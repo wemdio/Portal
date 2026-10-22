@@ -416,9 +416,9 @@ function Collapsible({ title, hint, badge, children }: {
 }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="rounded-lg border border-gray-200">
+    <div className={`rounded-lg border ${INPUT_BORDER} ${INPUT_BG}`}>
       <button type="button" onClick={() => setOpen(v => !v)}
-        className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition hover:bg-gray-50 cursor-pointer">
+        className="flex w-full items-center gap-2 rounded-lg px-3.5 py-3.5 text-left transition hover:bg-gray-100 cursor-pointer">
         {open ? <ChevronUp className="h-3.5 w-3.5 shrink-0 text-gray-400" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-gray-400" />}
         <span className="text-xs font-semibold text-gray-800">{title}</span>
         {badge && <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">{badge}</span>}
@@ -645,23 +645,10 @@ function SettingsTab({ campaign, onSave }: {
         {/* Галочки «Писать только контактам из баз» и «Игнорировать ботов» сняты
             с экрана 10.09.2026: обе теперь заложены в инструмент и работают
             всегда (campaignLoop). */}
-        <SettingsGroup title="Кому отвечать" hint="Фильтры входящих сообщений.">
-          <SwitchRow
-            checked={telegram.reply_only_if_previously_wrote}
-            onChange={v => setTG('reply_only_if_previously_wrote', v)}
-            label="Только тем, кому мы уже писали"
-          />
-          <SwitchRow
-            checked={telegram.auto_allow_new_dialogs}
-            onChange={v => setTG('auto_allow_new_dialogs', v)}
-            label="Сразу разрешать отправку в новых диалогах"
-          />
-          <SwitchRow
-            checked={telegram.ignore_no_username}
-            onChange={v => setTG('ignore_no_username', v)}
-            label="Игнорировать людей без username"
-          />
-        </SettingsGroup>
+        {/* Группа «Кому отвечать» снята с экрана 22.10.2026: три правила теперь
+            заложены в код и действуют всегда — отвечать только тем, кому мы
+            писали; новые диалоги сразу разрешены к отправке; ответ человеку без
+            @username не пропускается (в базах только username-контакты). */}
 
         {/* Оба чёрных списка — рядом: заполняют их редко и обычно вместе. */}
         <SettingsGroup title="Чёрные списки" hint="Этим людям кампания не пишет и не отвечает.">

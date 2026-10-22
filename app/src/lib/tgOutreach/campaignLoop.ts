@@ -995,10 +995,9 @@ export async function handleChat(
     log('info', `${displayName}: это бот — пропускаю`);
     return { replied: false, triggerType: null };
   }
-  if (tg.ignore_no_username && !tgUsername) {
-    log('info', `${displayName}: у пользователя нет @username — пропускаю (включена настройка "игнорировать без username")`);
-    return { replied: false, triggerType: null };
-  }
+  // «Игнорировать без username» снято с экрана 22.10.2026 и не проверяется:
+  // в базах только username-контакты, и тот, кто писал по базе, а потом убрал
+  // @username, всё равно наш лид (диалог ищется по tg_user_id, а не по нику).
 
   const preReadDelay = randomRange(PRE_READ_DELAY_RANGE_SEC) * 1000;
   if (shouldStop) await interruptibleSleep(preReadDelay, shouldStop); else await sleep(preReadDelay);
@@ -1039,7 +1038,10 @@ export async function handleChat(
 
   await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, {
     tgIsBot,
-    initialCanSend: Boolean(tg.auto_allow_new_dialogs) && !tgIsBot,
+    // Новый диалог сразу разрешён к отправке (настройка снята с экрана
+    // 22.10.2026: у всех кампаний она стояла включённой). Ручное «отключить
+    // диалог» в «Диалогах» по-прежнему работает — его проверяет canSendToDialog.
+    initialCanSend: !tgIsBot,
   });
 
   if (!(await canSendToDialog(db, campaign.id, account.id, tgUserId))) {
@@ -1060,10 +1062,12 @@ export async function handleChat(
     return { replied: false, triggerType: null };
   }
 
-  if (tg.reply_only_if_previously_wrote) {
+  // Отвечаем только тем, кому писали сами. Проверка безусловная: настройку
+  // сняли с экрана 22.10.2026 (она стояла включённой у всех кампаний).
+  {
     const hasOurMessage = chatMessages.some(m => m.role === 'assistant');
     if (!hasOurMessage) {
-      log('info', `${displayName}: ранее не писали этому пользователю — пропускаю (включена настройка "отвечать только тем, кому уже писали")`);
+      log('info', `${displayName}: ранее не писали этому пользователю — пропускаю (отвечаем только тем, кому писали мы)`);
       return { replied: false, triggerType: null };
     }
   }
