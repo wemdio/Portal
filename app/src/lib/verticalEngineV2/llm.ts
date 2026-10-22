@@ -106,6 +106,18 @@ export type VeModelKind = 'research' | 'hypotheses' | 'chain' | 'bulk' | 'collec
 
 export const VE_COLLECTION_MODEL = 'deepinfra/deepseek-v4-flash-0731';
 
+/** One model for the relevance gate and its admission review, without the
+ * gpt-5-mini confirmation. On 286 labelled companies (23.10.2026) it admitted
+ * 6.5% of adjacent companies against 56% for that confirmation, with the same
+ * overall precision at about a third of the cost. Opt-in by VE_RELEVANCE_MODEL;
+ * the gate keeps the pair for a frozen audience or geography. */
+export const VE_RELEVANCE_MODEL = 'deepinfra/deepseek-v4.1-flash-1017';
+
+/** The configured single relevance model, or null for the legacy gate/review pair. */
+export function getVeRelevanceModel(): string | null {
+  return (process.env.VE_RELEVANCE_MODEL ?? '').trim() || null;
+}
+
 // Генерация гипотез без своей настройки идёт на модели исследования.
 const VE_MODEL_DEFAULTS: Record<Exclude<VeModelKind, 'hypotheses'>, string> = {
   research: 'anthropic/claude-opus-5',
@@ -141,7 +153,7 @@ export function getVeModel(kind: VeModelKind): string {
 /** This rollout keeps the evidence/admission contract. Reuse paid checkpoints
  * from the previous defaults; arbitrary model overrides remain isolated. */
 export function veCollectionCacheModel(kind: 'gate' | 'relevanceReview', model: string): string {
-  return model === VE_COLLECTION_MODEL
+  return model === VE_COLLECTION_MODEL || model === VE_RELEVANCE_MODEL
     ? kind === 'gate' ? 'openai/gpt-4o-mini' : 'openai/gpt-5-mini'
     : model;
 }
@@ -164,7 +176,8 @@ function veStrictOutputCompatible(node: unknown): boolean {
 /** Native output constraints verified in the Requesty collection-model pilot.
  * Other configured providers retain JSON mode plus the same local validation. */
 export function veNativeJsonSchema(model: string, name: string, schema: z.ZodType) {
-  if (model !== VE_COLLECTION_MODEL && !/^(?:openai\/)?(?:gpt-4o-mini|gpt-5-mini)(?:-\d{4}-\d{2}-\d{2})?$/.test(model)) return undefined;
+  if (model !== VE_COLLECTION_MODEL && model !== VE_RELEVANCE_MODEL
+    && !/^(?:openai\/)?(?:gpt-4o-mini|gpt-5-mini)(?:-\d{4}-\d{2}-\d{2})?$/.test(model)) return undefined;
   const jsonSchema = z.toJSONSchema(schema, { io: 'input', override: ({ jsonSchema }) => {
     if (jsonSchema.type === 'object') jsonSchema.additionalProperties = false;
   } });
