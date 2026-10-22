@@ -1030,7 +1030,7 @@ function LogsTab({ campaignId }: { campaignId: string }) {
       </div>
 
       {/* Right: errors side panel */}
-      <aside className="rounded-lg border border-gray-200 bg-white flex flex-col h-[538px] min-h-0 overflow-hidden">
+      <aside className="tg-logs-aside rounded-lg border border-gray-200 bg-white flex flex-col h-[538px] min-h-0 overflow-hidden">
         <header className="px-3.5 py-3 border-b border-gray-100 space-y-2">
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-xs font-semibold text-gray-800 flex items-center gap-1.5">
