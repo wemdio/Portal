@@ -132,6 +132,9 @@ SENDER_LAG_ALERT_MINUTES = max(SENDER_OVERDUE_MINUTES, int(os.environ.get("HEALT
 # Пока проблема держится — напоминание раз в столько минут.
 SENDER_REPEAT_MINUTES = max(30, int(os.environ.get("HEALTH_SENDER_REPEAT_MIN", "120")))
 SENDER_ALERT_MENTION = os.environ.get("HEALTH_SENDER_ALERT_MENTION", "@kuladmedDm").strip()
+# Алерт о копиях — только для передач, созданных после выкладки этого фикса:
+# старые передачи ушли без переписки, их не разбираем.
+HANDOFF_ALERT_SINCE = os.environ.get("HEALTH_HANDOFF_ALERT_SINCE", "2026-10-23T00:00:00+03:00").strip()
 HEALTH_CRITICAL_ENDPOINTS_RAW = os.environ.get(
     "HEALTH_CRITICAL_ENDPOINTS",
     "/,/tools,/api/user/tools",
@@ -2203,14 +2206,15 @@ async def _check_sender(conn) -> list[str]:
             "       mm.status AS mm_status, mm.error AS mm_error "
             "FROM public.agency_lead_handoffs h "
             "LEFT JOIN public.sender_manual_messages mm ON mm.agency_handoff_id = h.id "
-            "WHERE h.updated_at > now() - interval '3 days' AND ("
+            "WHERE h.created_at >= $1::timestamptz AND h.updated_at > now() - interval '3 days' AND ("
             "  h.status IN ('failed','skipped','unknown') "
             "  OR (h.status = 'sending' AND h.updated_at < now() - interval '15 minutes') "
             "  OR (h.status = 'queued' AND mm.status = 'failed') "
             "  OR (h.status = 'queued' AND mm.status IN ('queued','sending') "
             "      AND mm.updated_at < now() - interval '30 minutes') "
             "  OR (h.status = 'pending' AND h.attempts >= 3)) "
-            "ORDER BY h.updated_at LIMIT 30"
+            "ORDER BY h.updated_at LIMIT 30",
+            HANDOFF_ALERT_SINCE,
         )
     except Exception as e:
         print(f"[health] agency handoff query skipped: {e}")
