@@ -6401,7 +6401,10 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
       {/* Сайдбар списков. Виртуальный «Неопределённые» — первым, потому что
           на старте у всех 140 прокси именно он. Иконка Inbox читается как
           «всё подряд», не как именованная папка. */}
-      <aside className="space-y-1">
+      {/* Списки — отдельной карточкой: раньше пункты висели прямо на фоне и не
+          читались как единый список. */}
+      <aside className="space-y-1 self-start rounded-2xl border border-gray-200 bg-white p-3">
+        <div className="px-3 pb-2 pt-1 text-sm font-semibold text-gray-800">Списки прокси</div>
         <button
           type="button"
           onClick={() => setActiveList(null)}
