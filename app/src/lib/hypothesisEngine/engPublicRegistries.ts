@@ -285,7 +285,7 @@ export function mapHeEngCompaniesHouseRecord(row: Row, task: HeEngRegistryTask, 
   return { provider: task.provider, recordId, company, country: 'united kingdom',
     address: joined([address?.premises, address?.address_line_1, address?.address_line_2, address?.locality, address?.postal_code, country]),
     addressKind: 'registered', category: `SIC ${task.category}`, website: '', emails: [],
-    description: `Active UK registered company; SIC ${task.category}. Registered office may be an agent address; operating country, website and employee count require verification.`,
+    description: `Active UK registered company; SIC ${task.category}. Country comes from the registry address, which may be an agent address and does not establish an operating office. Website identity, employee count and relevant services require verification.`,
     sourceUrl: `https://find-and-update.company-information.service.gov.uk/company/${recordId}` };
 }
 

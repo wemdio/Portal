@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { companySiteAlias } from '@/lib/enrich/companySiteAlias';
 import { heCompanySiteIdentity } from './collectionIdentity';
 import { normalizeEngCountry, readHeCollectCountries } from './engCountries';
 import { HE_ENG_COMPANY_QUALIFICATION_VERSION, type HeEngCompanyQualificationVersion } from './engCompanyQualificationVersion';
@@ -277,7 +278,8 @@ export function heEngCompanyQualified(row: HeEngQualificationRow, scope: HeEngQu
   if (!country || (scope.countries.length > 0 && !scope.countries.includes(country))) return false;
   if (!scope.hypotheses.some((h) => h.id === proof.hypothesisId)) return false;
   if (!Array.isArray(proof.evidence)) return false;
-  const site = heCompanySiteIdentity(typeof row.website === 'string' ? row.website : '');
+  const website = typeof row.website === 'string' ? row.website : '';
+  const site = heCompanySiteIdentity(website);
   if (!site) return false;
   if (version === 3) {
     const review = proof.fitReview;
@@ -289,11 +291,14 @@ export function heEngCompanyQualified(row: HeEngQualificationRow, scope: HeEngQu
   // v2 remains exactly the historical site-proof contract. v3 does not invent
   // identity/address quotes: its country provenance has a separate verifier.
   const required = version === 2 ? ['identity', 'activity', 'country'] as const : ['activity'] as const;
+  const company = typeof row.company === 'string' ? row.company : '';
   return required.every((kind) => proof.evidence!.some((e) => {
     if (!e || typeof e !== 'object') return false;
     if (e.kind !== kind || typeof e.quote !== 'string' || e.quote.trim().length < 8 || typeof e.url !== 'string') return false;
     const source = heCompanySiteIdentity(e.url);
-    return !!source && source.registrable === site.registrable;
+    // The company's own page may have redirected to a domain of the same brand.
+    return !!source && (source.registrable === site.registrable
+      || (!!company && companySiteAlias(e.url, website, company) !== null));
   }));
 }
 

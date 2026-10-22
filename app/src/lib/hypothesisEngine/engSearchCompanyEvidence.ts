@@ -6,6 +6,7 @@ import { readHeEngSourceCountry, withHeEngSourceCountry } from './engCompanyCoun
 import { extractHeEngOfficialCountryEvidence, HE_ENG_OWN_ORGANIZATION_TYPES, type HeEngOfficialCountryEvidence } from './engCompanySearchCountry';
 import type { HeEngCompanySearchCandidate } from './engCompanySearch';
 import { ENG_COUNTRIES, normalizeEngCountry } from './engCountries';
+import { createHeEngSourceEvidenceAudit, recordHeEngSourcePageAudit, type HeEngSourceEvidenceAudit } from './engSourceEvidenceAudit';
 import { readHeIcpFrame } from './icpFrame';
 import { withHeDeadline } from './operationDeadline';
 import { heStageSignal } from './stages/io';
@@ -28,6 +29,7 @@ export interface HeEngSearchCompanyEvidenceResult {
   row: Row | null;
   reason: HeEngSearchEvidenceReason;
   countrySource?: 'pdl' | 'company_website';
+  audit?: HeEngSourceEvidenceAudit;
 }
 export interface OfficialPage { url: string; html: string }
 /** Injectable reads support offline checks without live network/provider calls. */
@@ -211,7 +213,11 @@ function catalogVariants(website: string): string[] {
   return [...new Set([site, `www.${site}`].flatMap(domain => [domain, `${domain}/`, `https://${domain}`, `https://${domain}/`, `http://${domain}`, `http://${domain}/`]))];
 }
 
-function ownOrganizationFacts(page: OfficialPage, evidence: HeEngOfficialCountryEvidence): { name: string; employees: HeEngEmployeeRange | null } | null {
+function ownOrganizationFactsMatching(
+  page: OfficialPage,
+  companyWebsite: string,
+  matchesOrganization: (org: Row, name: string) => boolean,
+): { name: string; employees: HeEngEmployeeRange | null } | null {
   const found: Array<{ name: string; employees: HeEngEmployeeRange | null }> = [];
   let visited = 0;
   const typeList = (raw: unknown) => (Array.isArray(raw) ? raw : [raw]).map(item => text(item).replace(/^https?:\/\/schema\.org\//, ''));
@@ -222,20 +228,9 @@ function ownOrganizationFacts(page: OfficialPage, evidence: HeEngOfficialCountry
     if (!org) return;
     let ownUrl: string | null = null;
     try { ownUrl = new URL(text(org.url, 2048), page.url).href; } catch { /* No own Organization URL. */ }
-    if (text(org.url) && ownUrl && host(ownUrl) === host(evidence.companyWebsite) && typeList(org['@type']).some(type => HE_ENG_OWN_ORGANIZATION_TYPES.has(type))) {
-      const addresses = Array.isArray(org.address) ? org.address : [org.address];
-      // Headcount belongs to the same Organization that supplied the address,
-      // never another entity in the page's graph (parent, tenant, or customer).
-      const sameAddress = addresses.some(value => {
-        const address = record(value);
-        return address && typeList(address['@type']).includes('PostalAddress') &&
-          text(address.streetAddress) === evidence.sourcePostalAddress.streetAddress &&
-          text(address.addressLocality) === evidence.sourcePostalAddress.addressLocality &&
-          text(address.postalCode) === evidence.sourcePostalAddress.postalCode &&
-          structuredCountry(address.addressCountry) === evidence.country;
-      });
+    if (text(org.url) && ownUrl && host(ownUrl) === host(companyWebsite) && typeList(org['@type']).some(type => HE_ENG_OWN_ORGANIZATION_TYPES.has(type))) {
       const name = text(org.legalName) || text(org.name);
-      if (sameAddress && name) found.push({ name, employees: readHeEngEmployeeRange(org.numberOfEmployees) });
+      if (name && matchesOrganization(org, name)) found.push({ name, employees: readHeEngEmployeeRange(org.numberOfEmployees) });
     }
     for (const [key, value] of Object.entries(org)) if (key !== '@context') walk(value, depth + 1);
   };
@@ -245,6 +240,27 @@ function ownOrganizationFacts(page: OfficialPage, evidence: HeEngOfficialCountry
   }
   const distinct = [...new Map(found.map(value => [JSON.stringify(value), value])).values()];
   return distinct.length === 1 ? distinct[0] : null;
+}
+
+function ownOrganizationFacts(page: OfficialPage, evidence: HeEngOfficialCountryEvidence): { name: string; employees: HeEngEmployeeRange | null } | null {
+  return ownOrganizationFactsMatching(page, evidence.companyWebsite, org => {
+    const addresses = Array.isArray(org.address) ? org.address : [org.address];
+    // Headcount belongs to the same Organization that supplied the address,
+    // never another entity in the page's graph (parent, tenant, or customer).
+    return addresses.some(value => {
+      const address = record(value);
+      const types = address && (Array.isArray(address['@type']) ? address['@type'] : [address['@type']]);
+      return address && types?.some(type => text(type).replace(/^https?:\/\/schema\.org\//, '') === 'PostalAddress') &&
+        text(address.streetAddress) === evidence.sourcePostalAddress.streetAddress &&
+        text(address.addressLocality) === evidence.sourcePostalAddress.addressLocality &&
+        text(address.postalCode) === evidence.sourcePostalAddress.postalCode &&
+        structuredCountry(address.addressCountry) === evidence.country;
+    });
+  });
+}
+
+function employeeRangeText(range: HeEngEmployeeRange | null): string {
+  return range ? range.max === null ? `${range.min}+` : range.min === range.max ? String(range.min) : `${range.min}-${range.max}` : '';
 }
 
 function interruption(ctx: HeStageContext, error: unknown): void {
@@ -297,12 +313,14 @@ export async function resolveHeEngSearchCompanyEvidence(
   scope: HeEngSearchEvidenceScope,
   reads: HeEngSearchCompanyEvidenceReads = {},
 ): Promise<HeEngSearchCompanyEvidenceResult> {
+  const audit = createHeEngSourceEvidenceAudit('web_search');
+  const finish = (result: Omit<HeEngSearchCompanyEvidenceResult, 'audit'>): HeEngSearchCompanyEvidenceResult => ({ ...result, audit });
   const companyHost = host(candidate.website);
-  if (!companyHost) return { row: null, reason: 'invalid_website' };
+  if (!companyHost) return finish({ row: null, reason: 'invalid_website' });
   const size = heEngSearchEmployeeConstraint(scope);
-  if (!size.valid) return { row: null, reason: 'size_scope_ambiguous' };
+  if (!size.valid) return finish({ row: null, reason: 'size_scope_ambiguous' });
   const countries = scope.allowedCountries.map(normalizeEngCountry);
-  if (!countries.length || countries.some(country => !country)) return { row: null, reason: 'country_unconfirmed' };
+  if (!countries.length || countries.some(country => !country)) return finish({ row: null, reason: 'country_unconfirmed' });
   const allowed = countries as string[];
   const signal = heStageSignal(ctx);
   signal?.throwIfAborted();
@@ -320,18 +338,29 @@ export async function resolveHeEngSearchCompanyEvidence(
   } catch (error) { interruption(ctx, error); }
   ctx.onActivity?.();
   const exact = catalogRows.filter(row => host(row.website) === companyHost && text(row.name));
-  const identities = new Map(exact.map(row => [JSON.stringify([text(row.name).toLowerCase(), normalizeEngCountry(row.country), text(row.size)]), row]));
+  audit.catalogMatches = exact.length;
+  // Use the same ISO/name normalization as country proofs: distinct GB/IE rows
+  // must not collapse into one identity just because neither is a display name.
+  const identities = new Map(exact.map(row => [JSON.stringify([text(row.name).toLowerCase(), structuredCountry(row.country), text(row.size)]), row]));
   const catalog = catalogRows.length <= MAX_CATALOG_MATCHES && identities.size === 1 ? [...identities.values()][0] : null;
   const catalogSize = catalog ? readHeEngEmployeeRange(catalog.size) : null;
   const sizeFit = satisfiesSize(catalogSize, size.range);
-  if (catalog && sizeFit === 'match') {
+  let catalogCountryRow: Row | null = null;
+  if (catalog) {
     const row = withHeEngSourceCountry({ company: text(catalog.name), website: text(catalog.website, 2048),
       address: [catalog.locality, catalog.region, catalog.country].map(value => text(value)).filter(Boolean).join(', '),
       category: text(catalog.industry), employees: text(catalog.size), source_detail: 'eng_search:pdl',
       _eng_source_description: text(catalog.description, 1200),
     }, { source: 'pdl', sourceName: catalog.name, sourceWebsite: catalog.website, country: catalog.country, id: catalog.id });
     const proof = readHeEngSourceCountry(row);
-    if (proof && allowed.includes(proof.country)) return { row, reason: 'confirmed_catalog', countrySource: 'pdl' };
+    if (proof) {
+      audit.countrySource = 'pdl';
+      audit.country = proof.country;
+      if (allowed.includes(proof.country)) catalogCountryRow = row;
+    }
+  }
+  if (catalogCountryRow && sizeFit === 'match') {
+    return finish({ row: catalogCountryRow, reason: 'confirmed_catalog', countrySource: 'pdl' });
   }
   // A group may have its catalog headquarters elsewhere. Only its own proven
   // address in an allowed country can establish local presence here.
@@ -348,27 +377,49 @@ export async function resolveHeEngSearchCompanyEvidence(
       page = reads.page
         ? await withHeDeadline('ENG search company address', 12_000, signal, pageSignal => reads.page!(url, pageSignal))
         : await officialPage(ctx, url, signal);
-    } catch (error) { interruption(ctx, error); continue; }
+    } catch (error) { interruption(ctx, error); recordHeEngSourcePageAudit(audit, url, null); continue; }
     ctx.onActivity?.();
+    const pageAudit = recordHeEngSourcePageAudit(audit, url, page);
     if (!page || !page.url.startsWith('https:') || host(page.url) !== companyHost || page.html.length > MAX_PAGE_BYTES) continue;
-    lastReason = 'country_unconfirmed';
+    lastReason = catalogCountryRow ? 'identity_unconfirmed' : 'country_unconfirmed';
+    if (catalogCountryRow && catalog) {
+      // Country is already a provider fact for this exact entity and website.
+      // Resolve only the missing headcount; no second postal address is needed.
+      const facts = ownOrganizationFactsMatching(page, candidate.website,
+        (_org, name) => companyNameKey(name) === companyNameKey(catalog.name));
+      pageAudit.identity = Boolean(facts);
+      pageAudit.country = audit.country;
+      if (facts) {
+        const employeeRange = facts.employees ?? catalogSize;
+        const fit = satisfiesSize(employeeRange, size.range);
+        pageAudit.employeeFit = fit;
+        if (fit === 'match') return finish({ row: { ...catalogCountryRow, employees: employeeRangeText(employeeRange) },
+          reason: 'confirmed_catalog', countrySource: 'pdl' });
+        lastReason = fit === 'outside' ? 'outside_size' : 'size_unconfirmed';
+      }
+    }
     const evidence = extractHeEngOfficialCountryEvidence({ companyWebsite: candidate.website, pageUrl: page.url, html: page.html, allowedCountries: allowed });
     if (evidence) {
       const facts = ownOrganizationFacts(page, evidence);
+      pageAudit.identity = Boolean(facts);
+      pageAudit.country = evidence.country;
       if (!facts) lastReason = 'identity_unconfirmed';
       else {
         const employeeRange = facts.employees ?? (catalog && companyNameKey(catalog.name) === companyNameKey(facts.name) ? catalogSize : null);
         const fit = satisfiesSize(employeeRange, size.range);
+        pageAudit.employeeFit = fit;
         if (fit !== 'match') lastReason = fit === 'outside' ? 'outside_size' : 'size_unconfirmed';
         else {
           const row = withHeEngSourceCountry({ company: facts.name, website: evidence.companyWebsite,
-            address: evidence.sourceAddress, employees: employeeRange
-              ? employeeRange.max === null ? `${employeeRange.min}+` : employeeRange.min === employeeRange.max ? String(employeeRange.min) : `${employeeRange.min}-${employeeRange.max}`
-              : '', source_detail: 'eng_search:company_website',
+            address: evidence.sourceAddress, employees: employeeRangeText(employeeRange), source_detail: 'eng_search:company_website',
           }, { source: 'company_website', sourceName: facts.name, sourceWebsite: evidence.companyWebsite,
             country: evidence.sourceCountry, address: evidence.sourceAddress, page: evidence.pageUrl,
             organizationWebsite: evidence.sourceOrganizationWebsite, postalAddress: evidence.sourcePostalAddress });
-          if (readHeEngSourceCountry(row)) return { row, reason: 'confirmed_website', countrySource: 'company_website' };
+          if (readHeEngSourceCountry(row)) {
+            audit.countrySource = 'company_website';
+            audit.country = evidence.country;
+            return finish({ row, reason: 'confirmed_website', countrySource: 'company_website' });
+          }
         }
       }
     }
@@ -379,5 +430,5 @@ export async function resolveHeEngSearchCompanyEvidence(
       }
     }
   }
-  return { row: null, reason: lastReason };
+  return finish({ row: null, reason: lastReason });
 }
