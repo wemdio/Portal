@@ -16,6 +16,12 @@ const fails = async (run, pattern) => {
   await assert.rejects(run, pattern);
 };
 const migration = (name) => readFileSync(resolve(root, 'supabase/migrations', name), 'utf8');
+const preparationControl = migration('20261015_0030_ve_hypothesis_preparation_pause.sql');
+const preparationFunction = (name) => {
+  const definition = preparationControl.match(new RegExp(`create or replace function public\\.${name}\\([\\s\\S]+?\\$\\$;`))?.[0];
+  assert.ok(definition, `production SQL definition missing: ${name}`);
+  return definition;
+};
 try {
   await db.exec(`
     create role anon; create role authenticated; create role service_role; create role readonly;
@@ -40,7 +46,7 @@ try {
       create table public.ve_outreach_preparations(project_id uuid,hypothesis_id uuid,base_id uuid,template_id uuid,
         status text not null default 'error',language text not null default 'ru',independent_control boolean not null default false,
         locked_until timestamptz,claim_token uuid,last_error text,updated_at timestamptz not null default now(),
-        paused_at timestamptz,cancelled_at timestamptz,primary key(project_id,hypothesis_id));
+        paused_at timestamptz,cancelled_at timestamptz,pause_state jsonb,primary key(project_id,hypothesis_id));
       create table public.ve_outreach_setups(project_id uuid primary key,selected_hypothesis_ids uuid[] not null default '{}',
         approved_bases jsonb not null default '{}',language text not null default 'ru');
       create table public.ve_outreach_runs(id uuid primary key,project_id uuid,status text,request jsonb);`);
@@ -53,6 +59,10 @@ try {
     await db.exec(frozenPredicate);
     await db.exec(migration('20261020_0006_ve_legacy_requesty_preview_recovery.sql'));
     await db.exec(migration('20261021_0004_ve_queue_persistence_recovery.sql'));
+    await db.exec(preparationFunction('ve_completed_preparation_recoverable'));
+    await db.exec(preparationFunction('ve_claim_outreach_preparation'));
+    await db.exec(preparationFunction('ve_save_outreach_preparation'));
+    await db.exec(migration('20261022_0001_ve_preparation_claim_fast_guard.sql'));
   }
   const now = '2030-09-02T10:00:00Z'; // Monday, independent of machine weekday.
   const id = Object.fromEntries(['project', 'period', 've', 'actor', 'vertical', 'hypothesis', 'base', 'template', 'audit', 'reservation', 'preset']
@@ -731,6 +741,145 @@ try {
   assert.equal(await scalar('select ve_transient_collect_error($1) result', [queueError]), false);
   assert.equal(await scalar("select ve_transient_collect_error('ve_jobs requeue: fetch failed') result"), false);
   assert.equal(await scalar("select ve_transient_collect_error('Requesty 503: unavailable') result"), true);
+  // Execute the real preparation claim/save functions. The former OR predicate
+  // evaluated a large base JSON recovery query even for unrelated history.
+  const withPreparationQueue = run => db.transaction(async tx => {
+    const query = async (sql, args = []) => (await tx.query(sql, args)).rows;
+    const one = async (sql, args = []) => (await query(sql, args))[0];
+    const project = randomUUID(), vertical = randomUUID();
+    await query(`insert into ve_projects(id,created_by,name,website_url,status)
+      values($1,$2,'Preparation queue','https://example.org','researched')`, [project, id.actor]);
+    await query("insert into ve_verticals(id,project_id,name,potential_pct) values($1,$2,'Test',50)", [vertical, project]);
+    await query('insert into ve_outreach_setups(project_id) values($1)', [project]);
+    const add = async (status, options = {}) => {
+      const hypothesis = randomUUID(), base = options.completed ? randomUUID() : null;
+      await query(`insert into ve_hypotheses(id,project_id,vertical_id,title,tier,status)
+        values($1,$2,$3,'Saved hypothesis',1,'accepted')`, [hypothesis, project, vertical]);
+      if (options.selected !== false) await query(`update ve_outreach_setups
+        set selected_hypothesis_ids=array_append(selected_hypothesis_ids,$2) where project_id=$1`, [project, hypothesis]);
+      if (base) {
+        await query(`insert into ve_bases(id,project_id,vertical_id,hypothesis_id,source,status,collect_info,data,row_count,analysis)
+          values($1,$2,$3,$4,'auto','analyzed',$5,$6,1,'{"summary":"Paid analysis preserved"}')`,
+        [base, project, vertical, hypothesis,
+          { collection_mode: 'preview', ready_target: 500, target_progress: { status: 'limited', ready_rows: 1,
+            round: 100, max_rounds: 100, candidates_processed: 10000, max_candidates: 10000 },
+          target_checkpoint: { completed_round: 100, seen_rows: [{ company: 'Saved company' }] } },
+          [{ company: 'Saved company', email: 'saved@example.org', _email_status: 'ok' }]]);
+        for (const stage of ['base_collect', 'base_analyze']) await query(`insert into ve_jobs(project_id,stage,status,payload,result,
+          attempts,tokens_used,cost_usd,created_at,finished_at) values($1,$2,'done',$3,'{"saved":"paid result"}',3,1234,0.01,
+            '2000-01-01','2001-01-01')`, [project, stage, { base_id: base, hypothesis_id: hypothesis }]);
+      }
+      await query(`insert into ve_outreach_preparations(project_id,hypothesis_id,base_id,status,last_error,
+        independent_control,language,updated_at) values($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [project, hypothesis, base, status, options.error ?? null, options.independent ?? false,
+        options.language ?? 'ru', options.updatedAt ?? '2001-01-01']);
+      return { project, hypothesis, base };
+    };
+    const claim = () => query('select * from ve_claim_outreach_preparation()');
+    const paidSnapshot = async () => ({
+      bases: await query('select to_jsonb(b) value from ve_bases b where project_id=$1 order by id', [project]),
+      jobs: await query('select to_jsonb(j) value from ve_jobs j where project_id=$1 order by id', [project]),
+    });
+    const save = async (key, token) => (await one(`select ve_save_outreach_preparation($1,$2,$3,'collecting',$4,null,null,false) result`,
+      [project, key.hypothesis, token, key.base])).result;
+    await run({ query, one, add, claim, paidSnapshot, save, project });
+    await tx.rollback();
+  });
+  await withPreparationQueue(async f => {
+    for (let index = 0; index < 64; index += 1) {
+      await f.add('ready', { completed: true, updatedAt: '1999-01-01' });
+      await f.add('error', { completed: true, error: 'Requesty 402: insufficient balance', updatedAt: '1999-01-01' });
+    }
+    await f.add('error', { error: 'База ещё не готова к выбранной стадии', updatedAt: '1999-06-01' });
+    const live = await f.add('collecting', { updatedAt: '2000-01-01' });
+    const generating = await f.add('generating', { updatedAt: '2000-06-01' });
+    const pending = await f.add('pending', { updatedAt: '2001-01-01' });
+    await f.query(`create or replace function public.ve_completed_preparation_recoverable(p_project_id uuid,p_hypothesis_id uuid)
+      returns boolean language plpgsql stable security definer set search_path='' as $$
+      begin raise exception 'SMOKE_HEAVY_RECOVERY_MUST_NOT_RUN'; end $$;`);
+    // The regression fixture actually fails the previous production query.
+    await f.query('savepoint previous_claim');
+    await f.query(preparationFunction('ve_claim_outreach_preparation'));
+    await assert.rejects(f.claim, /SMOKE_HEAVY_RECOVERY_MUST_NOT_RUN/);
+    await f.query('rollback to savepoint previous_claim');
+    const before = await f.paidSnapshot();
+    await f.query('set local role service_role');
+    const first = (await f.claim())[0];
+    await f.query('reset role');
+    assert.equal(first.hypothesis_id, live.hypothesis, 'oldest live preparation remains first');
+    assert.equal(first.status, 'collecting');
+    assert.ok(first.claim_token);
+    assert.ok(Date.parse(first.locked_until) > Date.now());
+    const second = (await f.claim())[0];
+    assert.equal(second.hypothesis_id, generating.hypothesis);
+    assert.equal(second.status, 'generating');
+    assert.equal((await f.claim())[0].hypothesis_id, pending.hypothesis, 'new work is not starved by terminal rows');
+    assert.deepEqual(await f.claim(), [], 'leased preparations cannot be claimed twice; terminal history never calls heavy recovery');
+    assert.deepEqual(await f.paidSnapshot(), before, 'claim does not enqueue jobs or mutate paid bases');
+    await f.query("update ve_outreach_preparations set locked_until=now()-interval '1 second' where hypothesis_id=$1", [live.hypothesis]);
+    const renewed = (await f.claim())[0];
+    assert.equal(renewed.hypothesis_id, live.hypothesis);
+    assert.notEqual(renewed.claim_token, first.claim_token);
+    assert.equal(await f.save(live, first.claim_token), false, 'an expired owner cannot save after a new claim');
+    assert.equal(await f.save(live, renewed.claim_token), true);
+    await f.query('update ve_outreach_preparations set paused_at=clock_timestamp() where hypothesis_id=$1', [live.hypothesis]);
+    assert.equal(await f.save(live, renewed.claim_token), false, 'pause wins even over the current claim');
+    assert.deepEqual(await f.paidSnapshot(), before);
+  });
+  const coordinatorError = 'База ещё не готова к выбранной стадии';
+  await withPreparationQueue(async f => {
+    for (let index = 0; index < 64; index += 1) await f.add('error', {
+      completed: true, error: 'Requesty 402: insufficient balance', updatedAt: '1999-01-01' });
+    for (let index = 0; index < 64; index += 1) {
+      const unfinished = await f.add('error', { completed: true, error: coordinatorError, updatedAt: '1999-02-01' });
+      await f.query("delete from ve_jobs where project_id=$1 and payload->>'base_id'=$2 and stage='base_analyze'", [f.project, unfinished.base]);
+    }
+    const completed = await f.add('error', { completed: true, error: coordinatorError, updatedAt: '2000-01-01' });
+    const pending = await f.add('pending', { updatedAt: '2001-01-01' });
+    const before = await f.paidSnapshot();
+    const recovered = (await f.claim())[0];
+    assert.equal(recovered.hypothesis_id, completed.hypothesis, 'LIMIT follows the full predicate: 64 plausible but unfinished histories cannot starve completed recovery');
+    assert.equal(recovered.base_id, completed.base);
+    assert.equal(recovered.status, 'collecting', 'recovery advances to letters without granting a fresh collection');
+    assert.equal(recovered.last_error, null);
+    assert.equal((await f.claim())[0].hypothesis_id, pending.hypothesis);
+    assert.deepEqual(await f.claim(), []);
+    assert.deepEqual(await f.paidSnapshot(), before, 'saved rows, checkpoints, caps, job count and paid results stay unchanged');
+  });
+  const claimGuards = [
+    ['paused', f => f.query('update ve_outreach_preparations set paused_at=clock_timestamp() where project_id=$1', [f.project])],
+    ['cancelled', f => f.query('update ve_outreach_preparations set cancelled_at=clock_timestamp() where project_id=$1', [f.project])],
+    ['active lease', f => f.query("update ve_outreach_preparations set locked_until=clock_timestamp()+interval '1 hour',claim_token=gen_random_uuid() where project_id=$1", [f.project])],
+    ['unselected', f => f.query("update ve_outreach_setups set selected_hypothesis_ids='{}' where project_id=$1", [f.project])],
+    ['changed language', f => f.query("update ve_outreach_setups set language='en' where project_id=$1", [f.project])],
+  ];
+  for (const status of ['pending', 'error']) for (const [name, mutate] of claimGuards) await withPreparationQueue(async f => {
+    await f.add(status, { completed: status === 'error', error: status === 'error' ? coordinatorError : undefined });
+    await mutate(f);
+    const before = await f.paidSnapshot();
+    const prepBefore = await f.query('select to_jsonb(p) value from ve_outreach_preparations p where project_id=$1', [f.project]);
+    assert.deepEqual(await f.claim(), [], `${status}: ${name}`);
+    assert.deepEqual(await f.paidSnapshot(), before, `${status}: ${name}`);
+    assert.deepEqual(await f.query('select to_jsonb(p) value from ve_outreach_preparations p where project_id=$1', [f.project]), prepBefore);
+  });
+  for (const status of ['pending', 'error']) await withPreparationQueue(async f => {
+    const independent = await f.add(status, { independent: true, selected: false, language: 'en',
+      completed: status === 'error', error: status === 'error' ? coordinatorError : undefined });
+    assert.equal((await f.claim())[0].hypothesis_id, independent.hypothesis, 'explicit independent control survives selection changes');
+  });
+  for (const [name, mutate] of [
+    ['approved', (f, key) => f.query('update ve_outreach_setups set approved_bases=$2 where project_id=$1', [f.project, { [key.base]: {} }])],
+    ['launched', (f, key) => f.query(`insert into ve_templates(base_id,vertical_id,status,letters,launch_info)
+      select id,vertical_id,'ready','[]','{"campaigns":[]}' from ve_bases where id=$1`, [key.base])],
+    ['failed paid stage', (f, key) => f.query("update ve_jobs set status='failed' where project_id=$1 and payload->>'base_id'=$2 and stage='base_collect'", [f.project, key.base])],
+    ['active paid stage', (f, key) => f.query("update ve_jobs set status='running' where project_id=$1 and payload->>'base_id'=$2 and stage='base_collect'", [f.project, key.base])],
+  ]) await withPreparationQueue(async f => {
+    const key = await f.add('error', { completed: true, error: coordinatorError });
+    await mutate(f, key);
+    const before = await f.paidSnapshot();
+    assert.deepEqual(await f.claim(), [], `completed recovery: ${name}`);
+    assert.deepEqual(await f.paidSnapshot(), before, name);
+  });
   await rows("update ve_templates set letters='[{\"body\":\"Changed\"}]' where id=$1", [id.template]);
   assert.equal(await scalar('select ve_contact_supply_approval_current($1) result', [plan.id]), false);
   await fails(() => scalar('select ve_reserve_contact_delivery_day($1,$2,0) result', [id.ve, now]), /approval is stale/);
@@ -746,8 +895,10 @@ try {
   await fails(() => scalar('select ve_resume_legacy_requesty_preview($1,$2,$3,$4,$5,$6,$7,$8) result',
     [id.ve,id.hypothesis,id.base,now,fingerprint,fundedCredit,now,now]), /permission denied/i);
   await fails(() => scalar('select ve_auto_resume_queue_persistence_failures(10,$1) result', [now]), /permission denied/i);
+  await fails(() => rows('select * from ve_claim_outreach_preparation()'), /permission denied/i);
+  await fails(() => scalar('select ve_completed_preparation_recoverable($1,$2) result', [id.ve, id.hypothesis]), /permission denied/i);
   await db.exec('reset role');
-  console.log('PASS continuous supply: approval, atomic enqueue/append/replay, campaign reuse, pause/stale rules, empty-day retry, saved billing-batch resume, and automatic credit recovery/rollback.');
+  console.log('PASS continuous supply: approval, atomic enqueue/append/replay, campaign reuse, pause/stale rules, empty-day retry, saved billing-batch resume, automatic credit recovery/rollback, and preparation claims without heavy checks of unrelated history.');
 } catch (error) {
   console.error(error.message, error.where || '', error.stack?.split('\n').slice(1, 3).join('\n') || '');
   process.exitCode = 1;

@@ -4,6 +4,7 @@ import { beginProviderUsage, type ProviderUsageDetails } from '@/lib/providerUsa
 import { addHeSite, heCompanySiteIdentity, heSameCompanySite, newHeSiteSet } from './collectionIdentity';
 import { engCountryIso2, engCountryLabel, normalizeEngCountry } from './engCountries';
 import { HeEngBaseBudgetError, openHeEngBaseBudget } from './engBaseBudgetLedger';
+import type { HeEngRegistryCandidate } from './engPublicRegistryTypes';
 
 const SEARCH_URL = 'https://google.serper.dev/search';
 const RESULTS_PER_PAGE = 10;
@@ -134,6 +135,23 @@ export function createHeEngCompanySearchCheckpoint(plan: HeEngCompanySearchPlan)
   return { version: 1, planFingerprint: plan.fingerprint, nextTask: 0, pages: {}, exhaustedTaskIds: [], calls: 0, actualMicrousd: 0 };
 }
 
+/** One exact-entity lookup plan; its caller permits only one paid result page. */
+export function createHeEngRegistryWebsiteSearchPlan(
+  candidate: Pick<HeEngRegistryCandidate, 'provider' | 'recordId' | 'company' | 'country'>,
+): HeEngCompanySearchPlan {
+  const country = normalizeEngCountry(candidate.country);
+  const term = searchTerm(cleanText(candidate.company, 250));
+  if (!country || !engCountryIso2(country) || term.length < 3 || !candidate.recordId) {
+    throw new Error('ENG registry website search requires a legal name, registry ID and country.');
+  }
+  const tasks: HeEngCompanySearchTask[] = [{
+    id: createHash('sha256').update(JSON.stringify(['registry-website-v1', candidate.provider, candidate.recordId, term, country])).digest('hex').slice(0, 24),
+    query: `"${term}" ${engCountryLabel(country)} official website -site:linkedin.com -site:facebook.com -site:crunchbase.com`,
+    country, gl: engCountryIso2(country)!,
+  }];
+  return { version: 1, fingerprint: companySearchPlanFingerprint(tasks), tasks };
+}
+
 function searchTariff(env: NodeJS.ProcessEnv): number | null {
   const tariff = env.HE_US_SERPER_USD_PER_1000 === undefined
     ? APPROVED_SERPER_USD_PER_1000 : Number(env.HE_US_SERPER_USD_PER_1000);
@@ -172,6 +190,20 @@ function validateCheckpoint(plan: HeEngCompanySearchPlan, saved?: HeEngCompanySe
   }
   if (state.inFlight) throw new HeEngBaseBudgetError('unknown_cost');
   return state;
+}
+
+/**
+ * Read-only coverage of the frozen term/country plan. A next-page cursor of 2
+ * proves the first response was saved, including an empty response. Exhausted
+ * IDs alone do not prove a page was read. Invalid or in-flight checkpoints keep
+ * their normal errors; coverage must never hide an unknown paid attempt.
+ */
+export function heEngCompanySearchFirstPassComplete(
+  plan: HeEngCompanySearchPlan,
+  checkpoint?: HeEngCompanySearchCheckpoint,
+): boolean {
+  const state = validateCheckpoint(plan, checkpoint);
+  return plan.tasks.every(task => (state.pages[task.id] ?? 1) >= 2);
 }
 
 /** Returned search hits are untrusted candidates, not qualified companies. */

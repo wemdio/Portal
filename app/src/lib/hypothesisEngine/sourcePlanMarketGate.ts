@@ -54,12 +54,12 @@ export type HeCollectTaskSource = HeCollectTask['source'];
  */
 const HE_MARKET_SOURCES: Record<HeMarket, readonly HeCollectTaskSource[] | null> = {
   ru: null,
-  us: ['pdl', 'funded', 'eng_hiring', 'google_maps', 'web_search'],
+  us: ['pdl', 'funded', 'eng_hiring', 'google_maps', 'web_search', 'eng_registry'],
 };
 
 /** Источник разрешён рынку. У RU набора нет — разрешено всё, как и раньше. */
 export function heSourceAllowedForMarket(market: HeMarket, source: string): boolean {
-  if (source === 'web_search') return market === 'us';
+  if (source === 'web_search' || source === 'eng_registry') return market === 'us';
   const allowed = HE_MARKET_SOURCES[market];
   return allowed === null || (allowed as readonly string[]).includes(source);
 }
