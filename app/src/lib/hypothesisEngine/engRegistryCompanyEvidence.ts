@@ -645,7 +645,9 @@ export async function resolveHeEngRegistryCandidate(
       } });
   }
   if (state.search.checkpoint.inFlight) throw new HeEngBaseBudgetError('unknown_cost');
-  if (state.search.checkpoint.unavailable) return finish({ row: null, reason: 'website_search_unavailable' });
+  // A paid page that never answered (charged at its reserve) found nothing either way.
+  const unanswered = state.search.checkpoint.calls > 0 && state.search.checkpoint.unanswered === state.search.checkpoint.calls;
+  if (state.search.checkpoint.unavailable || unanswered) return finish({ row: null, reason: 'website_search_unavailable' });
   // Only three sites are read: hits whose domain carries the company's own
   // words go first, directories and namesakes after, search rank breaks ties.
   const hits = [...new Set(state.search.candidates.map(hit => website(hit.website)).filter((site): site is string => site !== null))]

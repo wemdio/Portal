@@ -19,6 +19,10 @@ const APPROVED_SERPER_USD_PER_1000 = 1;
 // Standard search is one query/credit (https://serper.dev/); reserve two at
 // the approved account tariff before each physical request.
 const RESERVED_CREDITS = 2;
+// A request is paid whether or not its answer arrives in time, so wait long
+// enough for a slow answer; three unanswered requests in a row stop searching.
+const SEARCH_TIMEOUT_MS = 15_000;
+const MAX_UNANSWERED = 3;
 const BLOCKED_DOMAINS = new Set(['linkedin.com', 'facebook.com', 'instagram.com', 'wikipedia.org',
   'crunchbase.com', 'zoominfo.com', 'dnb.com', 'glassdoor.com', 'indeed.com', 'youtube.com', 'reddit.com']);
 
@@ -60,6 +64,13 @@ export interface HeEngCompanySearchCheckpoint {
   unavailable?: HeEngCompanySearchUnavailable;
   /** A restart must never resend this physical attempt. */
   inFlight?: { taskId: string; page: number; requestId: string };
+  /**
+   * Consecutive sent requests that brought no billing receipt (timeout, broken
+   * connection, error body). Each is charged at its full reserve; three in a
+   * row make the search unavailable for this checkpoint. Absent after a page
+   * that answered.
+   */
+  unanswered?: number;
 }
 
 export interface HeEngCompanySearchPageResult {
@@ -142,9 +153,9 @@ export function createHeEngCompanySearchCheckpoint(plan: HeEngCompanySearchPlan)
   return { version: 1, planFingerprint: plan.fingerprint, nextTask: 0, pages: {}, exhaustedTaskIds: [], calls: 0, actualMicrousd: 0 };
 }
 
-/** One exact-entity lookup plan; its caller permits only one paid result page. */
 /**
- * One search page for a registry company's website. v2 searches the name
+ * One exact-entity lookup plan; its caller permits only one paid result page:
+ * the search for a registry company's website. v2 searches the name
  * without its legal form: the exact «… LTD.» string is what directories carry,
  * while the company's own site uses «Limited» or the bare brand. It also drops
  * «official website» and excludes the registers and directories that filled
@@ -204,7 +215,8 @@ function validateCheckpoint(plan: HeEngCompanySearchPlan, saved?: HeEngCompanySe
       !record(state.pages) || Object.entries(state.pages).some(([id, page]) => !ids.has(id) || !Number.isInteger(page) || page < 1 || page > MAX_PAGES + 1) ||
       !Array.isArray(state.exhaustedTaskIds) || state.exhaustedTaskIds.some(id => !ids.has(id)) ||
       new Set(state.exhaustedTaskIds).size !== state.exhaustedTaskIds.length || ids.size !== plan.tasks.length ||
-      Object.entries(state.pages).some(([id, page]) => page > MAX_PAGES && !state.exhaustedTaskIds.includes(id))) {
+      Object.entries(state.pages).some(([id, page]) => page > MAX_PAGES && !state.exhaustedTaskIds.includes(id)) ||
+      (state.unanswered !== undefined && (!Number.isSafeInteger(state.unanswered) || state.unanswered < 1 || state.unanswered > state.calls))) {
     throw new Error('ENG company search checkpoint is invalid or belongs to a different audience.');
   }
   if (state.inFlight) throw new HeEngBaseBudgetError('unknown_cost');
@@ -318,6 +330,7 @@ export async function runHeEngCompanySearchPage(input: {
     model: 'google-search', reservedMicrousd: Math.max(1, Math.ceil(tariff * 1000 * RESERVED_CREDITS)) });
   state.inFlight = { taskId: task.id, page, requestId: reservation.requestId };
   let dispatched = false;
+  let unanswered = false;
   let actualMicrousd: number | null = null;
   let responseData: Record<string, unknown> | undefined;
   let responseStatus = 0;
@@ -328,7 +341,7 @@ export async function runHeEngCompanySearchPage(input: {
     input.signal?.throwIfAborted();
     metering = await beginProviderUsage('serper');
     input.signal?.throwIfAborted();
-    const signal = input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(8_000)]) : AbortSignal.timeout(8_000);
+    const signal = input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(SEARCH_TIMEOUT_MS)]) : AbortSignal.timeout(SEARCH_TIMEOUT_MS);
     const apiKey = (process.env.HE_US_SERPER_API_KEY ?? '').trim() || (process.env.SERPER_API_KEY ?? '').trim();
     dispatched = true;
     const response = await fetch(SEARCH_URL, { method: 'POST', headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
@@ -345,23 +358,40 @@ export async function runHeEngCompanySearchPage(input: {
       else usage.estimatedCostUsd = credits * tariff / 1000;
     }
   } catch (error) {
-    // Proven pre-dispatch failures cost zero. After dispatch, an absent receipt
-    // is unknown, including HTTP errors and timeouts: retain reserve and stop.
-    if (!dispatched) actualMicrousd = 0;
-    await ledger.settle(reservation, { actualMicrousd });
     if (!dispatched) {
+      // Proven pre-dispatch failures cost zero.
+      await ledger.settle(reservation, { actualMicrousd: 0 });
       delete state.inFlight;
       await input.onCheckpoint(state, []);
+      throw error;
     }
-    throw error;
+    unanswered = true;
   } finally {
     if (metering) await metering.finish(usage);
   }
-  await ledger.settle(reservation, { actualMicrousd });
-  // A missing receipt above throws and keeps the persistent in-flight marker.
-  state.actualMicrousd += actualMicrousd!;
+  // A sent request without a receipt (timeout, broken connection, an error body
+  // without credits) is charged at its full reserve: Serper bills at most one
+  // credit per page and two are reserved, so the ledger never under-counts. An
+  // unknown charge used to hold the whole base; one slow answer stopped it.
+  const charged = actualMicrousd ?? reservation.reservedMicrousd;
+  await ledger.settle(reservation, { actualMicrousd: charged });
+  state.actualMicrousd += charged;
   state.calls += 1;
   delete state.inFlight;
+  if (unanswered) {
+    // This page is paid and its results are lost: move on instead of buying it again now.
+    state.unanswered = (state.unanswered ?? 0) + 1;
+    state.pages[task.id] = page + 1;
+    state.nextTask = (taskIndex + 1) % input.plan.tasks.length;
+    if (page >= MAX_PAGES) state.exhaustedTaskIds.push(task.id);
+    if (state.unanswered >= MAX_UNANSWERED) state.unavailable = 'search_transient';
+    await input.onCheckpoint(state, []);
+    // A cancelled job still stops here; its spend is already settled.
+    input.signal?.throwIfAborted();
+    return { checkpoint: state, candidates: [], status: state.unavailable ? 'unavailable'
+      : state.exhaustedTaskIds.length === input.plan.tasks.length ? 'exhausted' : 'more' };
+  }
+  delete state.unanswered;
   const embeddedStatus = typeof responseData?.statusCode === 'number' ? responseData.statusCode : responseStatus;
   if (responseStatus < 200 || responseStatus >= 300 || embeddedStatus >= 400 || responseData?.error) {
     const errorPhrase = [responseData?.error, responseData?.message].filter(v => typeof v === 'string').join(' ');
