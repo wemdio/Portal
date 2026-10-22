@@ -97,6 +97,7 @@ import {
 } from './types';
 import { createDirectoryFeed, type DirectoryCompany } from './directoryCandidates';
 import { loadYcCompanies, type YcCompany } from './ycCandidates';
+import { smtpVerify } from '@/lib/emailValidation/validator';
 
 /** Целое из env в рамках. Пусто или мусор — значение по умолчанию: NaN в пуле дал бы ноль потоков. */
 function envInt(name: string, fallback: number, min: number, max: number): number {
@@ -158,6 +159,15 @@ class SmtpSilentError extends Error {}
  * набирается (0,62^50), а мёртвый прокси его по-прежнему набирает.
  */
 const SMTP_UNVERIFIED_STREAK = 50;
+/**
+ * Контрольная проверка прокси перед остановкой запуска: серия неопределённых
+ * ответов может быть страной, где проверка не проходит (Сингапур ~97%), а не
+ * мёртвым прокси. Любой SMTP-ответ Gmail (в том числе 5xx) значит, что прокси
+ * достучался до порта 25 — тогда серию сбрасываем и идём дальше.
+ */
+const SMTP_CANARY_EMAIL = 'postmaster@gmail.com';
+const SMTP_CANARY_MX = 'gmail-smtp-in.l.google.com';
+const SMTP_CANARY_TTL_MS = 60_000;
 /**
  * Писатель цепочек не отвечает — запуск падает целиком: шаблон один на оффер,
  * и без писателя все компании запуска ушли бы на ручную проверку, а разбор
@@ -1028,6 +1038,22 @@ async function runJob(
       smtpUnverifiedStreak += 1;
       return smtpUnverifiedStreak >= SMTP_UNVERIFIED_STREAK;
     };
+    let canaryAt = 0;
+    let canaryAlive = false;
+    /** true — прокси не отвечает совсем: запуск валим. Живой прокси обнуляет серию. */
+    const smtpProxyDead = async (): Promise<boolean> => {
+      if (Date.now() - canaryAt >= SMTP_CANARY_TTL_MS) {
+        try {
+          const r = await smtpVerify(SMTP_CANARY_EMAIL, SMTP_CANARY_MX, { checkCatchAll: false, timeout: 15_000 });
+          canaryAlive = r.code > 0;
+        } catch {
+          canaryAlive = false;
+        }
+        canaryAt = Date.now();
+      }
+      if (canaryAlive) smtpUnverifiedStreak = 0;
+      return !canaryAlive;
+    };
     const smtpSilentError = () =>
       new SmtpSilentError(`Проверка почт остановлена: ${SMTP_UNVERIFIED_STREAK} компаний подряд с неопределённым результатом — проверьте SMTP-прокси и почтовые домены получателей`);
     // Предохранитель «писатель молчит»: WRITER_FAILED_ATTEMPTS попыток шаблона
@@ -1212,7 +1238,7 @@ async function runJob(
       const main = allowed[0];
       if (!main) {
         await excludeRow(id, ST.s5Email, 'suppressed_contact');
-        if (smtpSilent) throw smtpSilentError();
+        if (smtpSilent && await smtpProxyDead()) throw smtpSilentError();
         return null;
       }
       // Почту и вердикт проверки пишем сразу: строка, отсеянная дальше
@@ -1230,7 +1256,7 @@ async function runJob(
         // разбор ИИ ей не оплачиваем, письма не пишем, решает человек. «Почту»
         // в воронке она не проходит (lib/polzaOutreach/funnel.ts).
         await updateRow(id, { ...emailPatch, status: 'needs_review', stage: ST.s5Email, review_reason: 'email_unverified' });
-        if (smtpSilent) throw smtpSilentError();
+        if (smtpSilent && await smtpProxyDead()) throw smtpSilentError();
         return null;
       }
       await updateRow(id, { ...emailPatch, stage: ST.s5Email });
