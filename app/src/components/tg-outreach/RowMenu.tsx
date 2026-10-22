@@ -89,22 +89,18 @@ export function RowMenu({ items, label = 'Действия' }: { items: RowMenuI
             right: pos.right,
             ...(pos.up ? { bottom: window.innerHeight - pos.top } : { top: pos.top }),
           }}
-          className={`z-50 min-w-[210px] overflow-hidden rounded-xl border py-1.5 text-xs shadow-2xl ${
-            dark ? 'border-white/10 bg-[#1a1b20] text-gray-200' : 'border-gray-200 bg-white text-gray-700'
+          className={`tg-menu ${dark ? 'tg-menu--dark' : 'tg-menu--light'} z-50 min-w-[210px] overflow-hidden rounded-xl border text-xs shadow-2xl ${
+            dark ? 'border-white/10 bg-[#1a1b20]' : 'border-gray-200 bg-white'
           }`}
         >
           {items.map((item, i) => (
             <div key={item.label}>
-              {item.danger && i > 0 && <div className={`my-1 border-t ${dark ? 'border-white/10' : 'border-gray-100'}`} />}
+              {item.danger && i > 0 && <div className="tg-menu-sep" />}
               <button
                 type="button"
                 role="menuitem"
                 onClick={() => { setPos(null); item.onClick(); }}
-                className={`flex w-full items-center gap-2.5 px-3.5 py-2 text-left transition cursor-pointer ${
-                  item.danger
-                    ? (dark ? 'text-rose-400 hover:bg-rose-500/10' : 'text-rose-600 hover:bg-rose-50')
-                    : (dark ? 'text-gray-200 hover:bg-white/10' : 'text-gray-700 hover:bg-gray-100')
-                }`}
+                className={`tg-menu-item ${item.danger ? 'tg-menu-item--danger' : ''}`}
               >
                 {item.icon}
                 {item.label}
