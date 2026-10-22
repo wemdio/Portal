@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { MoreHorizontal } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { MoreVertical } from 'lucide-react';
 
 export interface RowMenuItem {
   label: string;
@@ -14,11 +15,17 @@ export interface RowMenuItem {
 /**
  * Меню строки в одно троеточие: действия с аккаунтом не занимают ширину
  * таблицы тремя значками. Список позиционируется по координатам кнопки
- * (fixed), а не внутри ячейки: таблица обрезает всё, что выходит за её рамку.
+ * (fixed) и выносится порталом в оболочку страницы: внутри ячейки его обрезала бы
+ * таблица, а у предков со стеклом (backdrop-filter) fixed считается от них, а не
+ * от окна — меню просто не появлялось. Портал в body: оболочка сама может быть
+ * такой «стеклянной» рамкой. Вне оболочки тёмная тема не красит утилиты Tailwind,
+ * поэтому цвета меню заданы явно по теме страницы.
  * Закрывается кликом вне меню, Escape и прокруткой.
  */
 export function RowMenu({ items, label = 'Действия' }: { items: RowMenuItem[]; label?: string }) {
   const [pos, setPos] = useState<{ top: number; right: number; up: boolean } | null>(null);
+  // Тема страницы на момент открытия (меню живёт вне оболочки портала).
+  const [dark, setDark] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -49,6 +56,7 @@ export function RowMenu({ items, label = 'Действия' }: { items: RowMenuI
     if (!rect) return;
     // Меню высотой ~120 px: внизу экрана раскрываем вверх.
     const up = window.innerHeight - rect.bottom < 150;
+    setDark(document.documentElement.getAttribute('data-portal-theme') === 'dark');
     setPos({
       top: up ? rect.top - 6 : rect.bottom + 6,
       right: Math.max(8, window.innerWidth - rect.right),
@@ -70,9 +78,9 @@ export function RowMenu({ items, label = 'Действия' }: { items: RowMenuI
           pos ? 'bg-indigo-50 text-indigo-600' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-700'
         }`}
       >
-        <MoreHorizontal className="h-4 w-4" />
+        <MoreVertical className="h-4 w-4" />
       </button>
-      {pos && (
+      {pos && createPortal(
         <div
           ref={menuRef}
           role="menu"
@@ -81,19 +89,21 @@ export function RowMenu({ items, label = 'Действия' }: { items: RowMenuI
             right: pos.right,
             ...(pos.up ? { bottom: window.innerHeight - pos.top } : { top: pos.top }),
           }}
-          className="z-50 min-w-[210px] overflow-hidden rounded-xl border border-gray-200 bg-white py-1.5 text-xs shadow-xl"
+          className={`z-50 min-w-[210px] overflow-hidden rounded-xl border py-1.5 text-xs shadow-2xl ${
+            dark ? 'border-white/10 bg-[#1a1b20] text-gray-200' : 'border-gray-200 bg-white text-gray-700'
+          }`}
         >
           {items.map((item, i) => (
             <div key={item.label}>
-              {item.danger && i > 0 && <div className="my-1 border-t border-gray-100" />}
+              {item.danger && i > 0 && <div className={`my-1 border-t ${dark ? 'border-white/10' : 'border-gray-100'}`} />}
               <button
                 type="button"
                 role="menuitem"
                 onClick={() => { setPos(null); item.onClick(); }}
                 className={`flex w-full items-center gap-2.5 px-3.5 py-2 text-left transition cursor-pointer ${
                   item.danger
-                    ? 'text-rose-600 hover:bg-rose-50'
-                    : 'text-gray-700 hover:bg-gray-100'
+                    ? (dark ? 'text-rose-400 hover:bg-rose-500/10' : 'text-rose-600 hover:bg-rose-50')
+                    : (dark ? 'text-gray-200 hover:bg-white/10' : 'text-gray-700 hover:bg-gray-100')
                 }`}
               >
                 {item.icon}
@@ -101,7 +111,8 @@ export function RowMenu({ items, label = 'Действия' }: { items: RowMenuI
               </button>
             </div>
           ))}
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );
