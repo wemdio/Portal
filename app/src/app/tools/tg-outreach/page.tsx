@@ -2258,6 +2258,16 @@ function BulkActionsBar({
     // таблицей, и при выборе первой строки весь список прыгал вниз.
     <div className="bulk-actions-bar fixed bottom-4 left-1/2 z-40 flex w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-wrap items-center gap-3 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 shadow-xl">
       <span className="text-xs font-medium text-indigo-900">Выбрано: {selectedCount}</span>
+      {/* «Снять выделение» — слева, рядом со счётчиком: справа, после десятка
+          кнопок, до него приходилось тянуться через весь экран. */}
+      <button
+        type="button"
+        onClick={onClear}
+        disabled={deleting}
+        className="rounded-full border border-indigo-300 bg-white/60 px-3 py-1 text-xs font-medium text-indigo-700 transition hover:bg-white hover:text-indigo-900 cursor-pointer disabled:opacity-50"
+      >
+        Снять выделение
+      </button>
       {onCheck && (
         <button
           type="button"
@@ -2281,14 +2291,6 @@ function BulkActionsBar({
       >
         {deleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
         Удалить выбранные
-      </button>
-      <button
-        type="button"
-        onClick={onClear}
-        disabled={deleting}
-        className="text-xs text-indigo-700 hover:text-indigo-900 hover:underline transition cursor-pointer disabled:opacity-50"
-      >
-        Снять выделение
       </button>
     </div>
   );
