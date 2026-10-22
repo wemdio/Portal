@@ -2215,7 +2215,7 @@ function SelectAllCheckbox({
       onChange={e => onChange(e.target.checked)}
       title={allSelected ? 'Снять выделение' : 'Выделить все'}
       aria-label={allSelected ? 'Снять выделение' : 'Выделить все'}
-      className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+      className="h-5 w-5 cursor-pointer accent-indigo-600"
     />
   );
 }
@@ -3886,7 +3886,7 @@ function CampaignAccountsTab({
               disabled={campaignStatus === 'running'}
               title={campaignStatus === 'running'
                 ? 'Сначала остановите кампанию: из-под работающего круга аккаунты не переносятся'
-                : 'Перенести выбранные аккаунты в другую остановленную кампанию; перенесённые — вернуть обратно'}
+                : 'Перенести выбранные аккаунты в другую остановленную кампанию: они переедут как есть, с прокси'}
               className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Move className="h-3.5 w-3.5" />
@@ -4068,7 +4068,7 @@ function CampaignAccountsTab({
                   checked={isSelected(a.id)}
                   onChange={() => toggle(a.id)}
                   aria-label={`Выбрать ${a.session_name}`}
-                  className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+                  className="h-5 w-5 cursor-pointer accent-indigo-600"
                 />
                 <button
                   type="button"
@@ -4162,10 +4162,7 @@ function CampaignAccountsTab({
                           профиль не применился
                         </span>
                       )}
-                      {/* «В гостях»: аккаунт пришёл из другой кампании. Пометка
-                          нужна не для красоты — от неё зависит, что с
-                          аккаунтом можно сделать: вернуть домой, но не
-                          переносить дальше. */}
+                      {/* Пометка «откуда пришёл»: аккаунт приехал из другой кампании. */}
                       {a.moved_from_campaign_id && (
                         <span
                           title={[
@@ -4177,8 +4174,7 @@ function CampaignAccountsTab({
                                 })
                               : null,
                             a.moved_reason ? `Причина: ${a.moved_reason}` : null,
-                            'Его можно вернуть обратно, но не перенести в третью кампанию.',
-                          ].filter(Boolean).join(' · ')}
+                                          ].filter(Boolean).join(' · ')}
                           className="cursor-help rounded-md bg-sky-50 px-1.5 py-0.5 text-[10px] text-sky-700"
                         >
                           из «{a.moved_from_campaign_name ?? '—'}»
@@ -4380,7 +4376,7 @@ function CampaignAccountsTab({
             clear();
             setMoveNotice(
               `Перенесено аккаунтов: ${movedIds.length} → «${toName}». `
-              + 'Там они выключены и без прокси — назначьте прокси и включите.',
+              + 'Они приехали как есть, вместе с прокси.',
             );
           }}
         />
@@ -5563,7 +5559,7 @@ function CampaignBasesTab({
                 onChange={() => { void toggleLink(b.id); }}
                 title="Участвует в рассылке. Снятая галочка ставит базу на паузу, контакты и счётчики сохраняются"
                 aria-label={`Участвует в рассылке: база ${b.name}`}
-                className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+                className="h-5 w-5 cursor-pointer accent-indigo-600"
               />
               <div className="min-w-0">
                 <div className="text-xs font-medium text-gray-800 truncate">{b.name}</div>
@@ -6885,7 +6881,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
                   checked={isSelected(p.id)}
                   onChange={() => toggle(p.id)}
                   aria-label={`Выбрать ${p.name || p.url}`}
-                  className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+                  className="h-5 w-5 cursor-pointer accent-indigo-600"
                 />
                 <div className="min-w-0">
                   {p.name && <p className="text-xs font-medium text-gray-800">{p.name}</p>}
