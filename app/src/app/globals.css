@@ -3863,3 +3863,59 @@ html[data-portal-theme='dark'] .portal-shell .sender-table-head {
 @media (prefers-reduced-motion: reduce) {
   .portal-spinner { animation-duration: 2.4s; }
 }
+
+/* ─── Галочки выбора строк в TG-аутриче ──────────────────────────────────────
+   Системная галочка в тёмной теме — мелкий серый квадрат, по которому трудно
+   попасть и не видно, что выбрано. Здесь: крупный скруглённый квадрат, при
+   выборе заливка индиго с белой отметкой, у «выбрать все» — чёрточка, когда
+   выбрана часть. Цвета заданы явно: тёмная тема перекрашивает серые утилиты
+   Tailwind, но не эти правила. */
+.tg-check {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-grid;
+  place-content: center;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  border: 2px solid #71717a;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+.tg-check:hover {
+  border-color: #818cf8;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18);
+}
+.tg-check:checked,
+.tg-check:indeterminate {
+  background-color: #6366f1;
+  border-color: #6366f1;
+}
+.tg-check:checked::after {
+  content: '';
+  width: 10px;
+  height: 5px;
+  border-left: 2.5px solid #ffffff;
+  border-bottom: 2.5px solid #ffffff;
+  transform: translateY(-1px) rotate(-45deg);
+}
+.tg-check:indeterminate::after {
+  content: '';
+  width: 10px;
+  height: 2.5px;
+  border-radius: 2px;
+  background: #ffffff;
+}
+.tg-check:focus-visible {
+  outline: 2px solid #a5b4fc;
+  outline-offset: 2px;
+}
+.tg-check:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tg-check { transition: none; }
+}

@@ -2215,7 +2215,7 @@ function SelectAllCheckbox({
       onChange={e => onChange(e.target.checked)}
       title={allSelected ? 'Снять выделение' : 'Выделить все'}
       aria-label={allSelected ? 'Снять выделение' : 'Выделить все'}
-      className="h-5 w-5 cursor-pointer accent-indigo-600"
+      className="tg-check"
     />
   );
 }
@@ -4083,7 +4083,7 @@ function CampaignAccountsTab({
                   checked={isSelected(a.id)}
                   onChange={() => toggle(a.id)}
                   aria-label={`Выбрать ${a.session_name}`}
-                  className="h-5 w-5 cursor-pointer accent-indigo-600"
+                  className="tg-check"
                 />
                 <button
                   type="button"
@@ -5574,7 +5574,7 @@ function CampaignBasesTab({
                 onChange={() => { void toggleLink(b.id); }}
                 title="Участвует в рассылке. Снятая галочка ставит базу на паузу, контакты и счётчики сохраняются"
                 aria-label={`Участвует в рассылке: база ${b.name}`}
-                className="h-5 w-5 cursor-pointer accent-indigo-600"
+                className="tg-check"
               />
               <div className="min-w-0">
                 <div className="text-xs font-medium text-gray-800 truncate">{b.name}</div>
@@ -6896,7 +6896,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
                   checked={isSelected(p.id)}
                   onChange={() => toggle(p.id)}
                   aria-label={`Выбрать ${p.name || p.url}`}
-                  className="h-5 w-5 cursor-pointer accent-indigo-600"
+                  className="tg-check"
                 />
                 <div className="min-w-0">
                   {p.name && <p className="text-xs font-medium text-gray-800">{p.name}</p>}
