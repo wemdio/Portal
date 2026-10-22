@@ -3987,11 +3987,11 @@ html[data-portal-theme='dark'] .tg-list-item--active:hover {
 
 /* Блок «Ошибки за период» во вкладке «Логи» TG-аутрича: в тёмной теме того же
    цвета, что и окно логов слева (gray-950), а не светлее него. */
-html[data-portal-theme='dark'] .tg-logs-aside {
+html[data-portal-theme='dark'] .portal-shell aside.tg-logs-aside {
   background-color: #030712 !important;
   border-color: #1f2937 !important;
 }
-html[data-portal-theme='dark'] .tg-logs-aside header,
-html[data-portal-theme='dark'] .tg-logs-aside section {
+html[data-portal-theme='dark'] .portal-shell aside.tg-logs-aside header,
+html[data-portal-theme='dark'] .portal-shell aside.tg-logs-aside section {
   border-color: #111827 !important;
 }
