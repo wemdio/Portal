@@ -134,6 +134,8 @@ SENDER_REPEAT_MINUTES = max(30, int(os.environ.get("HEALTH_SENDER_REPEAT_MIN", "
 SENDER_ALERT_MENTION = os.environ.get("HEALTH_SENDER_ALERT_MENTION", "@kuladmedDm").strip()
 # Алерт о копиях — только для передач, созданных после выкладки этого фикса:
 # старые передачи ушли без переписки, их не разбираем.
+# Простой дольше года — не простой, а служебная метка 1970 (см. check_stuck_jobs).
+_HANDOFF_MARKER_SECS = 365 * 24 * 3600
 HANDOFF_ALERT_SINCE = os.environ.get("HEALTH_HANDOFF_ALERT_SINCE", "2026-10-23T00:00:00+03:00").strip()
 HEALTH_CRITICAL_ENDPOINTS_RAW = os.environ.get(
     "HEALTH_CRITICAL_ENDPOINTS",
@@ -1563,6 +1565,10 @@ async def check_stuck_jobs() -> list[str]:
                         stalled_secs = int(loop_now - previous[1])
 
                 if stalled_secs is None or stalled_secs < JOB_STUCK_MINUTES * 60:
+                    continue
+                # Выкладка (drain-worker.sh) ставит started_at задач «Конструктора баз» в 1970,
+                # чтобы новый воркер подхватил их сразу: это метка передачи, а не зависание.
+                if spec.updated_column and stalled_secs > _HANDOFF_MARKER_SECS:
                     continue
                 if spec.table == "email_validation_jobs" and row["id"] in deferred_emailval_jobs:
                     _JOB_PROGRESS_TRACKER[key] = (str(row["progress"] or ""), loop_now)
