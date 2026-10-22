@@ -105,19 +105,19 @@ function envInt(name: string, fallback: number, min: number, max: number): numbe
   return raw && Number.isFinite(n) ? Math.max(min, Math.min(max, Math.trunc(n))) : fallback;
 }
 
-const ENRICH_CONCURRENCY = envInt('POLZA_OUTREACH_LLM_CONCURRENCY', 4, 1, 6);
+const ENRICH_CONCURRENCY = envInt('POLZA_OUTREACH_LLM_CONCURRENCY', 8, 1, 12);
 // Шаг почты: обход сайта до минуты и SMTP-проверка через прокси — потоки
 // больше ждут, чем работают, и ИИ не тратят. Почту теперь ищут у всех
 // прошедших S3, а не только у write now, поэтому свой пул, шире разбора.
-const EMAIL_CONCURRENCY = envInt('POLZA_OUTREACH_EMAIL_CONCURRENCY', 8, 1, 16);
+const EMAIL_CONCURRENCY = envInt('POLZA_OUTREACH_EMAIL_CONCURRENCY', 14, 1, 24);
 // Письма — подстановка в шаблон оффера. Шаблон пишется один раз на оффер:
 // компании оффера, дошедшие до писем одновременно, ждут одного писателя.
-const LETTERS_CONCURRENCY = 4;
+const LETTERS_CONCURRENCY = 8;
 // Поиск домена (запросы по каталогу PDL и Clearbit) и профиль PDL идут в
 // пуле почты, а он шире прежнего пула разбора (8 против 4): без своего
 // ограничителя запросов к Clearbit и каталогу одновременно стало бы вдвое
 // больше. Четыре — как было, когда S2 шёл в пуле разбора.
-const DOMAIN_CONCURRENCY = 4;
+const DOMAIN_CONCURRENCY = 6;
 const DB_CHUNK = 100;
 const MIN_WAVE = 25;
 const MAX_WAVE = 250;
