@@ -9,6 +9,7 @@ import { proxyCountryLabel } from '@/lib/tgOutreach/proxyCountry';
 import { RowMenu } from '@/components/tg-outreach/RowMenu';
 import { Reveal } from '@/components/tg-outreach/Reveal';
 import { PageLoader } from '@/components/tg-outreach/PageLoader';
+import { FailedReplyBubble, ReplyFailureIndicator } from '@/components/tg-outreach/FailedReplyBubble';
 import { ArchiveCampaignDialog, CampaignList, DeleteCampaignDialog, archiveBlockReason } from '@/components/tg-outreach/CampaignList';
 import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
@@ -41,6 +42,8 @@ import {
   Ban,
   RefreshCw,
   AlertCircle,
+  AlertTriangle,
+  CheckCircle2,
   Flame,
   Database,
   Eye,
@@ -1313,6 +1316,14 @@ function DialogsTab({ campaignId, crmEnabled }: {
 
   useEffect(() => { queueMicrotask(() => { void fetchDialogs(); void fetchAccounts(); void fetchBases(); }); }, [fetchDialogs, fetchAccounts, fetchBases]);
 
+  // Ошибка/автоперегенерация ответа видна в открытой вкладке без перезагрузки.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void fetchDialogs({ silent: true });
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [fetchDialogs]);
+
   // Создание задачи ещё не означает удаление в Telegram. Ждём её результата,
   // обновляем открытую переписку и возвращаем кнопку при ошибке воркера.
   useEffect(() => {
@@ -1616,7 +1627,7 @@ function DialogsTab({ campaignId, crmEnabled }: {
 
   const selectedDialog = dialogs.find((x) => x.id === expandedId) ?? dialogs[0] ?? null;
   const listRef = useRef<HTMLUListElement>(null);
-  const messagesEndKey = selectedDialog ? `${selectedDialog.id}:${selectedDialog.messages.length}` : '';
+  const messagesEndKey = selectedDialog ? `${selectedDialog.id}:${selectedDialog.messages.length}:${selectedDialog.reply_failure?.timestamp ?? ''}:${selectedDialog.reply_failure?.retrying ?? ''}` : '';
 
   // Переписка открывается на последних сообщениях, как в мессенджере.
   useEffect(() => {
@@ -1856,6 +1867,7 @@ function DialogsTab({ campaignId, crmEnabled }: {
                         </span>
                         {d.status !== 'none' && <span className={`shrink-0 rounded-full px-1.5 py-px text-[10px] font-medium ${st.cls}`}>{st.label}</span>}
                         {d.can_send === false && <Ban className="h-3 w-3 shrink-0 text-rose-500" />}
+                        {d.reply_failure && <ReplyFailureIndicator failure={d.reply_failure} />}
                         <span className="shrink-0 text-[10px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : ''}</span>
                       </span>
                       <span className="mt-0.5 block truncate text-[11px] text-gray-500">
@@ -2223,6 +2235,7 @@ function DialogsTab({ campaignId, crmEnabled }: {
                           </div>
                         );
                       })}
+                      {d.reply_failure && <FailedReplyBubble failure={d.reply_failure} />}
                     </div>
                     <div className="flex gap-2">
                       <input value={sendText} onChange={e => setSendText(e.target.value)}
@@ -2722,6 +2735,24 @@ function HealthCell({ mark }: { mark: HealthMark }) {
   return (
     <span title={mark.detail} className={`w-fit cursor-help rounded-md px-1.5 py-0.5 text-[10px] font-medium ${cls}`}>
       {mark.label}
+    </span>
+  );
+}
+
+/**
+ * Здоровье прокси значком перед адресом: зелёная галочка — работает, жёлтый
+ * треугольник — сбоит или ещё не проверялся, красный круг — не работает.
+ * Причина — в подсказке при наведении.
+ */
+function ProxyHealthIcon({ mark }: { mark: HealthMark }) {
+  const icon = mark.tone === 'ok'
+    ? <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+    : mark.tone === 'bad'
+      ? <AlertCircle className="h-4 w-4 text-rose-500" />
+      : <AlertTriangle className="h-4 w-4 text-amber-500" />;
+  return (
+    <span title={`${mark.label}. ${mark.detail}`.trim()} className="inline-flex shrink-0 cursor-help">
+      {icon}
     </span>
   );
 }
@@ -4351,6 +4382,7 @@ function CampaignAccountsTab({
                   )}
                 </div>
                 <div className="flex min-w-0 items-center gap-2">
+                {proxy && editingProxyFor !== a.id && <ProxyHealthIcon mark={proxyMark} />}
                 {editingProxyFor === a.id ? (
                   /* Свой список вместо <select>: рядом с каждым адресом стоит
                      его состояние, иначе сорок одинаковых строк «тот же хост,
@@ -4380,8 +4412,6 @@ function CampaignAccountsTab({
                     {proxy ? (proxy.name || proxy.url) : <HealthCell mark={proxyMark} />}
                   </button>
                 )}
-                  {/* Нет прокси — «не назначен» стоит на месте прочерка, а не сбоку. */}
-                  {proxy ? <HealthCell mark={proxyMark} /> : null}
                 </div>
                 {editingPriceFor === a.id ? (
                   <input
