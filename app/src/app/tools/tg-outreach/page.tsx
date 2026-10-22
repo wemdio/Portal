@@ -4313,10 +4313,11 @@ function CampaignAccountsTab({
                     onClick={() => setEditingProxyFor(a.id)}
                     className="min-w-0 flex-1 text-left text-xs truncate rounded px-1 py-0.5 hover:bg-indigo-50 hover:text-indigo-700 transition cursor-pointer group"
                   >
-                    {proxy ? (proxy.name || proxy.url) : <span className="text-gray-300 group-hover:text-indigo-400">—</span>}
+                    {proxy ? (proxy.name || proxy.url) : <HealthCell mark={proxyMark} />}
                   </button>
                 )}
-                  <HealthCell mark={proxyMark} />
+                  {/* Нет прокси — «не назначен» стоит на месте прочерка, а не сбоку. */}
+                  {proxy ? <HealthCell mark={proxyMark} /> : null}
                 </div>
                 {editingPriceFor === a.id ? (
                   <input
