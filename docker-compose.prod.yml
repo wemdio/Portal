@@ -831,6 +831,9 @@ services:
       - SERPER_API_KEY=${SERPER_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=hypothesis-engine
+      # Полоса этого процесса: все стадии, кроме проверенных ENG-сборов — их
+      # берёт worker-hypothesis-engine-eng ниже (lib/hypothesisEngine/heWorkerLane.ts).
+      - HE_WORKER_LANE=serial
       # Потолок V8 old space — 75% лимита контейнера (deploy ниже), та же
       # ступень, на которую VE2 перешёл после OOM 15.09.2026
       # (docs/incidents/2026-09-15-ve2-resume-oom-and-parallel-projects.md):
@@ -884,6 +887,50 @@ services:
           # base_collect и у us-стадий evidence/brand_cloud). Лимит не
           # резервирует память заранее; вступает в силу только после
           # `up -d --force-recreate` (CLAUDE.md).
+          memory: 2048M
+          cpus: '0.5'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  worker-hypothesis-engine-eng:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-hypothesis-engine-eng
+    volumes:
+      - he-eng-companies-house:/var/lib/portal-eng-companies-house
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - OPENROUTER_HYPOTHESIS_ENGINE_API_KEY=${OPENROUTER_HYPOTHESIS_ENGINE_API_KEY}
+      - OPENROUTER_BRIEF_API_KEY=${OPENROUTER_BRIEF_API_KEY}
+      - HE_MODEL_RESEARCH=openai/gpt-5.5
+      - HE_MODEL_CHAIN=google/gemini-3.1-pro-preview
+      - HE_MODEL_BULK=openai/gpt-5.5
+      - SERPER_API_KEY=${SERPER_API_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_KIND=hypothesis-engine
+      # Только проверенные ENG-сборы клиентов (два слота). Раньше они стояли в
+      # одной очереди с исследованиями RU-инструмента и ждали их часами; каждый
+      # процесс при старте возвращает в очередь только строки своей полосы.
+      - HE_WORKER_LANE=eng_collections
+      # Потолок кучи и лимит памяти — как у worker-hypothesis-engine выше.
+      - NODE_OPTIONS=--max-old-space-size=1536
+    # Дренаж при деплое — та же ветка drain-worker.sh, что у worker-hypothesis-engine.
+    stop_grace_period: 5m
+    labels:
+      - autoheal=true
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/hypothesis-engine-worker-heartbeat && test $$(( $$(date +%s) - $$(cat /tmp/hypothesis-engine-worker-heartbeat | cut -c1-10) )) -lt 300 || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
           memory: 2048M
           cpus: '0.5'
     restart: unless-stopped
