@@ -2635,7 +2635,9 @@ function SortHeader({
   );
 }
 
-const ACCOUNT_GRID = 'grid grid-cols-[32px_44px_minmax(0,1fr)_76px_126px_150px_360px_138px_92px_60px_88px] gap-4 items-center';
+// Здоровье прокси живёт в одной ячейке с самим прокси (22.10.2026): отдельная колонка
+// съедала ширину. Аккаунт — самая широкая колонка, прокси чуть короче прежних 360 px.
+const ACCOUNT_GRID = 'grid grid-cols-[32px_44px_minmax(280px,1.6fr)_76px_126px_150px_minmax(230px,300px)_92px_60px_88px] gap-4 items-center';
 
 /**
  * Ячейка здоровья: слово и цвет, объяснение — под курсором.
@@ -4040,14 +4042,7 @@ function CampaignAccountsTab({
               sort={accountSort}
               onSort={toggleAccountSort}
             />
-            <SortHeader col="proxy" label="Прокси" sort={accountSort} onSort={toggleAccountSort} />
-            <SortHeader
-              col="health"
-              label="Здоровье прокси"
-              title="Проходят ли через прокси круги рассылки. Если нет — сколько дней уже не проходят."
-              sort={accountSort}
-              onSort={toggleAccountSort}
-            />
+            <SortHeader col="proxy" label="Прокси и здоровье" title="Прокси аккаунта и рядом — проходят ли через него круги рассылки." sort={accountSort} onSort={toggleAccountSort} />
             {/* Цена нужна не бухгалтерии, а гипотезам: партии покупают у разных
                 поставщиков и по разной цене, а живут они по-разному. Сумма по
                 колонке считается только по заполненным ценам. */}
@@ -4291,6 +4286,7 @@ function CampaignAccountsTab({
                     </div>
                   )}
                 </div>
+                <div className="flex min-w-0 items-center gap-2">
                 {editingProxyFor === a.id ? (
                   /* Свой список вместо <select>: рядом с каждым адресом стоит
                      его состояние, иначе сорок одинаковых строк «тот же хост,
@@ -4315,12 +4311,13 @@ function CampaignAccountsTab({
                     // Подсказка при наведении показывает адрес целиком.
                     title={proxy ? `${proxy.name || proxy.url} — нажмите, чтобы сменить` : 'Назначить прокси'}
                     onClick={() => setEditingProxyFor(a.id)}
-                    className="w-full text-left text-xs truncate rounded px-1 py-0.5 hover:bg-indigo-50 hover:text-indigo-700 transition cursor-pointer group"
+                    className="min-w-0 flex-1 text-left text-xs truncate rounded px-1 py-0.5 hover:bg-indigo-50 hover:text-indigo-700 transition cursor-pointer group"
                   >
                     {proxy ? (proxy.name || proxy.url) : <span className="text-gray-300 group-hover:text-indigo-400">—</span>}
                   </button>
                 )}
-                <HealthCell mark={proxyMark} />
+                  <HealthCell mark={proxyMark} />
+                </div>
                 {editingPriceFor === a.id ? (
                   <input
                     type="number"
