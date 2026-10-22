@@ -135,9 +135,23 @@ export function BulkProfileModal({
     update(index, { avatar: file, avatarUrl: URL.createObjectURL(file), state: 'idle', detail: '' });
   };
 
-  /** Несколько файлов сразу — раскладываются по аккаунтам в порядке списка. */
+  /**
+   * Несколько файлов сразу — случайно по аккаунтам. Аватарок меньше, чем
+   * аккаунтов (10 на 50), — повторяются по кругу, поровну; больше — берутся
+   * случайные.
+   */
   const attachMany = (files: FileList) => {
-    [...files].slice(0, rowsRef.current.length).forEach((file, i) => attachAvatar(i, file));
+    const shuffle = <T,>(items: T[]): T[] => {
+      const a = [...items];
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+      return a;
+    };
+    const pool = shuffle([...files]);
+    const order = shuffle(rowsRef.current.map((_, i) => i));
+    order.forEach((rowIndex, k) => attachAvatar(rowIndex, pool[k % pool.length]));
   };
 
   /** Шаг 1: подобрать имя и свободный ник. В Telegram ничего не пишет. */
@@ -335,7 +349,7 @@ export function BulkProfileModal({
             Аватарки файлами
           </button>
           <span className="text-[11px] text-gray-400">
-            Можно выбрать сразу несколько — разложатся по аккаунтам сверху вниз. До 1 МБ каждая.
+            Можно выбрать сразу несколько — разложатся по аккаунтам случайно, при нехватке повторяются. До 1 МБ каждая.
           </span>
           {saved || warnings || queued || failed ? (
             <span className="ml-auto text-xs text-gray-500">
