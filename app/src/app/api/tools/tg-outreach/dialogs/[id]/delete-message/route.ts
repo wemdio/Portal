@@ -9,8 +9,8 @@ type Ctx = { params: Promise<{ id: string }> };
 
 /**
  * Удалить в Telegram сообщение, которое написал наш аккаунт. Сам запрос только
- * ставит задачу воркеру: сессии Telegram живут у него, а пока кампания идёт, её
- * аккаунты заняты циклом — как и у refetch, второй клиент на той же сессии нельзя.
+ * ставит задачу воркеру: сессии Telegram живут у него. В работающей кампании
+ * воркер использует уже открытое соединение её аккаунта.
  */
 export async function POST(req: NextRequest, ctx: Ctx) {
   return withToolTrace(
@@ -41,15 +41,6 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         (m) => m.role === 'assistant' && (m.content ?? '').trim() === content,
       );
       if (!ours) return jsonError('Такого сообщения от нашего аккаунта в диалоге нет', 404);
-
-      const { data: campaign } = await supabase
-        .from('tg_outreach_campaigns')
-        .select('status')
-        .eq('id', dialog.campaign_id)
-        .single();
-      if (campaign?.status === 'running') {
-        return jsonError('Кампания запущена — остановите её, чтобы удалить сообщение в Telegram', 409);
-      }
 
       const { data, error } = await supabase
         .from('tg_outreach_jobs')

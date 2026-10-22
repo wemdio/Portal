@@ -1241,6 +1241,7 @@ function DialogsTab({ campaignId, crmEnabled }: {
   const [sending, setSending] = useState(false);
   // Сообщения бота, по которым ушла задача на удаление в Telegram: ключ — диалог, время и текст.
   const [deletingMsgs, setDeletingMsgs] = useState<Set<string>>(new Set());
+  const [deletionJobs, setDeletionJobs] = useState<Record<string, { id: string; dialogId: string }>>({});
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
   /** Базы кампании — для фильтра «показать только диалоги этой гипотезы». */
   const [bases, setBases] = useState<Array<{ id: string; name: string }>>([]);
@@ -1320,6 +1321,41 @@ function DialogsTab({ campaignId, crmEnabled }: {
   }, [search, query]);
 
   useEffect(() => { queueMicrotask(() => { void fetchDialogs(); void fetchAccounts(); void fetchBases(); }); }, [fetchDialogs, fetchAccounts, fetchBases]);
+
+  // Создание задачи ещё не означает удаление в Telegram. Ждём её результата,
+  // обновляем открытую переписку и возвращаем кнопку при ошибке воркера.
+  useEffect(() => {
+    if (!Object.keys(deletionJobs).length) return;
+    let cancelled = false;
+    let busy = false;
+    const poll = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        for (const [key, job] of Object.entries(deletionJobs)) {
+          const res = await authFetch(`${API_BASE}/jobs/${job.id}`);
+          if (!res.ok || cancelled) continue;
+          const result = await res.json() as { status: string; error_message?: string | null };
+          if (cancelled || !['completed', 'failed', 'cancelled'].includes(result.status)) continue;
+          if (result.status === 'completed') {
+            await fetchDialogs({ silent: true });
+          } else {
+            setDialogSaveError({ id: job.dialogId, message: result.error_message || 'Не удалось удалить сообщение в Telegram' });
+          }
+          if (cancelled) return;
+          setDeletingMsgs((cur) => { const next = new Set(cur); next.delete(key); return next; });
+          setDeletionJobs((cur) => { const next = { ...cur }; delete next[key]; return next; });
+        }
+      } catch {
+        // При кратком обрыве сети продолжаем ждать подтверждения от воркера.
+      } finally {
+        busy = false;
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 1500);
+    void poll();
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [deletionJobs, fetchDialogs]);
 
   /**
    * Пометка статуса и тумблер «можно писать» — оптимистично.
@@ -1542,6 +1578,7 @@ function DialogsTab({ campaignId, crmEnabled }: {
     if (!window.confirm('Удалить это сообщение в Telegram у обеих сторон? Отменить нельзя.')) return;
     const key = `${dialogId}|${m.timestamp ?? ''}|${m.content}`;
     setDeletingMsgs((cur) => new Set(cur).add(key));
+    setDialogSaveError((cur) => cur?.id === dialogId ? null : cur);
     try {
       const res = await authFetch(`${API_BASE}/dialogs/${dialogId}/delete-message`, {
         method: 'POST',
@@ -1551,6 +1588,8 @@ function DialogsTab({ campaignId, crmEnabled }: {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
         throw new Error(body?.error ?? `сервер ответил ${res.status}`);
       }
+      const job = await res.json() as { id: string };
+      setDeletionJobs((cur) => ({ ...cur, [key]: { id: job.id, dialogId } }));
     } catch (err) {
       setDeletingMsgs((cur) => { const next = new Set(cur); next.delete(key); return next; });
       setDialogSaveError({ id: dialogId, message: err instanceof Error ? err.message : 'не удалось удалить сообщение' });
