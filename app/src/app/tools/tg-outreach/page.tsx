@@ -4076,7 +4076,7 @@ function CampaignAccountsTab({
             return (
               <div
                 key={a.id}
-                className={`${ACCOUNT_GRID} px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
+                className={`${ACCOUNT_GRID} px-4 py-3 transition-colors duration-300 ease-out ${isSelected(a.id) ? 'bg-[rgba(99,102,241,0.07)]' : ''}`}
               >
                 <input
                   type="checkbox"
@@ -6889,7 +6889,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
               return (
               <div
                 key={p.id}
-                className={`grid grid-cols-[32px_1fr_80px_180px_40px] gap-4 items-center px-4 py-2.5 ${isSelected(p.id) ? 'bg-indigo-50/60' : ''}`}
+                className={`grid grid-cols-[32px_1fr_80px_180px_40px] gap-4 items-center px-4 py-2.5 transition-colors duration-300 ease-out ${isSelected(p.id) ? 'bg-[rgba(99,102,241,0.07)]' : ''}`}
               >
                 <input
                   type="checkbox"
