@@ -276,3 +276,77 @@ export function buildBaseStats(input: BaseStatsInput): BaseStats[] {
     };
   });
 }
+
+export interface ForecastBase {
+  /** Когда при текущем темпе в базе кончатся контакты, ISO начала местных суток. null — не посчитать. */
+  endsAt: string | null;
+}
+
+export interface SendForecast {
+  /** Базы идут цепочкой (одна за другой), а не по кругу. */
+  chain: boolean;
+  /** Темп всей кампании, отправок в сутки: сумма темпов её включённых баз. */
+  perDay: number;
+  /** Не отправленных контактов во всех включённых базах. */
+  remaining: number;
+  /** До какой даты хватит всех баз вместе. null — темп нулевой или контактов не осталось. */
+  endsAt: string | null;
+  /** В цепочке: база, из которой сейчас идут отправки (первая с остатком). */
+  currentBaseId: string | null;
+  currentEndsAt: string | null;
+  bases: Record<string, ForecastBase>;
+}
+
+/**
+ * Даты, до которых хватит баз кампании при текущем темпе.
+ *
+ * Цепочка: темп кампании один на всех, базы расходуются по очереди, поэтому
+ * дата каждой следующей — накопленный остаток до неё, делённый на темп
+ * кампании. Параллельный режим: база кончается по своему темпу (`daysLeft`), а
+ * все базы вместе — по общему.
+ *
+ * `order` — включённые в рассылку базы в порядке цепочки; выключенные из
+ * кампании базы не рассылаются и в прогноз не входят.
+ */
+export function buildSendForecast(
+  stats: BaseStats[],
+  order: string[],
+  chain: boolean,
+  nowMs: number,
+  tzOffsetHours = 3,
+): SendForecast {
+  const byId = new Map(stats.map((s) => [s.baseId, s]));
+  const active = order.map((id) => byId.get(id)).filter((s): s is BaseStats => Boolean(s));
+  const perDay = Math.round(active.reduce((sum, s) => sum + s.perDay, 0) * 10) / 10;
+  const remaining = active.reduce((sum, s) => sum + s.remaining, 0);
+
+  const dateAfter = (days: number): string => new Date(dayStart(nowMs + days * DAY_MS, tzOffsetHours)).toISOString();
+  const campaignDate = (left: number): string | null => (left > 0 && perDay > 0 ? dateAfter(left / perDay) : null);
+
+  const bases: Record<string, ForecastBase> = {};
+  let cumulative = 0;
+  for (const s of active) {
+    if (chain) {
+      cumulative += s.remaining;
+      bases[s.baseId] = { endsAt: s.remaining > 0 ? campaignDate(cumulative) : null };
+    } else {
+      bases[s.baseId] = { endsAt: s.remaining > 0 && s.perDay > 0 ? dateAfter(s.remaining / s.perDay) : null };
+    }
+  }
+
+  const current = chain ? active.find((s) => s.remaining > 0) ?? null : null;
+  return {
+    chain,
+    perDay,
+    remaining,
+    endsAt: campaignDate(remaining),
+    currentBaseId: current?.baseId ?? null,
+    currentEndsAt: current ? bases[current.baseId].endsAt : null,
+    bases,
+  };
+}
+
+/** «27.10» — дата из прогноза по Москве (ISO — начало местных суток). */
+export function formatForecastDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', timeZone: 'Europe/Moscow' });
+}

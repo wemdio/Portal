@@ -16,6 +16,7 @@ import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import {
   buildBaseStats,
+  buildSendForecast,
   type BaseContact,
   type BaseDialog,
   type BaseForward,
@@ -104,11 +105,26 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         tzOffsetHours: TZ_OFFSET_HOURS,
       });
 
+      // Прогноз «до какой даты хватит» — по включённым в рассылку базам и в
+      // порядке цепочки, как их берёт воркер (firstTouch/db.ts).
+      const [linksRes, campRes] = await Promise.all([
+        auth.supabase
+          .from('tg_outreach_campaign_bases')
+          .select('base_id, position')
+          .eq('campaign_id', campaignId)
+          .order('position', { ascending: true }),
+        auth.supabase.from('tg_outreach_campaigns').select('bases_chain').eq('id', campaignId).maybeSingle(),
+      ]);
+      const order = (linksRes.data ?? []).map((r) => (r as { base_id: string }).base_id);
+      const chain = Boolean((campRes.data as { bases_chain?: boolean } | null)?.bases_chain);
+      const forecast = order.length ? buildSendForecast(stats, order, chain, now, TZ_OFFSET_HOURS) : null;
+
       return NextResponse.json({
         period,
         from: new Date(range.fromMs).toISOString(),
         to: new Date(range.toMs).toISOString(),
         bases: stats,
+        forecast,
       });
     },
   );
