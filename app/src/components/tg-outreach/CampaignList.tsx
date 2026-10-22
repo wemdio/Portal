@@ -140,7 +140,9 @@ export function CampaignList({ campaigns, statusOf, onOpen, onChanged, onCreate 
               const blocked = archiveBlockReason(c);
               return (
                 <tr key={c.id} onClick={() => onOpen(c.id)}
-                  className="cursor-pointer border-b border-gray-100 last:border-0 hover:bg-indigo-50/40">
+                  // hover:bg-gray-100 — тёмная тема портала перекрашивает её в свой
+                  // цвет подсветки (globals.css); indigo-50 давал белёсую плашку.
+                  className="cursor-pointer border-b border-gray-100 last:border-0 hover:bg-gray-100">
                   <td className="px-4 py-3 font-semibold text-gray-900">{c.name}</td>
                   <td className="px-4 py-3">
                     <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-semibold ${st.cls}`}>{st.label}</span>
