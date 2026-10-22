@@ -981,7 +981,7 @@ function LogsTab({ campaignId }: { campaignId: string }) {
                 key={r}
                 type="button"
                 onClick={() => setViewRange(r)}
-                className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition cursor-pointer border ${viewRange === r ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}
+                className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition cursor-pointer border ${viewRange === r ? 'bg-[#4f46e5] text-[#ffffff] border-[#4f46e5] shadow-sm' : 'bg-white text-gray-600 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}
               >
                 {RANGE_LABEL[r]}
               </button>
