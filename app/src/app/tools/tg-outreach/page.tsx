@@ -7067,6 +7067,21 @@ function toDateInput(ms: number): string {
  * дата передачи клиенту), отдаются пустыми и заполняются руками уже в файле.
  * Показывать вместо них догадку было бы хуже пустоты: цифры уходят клиенту.
  */
+/** Строка истории отчётов: без самих цифр, они открываются по клику. */
+interface ReportHistoryItem {
+  id: string;
+  period_from: string;
+  period_to: string;
+  created_by_name: string | null;
+  created_at: string;
+}
+
+/** «01.10.2026 — 22.10.2026»: конец в базе исключающий, на экране — включительно. */
+function formatReportPeriod(fromIso: string, toIso: string): string {
+  const fmt = (ms: number) => new Date(ms + 3 * 3_600_000).toLocaleDateString('ru-RU', { timeZone: 'UTC' });
+  return `${fmt(new Date(fromIso).getTime())} — ${fmt(new Date(toIso).getTime() - 1)}`;
+}
+
 function CampaignReportTab({ campaignId }: { campaignId: string }) {
   const [{ from, to }, setPeriod] = useState(() => {
     // Первое число текущего месяца собираем из частей московской даты, а не
@@ -7083,6 +7098,11 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
     };
   });
   const [data, setData] = useState<ReportResponse['report'] | null>(null);
+  /** История собранных отчётов кампании (видна всем сотрудникам). */
+  const [history, setHistory] = useState<ReportHistoryItem[]>([]);
+  /** Какой сохранённый отчёт сейчас на экране; null — собран только что с другими датами. */
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [openingId, setOpeningId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -7094,6 +7114,35 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
     return `from=${encodeURIComponent(fromIso)}&to=${encodeURIComponent(toIso)}`;
   }, [from, to]);
 
+  const loadHistory = useCallback(async () => {
+    const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/report?list=1`);
+    if (!res.ok) return;
+    const body = (await res.json().catch(() => null)) as { items?: ReportHistoryItem[] } | null;
+    setHistory(body?.items ?? []);
+  }, [campaignId]);
+
+  useEffect(() => { queueMicrotask(() => { void loadHistory(); }); }, [loadHistory]);
+
+  /** Открыть сохранённый отчёт: цифры как были на момент сборки, без пересчёта. */
+  const openSaved = async (id: string) => {
+    setOpeningId(id); setError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/report?id=${id}`);
+      const body = (await res.json().catch(() => null)) as
+        (ReportResponse & { from?: string; to?: string; error?: string }) | null;
+      if (!res.ok || !body?.report) {
+        setError(body?.error ?? `Не удалось открыть отчёт (${res.status})`);
+        return;
+      }
+      setData(body.report);
+      setActiveId(id);
+      // Даты в полях показываем те, за которые отчёт собран; конец — включительно.
+      if (body.from && body.to) {
+        setPeriod({ from: toDateInput(new Date(body.from).getTime()), to: toDateInput(new Date(body.to).getTime() - 1) });
+      }
+    } finally { setOpeningId(null); }
+  };
+
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
@@ -7104,13 +7153,19 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
         return;
       }
       setData(body?.report ?? null);
+      setActiveId((body as { saved?: { id?: string } | null } | null)?.saved?.id ?? null);
+      void loadHistory();
     } finally { setLoading(false); }
-  }, [campaignId, range]);
+  }, [campaignId, range, loadHistory]);
 
   const download = async () => {
     setDownloading(true); setError(null);
     try {
-      const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/report?${range()}&format=xlsx`);
+      const res = await authFetch(
+        activeId
+          ? `${API_BASE}/campaigns/${campaignId}/report?id=${activeId}&format=xlsx`
+          : `${API_BASE}/campaigns/${campaignId}/report?${range()}&format=xlsx`,
+      );
       if (!res.ok) {
         setError(`Не удалось выгрузить файл (${res.status})`);
         return;
@@ -7129,16 +7184,17 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
   const head = 'px-2 py-1.5 text-[11px] font-medium text-gray-500 border border-gray-200 bg-gray-50 text-left';
 
   return (
-    <div className="space-y-4">
+    <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
+    <div className="min-w-0 space-y-4">
       <div className="flex flex-wrap items-end gap-3">
         <label className="space-y-1">
           <span className="block text-[11px] font-medium text-gray-500">Период с</span>
-          <input type="date" value={from} onChange={(e) => setPeriod((p) => ({ ...p, from: e.target.value }))}
+          <input type="date" value={from} onChange={(e) => { setActiveId(null); setPeriod((p) => ({ ...p, from: e.target.value })); }}
             className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400" />
         </label>
         <label className="space-y-1">
           <span className="block text-[11px] font-medium text-gray-500">по (включительно)</span>
-          <input type="date" value={to} onChange={(e) => setPeriod((p) => ({ ...p, to: e.target.value }))}
+          <input type="date" value={to} onChange={(e) => { setActiveId(null); setPeriod((p) => ({ ...p, to: e.target.value })); }}
             className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400" />
         </label>
         <button type="button" onClick={() => { void load(); }} disabled={loading}
@@ -7298,6 +7354,46 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
           </div>
         </div>
       )}
+    </div>
+
+    {/* История отчётов справа: видны последние десять, остальные — прокруткой. */}
+    <aside className="rounded-xl border border-gray-200 bg-white/50 lg:sticky lg:top-4">
+      <div className="flex items-center justify-between border-b border-gray-200 px-3.5 py-3">
+        <h3 className="text-xs font-semibold text-gray-800">История отчётов</h3>
+        <span className="text-[11px] text-gray-400">{history.length}</span>
+      </div>
+      {history.length === 0 ? (
+        <p className="px-3.5 py-6 text-center text-[11px] text-gray-400">
+          Собранные отчёты появятся здесь — их видят все сотрудники.
+        </p>
+      ) : (
+        <ul className="max-h-[600px] overflow-y-auto">
+          {history.map((h) => {
+            const active = activeId === h.id;
+            return (
+              <li key={h.id}>
+                <button
+                  type="button"
+                  onClick={() => { void openSaved(h.id); }}
+                  disabled={openingId === h.id}
+                  className={`tg-list-item block w-full border-b border-gray-100 px-3.5 py-2.5 text-left ${active ? 'tg-list-item--active' : ''}`}
+                >
+                  <span className={`block text-xs ${active ? 'font-semibold text-indigo-700' : 'font-medium text-gray-800'}`}>
+                    {formatReportPeriod(h.period_from, h.period_to)}
+                  </span>
+                  <span className="mt-0.5 block text-[11px] text-gray-500">
+                    {h.created_by_name || 'неизвестно кто'}
+                  </span>
+                  <span className="block text-[10px] text-gray-400">
+                    собран {new Date(h.created_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </aside>
     </div>
   );
 }

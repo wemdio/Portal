@@ -4,6 +4,12 @@
  * `?format=xlsx` отдаёт файл, иначе — JSON для экрана. Считает одна и та же
  * функция (`buildCampaignReport`), чтобы на экране и в файле не могли оказаться
  * разные цифры.
+ *
+ * Собранный отчёт сохраняется (22.10.2026, таблица tg_outreach_reports): его
+ * видно всем сотрудникам в истории справа от формы, с именем автора.
+ *   - `?list=1`  — история отчётов кампании, свежие сверху;
+ *   - `?id=…`    — сохранённый отчёт как он был собран (и `&format=xlsx` — файл по нему);
+ *   - `?from&to` — собрать новый и сохранить; `&format=xlsx` сохранённое не плодит.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
@@ -32,6 +38,54 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       const { id: campaignId } = await ctx.params;
 
       const url = new URL(req.url);
+
+      if (url.searchParams.get('list') === '1') {
+        const { data: rows, error: listError } = await auth.supabase
+          .from('tg_outreach_reports')
+          .select('id, period_from, period_to, created_by_name, created_at')
+          .eq('campaign_id', campaignId)
+          .order('created_at', { ascending: false })
+          .limit(100);
+        if (listError) return jsonError(listError.message, 500);
+        return NextResponse.json({ items: rows ?? [] });
+      }
+
+      const savedId = url.searchParams.get('id');
+      if (savedId) {
+        const { data: saved, error: savedError } = await auth.supabase
+          .from('tg_outreach_reports')
+          .select('id, campaign_id, period_from, period_to, report, created_by_name, created_at')
+          .eq('id', savedId)
+          .eq('campaign_id', campaignId)
+          .maybeSingle();
+        if (savedError) return jsonError(savedError.message, 500);
+        if (!saved) return jsonError('Отчёт не найден', 404);
+        const row = saved as {
+          id: string; period_from: string; period_to: string; report: CampaignReport;
+          created_by_name: string | null; created_at: string;
+        };
+        const { data: campRow } = await auth.supabase
+          .from('tg_outreach_campaigns').select('id, name').eq('id', campaignId).maybeSingle();
+        const campName = (campRow as { name?: string } | null)?.name ?? 'campaign';
+        if (url.searchParams.get('format') === 'xlsx') {
+          const buffer = buildWorkbook(row.report, campName, row.period_from, row.period_to);
+          const fileName = `otchet-${slug(campName)}-${row.period_from.slice(0, 10)}_${row.period_to.slice(0, 10)}.xlsx`;
+          return new NextResponse(buffer, {
+            headers: {
+              'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+              'Content-Disposition': `attachment; filename="${fileName}"`,
+            },
+          });
+        }
+        return NextResponse.json({
+          campaign: { id: campaignId, name: campName },
+          from: row.period_from,
+          to: row.period_to,
+          report: row.report,
+          saved: { id: row.id, created_by_name: row.created_by_name, created_at: row.created_at },
+        });
+      }
+
       const from = url.searchParams.get('from');
       const to = url.searchParams.get('to');
       if (!from || !to) return jsonError('from и to обязательны (ISO-даты)', 400);
@@ -90,7 +144,32 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       });
 
       if (url.searchParams.get('format') !== 'xlsx') {
-        return NextResponse.json({ campaign: { id: camp.id, name: camp.name }, from, to, report });
+        // Сохраняем собранный отчёт: имя автора берём из профиля, как у переносов.
+        const { data: profile } = await auth.supabase
+          .from('profiles').select('full_name, email').eq('id', auth.user.id).maybeSingle();
+        const byName =
+          (profile?.full_name as string | null) || (profile?.email as string | null) || auth.user.email || null;
+        const { data: savedRow, error: saveError } = await auth.supabase
+          .from('tg_outreach_reports')
+          .insert({
+            campaign_id: campaignId,
+            period_from: from,
+            period_to: to,
+            report,
+            created_by: auth.user.id,
+            created_by_name: byName,
+          })
+          .select('id, created_by_name, created_at')
+          .single();
+        // Сбой сохранения не должен прятать готовые цифры: отчёт отдаём как есть.
+        if (saveError) console.error('[tg-outreach][report] не удалось сохранить отчёт', saveError.message);
+        return NextResponse.json({
+          campaign: { id: camp.id, name: camp.name },
+          from,
+          to,
+          report,
+          saved: savedRow ?? null,
+        });
       }
 
       const buffer = buildWorkbook(report, camp.name, from, to);
