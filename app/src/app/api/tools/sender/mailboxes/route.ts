@@ -11,7 +11,7 @@ import { withToolTrace } from '@/lib/toolTrace';
 export const dynamic = 'force-dynamic';
 
 const LIST_COLS =
-  'id, provider, auth_type, enabled, google_state, google_account, email, display_name, username, smtp_host, smtp_port, smtp_tls_mode, imap_host, imap_port, status, daily_campaign_limit, daily_total_limit, last_verified_at, last_error, last_send_at, imap_checked_at, directory_synced_at, created_at, tag_id, egress_ip, sender_mailbox_tags(id, name)';
+  'id, provider, auth_type, enabled, google_state, google_account, email, display_name, username, smtp_host, smtp_port, smtp_tls_mode, imap_host, imap_port, status, daily_campaign_limit, daily_total_limit, last_verified_at, last_error, last_send_at, failed_at, next_recheck_at, imap_checked_at, directory_synced_at, created_at, tag_id, egress_ip, sender_mailbox_tags(id, name)';
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
@@ -343,11 +343,13 @@ export async function PATCH(req: NextRequest) {
 
     // «Использовать / не использовать» — это галочка enabled, а не состояние
     // проверки: снятая галочка не должна стирать то, что ящик уже проверен.
+    // Проверка заново сбрасывает паузу автопроверки: ручная идёт сразу.
+    const recheck = { status: 'pending', last_error: null, recheck_attempts: 0, next_recheck_at: null, updated_at: nowIso };
     const patch = action === 'disable'
       ? { enabled: false, updated_at: nowIso }
       : action === 'enable'
-        ? { enabled: true, status: 'pending', last_error: null, updated_at: nowIso }
-        : { status: 'pending', last_error: null, updated_at: nowIso };
+        ? { enabled: true, ...recheck }
+        : recheck;
 
     const { error, count } = await supabaseAdmin
       .from('sender_mailboxes').update(patch, { count: 'exact' }).in('id', ids);
@@ -416,6 +418,8 @@ export async function POST(req: NextRequest) {
       // отправляет ящик на проверку — креды могли смениться.
       status: 'pending',
       last_error: null,
+      recheck_attempts: 0,
+      next_recheck_at: null,
       created_by: auth.user.id,
       updated_at: nowIso,
     }));

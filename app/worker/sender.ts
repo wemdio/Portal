@@ -15,7 +15,8 @@
  */
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, startWorkerHeartbeat } from './_shared';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { verifyPendingMailboxes } from '@/lib/sender/verifyWorker';
+import { recheckFailedMailboxes, verifyPendingMailboxes } from '@/lib/sender/verifyWorker';
+import { releaseDeadMailboxRecipients } from '@/lib/sender/deadMailboxes';
 import { planSenderMessages } from '@/lib/sender/planner';
 import { runScheduledStarts } from '@/lib/sender/scheduledStart';
 import { processSenderBatch } from '@/lib/sender/sendWorker';
@@ -65,6 +66,15 @@ let lastMonitorAt = 0;
 const DOMAIN_HEALTH_INTERVAL_MS = Number(process.env.SENDER_DOMAIN_HEALTH_INTERVAL_MS ?? 1_800_000);
 let lastDomainHealthAt = 0;
 let domainHealthRunning = false;
+
+// Упавшие ящики своего адреса: перепроверка, когда подошла пауза (выборка
+// дешёвая, но вход в ящик — секунды, поэтому не чаще раза в минуту).
+const RECHECK_INTERVAL_MS = Number(process.env.SENDER_RECHECK_INTERVAL_MS ?? 60_000);
+let lastRecheckAt = 0;
+
+// Лиды упавших ящиков (только база): отдать другому ящику или завершить цепочку.
+const DEAD_MAILBOXES_INTERVAL_MS = Number(process.env.SENDER_DEAD_MAILBOXES_INTERVAL_MS ?? 300_000);
+let lastDeadMailboxesAt = 0;
 
 /** Как часто перепроверять, с какого адреса нас видит интернет. */
 const EGRESS_CHECK_INTERVAL_MS = 10 * 60 * 1000;
@@ -127,6 +137,11 @@ async function runFleetJobs(): Promise<void> {
 
   // Отложенные запуски — до планировщика: запущенную кампанию он разложит в тот же проход.
   await guarded('Отложенные запуски не обработались', () => runScheduledStarts({ log }));
+  // Лиды упавших ящиков — тоже до планировщика: открепленным он сразу даст рабочий ящик.
+  if (Date.now() - lastDeadMailboxesAt >= DEAD_MAILBOXES_INTERVAL_MS) {
+    lastDeadMailboxesAt = Date.now();
+    await guarded('Лиды упавших ящиков не разобраны', () => releaseDeadMailboxRecipients({ db, log }));
+  }
   await guarded('Планировщик не отработал', () => planSenderMessages({ log }));
   await guarded('Доставка проб не проверилась', () => checkDeliveredProbes(log));
   // Контрольные ящики: план на день (пока выключен SENDER_SEED_PROBES_ENABLED)
@@ -166,6 +181,10 @@ function makeTick(identity: EgressIdentity, lease: LeaseKeeper) {
     if (egressOk !== true) return false;
 
     await verifyPendingMailboxes({ log, egressIp });
+    if (Date.now() - lastRecheckAt >= RECHECK_INTERVAL_MS) {
+      lastRecheckAt = Date.now();
+      await guarded('Упавшие ящики не перепроверились', () => recheckFailedMailboxes({ log, egressIp }));
+    }
     const sent = await processSenderBatch({ log, egressIp });
 
     // Входящие опрашиваем реже отправки: IMAP-опрос всех ящиков дорогой, а

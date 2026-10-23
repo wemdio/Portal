@@ -30,6 +30,10 @@ export interface MailboxDto {
   last_verified_at: string | null;
   last_error: string | null;
   last_send_at: string | null;
+  /** Когда ящик упал; null — не в «Ошибке». */
+  failed_at?: string | null;
+  /** Следующая автопроверка входа; null — не запланирована (у упавшего — остановлена). */
+  next_recheck_at?: string | null;
   /** Тег ящика, он же категория. Один ящик — один тег. */
   tag: MailboxTagRef | null;
   /** Последняя проверочная отправка: не переписывает ли провайдер заголовки. */
