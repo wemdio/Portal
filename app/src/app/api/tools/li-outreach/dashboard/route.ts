@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
@@ -37,7 +38,69 @@ type CampaignRow = {
   last_invite_date: string | null;
   lead_list_id: string | null;
 };
-type LogRow = { campaign_id: string; level: string; created_at: string };
+type LogRow = { campaign_id: string; account_id: string | null; level: string; message: string; created_at: string };
+
+/** Сутки активности: что реально делали, а не сколько строк в журнале. */
+type Day = { date: string; invites: number; messages: number; errors: number };
+type AccountActivity = { account_id: string; invites_today: number; invites: number; messages: number; errors: number; last_action_at: string | null };
+type Activity = { timeline: Day[]; accounts: AccountActivity[] };
+
+const DAYS = 30;
+
+/** Журнал за период → активность по дням и по аккаунтам. Считаем только отправленные инвайты и сообщения и ошибки. */
+function buildActivity(logs: LogRow[], today: string): Activity {
+  const dayMap = new Map<string, Day>();
+  const now = Date.now();
+  for (let i = DAYS - 1; i >= 0; i--) {
+    const key = new Date(now - i * 86400000).toISOString().slice(0, 10);
+    dayMap.set(key, { date: key, invites: 0, messages: 0, errors: 0 });
+  }
+  const accounts = new Map<string, AccountActivity>();
+  for (const log of logs) {
+    const day = log.created_at.slice(0, 10);
+    const entry = dayMap.get(day);
+    const isInvite = log.message.startsWith('Инвайт отправлен');
+    const isMessage = log.message.startsWith('Сообщение отправлено');
+    const isError = log.level === 'error';
+    if (entry) {
+      if (isInvite) entry.invites++;
+      if (isMessage) entry.messages++;
+      if (isError) entry.errors++;
+    }
+    if (!log.account_id) continue;
+    let acc = accounts.get(log.account_id);
+    if (!acc) {
+      acc = { account_id: log.account_id, invites_today: 0, invites: 0, messages: 0, errors: 0, last_action_at: null };
+      accounts.set(log.account_id, acc);
+    }
+    if (isInvite) { acc.invites++; if (day === today) acc.invites_today++; }
+    if (isMessage) acc.messages++;
+    if (isError) acc.errors++;
+    if ((isInvite || isMessage) && (!acc.last_action_at || log.created_at > acc.last_action_at)) acc.last_action_at = log.created_at;
+  }
+  return { timeline: [...dayMap.values()], accounts: [...accounts.values()] };
+}
+
+/** PostgREST отдаёт не больше тысячи строк за запрос — читаем журнал страницами. */
+async function fetchLogs(db: SupabaseClient, campaignIds: string[]): Promise<LogRow[]> {
+  const since = new Date(Date.now() - DAYS * 86400000).toISOString();
+  const out: LogRow[] = [];
+  for (let from = 0; from < 200_000; from += 1000) {
+    const { data, error } = await db
+      .from('li_campaign_logs')
+      .select('campaign_id, account_id, level, message, created_at')
+      .in('campaign_id', campaignIds)
+      .gte('created_at', since)
+      .or('message.ilike.Инвайт отправлен%,message.ilike.Сообщение отправлено%,level.eq.error')
+      .order('created_at', { ascending: true })
+      .range(from, from + 999);
+    if (error) throw new Error(error.message);
+    const rows = (data ?? []) as LogRow[];
+    out.push(...rows);
+    if (rows.length < 1000) break;
+  }
+  return out;
+}
 
 function todayStr(): string {
   return new Date().toISOString().slice(0, 10);
@@ -57,7 +120,7 @@ export async function GET(req: NextRequest) {
     const campaignIdsRes = await db.from('li_campaigns').select('id').eq('user_id', auth.user.id);
     const campaignIds = (campaignIdsRes.data ?? []).map((c: { id: string }) => c.id);
 
-    const [leadsRes, campaignsRes, campaignLeadsRes, logsRes] = await Promise.all([
+    const [leadsRes, campaignsRes, campaignLeadsRes] = await Promise.all([
       db.from('li_leads').select('id, company, status').eq('user_id', auth.user.id),
       db
         .from('li_campaigns')
@@ -68,13 +131,6 @@ export async function GET(req: NextRequest) {
             .select('status, user_replied, invite_accepted, created_at, lead_id, campaign_id')
             .in('campaign_id', campaignIds)
         : Promise.resolve({ data: [], error: null }),
-      campaignIds.length > 0
-        ? db.from('li_campaign_logs')
-            .select('campaign_id, level, created_at')
-            .in('campaign_id', campaignIds)
-            .gte('created_at', new Date(Date.now() - 30 * 86400000).toISOString())
-            .order('created_at', { ascending: true })
-        : Promise.resolve({ data: [], error: null }),
     ]);
 
     if (leadsRes.error) return jsonError(leadsRes.error.message, 500);
@@ -82,7 +138,12 @@ export async function GET(req: NextRequest) {
     const leads = (leadsRes.data ?? []) as LeadRow[];
     const campaigns = (campaignsRes.data ?? []) as CampaignRow[];
     const campaignLeads = (campaignLeadsRes.data ?? []) as (CampaignLeadRow & { campaign_id: string })[];
-    const logs = (logsRes.data ?? []) as LogRow[];
+    let logs: LogRow[] = [];
+    try {
+      logs = campaignIds.length > 0 ? await fetchLogs(db, campaignIds) : [];
+    } catch (e) {
+      return jsonError(e instanceof Error ? e.message : 'Не удалось прочитать журнал', 500);
+    }
 
     // --- Company breakdown ---
     const companyMap = new Map<string, { total: number; new: number; invited: number; connected: number; messaged: number; replied: number; completed: number; error: number }>();
@@ -148,34 +209,17 @@ export async function GET(req: NextRequest) {
         skipped,
         replied,
         accepted,
+        activity: buildActivity(logs.filter((l) => l.campaign_id === c.id), today),
         reply_rate: cls.length > 0 ? Math.round((replied / cls.length) * 100) : 0,
         accept_rate: cls.length > 0 ? Math.round((accepted / cls.length) * 100) : 0,
       };
     });
 
-    // --- Activity timeline (last 30 days, daily) ---
-    const timeline: { date: string; actions: number; errors: number }[] = [];
-    const dayMap = new Map<string, { actions: number; errors: number }>();
-    for (const log of logs) {
-      const day = log.created_at.slice(0, 10);
-      let entry = dayMap.get(day);
-      if (!entry) { entry = { actions: 0, errors: 0 }; dayMap.set(day, entry); }
-      entry.actions++;
-      if (log.level === 'error') entry.errors++;
-    }
-    const now = new Date();
-    for (let i = 29; i >= 0; i--) {
-      const d = new Date(now.getTime() - i * 86400000);
-      const key = d.toISOString().slice(0, 10);
-      const entry = dayMap.get(key) ?? { actions: 0, errors: 0 };
-      timeline.push({ date: key, ...entry });
-    }
-
     return NextResponse.json({
       funnel,
       by_company: byCompany,
       campaign_stats: campaignStats,
-      timeline,
+      activity: buildActivity(logs, today),
     });
   });
 }

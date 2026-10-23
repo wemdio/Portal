@@ -5,11 +5,13 @@ import { supabase } from '@/lib/supabaseClient';
 import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
 import { BarChart3, Megaphone, ScrollText, Search, Users, UserCircle } from 'lucide-react';
 import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
-import { LiActivityChart, LiFunnelChart } from '@/components/li-outreach/LiDashboardCharts';
+import LiDashboard, { type LiActivity } from '@/components/li-outreach/LiDashboard';
 
 // ---- Types ------------------------------------------------------------------
 
 type Tab = 'dashboard' | 'campaigns' | 'leads' | 'scraper' | 'accounts' | 'logs';
+const LI_TABS: readonly Tab[] = ['dashboard', 'campaigns', 'leads', 'scraper', 'accounts', 'logs'];
+const LI_TAB_KEY = 'li-outreach:tab';
 
 type LiAccountCooldownReason = 'invitation_limit' | 'already_invited' | 'account_restricted';
 type LiAccount = {
@@ -70,14 +72,14 @@ type DashboardCampaignStat = {
   leads_total: number; pending: number; in_progress: number; waiting: number; completed: number;
   error: number; skipped: number; replied: number; accepted: number; reply_rate: number; accept_rate: number;
   funnel: DashboardFunnel;
+  activity: LiActivity;
 };
-type DashboardTimeline = { date: string; actions: number; errors: number };
 type DashboardFunnel = { new: number; invited: number; already_invited: number; connected: number; messaged: number; replied: number; completed: number; error: number; total: number };
 type DashboardData = {
   funnel: DashboardFunnel;
   by_company: DashboardCompanyRow[];
   campaign_stats: DashboardCampaignStat[];
-  timeline: DashboardTimeline[];
+  activity: LiActivity;
 };
 
 type LiCampaign = {
@@ -183,7 +185,21 @@ async function api<T = unknown>(path: string, opts?: RequestInit & { json?: unkn
 // ---- Main page --------------------------------------------------------------
 
 export default function LiOutreachPage() {
-  const [tab, setTab] = useState<Tab>('dashboard');
+  const [tab, setTabState] = useState<Tab>('dashboard');
+  // Открытая вкладка переживает перезагрузку страницы. Читаем после монтирования (не при первом
+  // рендере — иначе разойдётся разметка сервера и клиента) и до тех пор ничего не грузим.
+  const [tabReady, setTabReady] = useState(false);
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(LI_TAB_KEY);
+      if (saved && (LI_TABS as readonly string[]).includes(saved)) setTabState(saved as Tab);
+    } catch { /* хранилище недоступно — остаёмся на дашборде */ }
+    setTabReady(true);
+  }, []);
+  const setTab = useCallback((next: Tab) => {
+    setTabState(next);
+    try { window.localStorage.setItem(LI_TAB_KEY, next); } catch { /* не критично */ }
+  }, []);
   // Logged-in user — used to tell own vs other specialists' campaigns/accounts
   // apart now that everyone sees everyone's launches (read-only for others).
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -273,8 +289,6 @@ export default function LiOutreachPage() {
   // Dashboard data
   const [dashData, setDashData] = useState<DashboardData | null>(null);
   const [dashLoading, setDashLoading] = useState(false);
-  // Воронка лидов на дашборде: '' = по всем кампаниям, иначе id кампании.
-  const [funnelCampaignId, setFunnelCampaignId] = useState('');
   const [companySearch, setCompanySearch] = useState('');
   const [companySortKey, setCompanySortKey] = useState<'total' | 'replied' | 'connected' | 'invited'>('total');
 
@@ -392,12 +406,13 @@ export default function LiOutreachPage() {
   }, []);
 
   useEffect(() => {
+    if (!tabReady) return;
     if (tab === 'dashboard') { void loadDashboard(); void loadLeads(); void loadCampaigns(); }
     if (tab === 'campaigns') void loadCampaigns();
     if (tab === 'leads') void loadLeads(leadListFilterId);
     if (tab === 'scraper' || tab === 'dashboard') void loadTasks();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, leadListFilterId]);
+  }, [tab, tabReady, leadListFilterId]);
 
   useEffect(() => {
     if (!selectedCampaignId) return;
@@ -922,12 +937,6 @@ export default function LiOutreachPage() {
 
   const selectedCampaign = useMemo(() => campaigns.find((c) => c.id === selectedCampaignId) ?? null, [campaigns, selectedCampaignId]);
 
-  // Дашборд: выбранная в селекторе воронки кампания и соответствующая воронка.
-  // Используется и для секции «Воронка лидов», и для верхних карточек.
-  const dashFunnelCampaign = funnelCampaignId
-    ? dashData?.campaign_stats.find((c) => c.id === funnelCampaignId) ?? null
-    : null;
-  const dashFunnel = dashFunnelCampaign ? dashFunnelCampaign.funnel : dashData?.funnel ?? null;
 
   return (
     <div className="min-w-0 space-y-6 overflow-x-clip text-left max-w-full lg:pl-14">
@@ -944,59 +953,14 @@ export default function LiOutreachPage() {
         <div className="space-y-5">
           {dashLoading && !dashData && <div className="text-center py-8 text-sm text-gray-400">Загрузка статистики…</div>}
 
-          {/* Top stats row */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 [&>*]:min-w-0">
-            <StatCard label="Аккаунты" value={accounts.filter((a) => a.is_active && a.user_id === currentUserId).length} total={accounts.filter((a) => a.user_id === currentUserId).length} accent="green" onClick={() => setTab('accounts')} />
-            <StatCard label="Кампании" value={campaigns.filter((c) => c.status === 'running').length} total={campaigns.length} accent="blue" onClick={() => setTab('campaigns')} />
-            <StatCard
-              label={dashFunnelCampaign ? `Лиды · ${dashFunnelCampaign.name}` : 'Лиды'}
-              value={dashFunnel?.total ?? leadsTotal}
-              accent="violet"
+          {dashData && (
+            <LiDashboard
+              data={dashData}
+              accounts={accounts.filter((a) => a.user_id === currentUserId)}
+              onOpenAccounts={() => setTab('accounts')}
+              onOpenCampaigns={() => setTab('campaigns')}
             />
-            <StatCard
-              label="Ответили"
-              value={dashFunnel?.replied ?? 0}
-              total={dashFunnel?.total}
-              accent="green"
-            />
-          </div>
-
-          {/* Lead funnel + 30-day activity — стоят рядом на широких экранах
-           *  (lg+) чтобы не растягивать дашборд вертикально, на мобилке
-           *  пакуются в одну колонку. */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 [&>*]:min-w-0">
-            {/* Lead funnel (visual) — выбираемая по кампании */}
-            {dashData && dashFunnel && (
-              <div className="rounded-xl border border-gray-200 bg-white p-5">
-                <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
-                  <h3 className="text-sm font-semibold text-gray-900">
-                    Воронка лидов{dashFunnelCampaign ? ` — ${dashFunnelCampaign.name}` : ''}
-                  </h3>
-                  <select
-                    value={funnelCampaignId}
-                    onChange={(e) => setFunnelCampaignId(e.target.value)}
-                    className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm bg-white max-w-[260px]"
-                  >
-                    <option value="">Все кампании</option>
-                    {dashData.campaign_stats.map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <LiFunnelChart funnel={dashFunnel} />
-              </div>
-            )}
-
-            {/* Activity timeline (30 days). flex flex-col + chart с flex-1
-             *  чтобы блок заполнял всю высоту grid-ячейки (равной воронке),
-             *  а не оставлял пустое пространство снизу с надписями посередине. */}
-            {dashData && dashData.timeline.length > 0 && (
-              <div className="rounded-xl border border-gray-200 bg-white p-5 flex flex-col">
-                <h3 className="text-sm font-semibold text-gray-900 mb-4 flex-shrink-0">Активность за 30 дней</h3>
-                <LiActivityChart timeline={dashData.timeline} />
-              </div>
-            )}
-          </div>
+          )}
 
           {/* Campaign performance */}
           {dashData && dashData.campaign_stats.length > 0 && (
@@ -2729,48 +2693,6 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
 }
 
 // ---- Helper components ------------------------------------------------------
-
-const ACCENT_STYLES: Record<string, { dot: string; bar: string }> = {
-  green:  { dot: 'bg-green-500',  bar: 'bg-green-500' },
-  blue:   { dot: 'bg-blue-500',   bar: 'bg-blue-500' },
-  violet: { dot: 'bg-violet-500', bar: 'bg-violet-500' },
-  gray:   { dot: 'bg-gray-400',   bar: 'bg-gray-400' },
-};
-
-function StatCard({ label, value, total, accent = 'gray', onClick }: { label: string; value: number; total?: number; accent?: string; onClick?: () => void }) {
-  const s = ACCENT_STYLES[accent] ?? ACCENT_STYLES.gray;
-  const pct = total && total > 0 ? Math.round((value / total) * 100) : null;
-  const body = (
-    <>
-      <div className="flex items-center gap-1.5">
-        <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
-        <span className="text-xs text-gray-500">{label}</span>
-        {onClick && <span className="ml-auto text-xs text-gray-300 transition group-hover:text-indigo-500" aria-hidden>→</span>}
-      </div>
-      <div className="text-2xl font-bold text-gray-900 mt-1">
-        {value}{total !== undefined && total !== value ? <span className="text-sm font-normal text-gray-400">/{total}</span> : null}
-      </div>
-      {pct !== null && (
-        <div className="mt-2 h-1 rounded-full bg-gray-100 overflow-hidden">
-          <div className={`h-full rounded-full ${s.bar}`} style={{ width: `${pct}%` }} />
-        </div>
-      )}
-    </>
-  );
-  const base = 'rounded-xl border border-gray-200 bg-white p-4';
-  // Карточка-ссылка: клик открывает соответствующий раздел.
-  return onClick ? (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`group w-full cursor-pointer text-left transition hover:border-indigo-300 hover:shadow-sm ${base}`}
-    >
-      {body}
-    </button>
-  ) : (
-    <div className={base}>{body}</div>
-  );
-}
 
 function CompanyTable({ rows, search, sortKey }: { rows: DashboardCompanyRow[]; search: string; sortKey: string }) {
   const filtered = rows

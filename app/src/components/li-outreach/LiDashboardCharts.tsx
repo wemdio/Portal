@@ -37,7 +37,8 @@ export interface LiFunnel {
 
 export interface LiTimelineDay {
   date: string;
-  actions: number;
+  invites: number;
+  messages: number;
   errors: number;
 }
 
@@ -109,7 +110,7 @@ function funnelOption(funnel: LiFunnel, theme: ChartTheme, animate: boolean): EC
   };
 }
 
-export function LiFunnelChart({ funnel }: { funnel: LiFunnel }) {
+export function LiFunnelChart({ funnel, height = 340 }: { funnel: LiFunnel; height?: number }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const theme = useChartTheme(rootRef);
   const reducedMotion = usePrefersReducedMotion();
@@ -121,7 +122,7 @@ export function LiFunnelChart({ funnel }: { funnel: LiFunnel }) {
   if (funnel.total === 0) return <p className="text-xs text-gray-400">Нет лидов</p>;
   return (
     <div ref={rootRef}>
-      {option ? <EChart option={option} height={340} ariaLabel="Воронка лидов LinkedIn" /> : <div style={{ height: 340 }} />}
+      {option ? <EChart option={option} height={height} ariaLabel="Воронка лидов LinkedIn" /> : <div style={{ height }} />}
       <div className="mt-2 flex items-center gap-2 border-t border-gray-100 pt-2 text-xs text-gray-500">
         <span className="font-semibold text-gray-900">Всего {funnel.total}</span>
         <span>
@@ -141,7 +142,6 @@ function label(date: string): string {
 function timelineOption(days: LiTimelineDay[], theme: ChartTheme, animate: boolean): EChartsCoreOption {
   const labels = days.map((d) => label(d.date));
   const hasErrors = days.some((d) => d.errors > 0);
-  const actionsColor = seriesColor(theme, 0);
 
   const area = (color: string) => ({
     color: {
@@ -174,7 +174,7 @@ function timelineOption(days: LiTimelineDay[], theme: ChartTheme, animate: boole
     animationDuration: 700,
     animationEasing: 'cubicOut',
     textStyle: { fontFamily: CHART_FONT },
-    grid: { left: 4, right: 8, top: 16, bottom: 4, containLabel: true },
+    grid: { left: 4, right: 8, top: 12, bottom: 4, containLabel: true },
     legend: { show: false },
     tooltip: {
       trigger: 'axis',
@@ -196,13 +196,15 @@ function timelineOption(days: LiTimelineDay[], theme: ChartTheme, animate: boole
       axisLabel: { color: AXIS_TEXT, fontSize: AXIS_FONT_SIZE, fontFamily: CHART_FONT },
     },
     series: [
-      line('Действия', days.map((d) => d.actions), actionsColor),
-      ...(hasErrors ? [line('С ошибками', days.map((d) => d.errors), ERROR_COLOR)] : []),
+      line('Инвайты', days.map((d) => d.invites), seriesColor(theme, 0)),
+      line('Сообщения', days.map((d) => d.messages), seriesColor(theme, 1)),
+      ...(hasErrors ? [line('Ошибки', days.map((d) => d.errors), ERROR_COLOR)] : []),
     ],
   };
 }
 
-export function LiActivityChart({ timeline }: { timeline: LiTimelineDay[] }) {
+/** Инвайты, сообщения и ошибки по дням — то, что реально сделали аккаунты. */
+export function LiInviteChart({ timeline, height = 240 }: { timeline: LiTimelineDay[]; height?: number }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const theme = useChartTheme(rootRef);
   const reducedMotion = usePrefersReducedMotion();
@@ -210,16 +212,10 @@ export function LiActivityChart({ timeline }: { timeline: LiTimelineDay[] }) {
     () => (theme ? timelineOption(timeline, theme, !reducedMotion) : null),
     [timeline, theme, reducedMotion],
   );
-  const total = timeline.reduce((sum, d) => sum + d.actions, 0);
-  const errors = timeline.reduce((sum, d) => sum + d.errors, 0);
 
   return (
     <div ref={rootRef}>
-      {option ? <EChart option={option} height={340} ariaLabel="Активность LinkedIn за 30 дней" /> : <div style={{ height: 340 }} />}
-      <div className="mt-2 flex items-center gap-2 border-t border-gray-100 pt-2 text-xs text-gray-500">
-        <span className="font-semibold text-gray-900 tabular-nums">{total} действий за 30 дней</span>
-        {errors > 0 && <span className="tabular-nums">· ошибок {errors}</span>}
-      </div>
+      {option ? <EChart option={option} height={height} ariaLabel="Инвайты и сообщения LinkedIn по дням" /> : <div style={{ height }} />}
     </div>
   );
 }
