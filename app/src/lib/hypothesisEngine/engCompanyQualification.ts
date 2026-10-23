@@ -1,4 +1,4 @@
-import { heEngBaseBudgetActive, isHeEngBaseBudgetPreflightFailure, rethrowHeEngBaseBudgetError } from './engBaseBudget';
+import { activeHeEngBaseBudgetLedger, heEngBaseBudgetActive, isHeEngBaseBudgetPreflightFailure, rethrowHeEngBaseBudgetError } from './engBaseBudget';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { HeEngBaseBudgetError } from './engBaseBudgetLedger';
@@ -694,8 +694,11 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
    */
   async function currentSite(key: string, row: T, website: string, company: string): Promise<{ website: string; pages: QualificationPage[] } | null> {
     const ledger = input.siteSearch;
+    // Model requests and other searches of this run may be unanswered right now:
+    // reserve on the stage's open ledger, never open it again (see activeHeEngBaseBudgetLedger).
+    const stageLedger = ledger ? activeHeEngBaseBudgetLedger(ledger.baseId, ledger.projectId) : null;
     const country = heEngSourceCountry(row, scope.countries);
-    if (!ledger || country.status !== 'confirmed' || !country.country) return null;
+    if (!ledger || !stageLedger || country.status !== 'confirmed' || !country.country) return null;
     const searches = memo.economy!.siteSearches ??= {};
     let search = searches[key];
     if (!search) {
@@ -707,7 +710,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     if (search.checkpoint.inFlight) throw new HeEngBaseBudgetError('unknown_cost');
     if (search.checkpoint.calls === 0 && !search.checkpoint.unavailable) {
       const state = search;
-      await runHeEngCompanySearchPage({ db: ledger.db, baseId: ledger.baseId, projectId: ledger.projectId,
+      await runHeEngCompanySearchPage({ db: ledger.db, baseId: ledger.baseId, projectId: ledger.projectId, ledger: stageLedger,
         plan: state.plan, checkpoint: state.checkpoint, seenWebsites: [website], signal: heStageSignal(ctx),
         onCheckpoint: async (checkpoint, candidates) => {
           state.checkpoint = structuredClone(checkpoint);
