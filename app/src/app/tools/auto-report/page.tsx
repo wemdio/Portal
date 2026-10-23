@@ -19,7 +19,7 @@ interface InstantlyCampaignItem {
 }
 
 interface CampaignsListMeta {
-  source: 'database' | 'instantly_fallback' | 'instantly_direct';
+  source: 'database' | 'instantly_fallback' | 'instantly_direct' | 'sender';
   lastSyncedAt: string | null;
   stale: boolean;
   backgroundSync: boolean;
@@ -41,14 +41,21 @@ function formatCampaignTimestamp(value: string | null | undefined): string | nul
   return raw;
 }
 
+/** Откуда кампании отчёта: Instantly или своя «Рассылка». */
+type ReportProvider = 'instantly' | 'sender';
+
+const PROVIDER_KEY = 'auto-report-provider';
+
 const CampaignRow = memo(function CampaignRow({
   campaign,
   isChecked,
   onToggle,
+  provider,
 }: {
   campaign: InstantlyCampaignItem;
   isChecked: boolean;
   onToggle: (id: string) => void;
+  provider: ReportProvider;
 }) {
   const createdLabel =
     formatCampaignTimestamp(campaign.timestamp_created) ??
@@ -89,12 +96,12 @@ const CampaignRow = memo(function CampaignRow({
           ) : null}
         </span>
         <a
-          href={`${INSTANTLY_ANALYTICS_URL_BASE}${campaign.id}/analytics`}
+          href={provider === 'sender' ? `/tools/sender/campaigns/${campaign.id}` : `${INSTANTLY_ANALYTICS_URL_BASE}${campaign.id}/analytics`}
           target="_blank"
           rel="noopener noreferrer"
           onClick={(e) => e.stopPropagation()}
           className="shrink-0 rounded p-1.5 text-gray-400 hover:bg-gray-200 hover:text-indigo-600 transition-colors"
-          title="Открыть аналитику в Instantly"
+          title={provider === 'sender' ? 'Открыть кампанию в «Рассылке»' : 'Открыть аналитику в Instantly'}
         >
           <ExternalLink className="h-4 w-4" />
         </a>
@@ -1225,11 +1232,43 @@ export default function AutoReportPage() {
   const [campaignsMeta, setCampaignsMeta] = useState<CampaignsListMeta | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState('');
+  // Источник кампаний: Instantly или «Рассылка». Выбор помним в браузере;
+  // читаем после монтирования, как историю отчётов, — иначе разметка сервера
+  // и браузера разошлась бы.
+  const [provider, setProvider] = useState<ReportProvider>('instantly');
+  // Список грузим, только когда выбор прочитан: иначе первым ушёл бы запрос
+  // кампаний Instantly и мог вернуться позже списка «Рассылки».
+  const [providerReady, setProviderReady] = useState(false);
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(PROVIDER_KEY) === 'sender') setProvider('sender');
+    } catch {
+      /* хранилище браузера недоступно — остаётся Instantly */
+    }
+    setProviderReady(true);
+  }, []);
+  const chooseProvider = (next: ReportProvider) => {
+    if (next === provider) return;
+    setProvider(next);
+    // Кампании другого источника не выбираются: отчёт по ним собрался бы не там.
+    setCampaignsList([]);
+    setSelectedIds(new Set());
+    setCampaignsFetched(false);
+    try {
+      window.localStorage.setItem(PROVIDER_KEY, next);
+    } catch {
+      /* хранилище браузера недоступно — выбор просто не запомнится */
+    }
+  };
   const catalogSyncWaitAttemptsRef = useRef(0);
+  /** Номер последнего запроса списка: ответ устаревшего (другой источник) не применяется. */
+  const campaignsRequestRef = useRef(0);
 
   const loadCampaigns = useCallback(async (opts?: { silent?: boolean; direct?: boolean }) => {
     const silent = opts?.silent === true;
     const direct = opts?.direct === true;
+    const requestNo = ++campaignsRequestRef.current;
+    const stale = () => requestNo !== campaignsRequestRef.current;
     if (!silent) {
       setCampaignsLoading(true);
     }
@@ -1239,7 +1278,7 @@ export default function AutoReportPage() {
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), 35_000);
     try {
-      const sourceSuffix = direct ? '?source=instantly' : '';
+      const sourceSuffix = provider === 'sender' ? '?provider=sender' : direct ? '?source=instantly' : '';
       const res = await authFetch(`/api/tools/auto-report/campaigns${sourceSuffix}`, {
         signal: controller.signal,
       });
@@ -1248,6 +1287,7 @@ export default function AutoReportPage() {
         meta?: CampaignsListMeta;
         error?: string;
       };
+      if (stale()) return;
       if (!res.ok) {
         setError(data.error || `Ошибка ${res.status}`);
         if (!silent) setCampaignsLoading(false);
@@ -1286,6 +1326,7 @@ export default function AutoReportPage() {
         setCatalogSyncPending(false);
       }
     } catch (err) {
+      if (stale()) return;
       const aborted = err instanceof DOMException && err.name === 'AbortError';
       setError(
         aborted
@@ -1296,15 +1337,16 @@ export default function AutoReportPage() {
       );
     } finally {
       window.clearTimeout(timeoutId);
-      if (!silent) {
+      if (!silent && !stale()) {
         setCampaignsLoading(false);
       }
     }
-  }, []);
+  }, [provider]);
 
   useEffect(() => {
+    if (!providerReady) return;
     loadCampaigns();
-  }, [loadCampaigns]);
+  }, [loadCampaigns, providerReady]);
 
   useEffect(() => {
     if (!catalogSyncPending || campaignsList.length > 0) return;
@@ -1370,7 +1412,7 @@ export default function AutoReportPage() {
     try {
       const res = await authFetch('/api/tools/auto-report/stream', {
         method: 'POST',
-        body: JSON.stringify({ campaignIds: ids }),
+        body: JSON.stringify({ campaignIds: ids, provider }),
       });
 
       if (!res.ok || !res.body) {
@@ -1534,7 +1576,7 @@ export default function AutoReportPage() {
           <div>
             <h2 className="text-lg font-semibold text-gray-900">Сформировать отчёт</h2>
             <p className="text-sm text-gray-600 mt-0.5">
-              Подгрузите список кампаний из Instantly, найдите нужные по названию и выберите проекты для отчёта.
+              Подгрузите список кампаний из Instantly или «Рассылки», найдите нужные по названию и выберите проекты для отчёта.
             </p>
           </div>
         </div>
@@ -1542,6 +1584,24 @@ export default function AutoReportPage() {
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
+              <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
+                {([
+                  ['instantly', 'Instantly'],
+                  ['sender', '«Рассылка»'],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => chooseProvider(value)}
+                    disabled={campaignsLoading || loading}
+                    className={`rounded-md px-2.5 py-1 text-xs font-medium transition ${
+                      provider === value ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
               <button
                 type="button"
                 onClick={() => void loadCampaigns()}
@@ -1555,7 +1615,9 @@ export default function AutoReportPage() {
               {campaignsMeta ? (
                 <span className="inline-flex items-center rounded-md bg-gray-100 px-2 py-1 text-xs text-gray-600">
                   Источник:{' '}
-                  {campaignsMeta.source === 'database'
+                  {campaignsMeta.source === 'sender'
+                    ? '«Рассылка»'
+                    : campaignsMeta.source === 'database'
                     ? 'БД'
                     : campaignsMeta.source === 'instantly_direct'
                       ? 'Instantly (напрямую)'
@@ -1644,6 +1706,7 @@ export default function AutoReportPage() {
                             campaign={c}
                             isChecked={selectedIds.has(c.id)}
                             onToggle={toggleCampaign}
+                            provider={provider}
                           />
                         ))}
                       </ul>
