@@ -35,9 +35,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     // проходит вход по SMTP/IMAP, и только после этого попадает в рассылку.
     if (body.action === 'enable') patch.enabled = true;
     // Взяли в работу или отправили на перепроверку — ящик заново проходит вход.
+    // Пауза автопроверки сбрасывается: ручная проверка идёт сразу.
     if (body.action === 'enable' || body.action === 'recheck') {
       patch.status = 'pending';
       patch.last_error = null;
+      patch.recheck_attempts = 0;
+      patch.next_recheck_at = null;
     }
 
     if (typeof body.dailyCampaignLimit === 'number') {

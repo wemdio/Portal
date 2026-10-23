@@ -129,6 +129,19 @@ export async function POST(req: NextRequest) {
           .select('email');
       if (upsertError) return jsonError(upsertError.message, 500);
       imported += data?.length ?? 0;
+      // «Ящик переписки не работает» закрывает только цепочку, а не адрес
+      // (передать ответившего клиенту можно): ручной стоп его заменяет.
+      if (campaignId) {
+        const { data: promoted, error: promoteError } = await supabaseAdmin
+          .from('sender_campaign_suppressions')
+          .update({ reason: 'manual', note })
+          .eq('campaign_id', campaignId)
+          .in('email', part)
+          .eq('reason', 'mailbox_lost')
+          .select('email');
+        if (promoteError) return jsonError(promoteError.message, 500);
+        imported += promoted?.length ?? 0;
+      }
     }
 
     if (campaignId) await stopInCampaign(campaignId, emails);

@@ -17,6 +17,7 @@ Daily report (21:00 MSK):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import io
 import json
@@ -2133,6 +2134,9 @@ async def _check_sender(conn) -> list[str]:
     # Группируем по самому m.egress_ip, а не по выражению (GROUP BY 1): подзапрос
     # last_sent ссылается на m.egress_ip, и с 16.10.2026 Postgres отвергал запрос
     # («subquery uses ungrouped column») — алерт молча не работал.
+    # Письма упавших ящиков не считаем: про ящик говорит п. 3, их лидов
+    # разбирает «Рассылка» сама (lib/sender/deadMailboxes), а иначе такой ящик
+    # повторял «письма не уходят» каждые два часа.
     try:
         overdue = await conn.fetch(
             "SELECT coalesce(m.egress_ip, 'без адреса') AS ip, count(*) AS n, "
@@ -2143,6 +2147,7 @@ async def _check_sender(conn) -> list[str]:
             "           AND x.sent_at > now() - interval '1 day') AS last_sent "
             "FROM public.sender_messages s JOIN public.sender_mailboxes m ON m.id = s.mailbox_id "
             "WHERE s.status = 'scheduled' AND s.scheduled_at < now() - make_interval(mins => $1) "
+            "  AND m.status <> 'failed' "
             "GROUP BY m.egress_ip HAVING count(*) >= $2",
             SENDER_OVERDUE_MINUTES,
             SENDER_OVERDUE_MIN_MESSAGES,
@@ -2187,26 +2192,66 @@ async def _check_sender(conn) -> list[str]:
             f"{hint}"
         )
 
-    # 3. Ящики перешли в «Ошибка» за последний час.
+    # 3. Ящики перешли в «Ошибка» за последний час — по времени падения
+    # (failed_at ведёт база): updated_at его не отражает, отправка роняет ящик,
+    # не трогая updated_at, а синхронизация Google обновляет его каждый час.
     try:
         failed = await conn.fetch(
-            "SELECT id::text AS id, email, last_error, updated_at FROM public.sender_mailboxes "
-            "WHERE status = 'failed' AND updated_at > now() - interval '1 hour' ORDER BY email"
+            "SELECT id::text AS id, email, last_error, failed_at, next_recheck_at FROM public.sender_mailboxes "
+            "WHERE status = 'failed' AND failed_at > now() - interval '1 hour' ORDER BY email"
         )
     except Exception as e:
         print(f"[health] sender mailboxes query skipped: {e}")
         failed = []
     fresh = []
     for r in failed:
-        if await _claim_job_alert(conn, f"sender:mailbox_failed:{r['id']}:{r['updated_at'].isoformat()}"):
+        if await _claim_job_alert(conn, f"sender:mailbox_failed:{r['id']}:{r['failed_at'].isoformat()}"):
             fresh.append(r)
     if fresh:
+        # Без автопроверки — ящики, которые провайдер не пускает отправлять
+        # (спам-политика): вход у них проходит, проверка входа их не вернёт.
+        manual_mark = " — <b>автопроверки нет: проверьте ящик и нажмите «Проверить вход»</b>"
         lines = "\n".join(
             f"• {html.escape(str(r['email']))}: <code>{html.escape(str(r['last_error'] or 'без текста')[:200])}</code>"
+            f"{manual_mark if r['next_recheck_at'] is None else ''}"
             for r in fresh[:15]
         )
         more = f"\n…и ещё {len(fresh) - 15}" if len(fresh) > 15 else ""
-        problems.append(f"🟠 <b>Рассылка: ящики перешли в «Ошибка» ({len(fresh)})</b>\n{lines}{more}")
+        auto = "Остальные ящики перепроверятся сами. " if any(r["next_recheck_at"] is None for r in fresh) else "Ящики перепроверятся сами. "
+        problems.append(
+            f"🟠 <b>Рассылка: ящики перешли в «Ошибка» ({len(fresh)})</b>\n{lines}{more}\n"
+            f"{auto}Лидам, которым с них ещё не писали, через 30 минут "
+            "дадим другой ящик кампании; цепочки остальных завершатся, если ящик не поднимется за 3 дня."
+        )
+
+    # 4. Цепочки завершены: ящик переписки не поднялся за 3 дня (стоп-лист
+    # кампании с причиной mailbox_lost). Одна сводка на ящик и падение: пометку
+    # «Ящик переписки … не работает с …» пишет сам разбор (deadMailboxes), она
+    # одна у всех лидов ящика и не меняется, если ящик потом удалят.
+    try:
+        lost = await conn.fetch(
+            "SELECT coalesce(s.note, 'без пометки') AS note, count(*) AS n "
+            "FROM public.sender_campaign_suppressions s "
+            "WHERE s.reason = 'mailbox_lost' AND s.created_at > now() - interval '1 day' "
+            "GROUP BY 1 ORDER BY 2 DESC"
+        )
+    except Exception as e:
+        print(f"[health] sender mailbox_lost query skipped: {e}")
+        lost = []
+    lost_fresh = []
+    for r in lost:
+        note_key = hashlib.sha1(str(r["note"]).encode()).hexdigest()
+        if await _claim_job_alert(conn, f"sender:mailbox_lost:{note_key}"):
+            lost_fresh.append(r)
+    if lost_fresh:
+        lines = "\n".join(f"• {html.escape(str(r['note']))}: {r['n']} лидов" for r in lost_fresh[:15])
+        more = f"\n…и ещё {len(lost_fresh) - 15} ящиков" if len(lost_fresh) > 15 else ""
+        total = sum(int(r["n"]) for r in lost_fresh)
+        problems.append(
+            f"🟠 <b>Рассылка: завершены цепочки {total} лидов — ящики не работают 3 дня</b>\n{lines}{more}\n"
+            "Письма с чужого адреса им не шлём. Лиды — в стоп-листе кампании с причиной "
+            "«ящик переписки не работает»."
+        )
 
     # 4. Копия лида на общую почту AMO не ушла: без неё менеджеры не ведут переписку.
     try:

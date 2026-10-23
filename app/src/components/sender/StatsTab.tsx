@@ -270,6 +270,7 @@ const SUPPRESS_LABELS: Record<string, string> = {
   manual: 'добавлены руками',
   client_blocklist: 'стоп-лист клиента',
   project_block: 'стоп-лист проекта',
+  mailbox_lost: 'ящик переписки не работает',
 };
 
 const INBOX_LABELS: Record<string, string> = {

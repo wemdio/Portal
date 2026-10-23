@@ -397,11 +397,15 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass  # quiet
 
-    def _json(self, code, obj):
+    def _json(self, code, obj, close=False):
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if close:
+            # The request body was not read: end the keep-alive connection, or the
+            # unread body would be parsed as the next request (a 501 for the worker).
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
@@ -416,9 +420,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path != "/smtp-check":
-            return self._json(404, {"error": "not found"})
+            return self._json(404, {"error": "not found"}, close=True)
         if not self._auth_ok():
-            return self._json(401, {"error": "Unauthorized"})
+            return self._json(401, {"error": "Unauthorized"}, close=True)
         try:
             n = int(self.headers.get("Content-Length", "0"))
             req = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}

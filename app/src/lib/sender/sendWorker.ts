@@ -69,6 +69,7 @@ function retryPlan(code: SendErrorCode | undefined, attempts: number): 'retry' |
     case 'rejected':
       return 'fail';
     case 'auth':
+    case 'auth_temporary':
     case 'blocked_target':
     case 'policy_reject':
       return 'hold';
@@ -291,14 +292,35 @@ export async function processSenderBatch(opts: { egressIp: string; batchSize?: n
       // очередь, чтобы оно ушло после переподключения. Сюда же попадает
       // спам-блокировка провайдера (5.7.x) — вина ящика, а не получателя.
       const retryAt = new Date(Date.now() + MAILBOX_PROBLEM_DELAY_MS).toISOString();
+      // Письмо, отвергнутое по спам-политике, назад в очередь не ставим: дело
+      // может быть в самом письме, и другой ящик (лидов упавшего разбирает
+      // deadMailboxes) получил бы тот же отказ и тоже упал. Лид ждёт ящик и
+      // через 3 дня завершается вместе с остальными его лидами.
       await db
         .from('sender_messages')
-        .update({ status: 'scheduled', scheduled_at: retryAt, attempts, error: result.error ?? null })
+        .update(result.code === 'policy_reject'
+          ? { status: 'failed', attempts, error: result.error ?? 'policy_reject' }
+          : { status: 'scheduled', scheduled_at: retryAt, attempts, error: result.error ?? null })
         .eq('id', message.id);
       await db
         .from('sender_mailboxes')
         .update({ status: 'failed', last_error: result.error?.slice(0, 500) ?? 'Ящик отклонил вход' })
         .eq('id', mailbox.id);
+      // Спам-блокировка — отказ на отправке, а вход у такого ящика проходит:
+      // автоперепроверка входа вернула бы его в рассылку, и через четверть
+      // часа он падал бы снова, обнуляя часы падения. Перепроверку снимаем
+      // отдельной записью (при смене статуса её ставит триггер) — ящик
+      // возвращают вручную, а его лидов разбирает deadMailboxes.
+      if (result.code === 'policy_reject') {
+        await db
+          .from('sender_mailboxes')
+          .update({
+            next_recheck_at: null,
+            last_error: `${result.error?.slice(0, 400) ?? 'Отказ по политике провайдера'} — провайдер не принимает письма, автопроверка входа не поможет: проверьте ящик и нажмите «Проверить вход»`,
+          })
+          .eq('id', mailbox.id)
+          .eq('status', 'failed');
+      }
       mailboxCache.set(mailbox.id, { ...mailbox, status: 'failed' });
       continue;
     }
