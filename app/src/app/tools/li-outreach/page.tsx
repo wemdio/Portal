@@ -28,6 +28,8 @@ type LiAccount = {
   created_at: string;
   cooldown_until: string | null;
   cooldown_reason: LiAccountCooldownReason | null;
+  /** Статус в Unipile как есть: OK, CREDENTIALS (разлогинен), ERROR… */
+  unipile_status?: string | null;
   proxy_url: string | null;
   /** Кампании, привязанные к аккаунту (отдаёт GET /accounts). */
   campaigns?: Array<{ id: string; name: string; status: string }>;
@@ -49,6 +51,24 @@ const CAMPAIGN_STATUS_LABEL_RU: Record<string, string> = {
   completed: 'завершена',
   failed: 'ошибка',
 };
+
+/** Статус аккаунта для карточки: отлёжка, затем статус Unipile (разлогинен, ошибка…). */
+function liAccountStatus(a: Pick<LiAccount, 'is_active' | 'unipile_status' | 'cooldown_until'>): { text: string; cls: string; hint?: string } {
+  if (isAccountInCooldown(a)) return { text: 'В отлёжке', cls: 'bg-amber-100 text-amber-700' };
+  const status = (a.unipile_status ?? '').toUpperCase();
+  const labels: Record<string, { text: string; hint?: string }> = {
+    OK: { text: 'Активен' },
+    CREDENTIALS: { text: 'Разлогинен', hint: 'LinkedIn разлогинил аккаунт: нужно заново войти в нём через Unipile' },
+    ERROR: { text: 'Ошибка Unipile', hint: 'Unipile сообщает об ошибке аккаунта' },
+    STOPPED: { text: 'Остановлен', hint: 'Аккаунт остановлен в Unipile' },
+    CONNECTING: { text: 'Подключается' },
+    PERMISSION_ERROR: { text: 'Нет прав', hint: 'У Unipile нет доступа к аккаунту' },
+  };
+  const known = labels[status];
+  if (known) return { ...known, cls: status === 'OK' ? 'bg-green-100 text-green-700' : status === 'CONNECTING' ? 'bg-blue-100 text-blue-700' : 'bg-rose-100 text-rose-700' };
+  if (status) return { text: status, cls: 'bg-rose-100 text-rose-700', hint: 'Статус аккаунта в Unipile' };
+  return a.is_active ? { text: 'Активен', cls: 'bg-green-100 text-green-700' } : { text: 'Неактивен', cls: 'bg-gray-100 text-gray-600' };
+}
 
 function isAccountInCooldown(a: Pick<LiAccount, 'cooldown_until'>): boolean {
   if (!a.cooldown_until) return false;
@@ -409,6 +429,13 @@ export default function LiOutreachPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCampaignId]);
 
+  // Вкладка «Аккаунты»: воркер синхронизирует раз в 15 минут — подтягиваем изменения раз в минуту.
+  useEffect(() => {
+    if (tab !== 'accounts') return;
+    const interval = window.setInterval(() => { void loadAccounts(); }, 60_000);
+    return () => window.clearInterval(interval);
+  }, [tab, loadAccounts]);
+
   // Скрапер живой: пока есть задача в работе — обновляем каждые 3 сек (прогресс идёт на глазах),
   // иначе раз в 15 сек. Когда задача завершилась, перечитываем базы: в них появились люди.
   const hasActiveTask = tasks.some((t) => t.status === 'pending' || t.status === 'running');
@@ -464,6 +491,11 @@ export default function LiOutreachPage() {
 
   // ---- Actions --------------------------------------------------------------
 
+  /** Когда последний раз синхронизировались: самая свежая отметка среди карточек. */
+  const lastAccountSync = useMemo(
+    () => accounts.reduce<string | null>((max, a) => (a.last_synced_at && (!max || a.last_synced_at > max) ? a.last_synced_at : max), null),
+    [accounts],
+  );
   const syncAccounts = async () => { setSyncing(true); try { await api('/accounts/sync', { method: 'POST', json: {} }); await loadAccounts(); } finally { setSyncing(false); } };
   const startCampaign = async (id: string) => { await api(`/campaigns/${id}/start`, { method: 'POST', json: {} }); await loadCampaigns(); };
   const stopCampaign = async (id: string) => { await api(`/campaigns/${id}/stop`, { method: 'POST', json: {} }); await loadCampaigns(); };
@@ -1767,10 +1799,20 @@ export default function LiOutreachPage() {
       {tab === 'accounts' && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-900">LinkedIn аккаунты (Unipile)</h2>
-            <button onClick={() => void syncAccounts()} disabled={syncing} className="rounded-lg bg-blue-600 text-white px-4 py-2 text-sm font-medium disabled:opacity-50">
-              {syncing ? 'Синхронизация...' : 'Синхронизировать'}
-            </button>
+            <div>
+              <h2 className="text-sm font-semibold text-gray-900">LinkedIn аккаунты (Unipile)</h2>
+              <p className="text-[11px] text-gray-400">
+                Аккаунты подтягиваются из Unipile сами, раз в 15 минут: ушедшие пропадают, разлогиненные получают статус.
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-gray-500" title="Время последней синхронизации с Unipile">
+                {lastAccountSync ? `Синхронизировано: ${new Date(lastAccountSync).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}` : 'Ещё не синхронизировалось'}
+              </span>
+              <button onClick={() => void syncAccounts()} disabled={syncing} className="rounded-lg bg-blue-600 text-white px-4 py-2 text-sm font-medium disabled:opacity-50">
+                {syncing ? 'Синхронизация...' : 'Синхронизировать'}
+              </button>
+            </div>
           </div>
           {loadingAccounts && accounts.length === 0 ? (
             <div className="flex items-center justify-center py-16" role="status" aria-label="Загрузка аккаунтов">
@@ -1847,7 +1889,7 @@ function AccountCard({
   const remove = async () => {
     // Удалить может любой: удаление не блокируется даже запущенной кампанией
     // (решение 08.10.2026), поэтому о ней предупреждаем первой строкой.
-    const lines = [`Удалить карточку «${a.name || a.unipile_account_id}»${a.owner_name ? ` (добавил ${a.owner_name})` : ''}?`];
+    const lines = [`Удалить карточку «${a.name || a.unipile_account_id}»?`];
     if (runningCampaigns.length > 0) {
       lines.push(`⚠ Запущенная кампания ${runningCampaigns.map((c) => `«${c.name}»`).join(', ')} останется без аккаунта и встанет, пока ей не выберут другой.`);
     } else if (linkedCampaigns.length > 0) {
@@ -1867,7 +1909,7 @@ function AccountCard({
   };
 
   return (
-    <div className={`rounded-xl border px-4 py-3 text-sm space-y-2 ${!isOwn ? 'border-l-4 border-l-purple-400 border-y border-r border-purple-200 bg-purple-50/40' : cooling ? 'border-amber-300 bg-amber-50/60' : 'border-gray-200'}`}>
+    <div className={`rounded-xl border px-4 py-3 text-sm space-y-2 ${cooling ? 'border-amber-300 bg-amber-50/60' : 'border-gray-200'}`}>
       <div className="flex items-center justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
@@ -1879,12 +1921,6 @@ function AccountCard({
             >
               {a.name || a.unipile_account_id}
             </button>
-            <span
-              className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${isOwn ? 'bg-gray-100 text-gray-600' : 'bg-purple-100 text-purple-700'}`}
-              title="Кто добавил аккаунт в портал. Действовать с аккаунтом может вся команда."
-            >
-              👤 добавил {a.owner_name ?? '—'}
-            </span>
             {errorCounts24h && errorCounts24h.error > 0 && (
               <button
                 type="button"
@@ -1907,9 +1943,10 @@ function AccountCard({
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0 ml-3">
-          <span className={`text-xs px-2 py-0.5 rounded ${cooling ? 'bg-amber-100 text-amber-700' : a.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
-            {cooling ? 'В отлёжке' : a.is_active ? 'Активен' : 'Неактивен'}
-          </span>
+          {(() => {
+            const st = liAccountStatus(a);
+            return <span className={`text-xs px-2 py-0.5 rounded ${st.cls}`} title={st.hint}>{st.text}</span>;
+          })()}
           <button
             onClick={() => void remove()}
             disabled={deleting}
@@ -2074,8 +2111,8 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
               {account.headline && <span className="truncate max-w-[260px]">{account.headline}</span>}
               <span>
                 Статус:{' '}
-                <span className={cooling ? 'text-amber-700' : account.is_active ? 'text-emerald-700' : 'text-gray-500'}>
-                  {cooling ? 'В отлёжке' : account.is_active ? 'Активен' : 'Неактивен'}
+                <span className={cooling ? 'text-amber-700' : account.is_active ? 'text-emerald-700' : 'text-rose-600'} title={liAccountStatus(account).hint}>
+                  {liAccountStatus(account).text}
                 </span>
               </span>
               {cooling && account.cooldown_until && (
