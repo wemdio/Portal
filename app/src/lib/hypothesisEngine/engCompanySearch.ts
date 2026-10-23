@@ -10,6 +10,8 @@ const SEARCH_URL = 'https://google.serper.dev/search';
 const RESULTS_PER_PAGE = 10;
 const MAX_PAGES = 3;
 const MAX_QUERIES = 160;
+/** A saved plan with a longer query is rejected as invalid before any paid call. */
+export const HE_ENG_SEARCH_QUERY_MAX = 300;
 const MAX_RESPONSE_BYTES = 512 * 1024;
 // User confirmed on 2026-10-21: this account buys 50,000 Serper credits for
 // $50, i.e. $1 per 1,000 credits. This approved default belongs only to the new
@@ -186,10 +188,31 @@ export function createHeEngRegistryWebsiteSearchPlan(
     id: createHash('sha256').update(JSON.stringify([`registry-website-v${version === 3 ? 2 : version}`, candidate.provider, candidate.recordId, term, country])).digest('hex').slice(0, 24),
     query: version === 1
       ? `"${term}" ${engCountryLabel(country)} official website -site:linkedin.com -site:facebook.com -site:crunchbase.com`
-      : `"${term}" ${engCountryLabel(country)} -site:linkedin.com -site:facebook.com -site:crunchbase.com -site:company-information.service.gov.uk -site:register.fca.org.uk -site:kompass.com -site:endole.co.uk -site:companycheck.co.uk -site:opencorporates.com -site:cylex-uk.co.uk`,
+      : fittedRegistryWebsiteQuery(term, engCountryLabel(country)),
     country, gl: engCountryIso2(country)!,
   }];
   return { version: 1, fingerprint: companySearchPlanFingerprint(tasks), tasks };
+}
+
+const REGISTRY_WEBSITE_EXCLUDED_SITES = [
+  'linkedin.com', 'facebook.com', 'crunchbase.com', 'company-information.service.gov.uk', 'register.fca.org.uk',
+  'kompass.com', 'endole.co.uk', 'companycheck.co.uk', 'opencorporates.com', 'cylex-uk.co.uk',
+];
+
+/**
+ * A long legal name («RGA INTERNATIONAL REINSURANCE COMPANY DESIGNATED ACTIVITY
+ * COMPANY», GLEIF) pushed the query past HE_ENG_SEARCH_QUERY_MAX, the saved plan
+ * failed validation and the whole collection stopped (23.10.2026). Exclusions go
+ * first from the end, then trailing words of the name; a query that already
+ * fits is unchanged, so no paid checkpoint changes its plan.
+ */
+function fittedRegistryWebsiteQuery(term: string, countryLabel: string): string {
+  const excluded = [...REGISTRY_WEBSITE_EXCLUDED_SITES];
+  let words = term.split(' ');
+  const query = () => [`"${words.join(' ')}"`, countryLabel, ...excluded.map(site => `-site:${site}`)].join(' ');
+  while (query().length > HE_ENG_SEARCH_QUERY_MAX && excluded.length > 3) excluded.pop();
+  while (query().length > HE_ENG_SEARCH_QUERY_MAX && words.length > 1) words = words.slice(0, -1);
+  return query().slice(0, HE_ENG_SEARCH_QUERY_MAX);
 }
 
 function searchTariff(env: NodeJS.ProcessEnv): number | null {
@@ -211,7 +234,7 @@ function validateCheckpoint(plan: HeEngCompanySearchPlan, saved?: HeEngCompanySe
       plan.tasks.some(task => !record(task) || Object.keys(task).length !== 4 ||
         !['id', 'query', 'country', 'gl'].every(key => Object.hasOwn(task, key)) ||
         typeof task.id !== 'string' || !/^[a-f0-9]{24}$/.test(task.id) ||
-        typeof task.query !== 'string' || !task.query || task.query.length > 300 ||
+        typeof task.query !== 'string' || !task.query || task.query.length > HE_ENG_SEARCH_QUERY_MAX ||
         typeof task.country !== 'string' || typeof task.gl !== 'string' ||
         normalizeEngCountry(task.country) !== task.country || engCountryIso2(task.country) !== task.gl) ||
       plan.fingerprint !== companySearchPlanFingerprint(plan.tasks)) {
