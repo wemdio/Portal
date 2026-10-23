@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Loader2, Search, Trash2, X } from 'lucide-react';
+import { Check, Loader2, Pencil, Search, Trash2, X } from 'lucide-react';
 
 import { authFetch } from '@/lib/authFetch';
 
@@ -56,6 +56,31 @@ export function BaseContactsModal({
   const [busyId, setBusyId] = useState<string | null>(null);
   /** Строка, которую сейчас правят, и её черновик. */
   const [editing, setEditing] = useState<{ id: string; username: string; message: string } | null>(null);
+  /** Название гипотезы: текущее и черновик (null — не правится). */
+  const [name, setName] = useState(baseName);
+  const [nameDraft, setNameDraft] = useState<string | null>(null);
+
+  const saveName = async () => {
+    const next = (nameDraft ?? '').trim();
+    if (!next) { setError('Название не может быть пустым'); return; }
+    if (next === name) { setNameDraft(null); return; }
+    setBusyId('name');
+    setError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/bases/${baseId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: next }),
+      });
+      const body = await res.json().catch(() => null) as { name?: string; error?: string } | null;
+      if (!res.ok) { setError(body?.error ?? 'Название не сохранилось'); return; }
+      setName(body?.name ?? next);
+      setNameDraft(null);
+      onChanged();
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -127,7 +152,7 @@ export function BaseContactsModal({
    */
   const clearAll = async () => {
     const ok = confirm(
-      `Удалить все ${total} контактов из базы «${baseName}»? Сама база, её название и чаты-источники останутся. Отменить нельзя.`,
+      `Удалить все ${total} контактов из базы «${name}»? Сама база, её название и чаты-источники останутся. Отменить нельзя.`,
     );
     if (!ok) return;
     setBusyId('all');
@@ -149,9 +174,52 @@ export function BaseContactsModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="flex max-h-[85vh] w-full max-w-4xl flex-col rounded-xl bg-white shadow-xl">
         <div className="flex items-center gap-3 border-b border-gray-200 px-4 py-3">
-          <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-gray-900">
-            База «{baseName}» · контактов {total}
-          </h3>
+          {nameDraft === null ? (
+            <h3 className="flex min-w-0 flex-1 items-center gap-1.5 text-sm font-semibold text-gray-900">
+              <span className="truncate">База «{name}» · контактов {total}</span>
+              <button
+                type="button"
+                onClick={() => setNameDraft(name)}
+                title="Изменить название гипотезы"
+                aria-label="Изменить название гипотезы"
+                className="shrink-0 cursor-pointer rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-indigo-600"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </button>
+            </h3>
+          ) : (
+            <div className="flex min-w-0 flex-1 items-center gap-1.5">
+              <input
+                autoFocus
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void saveName();
+                  if (e.key === 'Escape') setNameDraft(null);
+                }}
+                maxLength={200}
+                aria-label="Название гипотезы"
+                className="min-w-0 flex-1 rounded-lg border border-gray-200 px-2.5 py-1 text-sm font-semibold outline-none focus:border-indigo-400"
+              />
+              <button
+                type="button"
+                disabled={busyId === 'name'}
+                onClick={() => void saveName()}
+                title="Сохранить название"
+                className="shrink-0 cursor-pointer rounded-md p-1.5 text-emerald-600 hover:bg-emerald-50 disabled:opacity-40"
+              >
+                {busyId === 'name' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+              </button>
+              <button
+                type="button"
+                onClick={() => setNameDraft(null)}
+                title="Отменить"
+                className="shrink-0 cursor-pointer rounded-md p-1.5 text-gray-400 hover:bg-gray-100"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
           <button
             type="button"
             disabled={busyId !== null || total === 0}

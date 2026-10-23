@@ -46,7 +46,6 @@ import {
   CheckCircle2,
   Flame,
   Database,
-  Eye,
   Eraser,
   ShieldCheck,
   FileSpreadsheet,
@@ -3688,6 +3687,12 @@ function CampaignAccountsTab({
     [accounts, errorCounts, loadedAt],
   );
 
+  /** Греются сейчас: срок прогрева ещё в будущем (как в круге рассылки). */
+  const warmingCount = useMemo(() => {
+    const now = loadedAt ?? Date.now();
+    return accounts.filter((a) => a.warmup_until && new Date(a.warmup_until).getTime() > now).length;
+  }, [accounts, loadedAt]);
+
   /**
    * Кого предлагает выключить кнопка «Снять неживые с рассылки».
    *
@@ -3863,7 +3868,14 @@ function CampaignAccountsTab({
           </span>
 
           <span
-            className={`rounded-md px-2 py-1 font-medium ${accountStats.restricted > 0 ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-400'}`}
+            className={`rounded-md px-2 py-1 font-medium ${warmingCount > 0 ? 'bg-yellow-50 text-yellow-700' : 'bg-gray-50 text-gray-400'}`}
+            title="Греются сейчас: в боевую рассылку не идут, пока не выйдет срок прогрева. Они входят в «живо»."
+          >
+            греются {warmingCount} из {accounts.length}
+          </span>
+
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.restricted > 0 ? 'bg-rose-50 text-rose-700' : 'bg-gray-50 text-gray-400'}`}
             title="Сейчас не могут работать: кулдаун после ограничения Telegram, мёртвая сессия, бан, заморозка. Сбои связи с прокси сюда не входят."
           >
             ограничены {accountStats.restricted} из {accounts.length}
@@ -5852,7 +5864,7 @@ function CampaignBasesTab({
                   label={`Действия: ${b.name}`}
                   items={[
                     { label: 'Загрузить контакты', icon: <Upload className="h-3.5 w-3.5" />, onClick: () => { uploadTargetRef.current = b.id; uploadInputRef.current?.click(); } },
-                    { label: 'Посмотреть и править', icon: <Eye className="h-3.5 w-3.5" />, onClick: () => setViewingBase({ id: b.id, name: b.name }) },
+                    { label: 'Редактировать', icon: <Pencil className="h-3.5 w-3.5" />, onClick: () => setViewingBase({ id: b.id, name: b.name }) },
                     ...(b.counts.total > 0 ? [{ label: 'Скачать в Excel', icon: <Download className="h-3.5 w-3.5" />, onClick: () => { void downloadBase(b); } }] : []),
                     ...(b.counts.failed > 0 ? [{ label: 'Вернуть отложенные в очередь', icon: <RefreshCw className="h-3.5 w-3.5" />, onClick: () => { void requeueBase(b); } }] : []),
                     ...(b.counts.total > 0 ? [{ label: 'Очистить базу', icon: <Eraser className="h-3.5 w-3.5" />, danger: true, onClick: () => { void clearBase(b); } }] : []),
