@@ -6,6 +6,10 @@ import type { Email } from './types';
 
 const YOU_WROTE = /^Вы\s+писали\s+(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[а-яё]{3,})(?:[^\n]{0,120})?:\s*$/iu;
 const SPACED_SIGNOFF = /^(?:с\s+(?:уважением|наилучшими\s+пожеланиями)|best\s+regards|kind\s+regards|regards|yours\s+sincerely|sincerely)\s*[:,]/iu;
+const GREETING = /^(?:добрый\s+(?:день|вечер)|здравствуйте|hello|hi)[!. ,]/iu;
+// Display evidence only: a short authored date is still text, regardless of
+// whether qualification ultimately treats it as deferred interest.
+const SHORT_DATED_REPLY = /^после\s+\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+\d{4}(?:\s+года)?)?[.!]?\s*$/imu;
 
 /** Board-only projection. Never replace the original email used for contacts,
  * qualification or handoff context with this cleaned text. No AI paraphrasing. */
@@ -38,8 +42,8 @@ export function leadBoardRequestText(body: Email['body']): string | null {
         // The CSS class alone must not erase a substantive request. Closed
         // history has already been removed; still cut the contact table below.
         const visible = getBodyText({ html: node.html() ?? '' });
-        const authoredInSignature = onlySignatureHasText && /^(?:добрый\s+(?:день|вечер)|здравствуйте|hello|hi)[!. ,]/iu.test(visible.trim()) &&
-          /(?:напишите|подскажите|пришлите|возможно\s+ли|интересует|please\s+send)/iu.test(visible);
+        const authoredInSignature = onlySignatureHasText && GREETING.test(visible.trim()) &&
+          (/(?:напишите|подскажите|пришлите|возможно\s+ли|интересует|please\s+send)/iu.test(visible) || SHORT_DATED_REPLY.test(visible));
         if (!authoredInSignature) node.before('\n--\n');
         else node.find('table').first().before('\n--\n');
       });
@@ -59,6 +63,17 @@ export function leadBoardRequestText(body: Email['body']): string | null {
 }
 
 function cleanRequestText(text: string): string | null {
+  text = recoverBottomPostedBoardReply(text);
+  // Some senders type a greeting and material request after an initial "--".
+  // Ignore that decoration only for a recognizable message, never for an
+  // ordinary signature/contact card or a quoted request below the signature.
+  const withoutLeadingDivider = text.replace(/^\s*--[ \t]*\r?\n/u, '');
+  if (withoutLeadingDivider !== text) {
+    const candidate = stripLeadReplyContactSignature(extractAuthoredReplyText(withoutLeadingDivider));
+    if (GREETING.test(candidate.trim()) && /^(?:направьте|пришлите|вышлите|отправьте|please\s+send)(?=\s|[!.]|$)/imu.test(candidate)) {
+      text = withoutLeadingDivider;
+    }
+  }
   // Another common dated attribution: "Name писал 2026-09-18 12:49:".
   // This display-only boundary must not change classifier behaviour.
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
@@ -71,4 +86,19 @@ function cleanRequestText(text: string): string | null {
   // Preserve separators inside substantive text, only trim the empty tail.
   while (authored.length && /^(?:\s*|\s*[-_=—–]{2,}\s*)$/u.test(authored[authored.length - 1])) authored.pop();
   return authored.join('\n').replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, '\n\n').trim() || null;
+}
+
+/** Board-only recovery of an answer below a fully marked, closed quotation.
+ * Never recover through an unquoted envelope or interleaved foreign history. */
+function recoverBottomPostedBoardReply(text: string): string {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const first = lines.findIndex((line) => line.trim());
+  if (first < 0) return text;
+  const header = lines[first].trim();
+  if (!(LEAD_DATED_ATTRIBUTION.test(header) || LEAD_DATE_FIRST_ATTRIBUTION.test(header) ||
+      LEAD_MONTH_FIRST_ATTRIBUTION.test(header) || YOU_WROTE.test(header) || /^On\s+.+\s+wrote:\s*$/iu.test(header))) return text;
+  const lastQuoted = lines.findLastIndex((line) => /^>/.test(line.trim()));
+  if (lastQuoted <= first || !lines.slice(first + 1, lastQuoted + 1)
+    .every((line) => !line.trim() || /^>/.test(line.trim()))) return text;
+  return lines.slice(lastQuoted + 1).join('\n').trim() || text;
 }

@@ -194,6 +194,25 @@ export function createHeEngRegistryWebsiteSearchPlan(
   return { version: 1, fingerprint: companySearchPlanFingerprint(tasks), tasks };
 }
 
+/**
+ * One paid result page: the current site of a catalogue company whose own
+ * domain no longer exists or is parked (engCompanyQualification). The query is
+ * the registry website search v3 shape; the task id names the catalogue
+ * company (its 64-hex company key), not a registry record.
+ */
+export function createHeEngCatalogWebsiteSearchPlan(input: { companyKey: string; company: string; country: string }): HeEngCompanySearchPlan {
+  const country = normalizeEngCountry(input.country);
+  const term = searchTerm(legalNameCore(cleanText(input.company, 250), LEGAL_FORMS_V3));
+  if (!country || !engCountryIso2(country) || term.length < 3 || !/^[a-f0-9]{64}$/.test(input.companyKey)) {
+    throw new Error('ENG catalogue website search requires a company name, its key and a country.');
+  }
+  const tasks: HeEngCompanySearchTask[] = [{
+    id: createHash('sha256').update(JSON.stringify(['catalog-website-v1', input.companyKey, term, country])).digest('hex').slice(0, 24),
+    query: fittedRegistryWebsiteQuery(term, engCountryLabel(country)), country, gl: engCountryIso2(country)!,
+  }];
+  return { version: 1, fingerprint: companySearchPlanFingerprint(tasks), tasks };
+}
+
 const REGISTRY_WEBSITE_EXCLUDED_SITES = [
   'linkedin.com', 'facebook.com', 'crunchbase.com', 'company-information.service.gov.uk', 'register.fca.org.uk',
   'kompass.com', 'endole.co.uk', 'companycheck.co.uk', 'opencorporates.com', 'cylex-uk.co.uk',

@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto';
 import * as net from 'node:net';
 import * as os from 'node:os';
 
@@ -90,16 +91,19 @@ function waitForGreeting(socket: net.Socket, timeoutMs: number): Promise<SmtpRes
   return readSmtpReply(socket, timeoutMs, 'greeting');
 }
 
-// QUIT — fire-and-forget: ответ сервера не ждём (это до 3s чистой задержки на
-// каждую пробу), просто пишем QUIT и сразу закрываем сокет. No-op 'error'
-// обязателен: EPIPE/ECONNRESET на уже мёртвом сокете без обработчика дал бы
-// unhandled 'error' на EventEmitter и уронил процесс.
-function quitAndDestroy(socket: net.Socket): void {
-  try {
-    socket.once('error', () => {});
-    socket.write('QUIT\r\n');
-    socket.destroy();
-  } catch { /* сокет уже закрыт — некритично */ }
+// QUIT вежливо, но без задержки ответа воркеру: ждём «221» сервера в фоне не
+// дольше SMTP_QUIT_WAIT_MS и только потом закрываем сокет. Раньше QUIT писали и
+// сразу рвали соединение — «lost connection after RCPT» в логах получателя:
+// почерк бота, по которому IP проб попадали в Spamhaus CSS (23.10.2026).
+// No-op 'error' обязателен: EPIPE/ECONNRESET на уже мёртвом сокете без
+// обработчика дал бы unhandled 'error' на EventEmitter и уронил процесс.
+const SMTP_QUIT_WAIT_MS = Number(process.env.SMTP_QUIT_WAIT_MS ?? '1500');
+
+function quitPolitely(socket: net.Socket): void {
+  socket.once('error', () => {});
+  readSmtpReply(socket, SMTP_QUIT_WAIT_MS, 'QUIT reply', 'QUIT')
+    .catch(() => undefined)
+    .finally(() => { try { socket.destroy(); } catch { /* уже закрыт */ } });
 }
 
 export interface SmtpCheckRequest {
@@ -124,8 +128,18 @@ export interface SmtpCheckRequest {
   timeout?: number;
 }
 
-function randomProbeAddress(domain: string): string {
-  return `verify-check-${Date.now()}-${Math.random().toString(36).substring(2, 10)}@${domain}`;
+// Случайный ящик для проверки catch-all. Был «verify-check-<время>-…» — по
+// имени сразу видно проверяльщика. Теперь обычное «имя.фамилия123»: такого
+// ящика почти наверняка нет, а проба не выделяется среди обычной почты.
+const PROBE_FIRST = ['anna', 'mark', 'olga', 'peter', 'julia', 'david', 'maria', 'alex',
+  'nina', 'tom', 'eva', 'leon', 'sara', 'ivan', 'lena', 'max'];
+const PROBE_LAST = ['berg', 'holm', 'strand', 'wood', 'lind', 'hart', 'vale', 'brook',
+  'field', 'stone', 'dale', 'marsh', 'west', 'ford', 'hill', 'lake'];
+
+export function randomProbeAddress(domain: string): string {
+  const first = PROBE_FIRST[randomInt(PROBE_FIRST.length)];
+  const last = PROBE_LAST[randomInt(PROBE_LAST.length)];
+  return `${first}.${last}${randomInt(100, 1000)}@${domain}`;
 }
 
 // Общий дедлайн всей SMTP-проверки: воркер обрывает HTTP-вызов к прокси на 25s,
@@ -186,7 +200,8 @@ async function probeOnFreshConnection(
     const mailFrom = await smtpCommand(socket, `MAIL FROM:<${heloFrom}>`, timeout);
     if (mailFrom.code !== 250) return null;
     const rcpt = await smtpCommand(socket, `RCPT TO:<${recipient}>`, timeout);
-    quitAndDestroy(socket);
+    quitPolitely(socket);
+    socket = null;
     return rcpt;
   } catch {
     return null;
@@ -347,7 +362,8 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
       }
     }
 
-    quitAndDestroy(socket);
+    quitPolitely(socket);
+    socket = null;
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'SMTP error';
     result.error = msg;
