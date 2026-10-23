@@ -46,6 +46,7 @@ import {
   sanitizeEngContactDiagnostics,
   type EngContactCollectionDiagnostics,
 } from './engContactDiagnostics';
+import { ENG_BASE_BUDGET_FREE_STEPS } from './engConstructorSteps';
 
 const admin = supabaseAdmin!;
 
@@ -801,11 +802,7 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
     const selectedSteps: StepKey[] = job.selected_steps || [];
     const stepConfig: StepConfig = job.step_config || {};
     if (stepConfig.he_eng_base_budget) {
-      const freeEngSteps = new Set([
-        'find_emails', 'enrich_descriptions', 'split_emails', 'dedup_email',
-        'dedup_full', 'remove_empty', 'validate_emails', 'cap_emails_per_company',
-      ]);
-      if (selectedSteps.some((step) => !freeEngSteps.has(step))) {
+      if (selectedSteps.some((step) => !ENG_BASE_BUDGET_FREE_STEPS.has(step))) {
         throw new Error('ENG base budget: unbudgeted_constructor_step');
       }
     }

@@ -24,6 +24,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { resumeFailedConstructorJob } from '@/lib/tools/baseConstructorResume';
 import { MAX_MANUAL_CONSTRUCTOR_JOBS } from '@/lib/tools/baseConstructorCapacity';
 import { describeConstructorProgress } from '@/lib/tools/baseConstructorProgress';
+import { ENG_CONSTRUCT_STEPS_AFTER_SPLIT } from '@/lib/tools/engConstructorSteps';
 import {
   EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
   ENRICH_CHECKPOINT_ATTEMPTED_COL,
@@ -401,6 +402,30 @@ describe('runBaseConstructorJob resume logic', () => {
       (u) => 'current_step_progress' in u && 'started_at' in u,
     );
     expect(heartbeats.length).toBeGreaterThan(0);
+  });
+
+  it('ENG base budget runs every step of the ENG collection chain and still refuses paid steps', async () => {
+    // 23.10.2026: remove_support_emails joined the chain but not the budget
+    // list, and every collection job failed at its start.
+    const chain = ['find_emails', 'enrich_descriptions', ...ENG_CONSTRUCT_STEPS_AFTER_SPLIT];
+    const job = {
+      id: 'job-eng-budget', user_id: 'u', file_name: 'eng.csv', locale: 'en', status: 'pending',
+      step_config: { he_eng_base_budget: { base_id: 'base', project_id: 'project' } },
+      current_step: 0, current_step_progress: 0,
+      data: [['Company', 'Site', 'Email'], ['Acme', 'https://acme.example', 'sales@acme.example']],
+    };
+    admin.__setCurrentJob({ ...job, selected_steps: chain });
+    await runBaseConstructorJob('job-eng-budget');
+    const ran = admin.__getUpdates().map((u) => u.current_step_key);
+    expect(ran).toEqual(expect.arrayContaining([...chain, 'done']));
+    expect(admin.__getUpdates().some((u) => u.status === 'failed')).toBe(false);
+
+    admin.__reset();
+    admin.__setCurrentJob({ ...job, selected_steps: [...chain, 'ta_scoring'] });
+    await runBaseConstructorJob('job-eng-budget');
+    expect(admin.__getUpdates()).toContainEqual(expect.objectContaining({
+      status: 'failed', error_message: 'ENG base budget: unbudgeted_constructor_step',
+    }));
   });
 
   it('resume после завершённого enrich не передаёт checkpoint metadata дальше', async () => {
