@@ -55,7 +55,7 @@ export function CampaignRail({ items, active, onSelect }: {
               aria-label={item.label}
               aria-current={isActive ? 'page' : undefined}
               onClick={() => onSelect(item.id)}
-              className={`group relative flex h-10 w-10 items-center justify-center rounded-lg transition-colors cursor-pointer ${
+              className={`group relative flex h-10 w-10 items-center justify-center rounded-lg outline-none transition-colors cursor-pointer ${
                 isActive ? 'bg-indigo-600/10 text-indigo-600' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800'
               }`}
             >
@@ -74,7 +74,7 @@ export function CampaignRail({ items, active, onSelect }: {
             key={item.id}
             type="button"
             onClick={() => onSelect(item.id)}
-            className={`-mb-px shrink-0 border-b-2 px-3 py-2 text-xs font-medium cursor-pointer ${
+            className={`-mb-px shrink-0 border-b-2 px-3 py-2 text-xs font-medium outline-none cursor-pointer ${
               active === item.id ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500'
             }`}
           >

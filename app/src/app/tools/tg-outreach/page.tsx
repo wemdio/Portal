@@ -8246,7 +8246,7 @@ function CampaignsSection() {
 export default function TgOutreachPage() {
   // useSearchParams требует границы Suspense, иначе сборка падает на статике.
   return (
-    <div className="w-full text-left">
+    <div className="no-focus-ring w-full text-left">
       <Suspense fallback={null}>
         <CampaignsSection />
       </Suspense>

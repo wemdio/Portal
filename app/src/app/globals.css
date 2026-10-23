@@ -3995,3 +3995,8 @@ html[data-portal-theme='dark'] .portal-shell aside.tg-logs-aside header,
 html[data-portal-theme='dark'] .portal-shell aside.tg-logs-aside section {
   border-color: #111827 !important;
 }
+
+/* TG/LinkedIn-аутрич: рамку фокуса браузера не показываем */
+.no-focus-ring :focus-visible {
+  outline: none !important;
+}
