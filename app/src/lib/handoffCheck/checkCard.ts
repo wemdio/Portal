@@ -106,6 +106,18 @@ export function canonicalSource(statedSource: string | null): string | null {
   return best && !tie ? best.canonical : null;
 }
 
+/**
+ * Иностранный налоговый номер: рядом с цифрами есть буквы (страна или префикс).
+ * Слово «ИНН» не считается — иначе «ИНН 77094928451» (опечатка) прошло бы как
+ * иностранный. Чисто цифровые значения не 10/12 остаются ошибкой.
+ */
+function isForeignTaxId(raw: string): boolean {
+  const withoutLabel = raw.replace(/инн/gi, '');
+  const hasLetters = /[a-zа-яё]/i.test(withoutLabel);
+  const digits = withoutLabel.replace(/\D/g, '');
+  return hasLetters && digits.length >= 5;
+}
+
 function formatRub(amount: number): string {
   return `${amount.toLocaleString('ru-RU')} ₽`;
 }
@@ -138,6 +150,8 @@ export function checkCard(
   const normalizedInn = normalizeInn(card.inn);
   if (!card.inn) {
     problems.push({ code: 'NO_INN', text: 'нет ИНН' });
+  } else if (!normalizedInn && isForeignTaxId(card.inn)) {
+    // Иностранный налоговый номер («Canada 751632076»): формат не проверяем.
   } else if (!normalizedInn) {
     problems.push({ code: 'BAD_INN', text: `ИНН «${card.inn}» не похож на настоящий (не 10 и не 12 цифр)` });
   } else if (card.innDuplicates.length > 0) {
