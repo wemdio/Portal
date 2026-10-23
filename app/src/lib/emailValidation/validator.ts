@@ -19,6 +19,7 @@ import {
   type ValidationResult,
   type DomainInfo,
 } from './shared';
+import { cachedCatchAll, cachedValidation, isConclusiveValidation, rememberCatchAll, rememberValidation } from './sharedCache';
 
 // Re-export everything from shared so the worker can import from one place
 export { checkSyntax, normalizeEmail, isDisposable, isRole, isFreeProvider, suggestTypo } from './shared';
@@ -176,30 +177,61 @@ let proxyIndex = 0;
 // 31.76.79.220 egress → the probe eats the full connect timeout, ~8s, before
 // failover). Without memory, round-robin sends ~1/N of every same-MX probe into
 // that dead wait. We remember (mxHost, proxyUrl) transport failures and, on the
-// NEXT probe to that MX, try known-good IPs FIRST and blocked ones LAST — so
-// after ONE learning probe the ~8s penalty disappears for the rest of the job.
+// NEXT probe to that MX, skip the blocked IPs — so after ONE learning probe the
+// ~8s penalty disappears for the rest of the job.
 //
-// This only REORDERS the failover sequence; a blocked IP is still tried as a
-// last resort, and entries expire, so it never drops coverage and never changes
-// a verdict — it only avoids known-dead waits.
+// Since 23.10.2026 a blocked IP is no longer tried «as a last resort», and when
+// every IP is blocked for a provider the probe is not sent at all until the
+// entry expires (SMTP_EGRESS_BLOCK_TTL_MS): with all three IPs in Spamhaus CSS
+// each Microsoft address was probed three times, from three listed IPs, which
+// is exactly the traffic that keeps an IP listed. Such an address stays
+// 'unknown' (retryable), never gets a guessed verdict.
 const SMTP_EGRESS_BLOCK_TTL_MS = Number(
   process.env.SMTP_EGRESS_BLOCK_TTL_MS ?? String(30 * 60 * 1000),
 );
 const mxEgressBlock = new Map<string, Map<string, number>>();
 
-function isEgressBlocked(mxHost: string, url: string): boolean {
-  const m = mxEgressBlock.get(mxHost);
+/**
+ * Big providers block an IP for all their hosts at once: Microsoft gives every
+ * customer its own MX (company.mail.protection.outlook.com) behind one
+ * Spamhaus-based policy. Keyed by host, a listed IP was rediscovered — and
+ * probed through every IP — for each new company (23.10.2026, CSS listing).
+ */
+export function smtpEgressKey(mxHost: string): string {
+  const host = mxHost.toLowerCase().replace(/\.$/, '');
+  if (/\.protection\.outlook\.com$|(^|\.)(outlook|hotmail)\.com$/.test(host)) return 'provider:microsoft';
+  if (/(^|\.)(google|googlemail)\.com$|\.smtp\.goog$/.test(host)) return 'provider:google';
+  if (/(^|\.)yandex\.(ru|net|com)$/.test(host)) return 'provider:yandex';
+  if (/(^|\.)mail\.ru$/.test(host)) return 'provider:mailru';
+  if (/\.mimecast\.(com|co\.za)$/.test(host)) return 'provider:mimecast';
+  if (/\.(pphosted|ppe-hosted)\.com$/.test(host)) return 'provider:proofpoint';
+  return host;
+}
+
+function blockedUnder(key: string, url: string): boolean {
+  const m = mxEgressBlock.get(key);
   const exp = m?.get(url);
   if (exp === undefined) return false;
   if (exp <= Date.now()) {
     m!.delete(url);
-    if (m!.size === 0) mxEgressBlock.delete(mxHost);
+    if (m!.size === 0) mxEgressBlock.delete(key);
     return false;
   }
   return true;
 }
 
-function markEgressBlocked(mxHost: string, url: string): void {
+/** Blocked for this host, or — after a reputation refusal — for its whole provider. */
+function isEgressBlocked(mxHost: string, url: string): boolean {
+  return blockedUnder(mxHost, url) || blockedUnder(smtpEgressKey(mxHost), url);
+}
+
+/**
+ * A reputation refusal (Spamhaus, blocklists, FCrDNS) holds for the whole
+ * provider; a transport failure (timeout, reset) only for the host that
+ * failed, so one slow Yandex MX does not idle an IP for every Yandex address.
+ */
+function markEgressBlocked(mxHost: string, url: string, reputation = false): void {
+  if (reputation) mxHost = smtpEgressKey(mxHost);
   let m = mxEgressBlock.get(mxHost);
   if (!m) {
     m = new Map();
@@ -248,17 +280,15 @@ export function __resetEgressBlockCache(): void {
  * Failover try-order for this MX: the global round-robin rotation (advanced once
  * per call for load-spreading), with (a) the IP that greylisted this MX pinned
  * FIRST (so a delayed retry hits the same IP and clears the greylist), and
- * (b) IPs known to be transport-blocked for THIS mx moved to the end so they're
- * only used as a last resort.
+ * (b) IPs known to be blocked for this MX or its provider left out. Empty when
+ * every IP is blocked: the caller then sends no probe (see above).
  */
 function proxyTryOrder(mxHost: string): string[] {
   const n = SMTP_PROXY_URLS.length;
   const rotated: string[] = [];
   for (let i = 0; i < n; i += 1) rotated.push(SMTP_PROXY_URLS[(proxyIndex + i) % n]);
   proxyIndex = (proxyIndex + 1) % n;
-  const good = rotated.filter((u) => !isEgressBlocked(mxHost, u));
-  const bad = rotated.filter((u) => isEgressBlocked(mxHost, u));
-  let order = good.concat(bad);
+  let order = rotated.filter((u) => !isEgressBlocked(mxHost, u));
   // Greylist retries must return from the SAME IP that greylisted → pin it first
   // (unless it has since become transport-blocked for this MX, in which case we
   // don't want to pay its dead-wait first).
@@ -334,7 +364,12 @@ async function smtpVerifyViaProxy(
   // MX — kept as the fallback to return if every other proxy is also blocked.
   let lastInconclusive: SmtpCheckResult | null = null;
 
-  for (const baseUrl of proxyTryOrder(mxHost)) {
+  const order = proxyTryOrder(mxHost);
+  if (!order.length) {
+    return { code: 0, exists: null, isCatchAll: null, greylist: false,
+      error: `Every egress IP is blocked by ${smtpEgressKey(mxHost)}; no probe until the block expires` };
+  }
+  for (const baseUrl of order) {
     const url = `${baseUrl.replace(/\/+$/, '')}/smtp-check`;
 
     try {
@@ -359,12 +394,18 @@ async function smtpVerifyViaProxy(
       }
 
       const result = (await res.json()) as SmtpCheckResult;
+      // The proxy's own per-provider hourly pace (services/smtp-proxy): this IP
+      // is not blocked, it is busy — try another IP, remember nothing.
+      if (/rate limited by proxy/i.test(result.error ?? '')) {
+        lastError = `Proxy ${baseUrl}: ${result.error}`;
+        continue;
+      }
       // Например, Microsoft 550 «Client host [IP] blocked using Spamhaus»:
       // другой egress может подтвердить тот же ящик. Запоминаем блокировку
       // только для этого MX, как при сетевом отказе; проверяем каждый прокси
       // не более одного раза. Если не помог ни один, результат остаётся unknown.
       if (isPermanentEgressRejection(result, email)) {
-        markEgressBlocked(mxHost, baseUrl);
+        markEgressBlocked(mxHost, baseUrl, true);
         lastInconclusive = {
           ...result,
           exists: null,
@@ -384,7 +425,7 @@ async function smtpVerifyViaProxy(
         // «450 4.7.25 Client host rejected: cannot find your hostname»
         // убивал все пробы через IP без PTR, хотя третий egress давал 250).
         if (result.greylist && RCPT_4XX_EGRESS_RE.test(result.smtpText ?? '')) {
-          markEgressBlocked(mxHost, baseUrl);
+          markEgressBlocked(mxHost, baseUrl, true);
           lastInconclusive = {
             ...result,
             error: `Egress rejected by MX policy (4xx): ${result.smtpText ?? result.code}`,
@@ -512,23 +553,44 @@ export function classifyRcpt5xx(text: string | undefined, probedEmail?: string):
 
 // ─── 10. Smart Verify (Aggregate Signals) ───────────────────────────────────
 
+/**
+ * IDN-домены (почта.рф → xn--80a1acny.xn--p1ai): syntax/MX/SMTP идут по
+ * punycode-форме домена, иначе такие адреса падали на проверке синтаксиса.
+ * Нормализованный адрес воркер хранит как введён — ValidationResult его не
+ * возвращает, поэтому конвертация чисто внутренняя (и ключ общего кэша).
+ */
+function validationAddress(rawEmail: string): string {
+  const email = rawEmail.trim().toLowerCase();
+  const at = email.lastIndexOf('@');
+  if (at <= 0) return email;
+  const rawDomain = email.substring(at + 1);
+  const asciiDomain = domainToASCII(rawDomain);
+  return asciiDomain && asciiDomain !== rawDomain ? `${email.substring(0, at)}@${asciiDomain}` : email;
+}
+
+/**
+ * Every validation path calls this. An address with a conclusive SMTP verdict
+ * from the last EMAIL_VALIDATION_CACHE_TTL_DAYS (sharedCache.ts) is answered
+ * without a probe; a new conclusive verdict is kept. Unknown is never kept.
+ */
 export async function validateEmail(
   rawEmail: string,
   domainCache: Map<string, DomainInfo>,
 ): Promise<ValidationResult> {
-  let email = rawEmail.trim().toLowerCase();
-  // IDN-домены (почта.рф → xn--80a1acny.xn--p1ai): syntax/MX/SMTP идут по
-  // punycode-форме домена, иначе такие адреса падали на проверке синтаксиса.
-  // Нормализованный адрес воркер хранит как введён — ValidationResult его
-  // не возвращает, поэтому конвертация чисто внутренняя.
-  const atIdx0 = email.lastIndexOf('@');
-  if (atIdx0 > 0) {
-    const rawDomain = email.substring(atIdx0 + 1);
-    const asciiDomain = domainToASCII(rawDomain);
-    if (asciiDomain && asciiDomain !== rawDomain) {
-      email = `${email.substring(0, atIdx0)}@${asciiDomain}`;
-    }
+  const email = validationAddress(rawEmail);
+  if (checkSyntax(email).valid) {
+    const cached = await cachedValidation(email);
+    if (cached) return cached;
   }
+  const result = await validateEmailBySmtp(email, domainCache);
+  if (isConclusiveValidation(result)) rememberValidation(email, result);
+  return result;
+}
+
+async function validateEmailBySmtp(
+  email: string,
+  domainCache: Map<string, DomainInfo>,
+): Promise<ValidationResult> {
   const details: Record<string, unknown> = {};
 
   const syntax = checkSyntax(email);
@@ -597,6 +659,23 @@ export async function validateEmail(
     };
   }
 
+  // A domain's catch-all flag found by any job in the last weeks: no second
+  // RCPT to a random mailbox of this domain (sharedCache.ts).
+  if (domainInfo.isCatchAll === null) {
+    const remembered = await cachedCatchAll(domain);
+    if (remembered !== null) domainInfo.isCatchAll = remembered;
+  }
+  // A catch-all domain says 250 to any mailbox: probing the address cannot
+  // change the verdict and only adds RCPTs (mail.ru, bk.ru, list.ru, inbox.ru:
+  // 6 450 catch_all of 11 567 free-mail checks in three days, 23.10.2026).
+  if (domainInfo.isCatchAll === true) {
+    return {
+      result: 'catch_all', quality: 'risky',
+      is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: true,
+      did_you_mean: didYouMean, mx_found: true, smtp_code: 0,
+      details: { step: 'catch_all', catch_all_known: true },
+    };
+  }
   const needCatchAllCheck = domainInfo.isCatchAll === null;
   let smtpResult: SmtpCheckResult | null = null;
   // Первый подтверждённый exists=true: backup-MX со протухшей таблицей ящиков
@@ -615,6 +694,7 @@ export async function validateEmail(
       });
       if (smtpResult.isCatchAll !== null && domainInfo.isCatchAll === null) {
         domainInfo.isCatchAll = smtpResult.isCatchAll;
+        rememberCatchAll(domain, smtpResult.isCatchAll);
       }
       // Backup-MX отверг ящик, который предыдущий MX уже подтвердил: стоп,
       // вердикт остаётся за подтвердившим (catch-all при этом может остаться
