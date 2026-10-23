@@ -80,6 +80,8 @@ function makeBuilder(table: string) {
       return builder;
     },
     gte: () => builder,
+    lt: () => builder,
+    lte: () => builder,
     not: () => builder,
     or: () => builder,
     update: () => builder,
@@ -263,7 +265,7 @@ describe('LI Outreach — user_id isolation on list endpoints', () => {
     expect(csv).toContain('NotMine');
   });
 
-  it('GET /scraper/tasks only returns rows for the authenticated user', async () => {
+  it('GET /scraper/tasks returns every specialist’s tasks', async () => {
     state.rowsByTable.li_tasks = [
       { id: 't1', user_id: AUTH_USER_ID, type: 'search', status: 'pending' },
       { id: 't2', user_id: OTHER_USER_ID, type: 'search', status: 'pending' },
@@ -271,11 +273,11 @@ describe('LI Outreach — user_id isolation on list endpoints', () => {
     const { GET } = await import('@/app/api/tools/li-outreach/scraper/tasks/route');
     const res = await GET(makeReq('http://x/api/tools/li-outreach/scraper/tasks'));
     const body = await (res as Response).json();
-    expect(ownsUserScope('li_tasks')).toBe(true);
-    expect((body.tasks as Array<{ id: string }>).map((t) => t.id)).toEqual(['t1']);
+    expect(ownsUserScope('li_tasks')).toBe(false);
+    expect((body.tasks as Array<{ id: string }>).map((t) => t.id)).toEqual(['t1', 't2']);
   });
 
-  it('GET /dashboard scopes campaigns and leads by the authenticated user', async () => {
+  it('GET /dashboard counts campaigns and leads of the whole team', async () => {
     state.rowsByTable.li_campaigns = [
       { id: 'c1', user_id: AUTH_USER_ID, name: 'Mine', status: 'draft', daily_invite_limit: 25, invites_sent_today: 0, lead_list_id: null },
       { id: 'c2', user_id: OTHER_USER_ID, name: 'NotMine', status: 'draft', daily_invite_limit: 25, invites_sent_today: 0, lead_list_id: null },
@@ -290,13 +292,13 @@ describe('LI Outreach — user_id isolation on list endpoints', () => {
     const { GET } = await import('@/app/api/tools/li-outreach/dashboard/route');
     const res = await GET(makeReq('http://x/api/tools/li-outreach/dashboard'));
     const body = await (res as Response).json();
-    expect(ownsUserScope('li_campaigns')).toBe(true);
-    expect(ownsUserScope('li_leads')).toBe(true);
-    expect(body.funnel.total).toBe(1);
+    expect(ownsUserScope('li_campaigns')).toBe(false);
+    expect(ownsUserScope('li_leads')).toBe(false);
+    expect(body.funnel.total).toBe(2);
     const names = (body.campaign_stats as Array<{ name: string }>).map((c) => c.name);
-    expect(names).toEqual(['Mine']);
+    expect(names).toEqual(['Mine', 'NotMine']);
     const companies = (body.by_company as Array<{ company: string }>).map((c) => c.company);
-    expect(companies).not.toContain('NotMine');
+    expect(companies).toContain('NotMine');
   });
 
   it('GET /dashboard returns zero invites_sent_today when last_invite_date is stale', async () => {
@@ -342,7 +344,7 @@ describe('LI Outreach — user_id isolation on list endpoints', () => {
     expect(statsByName['Fresh counter'].invites_sent_today).toBe(7);
   });
 
-  it('GET /logs scopes by owned campaigns', async () => {
+  it('GET /logs returns logs of every specialist’s campaigns', async () => {
     state.rowsByTable.li_campaigns = [
       { id: 'c1', user_id: AUTH_USER_ID, name: 'Mine' },
       { id: 'c2', user_id: OTHER_USER_ID, name: 'NotMine' },
@@ -356,7 +358,7 @@ describe('LI Outreach — user_id isolation on list endpoints', () => {
     const body = await (res as Response).json();
     const messages = (body.items as Array<{ message: string }>).map((i) => i.message);
     expect(messages).toContain('mine-log');
-    expect(messages).not.toContain('others-log');
+    expect(messages).toContain('others-log');
   });
 });
 
@@ -397,13 +399,14 @@ describe('LI Outreach — owner check on by-id campaign endpoints', () => {
     expect((res as Response).status).toBe(200);
   });
 
-  it('DELETE /campaigns/[id] does not delete a campaign owned by another user (owner-only)', async () => {
+  it('DELETE /campaigns/[id] lets any team member delete a campaign owned by another', async () => {
     seedCampaigns();
     const { DELETE } = await import('@/app/api/tools/li-outreach/campaigns/[id]/route');
     const res = await DELETE(makeReq('http://x/api/tools/li-outreach/campaigns/c2', { method: 'DELETE' }), {
       params: Promise.resolve({ id: 'c2' }),
     });
-    expect([403, 404]).toContain((res as Response).status);
+    expect((res as Response).status).toBe(200);
+    expect(ownsUserScope('li_campaigns')).toBe(false);
   });
 
   it('POST /campaigns/[id]/start allows starting a campaign owned by another team member', async () => {

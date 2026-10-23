@@ -171,6 +171,9 @@ function todayStr(): string {
  * эксклюзивны (один аккаунт — одна кампания), поэтому идут параллельно.
  * Кампания с одним аккаунтом идёт прежним путём.
  */
+/** Модель AI для LinkedIn-кампаний: одна на всех, Gemini 3.1 Pro (preview) — лучшая для текста. */
+const LI_AI_MODEL = 'google/gemini-3.1-pro-preview';
+
 export async function runCampaignTickAllAccounts(
   campaignId: string,
   userId: string,
@@ -327,7 +330,7 @@ export async function runCampaignTick(
   // See migration 20260525_0003_li_outreach_drop_byok_keys.sql.
   const aiConfig = {
     apiKey: process.env.OPENROUTER_LI_OUTREACH_API_KEY ?? '',
-    model: campaign.ai_model || 'openai/gpt-4o-mini',
+    model: LI_AI_MODEL,
   };
 
   const steps = (campaign.steps ?? []) as LiCampaignStep[];
@@ -847,7 +850,7 @@ async function processInviteStep(
 
   await db
     .from('li_campaign_leads')
-    .update({ current_step: stepIdx + 1, status: stepIdx + 1 < (campaign.steps?.length ?? 0) ? 'in_progress' : 'completed', updated_at: now })
+    .update({ current_step: stepIdx + 1, status: stepIdx + 1 < (campaign.steps?.length ?? 0) ? 'in_progress' : 'completed', invite_sent_at: now, updated_at: now })
     .eq('id', cl.id);
 
   log('info', `Инвайт отправлен (${newCount}/${campaign.daily_invite_limit} сегодня)`, lead.name, stepIdx);

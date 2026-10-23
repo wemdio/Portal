@@ -4000,3 +4000,90 @@ html[data-portal-theme='dark'] .portal-shell aside.tg-logs-aside section {
 .no-focus-ring :focus-visible {
   outline: none !important;
 }
+
+/* Блоки статистики LinkedIn Outreach: лёгкий оттенок фона, рамки и цвета значений (тема — data-portal-theme).
+   Селекторы тяжелее стекла portal-glass.css, иначе оно перекрывает фон и рамку. */
+html[data-portal-theme] body .kpi-tint-violet.kpi-tint-violet.kpi-tint-violet { background-color: rgba(139, 92, 246, 0.12) !important; border-color: rgba(139, 92, 246, 0.45) !important; }
+html[data-portal-theme] .kpi-value-violet.kpi-value-violet { color: #6d28d9 !important; }
+html[data-portal-theme='dark'] .kpi-value-violet.kpi-value-violet { color: #c4b5fd !important; }
+html[data-portal-theme] body .kpi-tint-sky.kpi-tint-sky.kpi-tint-sky { background-color: rgba(14, 165, 233, 0.12) !important; border-color: rgba(14, 165, 233, 0.45) !important; }
+html[data-portal-theme] .kpi-value-sky.kpi-value-sky { color: #0369a1 !important; }
+html[data-portal-theme='dark'] .kpi-value-sky.kpi-value-sky { color: #7dd3fc !important; }
+html[data-portal-theme] body .kpi-tint-green.kpi-tint-green.kpi-tint-green { background-color: rgba(34, 197, 94, 0.12) !important; border-color: rgba(34, 197, 94, 0.45) !important; }
+html[data-portal-theme] .kpi-value-green.kpi-value-green { color: #15803d !important; }
+html[data-portal-theme='dark'] .kpi-value-green.kpi-value-green { color: #86efac !important; }
+html[data-portal-theme] body .kpi-tint-teal.kpi-tint-teal.kpi-tint-teal { background-color: rgba(20, 184, 166, 0.12) !important; border-color: rgba(20, 184, 166, 0.45) !important; }
+html[data-portal-theme] .kpi-value-teal.kpi-value-teal { color: #0f766e !important; }
+html[data-portal-theme='dark'] .kpi-value-teal.kpi-value-teal { color: #5eead4 !important; }
+html[data-portal-theme] body .kpi-tint-amber.kpi-tint-amber.kpi-tint-amber { background-color: rgba(245, 158, 11, 0.12) !important; border-color: rgba(245, 158, 11, 0.45) !important; }
+html[data-portal-theme] .kpi-value-amber.kpi-value-amber { color: #b45309 !important; }
+html[data-portal-theme='dark'] .kpi-value-amber.kpi-value-amber { color: #fcd34d !important; }
+/* LinkedIn Outreach: строка таблицы под мышкой в светлой теме заметно серее (в тёмной хватает темы). */
+html:not([data-portal-theme='dark']) body .li-row-hover.li-row-hover:hover { background-color: rgba(15, 23, 42, 0.06) !important; }
+/* LinkedIn Outreach: фильтры дашборда (кампания, период) — заметная рамка и фон в обеих темах. */
+html[data-portal-theme] body .li-filter.li-filter { background-color: rgba(15, 23, 42, 0.04) !important; border-color: rgba(15, 23, 42, 0.32) !important; color: inherit; }
+html[data-portal-theme='dark'] body .li-filter.li-filter { background-color: rgba(255, 255, 255, 0.10) !important; border-color: rgba(255, 255, 255, 0.38) !important; }
+html[data-portal-theme] body .li-period.li-period { background-color: rgba(15, 23, 42, 0.04) !important; border-color: rgba(15, 23, 42, 0.12) !important; }
+html[data-portal-theme='dark'] body .li-period.li-period { background-color: rgba(255, 255, 255, 0.05) !important; border-color: rgba(255, 255, 255, 0.12) !important; }
+html[data-portal-theme] body .li-period-btn.li-period-btn { background: transparent !important; border: 0 !important; backdrop-filter: none; color: #64748b; }
+html[data-portal-theme='dark'] body .li-period-btn.li-period-btn { color: #94a3b8; }
+html[data-portal-theme] body .li-period-btn.li-period-btn:hover { color: #0f172a; }
+html[data-portal-theme='dark'] body .li-period-btn.li-period-btn:hover { color: #e5e7eb; }
+html[data-portal-theme] body .li-period-btn-on.li-period-btn-on { background: #ffffff !important; color: #0f172a; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12); }
+html[data-portal-theme='dark'] body .li-period-btn-on.li-period-btn-on { background: rgba(255, 255, 255, 0.14) !important; color: #f8fafc; box-shadow: none; }
+
+/* LinkedIn Outreach: выбор кампании — акцентная кнопка и список. */
+html[data-portal-theme] body .li-picker.li-picker { background-color: rgba(59, 130, 246, 0.10) !important; border-color: rgba(37, 99, 235, 0.55) !important; color: #1e3a8a; }
+html[data-portal-theme] body .li-picker.li-picker:hover { background-color: rgba(59, 130, 246, 0.18) !important; }
+html[data-portal-theme='dark'] body .li-picker.li-picker { background-color: rgba(96, 165, 250, 0.16) !important; border-color: rgba(147, 197, 253, 0.6) !important; color: #e0f2fe; }
+html[data-portal-theme] body .li-picker-menu.li-picker-menu.li-picker-menu { background-color: #ffffff !important; border-color: rgba(15, 23, 42, 0.25) !important; color: #0f172a; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; opacity: 1; }
+html[data-portal-theme='dark'] body .li-picker-menu.li-picker-menu.li-picker-menu { background-color: #1c2030 !important; border-color: rgba(255, 255, 255, 0.3) !important; color: #e5e7eb; }
+html[data-portal-theme] body .li-picker-item.li-picker-item { background: transparent !important; border: 0 !important; }
+html[data-portal-theme] body .li-picker-item.li-picker-item:hover { background: rgba(59, 130, 246, 0.12) !important; }
+/* LinkedIn Outreach: карточка при наведении на прогресс — сплошной фон, как в «Рассылке». */
+html[data-portal-theme] body .li-hover-card.li-hover-card.li-hover-card { background-color: #ffffff !important; border-color: rgba(15, 23, 42, 0.16) !important; color: #0f172a; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+html[data-portal-theme='dark'] body .li-hover-card.li-hover-card.li-hover-card { background-color: #1c2030 !important; border-color: rgba(255, 255, 255, 0.18) !important; color: #f1f5f9; }
+html[data-portal-theme='dark'] body .li-hover-card.li-hover-card.li-hover-card .border-zinc-200 { border-color: rgba(255, 255, 255, 0.14); }
+/* LinkedIn Outreach: ссылка-кнопка «Все аккаунты». */
+html[data-portal-theme] body .li-link-pill.li-link-pill { background-color: rgba(59, 130, 246, 0.10) !important; border-color: rgba(59, 130, 246, 0.35) !important; color: #1d4ed8; }
+html[data-portal-theme] body .li-link-pill.li-link-pill:hover { background-color: rgba(59, 130, 246, 0.18) !important; }
+html[data-portal-theme='dark'] body .li-link-pill.li-link-pill { color: #93c5fd; border-color: rgba(147, 197, 253, 0.4) !important; }
+html[data-portal-theme='dark'] body .li-hover-card.li-hover-card.li-hover-card dt { color: #a8b3c7; }
+/* Кнопка «⋯» в строках таблиц: в тёмной теме наведение — мягкая светлая подложка, а не белый квадрат. */
+html[data-portal-theme='dark'] body .row-actions-btn.row-actions-btn { color: #a1a1aa; }
+html[data-portal-theme='dark'] body .row-actions-btn.row-actions-btn:hover { background-color: rgba(255, 255, 255, 0.14) !important; color: #f4f4f5; }
+html[data-portal-theme] body .row-actions-btn.row-actions-btn { color: #71717a; }
+html[data-portal-theme] body .row-actions-btn.row-actions-btn:hover { background-color: rgba(15, 23, 42, 0.08) !important; color: #18181b; }
+html[data-portal-theme='dark'] body .row-actions-btn.row-actions-btn { color: #a1a1aa; }
+html[data-portal-theme='dark'] body .row-actions-btn.row-actions-btn:hover { background-color: rgba(255, 255, 255, 0.14) !important; color: #f4f4f5; }
+/* Переключатель «Активные / Архив»: выбранная вкладка синяя, невыбранная серая. */
+html[data-portal-theme] body .li-switch-btn.li-switch-btn { background: transparent !important; border: 0 !important; color: #71717a; backdrop-filter: none; }
+html[data-portal-theme] body .li-switch-btn-on.li-switch-btn-on { background: #2563eb !important; color: #ffffff; }
+html[data-portal-theme='dark'] body .li-switch-btn.li-switch-btn { color: #a1a1aa; }
+html[data-portal-theme='dark'] body .li-switch-btn-on.li-switch-btn-on { background: #2563eb !important; color: #ffffff; }
+/* Список кампаний LinkedIn: в тёмной теме строка под мышкой слегка голубеет, в тон интерфейсу. */
+html[data-portal-theme='dark'] body .li-campaign-row.li-campaign-row.li-campaign-row:hover { background-color: rgba(96, 165, 250, 0.10) !important; box-shadow: inset 2px 0 0 rgba(96, 165, 250, 0.7); }
+/* Страница кампании LinkedIn: крупные кнопки пуска/остановки и шестерёнка настроек. */
+html[data-portal-theme] body .li-run-btn-start.li-run-btn-start { background-color: #16a34a !important; border: 0 !important; color: #ffffff; }
+html[data-portal-theme] body .li-run-btn-start.li-run-btn-start:hover { background-color: #15803d !important; }
+html[data-portal-theme] body .li-run-btn-stop.li-run-btn-stop { background-color: rgba(245, 158, 11, 0.14) !important; border-color: rgba(217, 119, 6, 0.6) !important; color: #b45309; }
+html[data-portal-theme] body .li-run-btn-stop.li-run-btn-stop:hover { background-color: rgba(245, 158, 11, 0.24) !important; }
+html[data-portal-theme='dark'] body .li-run-btn-stop.li-run-btn-stop { color: #fcd34d; border-color: rgba(252, 211, 77, 0.55) !important; }
+html[data-portal-theme] body .li-gear-btn.li-gear-btn { background-color: transparent !important; border-color: rgba(15, 23, 42, 0.28) !important; color: #52525b; }
+html[data-portal-theme='dark'] body .li-gear-btn.li-gear-btn { border-color: rgba(255, 255, 255, 0.3) !important; color: #d4d4d8; }
+html[data-portal-theme] body .li-gear-btn.li-gear-btn:hover { background-color: rgba(15, 23, 42, 0.08) !important; }
+html[data-portal-theme='dark'] body .li-gear-btn.li-gear-btn:hover { background-color: rgba(255, 255, 255, 0.12) !important; }
+html[data-portal-theme] body .li-gear-btn-on.li-gear-btn-on { background-color: #2563eb !important; border-color: #2563eb !important; color: #ffffff; }
+
+
+/* LinkedIn Outreach: значки-кнопки в строке (глаз, корзина) и постраничные кнопки. */
+html[data-portal-theme] body .li-icon-btn.li-icon-btn { background: transparent !important; border: 0 !important; color: #71717a; backdrop-filter: none; }
+html[data-portal-theme] body .li-icon-btn.li-icon-btn:hover { background: rgba(15, 23, 42, 0.08) !important; color: #18181b; }
+html[data-portal-theme='dark'] body .li-icon-btn.li-icon-btn { color: #a1a1aa; }
+html[data-portal-theme='dark'] body .li-icon-btn.li-icon-btn:hover { background: rgba(255, 255, 255, 0.14) !important; color: #f4f4f5; }
+html[data-portal-theme] body .li-icon-btn-danger.li-icon-btn-danger:hover { background: rgba(239, 68, 68, 0.14) !important; color: #dc2626; }
+html[data-portal-theme] body .li-page-btn.li-page-btn { background: transparent !important; border-color: rgba(15, 23, 42, 0.22) !important; color: #3f3f46; }
+html[data-portal-theme='dark'] body .li-page-btn.li-page-btn { border-color: rgba(255, 255, 255, 0.25) !important; color: #d4d4d8; }
+html[data-portal-theme] body .li-page-btn.li-page-btn:hover:not(:disabled) { background: rgba(59, 130, 246, 0.12) !important; }
+
+
