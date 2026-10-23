@@ -103,13 +103,26 @@ async function queueSender(db: SupabaseClient, row: HandoffRow, settings: Agency
 }
 
 async function sendInstantly(db: SupabaseClient, row: HandoffRow, settings: AgencyHandoffSettings): Promise<void> {
-  const { data: q, error } = await db.from('own_reply_qualifications')
-    .select('status, campaign_id, campaign_name, lead_email, thread_id').eq('email_id', row.source_id).maybeSingle();
-  if (error) throw new Error(error.message);
-  const { data: own, error: ownError } = await db.from('own_reply_lead_settings').select('enabled').eq('id', 1).maybeSingle();
-  if (ownError) throw new Error(ownError.message);
-  if (!own?.enabled || q?.status !== 'lead' || !isOwnAgencyCampaign(q.campaign_name) || norm(q.lead_email) !== norm(row.lead_email)) {
-    throw new SkipHandoff('Квалификация выключена или лид снят с обработки');
+  // OutreachOS: лид из кабинета клиента — проверяем по его очереди, а не по таблицам наших кампаний.
+  let q: { campaign_id: string; lead_email: string };
+  if (row.scope === 'outreachos') {
+    const { data, error } = await db.from('outreachos_lead_pushes')
+      .select('lead_email, instantly_campaign_id').eq('instantly_email_id', row.source_id).eq('kind', 'reply').maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data?.instantly_campaign_id || norm(data.lead_email) !== norm(row.lead_email)) {
+      throw new SkipHandoff('Лид OutreachOS не найден в очереди');
+    }
+    q = { campaign_id: data.instantly_campaign_id, lead_email: data.lead_email };
+  } else {
+    const { data, error } = await db.from('own_reply_qualifications')
+      .select('status, campaign_id, campaign_name, lead_email, thread_id').eq('email_id', row.source_id).maybeSingle();
+    if (error) throw new Error(error.message);
+    const { data: own, error: ownError } = await db.from('own_reply_lead_settings').select('enabled').eq('id', 1).maybeSingle();
+    if (ownError) throw new Error(ownError.message);
+    if (!own?.enabled || data?.status !== 'lead' || !isOwnAgencyCampaign(data.campaign_name) || norm(data.lead_email) !== norm(row.lead_email)) {
+      throw new SkipHandoff('Квалификация выключена или лид снят с обработки');
+    }
+    q = data;
   }
   const requestOptions = { accountId: 'main', consumer: 'agency_lead_handoff',
     requestPriority: 'bulk' as const, retryRateLimits: false, timeoutMs: 20_000, timeoutIncludesBody: true };

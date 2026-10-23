@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-export const HANDOFF_SCOPES = ['auto_ru', 'auto_en', 'own_ru', 'own_en'] as const;
+export const HANDOFF_SCOPES = ['auto_ru', 'auto_en', 'own_ru', 'own_en', 'outreachos'] as const;
 export type HandoffScope = typeof HANDOFF_SCOPES[number];
 
 export interface AgencyHandoffSettings {

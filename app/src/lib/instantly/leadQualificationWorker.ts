@@ -2337,6 +2337,7 @@ export async function qualifyOneReply(
       eaccount: replyEaccount,
       projectOwnershipProven: true,
       projectId: qualifiedProjectId,
+      emailId: effectiveReply.id ?? null,
     });
   }
 }
@@ -3643,6 +3644,8 @@ export async function notifyClientOfReply(
     projectOwnershipProven?: boolean;
     /** Immutable project snapshot; null means proven self-serve at qualification time. */
     projectId?: string | null;
+    /** Письмо Instantly — для ответа лиду кабинета OutreachOS с общей почтой в копии. */
+    emailId?: string | null;
   },
 ): Promise<void> {
   const recordDelivery = async (
@@ -3765,6 +3768,8 @@ export async function notifyClientOfReply(
           companyName: data.companyName,
           replySubject: data.replySubject,
           replyBody: data.replyBody,
+          instantlyEmailId: data.emailId ?? null,
+          instantlyCampaignId: campaignId,
         });
       } catch (error) {
         workerLog('warn', `OutreachOS lead enqueue failed (campaign ${campaignId})`, error);
