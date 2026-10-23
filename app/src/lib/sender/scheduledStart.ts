@@ -3,6 +3,8 @@ import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { EDITABLE_CAMPAIGN_STATUSES, SenderOpError, startCampaign } from './campaignOps';
 import { fillPoolFromFolder } from './folders';
+import { ensureCampaignStopListChecked } from './stopLists';
+import { SCHEDULED_START_CLAIM_MARK } from './types';
 
 type Log = (level: 'info' | 'warn' | 'error', message: string) => void;
 
@@ -17,23 +19,55 @@ type Log = (level: 'info' | 'warn' | 'error', message: string) => void;
  * время уже снято, причина пишется в scheduled_start_error: кампания не
  * пытается стартовать каждые 15 секунд, а оператор видит, почему.
  */
+/** Отметка «запускается» старше этого — воркер прервался посреди запуска. */
+const STALE_CLAIM_MS = 10 * 60_000;
+
 export async function runScheduledStarts(opts: { log: Log }): Promise<number> {
   const db = supabaseAdmin;
   if (!db) return 0;
+  // Прерванный запуск (воркер упал или база не дала вернуть время) — снова в
+  // очередь: сам запуск повторяем безопасно, кампания всё ещё черновик или на паузе.
+  const nowIso = new Date().toISOString();
+  const { error: rearmError } = await db
+    .from('sender_campaigns')
+    .update({ scheduled_start_at: nowIso, scheduled_start_error: 'Запуск прервался — повторяем', updated_at: nowIso })
+    .eq('scheduled_start_error', SCHEDULED_START_CLAIM_MARK)
+    .is('scheduled_start_at', null)
+    .in('status', EDITABLE_CAMPAIGN_STATUSES)
+    .lt('updated_at', new Date(Date.now() - STALE_CLAIM_MS).toISOString());
+  if (rearmError) opts.log('warn', `Прерванные отложенные запуски не возвращены: ${rearmError.message}`);
+
+  // С запасом: ждущие сверки стоп-листов остаются в выборке и не должны
+  // заслонять остальные.
   const { data, error } = await db
     .from('sender_campaigns')
     .select('id, name, scheduled_start_at')
     .lte('scheduled_start_at', new Date().toISOString())
     .in('status', EDITABLE_CAMPAIGN_STATUSES)
-    .limit(20);
+    .order('scheduled_start_at')
+    .limit(200);
   if (error) throw new Error(error.message);
 
   let started = 0;
   for (const row of data ?? []) {
     const id = String(row.id);
+    // Стоп-листы клиента и проекта ещё не сверены свежо (почтовый хост базы
+    // Instantly не видит, сверяет воркер sender-leads) — ждём, не снимая
+    // время: отмена или перенос оператором в это время ничем не затрутся.
+    try {
+      await ensureCampaignStopListChecked(db, null, id);
+    } catch (e) {
+      const reason = `Стоп-листы клиента и проекта не сверены — ${e instanceof Error ? e.message : String(e)}`;
+      await db
+        .from('sender_campaigns')
+        .update({ scheduled_start_error: reason.slice(0, 500) })
+        .eq('id', id)
+        .eq('scheduled_start_at', row.scheduled_start_at as string);
+      continue;
+    }
     const { data: claimed, error: claimError } = await db
       .from('sender_campaigns')
-      .update({ scheduled_start_at: null })
+      .update({ scheduled_start_at: null, scheduled_start_error: SCHEDULED_START_CLAIM_MARK, updated_at: new Date().toISOString() })
       .eq('id', id)
       .eq('scheduled_start_at', row.scheduled_start_at as string)
       .select('id');
@@ -42,7 +76,7 @@ export async function runScheduledStarts(opts: { log: Log }): Promise<number> {
 
     try {
       await fillPoolFromFolder(id);
-      await startCampaign(id);
+      await startCampaign(id, { scheduledClaim: true });
       started += 1;
       opts.log('info', `Отложенный запуск: кампания «${row.name}» запущена`);
     } catch (e) {
@@ -50,14 +84,21 @@ export async function runScheduledStarts(opts: { log: Log }): Promise<number> {
       opts.log('warn', `Отложенный запуск кампании «${row.name}» не удался: ${message}`);
       // Сбой базы — не повод навсегда отменять запуск: возвращаем время, следующий тик попробует снова.
       const retry = !(e instanceof SenderOpError) || e.status >= 500;
-      // 409 — кампанию тем временем запустили или завершили руками: писать нечего.
-      if (e instanceof SenderOpError && e.status === 409) continue;
-      await db
+      // Всё ниже — только пока на кампании наша отметка: отмена и перенос
+      // оператором в это время её стёрли, и их решение не затирается.
+      // 409 — кампанию тем временем запустили или завершили руками: снимаем отметку.
+      const update = e instanceof SenderOpError && e.status === 409
+        ? { scheduled_start_error: null }
+        : retry
+          ? { scheduled_start_at: row.scheduled_start_at as string, scheduled_start_error: message.slice(0, 500) }
+          : { scheduled_start_error: message.slice(0, 500), updated_at: new Date().toISOString() };
+      const { error: afterError } = await db
         .from('sender_campaigns')
-        .update(retry
-          ? { scheduled_start_at: row.scheduled_start_at as string }
-          : { scheduled_start_error: message.slice(0, 500), updated_at: new Date().toISOString() })
-        .eq('id', id);
+        .update(update)
+        .eq('id', id)
+        .eq('scheduled_start_error', SCHEDULED_START_CLAIM_MARK);
+      // Не записалось — отметка останется, и через 10 минут запуск вернётся в очередь сам.
+      if (afterError) opts.log('warn', `Отложенный запуск кампании «${row.name}»: итог не записан — ${afterError.message}`);
     }
   }
   return started;

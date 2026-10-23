@@ -38,6 +38,7 @@ import { FolderSettingsModal, chainDaysLabel } from './FolderSettingsModal';
 import { RecipientsModal } from './RecipientsModal';
 import { SenderModal } from './SenderModal';
 import { formatInZone, StartCampaignModal, zoneCaption } from './StartCampaignModal';
+import { SCHEDULED_START_CLAIM_MARK } from '@/lib/sender/types';
 
 type CampaignAction = 'start' | 'pause' | 'finish' | 'delete' | 'unschedule';
 
@@ -677,7 +678,12 @@ function CampaignTable({
                   <div className="mt-0.5 inline-flex items-center gap-1 text-xs font-medium text-blue-700">
                     <CalendarClock className="h-3.5 w-3.5" />
                     Запуск {formatInZone(campaign.scheduled_start_at, campaign.timezone)}
+                    {campaign.scheduled_start_error ? (
+                      <span className="font-normal text-amber-700" title={campaign.scheduled_start_error}>· отложен</span>
+                    ) : null}
                   </div>
+                ) : campaign.scheduled_start_error === SCHEDULED_START_CLAIM_MARK ? (
+                  <div className="mt-0.5 text-xs text-blue-700">Запускается…</div>
                 ) : campaign.scheduled_start_error ? (
                   <div className="mt-0.5 text-xs text-red-600">Запуск не состоялся: {campaign.scheduled_start_error}</div>
                 ) : null}

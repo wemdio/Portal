@@ -23,6 +23,7 @@ import { chunkForInFilter } from '@/lib/sender/inFilter';
 import { normalizeRecipientEmail, type RecipientInput } from '@/lib/sender/recipientImport';
 import type { CampaignSourceKind } from '@/lib/sender/types';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 
 /**
  * Автоаутрич RU / EN → «Рассылка»: заливка готовых компаний запуска в
@@ -583,6 +584,8 @@ export interface UploadJobResult {
    * стоп-листа.
    */
   skippedSuppressed: number;
+  /** Адрес или сайт компании в стоп-листе клиента или проекта рассылки. */
+  skippedStopList?: number;
   /** Адрес уже стоял в рассылке — строка помечена залитой. */
   skippedExisting: number;
   /** У двух компаний одна почта: письмо получит первая, обе строки помечены. */
@@ -623,6 +626,7 @@ async function appendTarget(folder: FolderRow, campaignId: string | null | undef
 function nothingLandedMessage(result: ImportRecipientsResult): string {
   const parts: string[] = [];
   if (result.skippedSuppressed) parts.push(`адресов в стоп-листе — ${result.skippedSuppressed}`);
+  if (result.skippedStopList) parts.push(`в стоп-листе клиента или проекта — ${result.skippedStopList}`);
   if (result.skippedInvalid) parts.push(`некорректных адресов — ${result.skippedInvalid}`);
   if (result.skippedEmptyLetter) parts.push(`адресов с первым письмом без темы или текста — ${result.skippedEmptyLetter}`);
   return `Ни одна компания не попала в рассылку${parts.length ? `: ${parts.join(', ')}` : ''}`;
@@ -756,6 +760,7 @@ export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJo
       companies: landedRows.size,
       inserted: imported.inserted,
       skippedSuppressed: imported.skippedSuppressed,
+      skippedStopList: imported.skippedStopList,
       skippedExisting: imported.skippedExisting,
       skippedDuplicates: imported.skippedDuplicates,
       skippedInvalid: imported.skippedInvalid,
@@ -832,7 +837,7 @@ export async function startJobCampaign(input: {
 
   const campaignId = String(campaign.id);
   const mailboxesAdded = await fillPoolFromFolder(campaignId);
-  await startCampaign(campaignId);
+  await startCampaign(campaignId, { instantlyDb: supabaseInstantly });
   return { campaignId, mailboxesAdded };
 }
 

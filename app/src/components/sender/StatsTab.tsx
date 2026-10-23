@@ -268,6 +268,8 @@ const SUPPRESS_LABELS: Record<string, string> = {
   unsubscribe: 'отписались',
   complaint: 'жалобы на спам',
   manual: 'добавлены руками',
+  client_blocklist: 'стоп-лист клиента',
+  project_block: 'стоп-лист проекта',
 };
 
 const INBOX_LABELS: Record<string, string> = {

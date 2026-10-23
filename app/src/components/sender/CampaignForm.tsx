@@ -9,6 +9,7 @@ import { variantLabel } from '@/lib/sender/variants';
 import {
   createCampaign,
   fetchCampaign,
+  fetchSenderClients,
   fetchSenderProjects,
   fetchTestLetter,
   previewCampaignSteps,
@@ -19,6 +20,7 @@ import {
   type CampaignDto,
   type PreviewSampleDto,
   type RecipientColumnsDto,
+  type SenderClientDto,
   type SenderProjectDto,
   type VariantStatDto,
 } from './api';
@@ -142,6 +144,13 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   // клиентскому проекту не относятся.
   const [projectId, setProjectId] = useState<string | null>(null);
   const [projects, setProjects] = useState<SenderProjectDto[]>([]);
+  // Клиент кабинета (шаг 1.2): на базу действует его стоп-лист. Необязательно —
+  // у внутренних рассылок клиента нет.
+  const [clientUserId, setClientUserId] = useState<string | null>(null);
+  const [clients, setClients] = useState<SenderClientDto[]>([]);
+  // Клиент, подставленный от проекта: при смене проекта он меняется вслед, а
+  // выбранный руками — остаётся.
+  const autoClientRef = useRef<string | null>(null);
   // Будни по умолчанию: холодная рассылка в выходные бьёт по ответам и по
   // репутации домена. Но это умолчание, а не запрет — день включается кнопкой.
   const [weekdays, setWeekdays] = useState<number[]>([...WORKDAYS]);
@@ -182,6 +191,12 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
       } catch {
         /* список не доехал — выбор проекта останется пустым, кампания сохранится и так */
       }
+      try {
+        const res = await fetchSenderClients();
+        if (!cancelled) setClients(res.clients);
+      } catch {
+        /* список не доехал — выбор клиента останется пустым */
+      }
     })();
     return () => {
       cancelled = true;
@@ -210,6 +225,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
       setGapSeconds(details.campaign.gap_seconds);
       setGapJitterSeconds(details.campaign.gap_jitter_seconds);
       setProjectId(details.campaign.project_id ?? null);
+      setClientUserId(details.campaign.client_user_id ?? null);
       if (details.steps.length) setLetters(groupSteps(details.steps));
       setSaved(details.recipients);
       setRepliesByStep(details.repliesByStep ?? []);
@@ -344,6 +360,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
     gapSeconds: gapSeconds ?? 180,
     gapJitterSeconds: gapJitterSeconds ?? 120,
     projectId,
+    clientUserId,
   };
   const payloadRef = useRef(campaignPayload);
   payloadRef.current = campaignPayload;
@@ -461,7 +478,9 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
     return (
       `${res.replaced ? 'База заменена' : 'Получателей добавлено'}: ${res.imported}. `
       + `Пропущено: ${res.skippedInvalid} с плохим адресом, ${emptyLetter}${res.skippedDuplicates} дублей, `
-      + `${res.skippedSuppressed} из стоп-листа.${truncation}`
+      + `${res.skippedSuppressed} из стоп-листа`
+      + (res.skippedStopList ? `, ${res.skippedStopList} из стоп-листа клиента или проекта` : '')
+      + `.${truncation}`
     );
   };
 
@@ -763,7 +782,30 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
             <ProjectSelect
               projects={projects}
               value={projectId}
-              onChange={setProjectId}
+              onChange={(value) => {
+                setProjectId(value);
+                // Клиент проекта подставляется, пока клиента не выбрали руками.
+                // Клиент прежнего проекта — тоже подставленный, даже если форму
+                // открыли заново и отметки о подстановке уже нет.
+                const projectClient = projects.find((project) => project.id === value)?.clientUserId ?? null;
+                const previousClient = projects.find((project) => project.id === projectId)?.clientUserId ?? null;
+                if (!clientUserId || clientUserId === autoClientRef.current || clientUserId === previousClient) {
+                  setClientUserId(projectClient);
+                  autoClientRef.current = projectClient;
+                }
+              }}
+              disabled={readOnly}
+            />
+          </Step>
+
+          <Step no="1.2" title="Клиент" done={clientUserId !== null} hint="его стоп-лист; необязательно">
+            <ClientSelect
+              clients={clients}
+              value={clientUserId}
+              onChange={(value) => {
+                autoClientRef.current = null;
+                setClientUserId(value);
+              }}
               disabled={readOnly}
             />
           </Step>
@@ -1150,6 +1192,38 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
         </SenderModal>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Клиент кабинета для кампании: адреса и домены из его стоп-листа не попадают
+ * в базу, а закрытые клиентом позже снимаются с рассылки до следующего письма.
+ */
+function ClientSelect({
+  clients,
+  value,
+  onChange,
+  disabled,
+}: {
+  clients: SenderClientDto[];
+  value: string | null;
+  onChange: (value: string | null) => void;
+  disabled: boolean;
+}) {
+  return (
+    <select
+      value={value ?? ''}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.value || null)}
+      className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-sm text-zinc-900 disabled:bg-zinc-50"
+    >
+      <option value="">Без клиента</option>
+      {clients.map((client) => (
+        <option key={client.id} value={client.id}>
+          {client.email && client.email !== client.label ? `${client.label} · ${client.email}` : client.label}
+        </option>
+      ))}
+    </select>
   );
 }
 
