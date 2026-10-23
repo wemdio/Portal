@@ -1,7 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { Link2 } from 'lucide-react';
+import { Link2, List } from 'lucide-react';
+import { letterBlocks, splitBold } from '@/lib/mail/letterFormat';
 import { normalizeLinkUrl, splitLinkMarkup } from '@/lib/mail/linkMarkup';
 
 /**
@@ -91,10 +92,10 @@ export function LinkInsert({
   );
 }
 
-/** Текст письма как его увидит получатель: разметка ссылок — настоящими ссылками. */
-export function LetterText({ text, className }: { text: string; className?: string }) {
+/** Строка письма как её увидит получатель: ссылки — ссылками, `**жирный**` — жирным. */
+function Inline({ text }: { text: string }) {
   return (
-    <p className={className ?? 'whitespace-pre-wrap break-words text-sm text-zinc-700'}>
+    <>
       {splitLinkMarkup(text).map((chunk, index) =>
         chunk.kind === 'link' ? (
           <a
@@ -107,9 +108,81 @@ export function LetterText({ text, className }: { text: string; className?: stri
             {chunk.text}
           </a>
         ) : (
-          <span key={index}>{chunk.text}</span>
+          <span key={index}>
+            {splitBold(chunk.text).map((part, i) => (part.bold ? <strong key={i}>{part.text}</strong> : part.text))}
+          </span>
         ),
       )}
-    </p>
+    </>
+  );
+}
+
+/** Текст письма как его увидит получатель: ссылки, жирный и списки нарисованы настоящими. */
+export function LetterText({ text, className }: { text: string; className?: string }) {
+  return (
+    <div className={className ?? 'break-words text-sm text-zinc-700'}>
+      {letterBlocks(text).map((block, index) =>
+        block.kind === 'list' ? (
+          <ul key={index} className="my-1 list-disc pl-5">
+            {block.items.map((item, i) => (
+              <li key={i}><Inline text={item} /></li>
+            ))}
+          </ul>
+        ) : (
+          <p key={index} className="my-1 whitespace-pre-wrap">
+            <Inline text={block.lines.join('\n')} />
+          </p>
+        ),
+      )}
+    </div>
+  );
+}
+
+/**
+ * Панель инструментов письма внизу окна, как в Instantly: жирный, список и
+ * ссылка. Кнопки не отнимают фокус у поля, поэтому выделение остаётся.
+ */
+export function LetterToolbar({
+  disabled,
+  onBold,
+  onBullets,
+  children,
+}: {
+  disabled?: boolean;
+  onBold: () => void;
+  onBullets: () => void;
+  /** Остальные инструменты панели — например, вставка ссылки. */
+  children?: React.ReactNode;
+}) {
+  const button =
+    'inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-lg px-2 text-sm text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50';
+  return (
+    <div className="sticky bottom-3 z-10 mt-3 flex justify-center">
+      <div className="flex flex-wrap items-center gap-1 rounded-xl border border-zinc-300 bg-white px-2 py-1.5 shadow-lg">
+        <button
+          type="button"
+          title="Жирный"
+          aria-label="Жирный"
+          disabled={disabled}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={onBold}
+          className={`${button} font-bold`}
+        >
+          Ж
+        </button>
+        <button
+          type="button"
+          title="Список с маркерами"
+          aria-label="Список с маркерами"
+          disabled={disabled}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={onBullets}
+          className={button}
+        >
+          <List className="h-4 w-4" />
+        </button>
+        {children}
+      </div>
+    </div>
   );
 }

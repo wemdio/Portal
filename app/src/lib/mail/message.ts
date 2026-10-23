@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { letterBlocks, splitBold, type LetterBlock } from './letterFormat';
 import { linkMarkupToText, splitLinkMarkup } from './linkMarkup';
 
 /**
@@ -41,33 +42,38 @@ function escapeHtml(text: string): string {
   return text.replace(/[&<>"]/g, (c) => HTML_ESCAPES[c] ?? c);
 }
 
-/** Абзац письма в HTML: ссылки под словом — тегом, остальное экранируется. */
-function blockToHtml(block: string): string {
-  return splitLinkMarkup(block)
+/** Строка письма в HTML: ссылки под словом — тегом, жирный — <strong>, остальное экранируется. */
+function inlineToHtml(text: string): string {
+  return splitLinkMarkup(text)
     .map((chunk) =>
       chunk.kind === 'link'
         ? `<a href="${escapeHtml(chunk.url)}">${escapeHtml(chunk.text)}</a>`
-        : escapeHtml(chunk.text),
+        : splitBold(chunk.text)
+            .map((part) => (part.bold ? `<strong>${escapeHtml(part.text)}</strong>` : escapeHtml(part.text)))
+            .join(''),
     )
-    .join('')
-    .replace(/\n/g, '<br>');
+    .join('');
+}
+
+/** Блок письма в HTML: абзац или маркированный список. */
+function blockToHtml(block: LetterBlock): string {
+  if (block.kind === 'list') {
+    return `<ul>${block.items.map((item) => `<li>${inlineToHtml(item)}</li>`).join('')}</ul>`;
+  }
+  return `<p>${inlineToHtml(block.lines.join('\n')).replace(/\n/g, '<br>')}</p>`;
 }
 
 /**
- * Текст письма в простой HTML: абзацы, переносы строк и ссылки под словом
- * (`[Alial](https://alial.ru)` — см. linkMarkup), больше ничего.
+ * Текст письма в простой HTML: абзацы, переносы строк, ссылки под словом
+ * (`[Alial](https://alial.ru)` — см. linkMarkup), жирный и списки (letterFormat).
  *
  * Разметка нарочно скучная. HTML здесь нужен не для оформления, а чтобы
  * письмо было multipart/alternative: холодное письмо из одной-единственной
  * части фильтры считают типичной машинной рассылкой.
  */
 export function textToHtml(text: string): string {
-  const paragraphs = text
-    .replace(/\r\n/g, '\n')
-    .split(/\n{2,}/)
-    .map((block) => blockToHtml(block.trim()))
-    .filter(Boolean);
-  const body = paragraphs.length ? paragraphs.map((p) => `<p>${p}</p>`).join('\n') : '<p></p>';
+  const blocks = letterBlocks(text).map(blockToHtml);
+  const body = blocks.length ? blocks.join('\n') : '<p></p>';
   return `<div dir="auto">\n${body}\n</div>`;
 }
 

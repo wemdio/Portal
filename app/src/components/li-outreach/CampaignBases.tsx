@@ -128,7 +128,7 @@ export default function CampaignBases({
     run('invites', async () => {
       const data = await upload('/leads/import-with-invites', { campaign_id: campaignId }, file);
       const list = data.lead_list as { id: string; name: string } | null | undefined;
-      const parts = [`Импортировано лидов: ${Number(data.imported ?? 0)}`];
+      const parts = [`Импортировано контактов: ${Number(data.imported ?? 0)}`];
       if (list?.name) parts.push(`Создана база: «${list.name}»`);
       if (Number(data.skipped) > 0) parts.push(`Пропущено (нет имени/инвайта): ${data.skipped}`);
       alert(parts.join('\n'));

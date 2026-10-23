@@ -53,6 +53,8 @@ const STAGES: { key: keyof LiFunnel; label: string }[] = [
 ];
 
 const ERROR_COLOR = '#ef4444';
+// Сообщения зелёные: оранжевый из палитры сливался с красными ошибками.
+const MESSAGE_COLOR = '#22c55e';
 
 function funnelOption(funnel: LiFunnel, theme: ChartTheme, animate: boolean): EChartsCoreOption {
   const stages = STAGES.map((s) => ({ name: s.label, value: funnel[s.key] }));
@@ -70,7 +72,7 @@ function funnelOption(funnel: LiFunnel, theme: ChartTheme, animate: boolean): EC
         const value = item.value ?? 0;
         return `<div style="font-weight:600">${item.name ?? ''}</div>
                 <div style="margin-top:4px;font-variant-numeric:tabular-nums">${value}
-                <span style="opacity:.7"> · ${Math.round((value / total) * 100)}% от всех лидов</span></div>`;
+                <span style="opacity:.7"> · ${Math.round((value / total) * 100)}% от всех контактов</span></div>`;
       },
     },
     series: [
@@ -93,6 +95,10 @@ function funnelOption(funnel: LiFunnel, theme: ChartTheme, animate: boolean): EC
           fontSize: 13,
           fontWeight: 600,
           fontFamily: CHART_FONT,
+          // Без толстой обводки: только лёгкая тень, чтобы белый текст читался на светлых ступенях.
+          textBorderWidth: 0,
+          textShadowColor: 'rgba(0, 0, 0, 0.35)',
+          textShadowBlur: 3,
           formatter: (params: unknown) => {
             const item = params as { name?: string; value?: number };
             return `${item.name ?? ''} — ${item.value ?? 0}`;
@@ -119,10 +125,10 @@ export function LiFunnelChart({ funnel, height = 340 }: { funnel: LiFunnel; heig
     [funnel, theme, reducedMotion],
   );
 
-  if (funnel.total === 0) return <p className="text-xs text-gray-400">Нет лидов</p>;
+  if (funnel.total === 0) return <p className="text-xs text-gray-400">Нет контактов</p>;
   return (
     <div ref={rootRef}>
-      {option ? <EChart option={option} height={height} ariaLabel="Воронка лидов LinkedIn" /> : <div style={{ height }} />}
+      {option ? <EChart option={option} height={height} ariaLabel="Воронка контактов LinkedIn" /> : <div style={{ height }} />}
       <div className="mt-2 flex items-center gap-2 border-t border-gray-100 pt-2 text-xs text-gray-500">
         <span className="font-semibold text-gray-900">Всего {funnel.total}</span>
         <span>
@@ -197,7 +203,7 @@ function timelineOption(days: LiTimelineDay[], theme: ChartTheme, animate: boole
     },
     series: [
       line('Инвайты', days.map((d) => d.invites), seriesColor(theme, 0)),
-      line('Сообщения', days.map((d) => d.messages), seriesColor(theme, 1)),
+      line('Сообщения', days.map((d) => d.messages), MESSAGE_COLOR),
       ...(hasErrors ? [line('Ошибки', days.map((d) => d.errors), ERROR_COLOR)] : []),
     ],
   };

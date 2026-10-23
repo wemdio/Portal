@@ -1,12 +1,16 @@
 'use client';
 
+import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
-import { BarChart3, Megaphone, Search, UserCircle } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowLeft, BarChart3, Eye, Megaphone, Pause, Pencil, Play, Search, Square, Trash2, UserCircle } from 'lucide-react';
+import { RowActionsMenu, type RowAction } from '@/components/sender/RowActionsMenu';
 import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
-import LiDashboard, { type LiActivity } from '@/components/li-outreach/LiDashboard';
+import LiDashboard, { type LiActivity, type LiDashPeriod } from '@/components/li-outreach/LiDashboard';
 import CampaignBases, { OrphanBases } from '@/components/li-outreach/CampaignBases';
+import CampaignSummary from '@/components/li-outreach/CampaignSummary';
+import TaskLeadsModal, { type TaskLead } from '@/components/li-outreach/TaskLeadsModal';
 
 // ---- Types ------------------------------------------------------------------
 
@@ -43,6 +47,10 @@ const COOLDOWN_REASON_LABELS: Record<LiAccountCooldownReason, string> = {
 
 // Русские лейблы статусов кампании для бейджей в списке. Бэкенд хранит
 // статус в исходном виде (`draft`/`running`/...) — переводим только в UI.
+// Колонки строки кампании: шапка и строки делят одну сетку, цифры выровнены вправо.
+// Название чуть уже, пять колонок делят остальное поровну: промежутки одинаковые, действия — в меню «⋯».
+const CAMPAIGN_ROW_GRID = 'grid grid-cols-[minmax(180px,1fr)_110px_96px_minmax(170px,1.2fr)_88px_72px_80px_64px_104px_44px] items-center gap-4';
+
 const CAMPAIGN_STATUS_LABEL_RU: Record<string, string> = {
   draft: 'черновик',
   running: 'запущена',
@@ -87,18 +95,18 @@ function formatCooldownRemaining(until: string): string {
 type LiLeadList = { id: string; user_id?: string; owner_name?: string | null; name: string; description: string | null; created_at: string; has_custom_invites?: boolean; leads_count?: number; campaign_id?: string | null };
 type LiLead = { id: string; name: string; first_name: string | null; last_name: string | null; position: string | null; company: string | null; profile_url: string | null; status: string; lead_list_id: string | null; invite_text: string | null; created_at: string };
 
-type DashboardCompanyRow = { company: string; total: number; new: number; invited: number; connected: number; messaged: number; replied: number; completed: number; error: number };
 type DashboardCampaignStat = {
   id: string; name: string; status: string; daily_invite_limit: number; invites_sent_today: number;
   leads_total: number; pending: number; in_progress: number; waiting: number; completed: number;
   error: number; skipped: number; replied: number; accepted: number; reply_rate: number; accept_rate: number;
+  completed_period?: number; error_period?: number; skipped_period?: number;
   funnel: DashboardFunnel;
   activity: LiActivity;
 };
 type DashboardFunnel = { new: number; invited: number; already_invited: number; connected: number; messaged: number; replied: number; completed: number; error: number; total: number };
 type DashboardData = {
+  period?: { from: string; to: string; days: number };
   funnel: DashboardFunnel;
-  by_company: DashboardCompanyRow[];
   campaign_stats: DashboardCampaignStat[];
   activity: LiActivity;
 };
@@ -129,6 +137,8 @@ type LiCampaign = {
   /** Окна "HH:MM-HH:MM", в которые runner работает. Пустой массив = 24/7. */
   working_hours: string[] | null;
   timezone_offset: number | null;
+  /** Не null — кампания в архиве (убрана из основного списка). */
+  archived_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -160,6 +170,12 @@ type CampaignStep = { type?: unknown; message?: unknown; days?: unknown; hours?:
 const UNLISTED_LEAD_LIST_FILTER = '__unlisted__';
 const UNLISTED_LEAD_LIST_QUERY = '__none';
 
+/** Модель AI для LinkedIn-кампаний: одна на всех, не настраивается. */
+const LI_AI_MODEL = 'google/gemini-3.1-pro-preview';
+
+/** Задач скрапера на странице. */
+const TASKS_PER_PAGE = 10;
+
 const DEFAULT_CAMPAIGN_FORM = {
   name: '',
   /** Аккаунты кампании: несколько, но один аккаунт — только в одной кампании. */
@@ -170,6 +186,7 @@ const DEFAULT_CAMPAIGN_FORM = {
   followup1_message: 'Добрый день! Мы подключились недавно, и мне интересно узнать больше о вашем опыте.',
   followup1_days: 2,
   followup1_hours: 0,
+  followup1_enabled: true,
   followup2_enabled: true,
   followup2_message: 'Добрый день! Хотел напомнить о себе. Давайте созвонимся на 15 минут?',
   followup2_days: 3,
@@ -184,7 +201,7 @@ const DEFAULT_CAMPAIGN_FORM = {
   message_existing_connections: false,
   use_ai_welcome: false,
   use_ai_followup: true,
-  ai_model: 'openai/gpt-4o-mini',
+  ai_model: LI_AI_MODEL,
   // Использовать персонализированный текст инвайта из колонки li_leads.invite_text
   // (импорт через «CSV с инвайтами»). Тумблер появляется в редакторе кампании
   // только если выбранный список имеет has_custom_invites=true.
@@ -239,7 +256,10 @@ export default function LiOutreachPage() {
   const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(() => new Set());
   const [deletingLeads, setDeletingLeads] = useState(false);
   const [campaigns, setCampaigns] = useState<LiCampaign[]>([]);
+  const [showArchivedCampaigns, setShowArchivedCampaigns] = useState(false);
   const [tasks, setTasks] = useState<LiTask[]>([]);
+  const [tasksPage, setTasksPage] = useState(0);
+  const [viewTask, setViewTask] = useState<LiTask | null>(null);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [campaignLogs, setCampaignLogs] = useState<LiCampaignLog[]>([]);
   // Флаги первичной загрузки для каждой вкладки. Показываем крутящийся
@@ -282,7 +302,7 @@ export default function LiOutreachPage() {
   /** Страница кампании: настройки или логи (логи — только у существующей). */
   /** База, которую нужно раскрыть при открытии раздела «Базы» (переход из скрапера). */
   const [focusBaseId, setFocusBaseId] = useState<string | null>(null);
-  const [campaignPageTab, setCampaignPageTab] = useState<'settings' | 'bases' | 'logs'>('settings');
+  const [campaignPageTab, setCampaignPageTab] = useState<'summary' | 'settings' | 'bases' | 'logs'>('summary');
   const [cf, setCf] = useState(DEFAULT_CAMPAIGN_FORM);
 
   /** Закрывает страницу кампании и возвращает к списку. Сама форма (`cf`) НЕ
@@ -295,8 +315,7 @@ export default function LiOutreachPage() {
   // Dashboard data
   const [dashData, setDashData] = useState<DashboardData | null>(null);
   const [dashLoading, setDashLoading] = useState(false);
-  const [companySearch, setCompanySearch] = useState('');
-  const [companySortKey, setCompanySortKey] = useState<'total' | 'replied' | 'connected' | 'invited'>('total');
+  const [dashPeriod, setDashPeriod] = useState<LiDashPeriod>({ mode: '30', from: '', to: '' });
 
   // CSV import
   const [importing, setImporting] = useState(false);
@@ -376,10 +395,14 @@ export default function LiOutreachPage() {
       setLoadingCampaignLogs(false);
     }
   }, []);
-  const loadDashboard = useCallback(async () => {
+  const loadDashboard = useCallback(async (period: LiDashPeriod = dashPeriod) => {
     setDashLoading(true);
-    try { const d = await api<DashboardData>('/dashboard'); setDashData(d); } catch (e) { console.error('[li-outreach] loadDashboard failed', e); } finally { setDashLoading(false); }
-  }, []);
+    const query = period.mode === 'custom'
+      ? (period.from && period.to ? `?from=${period.from}&to=${period.to}` : '')
+      : `?days=${period.mode}`;
+    try { const d = await api<DashboardData>(`/dashboard${query}`); setDashData(d); } catch (e) { console.error('[li-outreach] loadDashboard failed', e); } finally { setDashLoading(false); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dashPeriod]);
 
   useEffect(() => {
     let cancelled = false;
@@ -499,6 +522,20 @@ export default function LiOutreachPage() {
   const syncAccounts = async () => { setSyncing(true); try { await api('/accounts/sync', { method: 'POST', json: {} }); await loadAccounts(); } finally { setSyncing(false); } };
   const startCampaign = async (id: string) => { await api(`/campaigns/${id}/start`, { method: 'POST', json: {} }); await loadCampaigns(); };
   const stopCampaign = async (id: string) => { await api(`/campaigns/${id}/stop`, { method: 'POST', json: {} }); await loadCampaigns(); };
+  const archiveCampaign = async (id: string, archived: boolean) => { await api(`/campaigns/${id}`, { method: 'PUT', json: { archived } }); await loadCampaigns(); };
+  /** Действия строки кампании — в меню «⋯». */
+  const campaignActions = (c: LiCampaign): RowAction[] => {
+    const items: RowAction[] = [];
+    if (c.status === 'running') items.push({ label: 'Остановить', icon: Square, onClick: () => void stopCampaign(c.id) });
+    else if (!c.archived_at) items.push({ label: 'Запустить', icon: Play, onClick: () => void startCampaign(c.id) });
+    if (c.status !== 'running') {
+      items.push(c.archived_at
+        ? { label: 'Вернуть из архива', icon: ArchiveRestore, onClick: () => void archiveCampaign(c.id, false) }
+        : { label: 'В архив', icon: Archive, onClick: () => void archiveCampaign(c.id, true) });
+    }
+    items.push({ label: 'Удалить', icon: Trash2, danger: true, onClick: () => void deleteCampaign(c.id) });
+    return items;
+  };
   const deleteCampaign = async (id: string) => { if (!confirm('Удалить кампанию?')) return; await api(`/campaigns/${id}`, { method: 'DELETE' }); await loadCampaigns(); };
 
   const startScrape = async () => {
@@ -538,25 +575,19 @@ export default function LiOutreachPage() {
 
   const cancelTask = async (taskId: string) => { await api(`/scraper/tasks/${taskId}/cancel`, { method: 'POST', json: {} }); void loadTasks(); };
 
-  /**
-   * «Повторить» — копирует параметры завершённой задачи в форму скрапера
-   * вверху и переключает вкладку search/reactions, чтобы оператор мог сразу
-   * нажать «Запустить». Поле lead_list_id — мягкий fallback: если список с
-   * того момента удалили, оставляем пустым, иначе селект показал бы пустой
-   * id и сбросился к «—».
-   */
-  const repeatTask = (task: LiTask) => {
-    const params = task.params ?? {};
-    const isReactions = task.type === 'post_reactions';
-    setScraperType(isReactions ? 'reactions' : 'search');
-    setScraperUrl(String(isReactions ? (params.post_url ?? '') : (params.search_url ?? '')));
-    setScraperAccountId(params.account_id ?? '');
-    const listStillExists = params.lead_list_id && leadLists.some((l) => l.id === params.lead_list_id);
-    setScraperListId(listStillExists ? String(params.lead_list_id) : '');
-    setScraperMax(typeof params.max_results === 'number' ? params.max_results : 100);
-    // Прокрутим к форме чтобы оператор сразу увидел подставленные значения.
-    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
+  const deleteTask = async (taskId: string) => {
+    if (!confirm('Удалить задачу из списка? Собранные контакты останутся в базе.')) return;
+    try {
+      await api(`/scraper/tasks/${taskId}`, { method: 'DELETE' });
+      await loadTasks();
+    } catch (e) {
+      alert('Ошибка: ' + (e instanceof Error ? e.message : e));
+    }
   };
+
+  /** Контакты, которые собрала задача, — для окна по значку «глаз». */
+  const loadTaskLeads = (taskId: string) =>
+    api<{ leads: TaskLead[]; total: number; listMissing?: boolean }>(`/scraper/tasks/${taskId}/leads`);
 
   /**
    * Название аккаунта для подписи под задачей. Читаем сначала снимок из
@@ -572,29 +603,6 @@ export default function LiOutreachPage() {
     if (!id) return '—';
     const acc = accounts.find((a) => a.id === id);
     return acc?.name || acc?.unipile_account_id || 'аккаунт удалён';
-  };
-
-  /** Название списка лидов по id — снимок → lookup → fallback. */
-  const listLabel = (params: Record<string, unknown>): string => {
-    const snapshot = String(params.lead_list_name ?? '').trim();
-    if (snapshot) return snapshot;
-    const id = String(params.lead_list_id ?? '').trim();
-    if (!id) return 'без списка';
-    const l = leadLists.find((x) => x.id === id);
-    return l?.name ?? 'список удалён';
-  };
-
-  /** Перейти к базе, которую собрал скрапер: страница её кампании → «Базы» → база раскрыта. */
-  const openScrapedBase = (listId: string) => {
-    const list = leadLists.find((l) => l.id === listId);
-    if (!list) return;
-    const campaign = list.campaign_id ? campaigns.find((c) => c.id === list.campaign_id) : null;
-    setTab('campaigns');
-    if (campaign) {
-      openEditCampaignForm(campaign);
-      setCampaignPageTab('bases');
-      setFocusBaseId(listId);
-    }
   };
 
   /** Тип таски → человекочитаемое название. */
@@ -616,48 +624,57 @@ export default function LiOutreachPage() {
     }
   };
 
+  /** Тело запроса кампании из формы — одно и для создания, и для автосохранения. */
+  const buildCampaignBody = () => {
+    const steps: { type: string; message?: string; days?: number; hours?: number }[] = [
+      { type: 'invite', message: cf.invite_message },
+      ...(cf.followup1_enabled
+        ? [
+            { type: 'wait', days: cf.followup1_days, hours: cf.followup1_hours },
+            { type: 'message', message: cf.followup1_message },
+          ]
+        : []),
+    ];
+    if (cf.followup2_enabled && cf.followup1_enabled) {
+      steps.push({ type: 'wait', days: cf.followup2_days, hours: cf.followup2_hours });
+      steps.push({ type: 'message', message: cf.followup2_message });
+    }
+    return {
+      name: cf.name,
+      account_ids: cf.account_ids,
+      lead_list_id: cf.lead_list_id || null,
+      steps,
+      use_ai: cf.use_ai,
+      stop_on_reply: cf.stop_on_reply,
+      daily_invite_limit: cf.daily_invite_limit,
+      min_delay: cf.min_delay,
+      max_delay: cf.max_delay,
+      welcome_message: cf.welcome_message || null,
+      ai_prompt_invite: cf.ai_prompt_invite || null,
+      ai_prompt_chat: cf.ai_prompt_chat || null,
+      message_existing_connections: cf.message_existing_connections,
+      use_ai_welcome: cf.use_ai_welcome,
+      use_ai_followup: cf.use_ai_followup,
+      ai_model: LI_AI_MODEL,
+      use_custom_invites: cf.use_custom_invites,
+      // UI хранит окна как строку через запятую (см. TG outreach
+      // sleep_periods), API нормализатор принимает оба формата.
+      working_hours: cf.working_hours
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+      timezone_offset: cf.timezone_offset,
+    };
+  };
+
   const createCampaign = async () => {
     if (!cf.name.trim()) { alert('Введите название кампании'); return; }
     if (cf.account_ids.length === 0) { alert('Выберите хотя бы один аккаунт'); return; }
     setCreating(true);
     try {
-      const steps: { type: string; message?: string; days?: number; hours?: number }[] = [
-        { type: 'invite', message: cf.invite_message },
-        { type: 'wait', days: cf.followup1_days, hours: cf.followup1_hours },
-        { type: 'message', message: cf.followup1_message },
-      ];
-      if (cf.followup2_enabled) {
-        steps.push({ type: 'wait', days: cf.followup2_days, hours: cf.followup2_hours });
-        steps.push({ type: 'message', message: cf.followup2_message });
-      }
       await api(editingCampaignId ? `/campaigns/${editingCampaignId}` : '/campaigns', {
         method: editingCampaignId ? 'PUT' : 'POST',
-        json: {
-          name: cf.name,
-          account_ids: cf.account_ids,
-          lead_list_id: cf.lead_list_id || null,
-          steps,
-          use_ai: cf.use_ai,
-          stop_on_reply: cf.stop_on_reply,
-          daily_invite_limit: cf.daily_invite_limit,
-          min_delay: cf.min_delay,
-          max_delay: cf.max_delay,
-          welcome_message: cf.welcome_message || null,
-          ai_prompt_invite: cf.ai_prompt_invite || null,
-          ai_prompt_chat: cf.ai_prompt_chat || null,
-          message_existing_connections: cf.message_existing_connections,
-          use_ai_welcome: cf.use_ai_welcome,
-          use_ai_followup: cf.use_ai_followup,
-          ai_model: cf.ai_model || null,
-          use_custom_invites: cf.use_custom_invites,
-          // UI хранит окна как строку через запятую (см. TG outreach
-          // sleep_periods), API нормализатор принимает оба формата.
-          working_hours: cf.working_hours
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean),
-          timezone_offset: cf.timezone_offset,
-        },
+        json: buildCampaignBody(),
       });
       setShowCreate(false);
       setEditingCampaignId(null);
@@ -669,6 +686,48 @@ export default function LiOutreachPage() {
       setCreating(false);
     }
   };
+
+  // Автосохранение настроек существующей кампании (как в «TG Аутриче»): через 0,8 с после
+  // последней правки. Сохранения идут по очереди; первый снимок после открытия — точка отсчёта.
+  const [autoSave, setAutoSave] = useState<{ state: 'idle' | 'saving' | 'saved' | 'error'; message?: string }>({ state: 'idle' });
+  const autoSaveBaseline = useRef<string | null>(null);
+  const autoSaveChain = useRef<Promise<void>>(Promise.resolve());
+  const autoSaveBody = useRef(buildCampaignBody);
+  autoSaveBody.current = buildCampaignBody;
+  useEffect(() => {
+    autoSaveBaseline.current = null;
+    setAutoSave({ state: 'idle' });
+  }, [editingCampaignId]);
+  const cfKey = JSON.stringify(cf);
+  useEffect(() => {
+    if (!showCreate || !editingCampaignId) return;
+    if (autoSaveBaseline.current === null) {
+      autoSaveBaseline.current = cfKey;
+      return;
+    }
+    if (cfKey === autoSaveBaseline.current) return;
+    if (!cf.name.trim() || cf.account_ids.length === 0) {
+      setAutoSave({ state: 'error', message: 'Нужны название и хотя бы один аккаунт — изменения пока не сохранены' });
+      return;
+    }
+    setAutoSave({ state: 'idle' });
+    const campaignId = editingCampaignId;
+    const timer = setTimeout(() => {
+      autoSaveChain.current = autoSaveChain.current.then(async () => {
+        setAutoSave({ state: 'saving' });
+        try {
+          await api(`/campaigns/${campaignId}`, { method: 'PUT', json: autoSaveBody.current() });
+          autoSaveBaseline.current = cfKey;
+          setAutoSave({ state: 'saved' });
+          void loadCampaigns();
+        } catch (e) {
+          setAutoSave({ state: 'error', message: e instanceof Error ? e.message : 'Не удалось сохранить настройки' });
+        }
+      });
+    }, 800);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfKey, showCreate, editingCampaignId]);
 
   const openCreateCampaignForm = () => {
     setEditingCampaignId(null);
@@ -701,6 +760,7 @@ export default function LiOutreachPage() {
       followup1_message: followup1Message,
       followup1_days: toNumber(waitSteps[0]?.days, DEFAULT_CAMPAIGN_FORM.followup1_days, 0),
       followup1_hours: toNumber(waitSteps[0]?.hours, DEFAULT_CAMPAIGN_FORM.followup1_hours, 0, 23),
+      followup1_enabled: Boolean(waitSteps[0] || messageSteps[0]),
       followup2_enabled: hasFollowup2,
       followup2_message: followup2Message,
       followup2_days: toNumber(waitSteps[1]?.days, DEFAULT_CAMPAIGN_FORM.followup2_days, 0),
@@ -732,7 +792,7 @@ export default function LiOutreachPage() {
     setFocusBaseId(null);
     setEditingCampaignId(campaign.id);
     setSelectedCampaignId(campaign.id);
-    setCampaignPageTab('settings');
+    setCampaignPageTab('summary');
     setShowCreate(true);
   };
 
@@ -789,7 +849,7 @@ export default function LiOutreachPage() {
     setImporting(true);
     setImportError(null);
     try {
-      if (!importListId) throw new Error('Выберите список для импорта');
+      if (!importListId) throw new Error('Выберите базу контактов для импорта');
       const token = await getAccessToken();
       if (!token) throw new Error('Not authenticated');
       const fd = new FormData();
@@ -850,8 +910,8 @@ export default function LiOutreachPage() {
         error?: string;
       };
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-      const parts = [`Импортировано лидов: ${data.imported ?? 0}`];
-      if (data.lead_list?.name) parts.push(`Создан список: «${data.lead_list.name}»`);
+      const parts = [`Импортировано контактов: ${data.imported ?? 0}`];
+      if (data.lead_list?.name) parts.push(`Создана база: «${data.lead_list.name}»`);
       if ((data.skipped ?? 0) > 0) parts.push(`Пропущено (нет имени/инвайта): ${data.skipped}`);
       alert(parts.join('\n'));
       setShowImportInvitesModal(false);
@@ -869,7 +929,7 @@ export default function LiOutreachPage() {
   };
 
   const deleteLeadList = async (list: LiLeadList) => {
-    if (!confirm(`Удалить список "${list.name}"?`)) return;
+    if (!confirm(`Удалить базу "${list.name}"?`)) return;
     try {
       await api(`/lead-lists/${list.id}`, { method: 'DELETE' });
       const nextFilterId = leadListFilterId === list.id ? '' : leadListFilterId;
@@ -915,7 +975,7 @@ export default function LiOutreachPage() {
         ? `из списка "${currentListName}"`
         : 'из общего списка';
 
-    if (!confirm(`Удалить ${ids.length} выбранных лидов ${scopeLabel}? Это удалит их из базы.`)) return;
+    if (!confirm(`Удалить ${ids.length} выбранных контактов ${scopeLabel}? Это удалит их из базы.`)) return;
 
     setDeletingLeads(true);
     try {
@@ -925,7 +985,7 @@ export default function LiOutreachPage() {
       await loadLeadLists();
       if (tab === 'dashboard') await loadDashboard();
     } catch (e) {
-      alert('Ошибка удаления лидов: ' + (e instanceof Error ? e.message : e));
+      alert('Ошибка удаления контактов: ' + (e instanceof Error ? e.message : e));
     } finally {
       setDeletingLeads(false);
     }
@@ -977,6 +1037,8 @@ export default function LiOutreachPage() {
     await Promise.all([loadLeadLists(), loadCampaigns()]);
   }, [loadLeadLists, loadCampaigns]);
 
+  const archivedCount = campaigns.filter((c) => c.archived_at).length;
+  const visibleCampaigns = campaigns.filter((c) => !!c.archived_at === showArchivedCampaigns);
   const editingCampaign = useMemo(() => campaigns.find((c) => c.id === editingCampaignId) ?? null, [campaigns, editingCampaignId]);
 
 
@@ -984,7 +1046,7 @@ export default function LiOutreachPage() {
     <div className="no-focus-ring min-w-0 space-y-6 overflow-x-clip text-left max-w-full lg:pl-14">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">LinkedIn Outreach</h1>
-        <p className="text-sm text-gray-500">Кампании, AI-персонализация, скрапинг лидов через Unipile.</p>
+        <p className="text-sm text-gray-500">Кампании, AI-персонализация, скрапинг контактов через Unipile.</p>
       </div>
 
       {/* Разделы — колонкой значков слева, как в TG-аутриче. */}
@@ -998,6 +1060,8 @@ export default function LiOutreachPage() {
           {dashData && (
             <LiDashboard
               data={dashData}
+              period={dashPeriod}
+              onPeriodChange={(next) => { setDashPeriod(next); if (next.mode !== 'custom' || (next.from && next.to)) void loadDashboard(next); }}
               accounts={accounts.filter((a) => a.user_id === currentUserId)}
               onOpenAccounts={() => setTab('accounts')}
               onOpenCampaigns={() => setTab('campaigns')}
@@ -1014,7 +1078,7 @@ export default function LiOutreachPage() {
                     <tr className="border-b border-gray-100">
                       <th className="text-left px-3 py-2 text-xs text-gray-500 font-medium">Кампания</th>
                       <th className="text-center px-2 py-2 text-xs text-gray-500 font-medium">Статус</th>
-                      <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Лидов</th>
+                      <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium" title="Сколько контактов сейчас в рассылке этой кампании">Контактов в рассылке</th>
                       <th
                         className="text-right px-2 py-2 text-xs text-gray-500 font-medium"
                         title="Сколько инвайтов отправлено сегодня из дневного лимита. Счётчик сбрасывается в полночь."
@@ -1023,38 +1087,37 @@ export default function LiOutreachPage() {
                       </th>
                       <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Принято</th>
                       <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Ответили</th>
-                      <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Accept %</th>
-                      <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Reply %</th>
+                      <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium" title="Принято / отправлено инвайтов за выбранный период">Принято, %</th>
+                      <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium" title="Ответили / приняли за выбранный период">Ответили, %</th>
                       <th
                         className="px-2 py-2 text-xs text-gray-500 font-medium w-56"
-                        title="Обработано = Завершено + Ошибки + Пропущено от общего числа лидов в кампании"
+                        title="Обработано за выбранный период = Завершено + Ошибки + Пропущено от общего числа контактов в кампании"
                       >
-                        Обработано
-                        <span className="ml-1 inline-flex items-center justify-center w-3.5 h-3.5 rounded-full bg-gray-200 text-gray-500 text-[9px] cursor-help" title="Доля лидов, по которым кампания уже отработала все шаги либо остановилась (успех / ошибка / пропуск). Остальные — в работе или ждут очереди.">?</span>
+                        Обработано за период
+                        <span className="ml-1 inline-flex items-center justify-center w-3.5 h-3.5 rounded-full bg-gray-200 text-gray-500 text-[9px] cursor-help" title="Доля контактов, по которым кампания уже отработала все шаги либо остановилась (успех / ошибка / пропуск). Остальные — в работе или ждут очереди.">?</span>
                       </th>
                     </tr>
                   </thead>
                   <tbody>
                     {dashData.campaign_stats.map((cs) => {
-                      const processed = cs.completed + cs.error + cs.skipped;
+                      // Всё за выбранный период, кроме «Осталось»: оно считается на сейчас.
+                      const completedP = cs.completed_period ?? cs.completed;
+                      const errorP = cs.error_period ?? cs.error;
+                      const skippedP = cs.skipped_period ?? cs.skipped;
+                      const processed = completedP + errorP + skippedP;
+                      const invitesP = cs.activity.timeline.reduce((sum, d) => sum + d.invites, 0);
+                      const acceptPct = invitesP > 0 ? `${Math.min(100, Math.round((cs.accepted / invitesP) * 100))}%` : '—';
+                      const replyPct = cs.accepted > 0 ? `${Math.min(100, Math.round((cs.replied / cs.accepted) * 100))}%` : '—';
                       const doneRatio = cs.leads_total > 0 ? Math.round((processed / cs.leads_total) * 100) : 0;
                       const pendingActive = cs.pending + cs.in_progress + cs.waiting;
-                      const pctCompleted = cs.leads_total > 0 ? (cs.completed / cs.leads_total) * 100 : 0;
-                      const pctError = cs.leads_total > 0 ? (cs.error / cs.leads_total) * 100 : 0;
-                      const pctSkipped = cs.leads_total > 0 ? (cs.skipped / cs.leads_total) * 100 : 0;
-                      const tooltip = `Обработано ${processed} из ${cs.leads_total} лидов (${doneRatio}%)\n` +
-                        `  ✓ Завершено: ${cs.completed}\n` +
-                        `  ✗ Ошибки: ${cs.error}\n` +
-                        `  ⤼ Пропущено: ${cs.skipped}\n` +
-                        `Осталось: ${pendingActive}\n` +
-                        `  • В очереди: ${cs.pending}\n` +
-                        `  • Сейчас обрабатываются: ${cs.in_progress}\n` +
-                        `  • Ждут следующего шага: ${cs.waiting}`;
+                      const pctCompleted = cs.leads_total > 0 ? (completedP / cs.leads_total) * 100 : 0;
+                      const pctError = cs.leads_total > 0 ? (errorP / cs.leads_total) * 100 : 0;
+                      const pctSkipped = cs.leads_total > 0 ? (skippedP / cs.leads_total) * 100 : 0;
                       return (
-                        <tr key={cs.id} className="border-b border-gray-50 hover:bg-gray-50/50">
+                        <tr key={cs.id} className="li-row-hover border-b border-gray-50 hover:bg-gray-50/50">
                           <td className="px-3 py-2.5 font-medium text-gray-900 max-w-[200px] truncate">{cs.name}</td>
                           <td className="px-2 py-2.5 text-center">
-                            <span className={`text-xs px-2 py-0.5 rounded-md font-medium ${cs.status === 'running' ? 'bg-green-100 text-green-700' : cs.status === 'draft' ? 'bg-gray-100 text-gray-600' : cs.status === 'paused' ? 'bg-amber-100 text-amber-700' : cs.status === 'completed' ? 'bg-cyan-100 text-cyan-700' : 'bg-gray-100 text-gray-600'}`}>
+                            <span className={`text-xs px-2 py-0.5 rounded-md font-medium ${cs.status === 'running' ? 'bg-green-100 text-green-700' : cs.status === 'draft' ? 'bg-gray-100 text-gray-600' : cs.status === 'paused' || cs.status === 'stopped' ? 'bg-amber-100 text-amber-700' : cs.status === 'completed' ? 'bg-cyan-100 text-cyan-700' : 'bg-gray-100 text-gray-600'}`}>
                               {cs.status === 'running' ? '● Активна' : CAMPAIGN_STATUS_LABEL_RU[cs.status] ?? cs.status}
                             </span>
                           </td>
@@ -1077,9 +1140,10 @@ export default function LiOutreachPage() {
                           </td>
                           <td className="px-2 py-2.5 text-right tabular-nums text-blue-700 font-medium">{cs.accepted}</td>
                           <td className="px-2 py-2.5 text-right tabular-nums text-green-700 font-medium">{cs.replied}</td>
-                          <td className="px-2 py-2.5 text-right tabular-nums">{cs.accept_rate}%</td>
-                          <td className="px-2 py-2.5 text-right tabular-nums">{cs.reply_rate}%</td>
-                          <td className="px-2 py-2.5" title={tooltip}>
+                          <td className="px-2 py-2.5 text-right tabular-nums">{acceptPct}</td>
+                          <td className="px-2 py-2.5 text-right tabular-nums">{replyPct}</td>
+                          <td className="px-2 py-2.5">
+                            <ProcessedCell cs={cs} processed={processed} doneRatio={doneRatio} pendingActive={pendingActive} completed={completedP} error={errorP} skipped={skippedP}>
                             <div className="flex items-center gap-2">
                               <div className="flex-1 h-2 rounded-full bg-gray-100 overflow-hidden flex">
                                 {pctCompleted > 0 && <div className="h-full bg-green-500 transition-all" style={{ width: `${pctCompleted}%` }} />}
@@ -1091,6 +1155,7 @@ export default function LiOutreachPage() {
                             <div className="text-[10px] text-gray-500 mt-0.5 tabular-nums">
                               {processed} из {cs.leads_total} · осталось {pendingActive}
                             </div>
+                            </ProcessedCell>
                           </td>
                         </tr>
                       );
@@ -1107,101 +1172,6 @@ export default function LiOutreachPage() {
               </div>
             </div>
           )}
-
-          {/* By company */}
-          {dashData && dashData.by_company.length > 0 && (
-            <div className="rounded-xl border border-gray-200 bg-white p-5">
-              <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-                <h3 className="text-sm font-semibold text-gray-900">Статистика по компаниям</h3>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    placeholder="Поиск компании…"
-                    value={companySearch}
-                    onChange={(e) => setCompanySearch(e.target.value)}
-                    className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs w-48"
-                  />
-                  <select
-                    value={companySortKey}
-                    onChange={(e) => setCompanySortKey(e.target.value as typeof companySortKey)}
-                    className="rounded-lg border border-gray-200 px-2 py-1.5 text-xs"
-                  >
-                    <option value="total">По кол-ву лидов</option>
-                    <option value="replied">По ответам</option>
-                    <option value="connected">По подключениям</option>
-                    <option value="invited">По приглашениям</option>
-                  </select>
-                </div>
-              </div>
-              <CompanyTable rows={dashData.by_company} search={companySearch} sortKey={companySortKey} />
-            </div>
-          )}
-
-          {/* Accounts health + tasks */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div className="rounded-xl border border-gray-200 bg-white p-4">
-              <h3 className="text-sm font-semibold text-gray-900 mb-3">Аккаунты</h3>
-              {accounts.filter((a) => a.user_id === currentUserId).length === 0 ? (
-                <p className="text-xs text-gray-400">Нет аккаунтов. Откройте вкладку «Аккаунты» и нажмите «Синхронизировать».</p>
-              ) : (
-                <div className="space-y-2">
-                  {accounts.filter((a) => a.user_id === currentUserId).map((a) => {
-                    const cooling = isAccountInCooldown(a);
-                    return (
-                      <div key={a.id} className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${cooling ? 'bg-amber-50 border border-amber-200' : 'bg-gray-50'}`}>
-                        <span className={`shrink-0 w-2 h-2 rounded-full ${cooling ? 'bg-amber-500 animate-pulse' : a.is_active ? 'bg-green-500' : 'bg-gray-300'}`} />
-                        <div className="min-w-0 flex-1">
-                          <span className="font-medium text-gray-900 truncate block">{a.name || a.unipile_account_id}</span>
-                          {cooling ? (
-                            <span
-                              className="text-xs text-amber-700 truncate block"
-                              title={`Аккаунт в отлёжке до ${new Date(a.cooldown_until!).toLocaleString('ru-RU')}. Все кампании и скрапинг с этого аккаунта приостановлены.`}
-                            >
-                              💤 в отлёжке ещё {formatCooldownRemaining(a.cooldown_until!)} · {a.cooldown_reason ? COOLDOWN_REASON_LABELS[a.cooldown_reason] : '—'}
-                            </span>
-                          ) : a.headline ? (
-                            <span className="text-xs text-gray-500 truncate block">{a.headline}</span>
-                          ) : null}
-                        </div>
-                        <span className="text-[10px] text-gray-400 shrink-0">
-                          {a.last_synced_at ? `sync ${new Date(a.last_synced_at).toLocaleDateString()}` : 'не синхр.'}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-            <div className="rounded-xl border border-gray-200 bg-white p-4">
-              <h3 className="text-sm font-semibold text-gray-900 mb-3">Скрапер задачи</h3>
-              {tasks.length === 0 ? (
-                <p className="text-xs text-gray-400">Нет задач</p>
-              ) : (
-                <div className="space-y-2">
-                  {tasks.slice(0, 5).map((t) => {
-                    const pct = t.total > 0 ? Math.round((t.progress / t.total) * 100) : 0;
-                    return (
-                      <div key={t.id} className="rounded-lg bg-gray-50 px-3 py-2 text-sm">
-                        <div className="flex items-center justify-between">
-                          <span className="font-medium text-gray-900">{t.type}</span>
-                          <span className={`text-xs px-2 py-0.5 rounded-md font-medium ${t.status === 'completed' ? 'bg-green-100 text-green-700' : t.status === 'running' ? 'bg-blue-100 text-blue-700' : t.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-gray-200 text-gray-600'}`}>
-                            {t.status}
-                          </span>
-                        </div>
-                        <div className="mt-1.5 flex items-center gap-2">
-                          <div className="flex-1 h-1.5 rounded-full bg-gray-200 overflow-hidden">
-                            <div className={`h-full rounded-full transition-all ${t.status === 'completed' ? 'bg-green-500' : t.status === 'failed' ? 'bg-red-400' : 'bg-blue-500'}`} style={{ width: `${pct}%` }} />
-                          </div>
-                          <span className="text-xs text-gray-500 tabular-nums">{t.progress}/{t.total}</span>
-                        </div>
-                        {t.error_message && <p className="text-xs text-red-600 mt-1">{t.error_message}</p>}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </div>
         </div>
       )}
 
@@ -1211,32 +1181,53 @@ export default function LiOutreachPage() {
           {/* Create Campaign Panel */}
           {showCreate && (
             <div className="space-y-4">
-              <div className="flex flex-wrap items-center gap-3">
+              {/* Шапка как в «Рассылке»: назад, название, статус, крупный пуск/стоп и шестерёнка настроек. */}
+              <div className="flex flex-wrap items-center gap-3 border-b border-gray-200 pb-4">
                 <button
                   type="button"
                   onClick={closeCampaignModal}
-                  className="cursor-pointer rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                  aria-label="К списку кампаний"
+                  title="К списку кампаний"
+                  className="cursor-pointer rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900"
                 >
-                  ← Кампании
+                  <ArrowLeft className="h-5 w-5" />
                 </button>
-                <h2 id="li-campaign-modal-title" className="min-w-0 truncate text-lg font-semibold text-gray-900">
+                <h2 id="li-campaign-modal-title" className="min-w-0 truncate text-xl font-semibold text-gray-900">
                   {editingCampaignId ? (cf.name || 'Кампания') : 'Новая кампания'}
                 </h2>
                 {editingCampaign && (
                   <>
-                    <span className={`shrink-0 rounded-md px-2 py-0.5 text-xs ${editingCampaign.status === 'running' ? 'bg-green-100 text-green-700' : editingCampaign.status === 'draft' ? 'bg-gray-100 text-gray-600' : editingCampaign.status === 'completed' ? 'bg-cyan-100 text-cyan-700' : 'bg-amber-100 text-amber-700'}`}>
+                    <span className={`inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium ${editingCampaign.status === 'running' ? 'bg-green-100 text-green-700' : editingCampaign.status === 'draft' ? 'bg-gray-100 text-gray-600' : editingCampaign.status === 'completed' ? 'bg-cyan-100 text-cyan-700' : 'bg-amber-100 text-amber-700'}`}>
+                      <span className={`h-1.5 w-1.5 rounded-full ${editingCampaign.status === 'running' ? 'bg-green-500' : editingCampaign.status === 'draft' ? 'bg-gray-400' : editingCampaign.status === 'completed' ? 'bg-cyan-500' : 'bg-amber-500'}`} />
                       {CAMPAIGN_STATUS_LABEL_RU[editingCampaign.status] ?? editingCampaign.status}
                     </span>
-                    <div className="ml-auto flex items-center gap-3 text-xs">
-                      {editingCampaign.status !== 'running' && <button type="button" onClick={() => void startCampaign(editingCampaign.id)} className="cursor-pointer text-green-700 hover:underline">▶ Запустить</button>}
-                      {editingCampaign.status === 'running' && <button type="button" onClick={() => void stopCampaign(editingCampaign.id)} className="cursor-pointer text-amber-700 hover:underline">⏹ Остановить</button>}
+                    <div className="ml-auto flex items-center gap-2">
+                      {editingCampaign.status === 'running' ? (
+                        <button
+                          type="button"
+                          onClick={() => void stopCampaign(editingCampaign.id)}
+                          className="li-run-btn li-run-btn-stop inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border px-3 text-xs font-medium"
+                        >
+                          <Pause className="h-3.5 w-3.5" />
+                          Остановить
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void startCampaign(editingCampaign.id)}
+                          className="li-run-btn li-run-btn-start inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg px-3 text-xs font-medium"
+                        >
+                          <Play className="h-3.5 w-3.5" />
+                          {editingCampaign.status === 'draft' ? 'Запустить' : 'Продолжить'}
+                        </button>
+                      )}
                     </div>
                   </>
                 )}
               </div>
               {editingCampaignId && (
-                <div role="tablist" aria-label="Разделы кампании" className="inline-flex rounded-full border border-gray-200 p-0.5 text-xs font-medium">
-                  {(['settings', 'bases', 'logs'] as const).map((id) => (
+                <div role="tablist" aria-label="Разделы кампании" className="inline-flex gap-1 rounded-xl border border-gray-200 p-1 text-sm font-medium">
+                  {(['summary', 'bases', 'logs', 'settings'] as const).map((id) => (
                     <button
                       key={id}
                       type="button"
@@ -1246,14 +1237,23 @@ export default function LiOutreachPage() {
                         setCampaignPageTab(id);
                         if (id === 'logs' && editingCampaignId) void loadCampaignLogs(editingCampaignId);
                       }}
-                      className={`cursor-pointer rounded-full px-4 py-1.5 transition ${campaignPageTab === id ? 'bg-[#4f46e5] text-white' : 'text-gray-500 hover:text-gray-800'}`}
+                      className={`li-switch-btn cursor-pointer rounded-lg px-4 py-1.5 ${campaignPageTab === id ? 'li-switch-btn-on' : ''}`}
                     >
-                      {id === 'settings' ? 'Настройки' : id === 'bases' ? 'Базы' : 'Логи'}
+                      {id === 'summary' ? 'Сводка' : id === 'bases' ? 'Базы' : id === 'logs' ? 'Логи' : 'Настройки'}
                     </button>
                   ))}
                 </div>
               )}
-              {editingCampaignId && campaignPageTab === 'bases' ? (
+              {editingCampaignId && campaignPageTab === 'summary' ? (
+                <CampaignSummary
+                  stats={dashData?.campaign_stats.find((x) => x.id === editingCampaignId)}
+                  periodText={dashData?.period ? `за ${dashData.period.days} дн.` : 'за 30 дней'}
+                  accounts={(editingCampaign?.account_ids ?? [])
+                    .map((id) => accounts.find((a) => a.id === id))
+                    .filter((a): a is NonNullable<typeof a> => !!a)
+                    .map((a) => ({ id: a.id, name: a.name || a.unipile_account_id }))}
+                />
+              ) : editingCampaignId && campaignPageTab === 'bases' ? (
                 <CampaignBases
                   campaignId={editingCampaignId}
                   activeListId={editingCampaign?.lead_list_id ?? null}
@@ -1325,13 +1325,14 @@ export default function LiOutreachPage() {
                       {accounts
                         .filter((a) => a.is_active || cf.account_ids.includes(a.id))
                         .map((a) => {
-                          // Чужая кампания держит аккаунт — выбрать нельзя.
-                          const busyIn = (a.campaigns ?? []).find((c) => c.id !== editingCampaignId);
+                          // Запущенная чужая кампания держит аккаунт — выбрать нельзя. Остановленная отдаёт его.
+                          const busyIn = (a.campaigns ?? []).find((c) => c.id !== editingCampaignId && c.status === 'running');
+                          const takenFrom = (a.campaigns ?? []).find((c) => c.id !== editingCampaignId && c.status !== 'running');
                           const checked = cf.account_ids.includes(a.id);
                           return (
                             <label
                               key={a.id}
-                              title={busyIn ? `Занят кампанией «${busyIn.name}»` : undefined}
+                              title={busyIn ? `Занят запущенной кампанией «${busyIn.name}»` : takenFrom ? `Будет забран из остановленной кампании «${takenFrom.name}»` : undefined}
                               className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm ${busyIn && !checked ? 'cursor-not-allowed opacity-40' : 'cursor-pointer hover:bg-white/5'}`}
                             >
                               <input
@@ -1345,6 +1346,7 @@ export default function LiOutreachPage() {
                               />
                               <span className="min-w-0 flex-1 truncate">{a.name || a.unipile_account_id}</span>
                               {busyIn && !checked && <span className="shrink-0 text-[10px] text-amber-500">занят: {busyIn.name}</span>}
+                              {takenFrom && !checked && !busyIn && <span className="shrink-0 text-[10px] text-gray-400">заберётся из остановленной: {takenFrom.name}</span>}
                             </label>
                           );
                         })}
@@ -1388,22 +1390,20 @@ export default function LiOutreachPage() {
                     <div className="flex items-center gap-3 flex-wrap">
                       <div className="text-xs font-semibold text-blue-700">Шаг 1 — Инвайт</div>
                       {showCustomInvitesToggle && (
-                        <label
-                          className={`flex items-center gap-1.5 text-xs cursor-pointer ${canUseCustomInvites ? 'text-emerald-700' : 'text-amber-700'}`}
+                        <div
+                          className={`text-xs ${canUseCustomInvites ? 'text-emerald-700' : 'text-amber-700'}`}
                           title={
                             canUseCustomInvites
                               ? 'Брать персональный текст инвайта из CSV (вместо шаблона ниже). AI-персонализация пропускается — инвайт уже персонализирован.'
-                              : 'Текущий список не содержит персонализированных инвайтов — тумблер ничего не изменит, пока не выберете подходящий список.'
+                              : 'Текущая база не содержит персонализированных инвайтов — тумблер ничего не изменит, пока не выберете подходящую базу.'
                           }
                         >
-                          <input
-                            type="checkbox"
+                          <LiSwitch
                             checked={cf.use_custom_invites}
-                            onChange={(e) => setCf({ ...cf, use_custom_invites: e.target.checked })}
-                            className="rounded"
+                            onChange={(v) => setCf({ ...cf, use_custom_invites: v })}
+                            label="Использовать персонализированный инвайт из CSV"
                           />
-                          Использовать персонализированный инвайт из CSV
-                        </label>
+                        </div>
                       )}
                     </div>
                     <textarea
@@ -1414,7 +1414,7 @@ export default function LiOutreachPage() {
                     />
                     {cf.use_custom_invites && (
                       <p className="text-[11px] text-emerald-700">
-                        Включён персонализированный инвайт: у каждого лида берётся свой текст из CSV. Если у лида текста нет — fallback на шаблон выше.
+                        Включён персонализированный инвайт: у каждого контакта берётся свой текст из CSV. Если у контакта текста нет — fallback на шаблон выше.
                       </p>
                     )}
                   </div>
@@ -1429,7 +1429,11 @@ export default function LiOutreachPage() {
 
               {/* Step 3: Follow-up 1 */}
               <div className="rounded-lg border-l-4 border-green-400 bg-white p-3 space-y-2">
-                <div className="text-xs font-semibold text-green-700">Шаг 3 — Follow-up #1</div>
+                <div className="flex items-center gap-3">
+                  <LiSwitch checked={cf.followup1_enabled} onChange={(v) => setCf({ ...cf, followup1_enabled: v, followup2_enabled: v ? cf.followup2_enabled : false })} label="Включить" />
+                  <div className="text-xs font-semibold text-green-700">Шаг 3 — Follow-up #1</div>
+                </div>
+                {cf.followup1_enabled && (<>
                 <div className="flex gap-2 items-center">
                   <label className="text-xs text-gray-500">Задержка:</label>
                   <input type="number" min={0} value={cf.followup1_days} onChange={(e) => setCf({ ...cf, followup1_days: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
@@ -1438,18 +1442,16 @@ export default function LiOutreachPage() {
                   <span className="text-xs text-gray-400">часов</span>
                 </div>
                 <textarea rows={2} value={cf.followup1_message} onChange={(e) => setCf({ ...cf, followup1_message: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+                </>)}
               </div>
 
               {/* Step 4: Follow-up 2 (optional) */}
               <div className="rounded-lg border-l-4 border-amber-400 bg-white p-3 space-y-2">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <LiSwitch checked={cf.followup2_enabled && cf.followup1_enabled} disabled={!cf.followup1_enabled} onChange={(v) => setCf({ ...cf, followup2_enabled: v })} label="Включить" />
                   <div className="text-xs font-semibold text-amber-700">Шаг 4 — Follow-up #2</div>
-                  <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer">
-                    <input type="checkbox" checked={cf.followup2_enabled} onChange={(e) => setCf({ ...cf, followup2_enabled: e.target.checked })} className="rounded" />
-                    Включить
-                  </label>
                 </div>
-                {cf.followup2_enabled && (
+                {cf.followup2_enabled && cf.followup1_enabled && (
                   <>
                     <div className="flex gap-2 items-center">
                       <label className="text-xs text-gray-500">Задержка:</label>
@@ -1465,14 +1467,8 @@ export default function LiOutreachPage() {
 
               {/* Settings row */}
               <div className="flex flex-wrap gap-4 items-center">
-                <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
-                  <input type="checkbox" checked={cf.use_ai} onChange={(e) => setCf({ ...cf, use_ai: e.target.checked })} className="rounded" />
-                  AI-персонализация
-                </label>
-                <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
-                  <input type="checkbox" checked={cf.stop_on_reply} onChange={(e) => setCf({ ...cf, stop_on_reply: e.target.checked })} className="rounded" />
-                  Стоп при ответе
-                </label>
+                <LiSwitch checked={cf.use_ai} onChange={(v) => setCf({ ...cf, use_ai: v })} label="AI-персонализация" />
+                <LiSwitch checked={cf.stop_on_reply} onChange={(v) => setCf({ ...cf, stop_on_reply: v })} label="Стоп при ответе" />
                 <div className="flex items-center gap-1.5">
                   <label className="text-xs text-gray-600">Лимит/день:</label>
                   <input type="number" min={1} max={100} value={cf.daily_invite_limit} onChange={(e) => setCf({ ...cf, daily_invite_limit: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
@@ -1512,18 +1508,6 @@ export default function LiOutreachPage() {
                     Промпт персонализации используется для инвайтов и follow-up, промпт автоответов - для ответов на входящие сообщения.
                   </p>
                   <div>
-                    <label className="text-xs text-gray-600 block mb-1">Модель AI</label>
-                    <select
-                      value={cf.ai_model}
-                      onChange={(e) => setCf({ ...cf, ai_model: e.target.value })}
-                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
-                    >
-                      <option value="openai/gpt-4o-mini">openai/gpt-4o-mini</option>
-                      <option value="openai/gpt-5-mini">openai/gpt-5-mini</option>
-                      <option value="openai/gpt-5">openai/gpt-5</option>
-                    </select>
-                  </div>
-                  <div>
                     <label className="text-xs text-gray-600 block mb-1">Промпт персонализации</label>
                     <textarea
                       rows={3}
@@ -1542,40 +1526,30 @@ export default function LiOutreachPage() {
                     />
                   </div>
                   <div className="flex flex-wrap gap-4">
-                    <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={cf.use_ai_welcome}
-                        onChange={(e) => setCf({ ...cf, use_ai_welcome: e.target.checked })}
-                        className="rounded"
-                      />
-                      AI для welcome-сообщения
-                    </label>
-                    <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={cf.use_ai_followup}
-                        onChange={(e) => setCf({ ...cf, use_ai_followup: e.target.checked })}
-                        className="rounded"
-                      />
-                      AI для follow-up
-                    </label>
-                    <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={cf.message_existing_connections}
-                        onChange={(e) => setCf({ ...cf, message_existing_connections: e.target.checked })}
-                        className="rounded"
-                      />
-                      Писать тем, кто уже в контактах
-                    </label>
+                    <LiSwitch checked={cf.use_ai_followup} onChange={(v) => setCf({ ...cf, use_ai_followup: v })} label="AI для follow-up" />
                   </div>
                 </div>
               </details>
 
-              <button onClick={() => void createCampaign()} disabled={creating} className="rounded-lg bg-green-600 text-white px-5 py-2 text-sm font-medium disabled:opacity-50">
-                {creating ? (editingCampaignId ? 'Сохранение...' : 'Создание...') : (editingCampaignId ? 'Сохранить изменения' : 'Создать кампанию')}
-              </button>
+              {editingCampaignId ? (
+                <div className="sticky bottom-3 z-10 flex justify-center">
+                  <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-2xl border border-gray-200 bg-white/95 px-6 py-2.5 text-xs shadow-lg backdrop-blur" aria-live="polite">
+                    {autoSave.state === 'saving' ? (
+                      <span className="inline-flex items-center gap-1.5 text-gray-500"><span className="h-3 w-3 animate-spin rounded-full border-2 border-gray-300 border-t-blue-600" />Сохраняю…</span>
+                    ) : autoSave.state === 'error' ? (
+                      <span role="alert" className="text-red-600">{autoSave.message}</span>
+                    ) : autoSave.state === 'saved' ? (
+                      <span role="status" className="inline-flex items-center gap-1 text-emerald-600">✓ Сохранено, кампания применит сразу</span>
+                    ) : (
+                      <span className="text-gray-400">Изменения сохраняются автоматически</span>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <button onClick={() => void createCampaign()} disabled={creating} className="rounded-lg bg-green-600 text-white px-5 py-2 text-sm font-medium disabled:opacity-50">
+                  {creating ? 'Создание...' : 'Создать кампанию'}
+                </button>
+              )}
                 </div>
               )}
             </div>
@@ -1583,75 +1557,110 @@ export default function LiOutreachPage() {
 
           {!showCreate && (
             <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-gray-900">Кампании <span className="font-normal text-gray-400">({campaigns.length})</span></h2>
-                <button onClick={openCreateCampaignForm} className="cursor-pointer rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700">+ Новая</button>
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold text-gray-900">
+                  Кампании
+                </h2>
+                <div className="flex items-center gap-2">
+                  <div className="li-period inline-flex gap-1 rounded-xl border p-1 text-sm" role="tablist" aria-label="Активные или архивные кампании">
+                    {([['Активные', false, campaigns.length - archivedCount], ['Архив', true, archivedCount]] as const).map(([label, archived, count]) => (
+                      <button
+                        key={label}
+                        type="button"
+                        role="tab"
+                        aria-selected={showArchivedCampaigns === archived}
+                        onClick={() => setShowArchivedCampaigns(archived)}
+                        className={`li-switch-btn cursor-pointer rounded-lg px-4 py-2 font-medium ${showArchivedCampaigns === archived ? 'li-switch-btn-on' : ''}`}
+                      >
+                        {label} ({count})
+                      </button>
+                    ))}
+                  </div>
+                  <button onClick={openCreateCampaignForm} className="cursor-pointer rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">+ Новая кампания</button>
+                </div>
               </div>
               {loadingCampaigns && campaigns.length === 0 ? (
                 <div className="flex items-center justify-center py-16" role="status" aria-label="Загрузка кампаний">
                   <div className="h-8 w-8 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
                 </div>
-              ) : campaigns.length === 0 ? (
-                <div className="text-sm text-gray-500">Нет кампаний</div>
+              ) : visibleCampaigns.length === 0 ? (
+                <div className="text-sm text-gray-500">{showArchivedCampaigns ? 'Архив пуст' : 'Нет кампаний'}</div>
               ) : (
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3 [&>*]:min-w-0">
-                  {campaigns.map((c) => {
-                    // isOwn: рамка карточки (чья кампания) и кнопка «Удалить» — удаление остаётся
-                    // только у владельца в API, на чужих карточках кнопку не рисуем.
-                    const isOwn = currentUserId != null && c.user_id === currentUserId;
-                    const cs = dashData?.campaign_stats.find((x) => x.id === c.id);
-                    return (
-                      <div
-                        key={c.id}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => openEditCampaignForm(c)}
-                        onKeyDown={(e) => { if (e.key === 'Enter') openEditCampaignForm(c); }}
-                        className={`group flex cursor-pointer flex-col rounded-xl border bg-white p-4 text-sm transition hover:shadow-sm ${isOwn ? 'border-gray-200 hover:border-indigo-300' : 'border-purple-200 border-l-4 border-l-purple-400 hover:border-purple-300'}`}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0 truncate font-semibold text-gray-900">{c.name}</div>
-                          <span className={`shrink-0 rounded-md px-2 py-0.5 text-xs ${c.status === 'running' ? 'bg-green-100 text-green-700' : c.status === 'draft' ? 'bg-gray-100 text-gray-600' : c.status === 'completed' ? 'bg-cyan-100 text-cyan-700' : 'bg-amber-100 text-amber-700'}`}>{CAMPAIGN_STATUS_LABEL_RU[c.status] ?? c.status}</span>
-                        </div>
-                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
-                          <span>{(c.steps ?? []).length} шагов</span>
-                          <span>· AI: {c.use_ai ? 'вкл' : 'выкл'}</span>
-                          <span>· лимит {c.daily_invite_limit}/день</span>
-                          {c.use_custom_invites && (
-                            <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700" title="На шаге 1 берётся персональный текст инвайта каждого лида из CSV. AI-персонализация для инвайта пропускается.">✎ персональные инвайты</span>
-                          )}
-                          {!isOwn && (
-                            <span className="rounded-full bg-purple-100 px-2 py-0.5 text-[10px] font-medium text-purple-700" title="Кампанию добавил другой специалист. Редактирование, старт и стоп доступны всей команде.">👤 {c.owner_name ?? 'другой спец'}</span>
-                          )}
-                        </div>
-                        {cs ? (
-                          <div className="mt-3 grid grid-cols-4 gap-2 border-t border-gray-100 pt-3">
-                            {[
-                              { label: 'Лидов', value: cs.leads_total },
-                              { label: 'Сегодня', value: `${cs.invites_sent_today}/${cs.daily_invite_limit}` },
-                              { label: 'Принято', value: cs.accepted },
-                              { label: 'Ответили', value: cs.replied },
-                            ].map((m) => (
-                              <div key={m.label} className="min-w-0">
-                                <div className="text-[10px] text-gray-400">{m.label}</div>
-                                <div className="text-sm font-semibold tabular-nums text-gray-900">{m.value}</div>
-                              </div>
-                            ))}
+                <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+                  <div className="min-w-[1120px] text-sm">
+                    <div className={`${CAMPAIGN_ROW_GRID} border-b border-gray-100 px-4 py-2 text-[11px] font-medium uppercase tracking-wide text-gray-400`}>
+                      <div>Кампания</div>
+                      <div>Статус</div>
+                      <div>Контактов</div>
+                      <div>Прогресс</div>
+                      <div className="text-right">Сегодня</div>
+                      <div className="text-right">Принято</div>
+                      <div className="text-right">Ответили</div>
+                      <div className="text-right">Ошибок</div>
+                      <div className="text-right">Создана</div>
+                      <div />
+                    </div>
+                    {visibleCampaigns.map((c) => {
+                      // Кампания ничья: создавший её нигде не показывается, запускать, править и удалять может любой.
+                      const cs = dashData?.campaign_stats.find((x) => x.id === c.id);
+                      const processed = cs ? cs.completed + cs.error + cs.skipped : 0;
+                      const progress = cs && cs.leads_total > 0 ? Math.round((processed / cs.leads_total) * 100) : 0;
+                      const created = new Date(c.created_at);
+                      return (
+                        <div
+                          key={c.id}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => openEditCampaignForm(c)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') openEditCampaignForm(c); }}
+                          className={`${CAMPAIGN_ROW_GRID} cursor-pointer border-b border-gray-100 px-4 py-3 last:border-b-0 hover:bg-gray-50 li-row-hover li-campaign-row`}
+                        >
+                          <div className="min-w-0">
+                            <div className="truncate font-semibold text-gray-900">{c.name}</div>
+                            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
+                              <span>{(c.steps ?? []).length} шагов</span>
+                              <span>· AI: {c.use_ai ? 'вкл' : 'выкл'}</span>
+                              {c.use_custom_invites && (
+                                <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700" title="На шаге 1 берётся персональный текст инвайта каждого контакта из CSV. AI-персонализация для инвайта пропускается.">✎ персональные инвайты</span>
+                              )}
+                            </div>
                           </div>
-                        ) : null}
-                        <div className="mt-3 flex items-center gap-3 text-xs">
-                          {c.status !== 'running' && <button onClick={(e) => { e.stopPropagation(); void startCampaign(c.id); }} className="cursor-pointer text-green-700 hover:underline">▶ Запустить</button>}
-                          {c.status === 'running' && <button onClick={(e) => { e.stopPropagation(); void stopCampaign(c.id); }} className="cursor-pointer text-amber-700 hover:underline">⏹ Остановить</button>}
-                          {isOwn && <button onClick={(e) => { e.stopPropagation(); void deleteCampaign(c.id); }} className="ml-auto cursor-pointer text-red-600 hover:underline">Удалить</button>}
+                          <div>
+                            <span className={`rounded-md px-2 py-0.5 text-xs ${c.status === 'running' ? 'bg-green-100 text-green-700' : c.status === 'draft' ? 'bg-gray-100 text-gray-600' : c.status === 'completed' ? 'bg-cyan-100 text-cyan-700' : 'bg-amber-100 text-amber-700'}`}>{CAMPAIGN_STATUS_LABEL_RU[c.status] ?? c.status}</span>
+                          </div>
+                          <div className="font-semibold tabular-nums text-gray-900">{cs ? cs.leads_total : '—'}</div>
+                          <div className="min-w-0">
+                            {cs && cs.leads_total > 0 ? (
+                              <>
+                                <div className="flex items-center gap-2">
+                                  <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-gray-100">
+                                    <div className="h-full rounded-full bg-green-500" style={{ width: `${progress}%` }} />
+                                  </div>
+                                  <span className="w-9 shrink-0 text-right text-xs font-semibold tabular-nums text-gray-700">{progress}%</span>
+                                </div>
+                                <div className="mt-0.5 text-[10px] tabular-nums text-gray-500">{processed} из {cs.leads_total}</div>
+                              </>
+                            ) : (
+                              <span className="text-gray-400">—</span>
+                            )}
+                          </div>
+                          <div className="text-right font-semibold tabular-nums text-gray-900" title="Отправлено инвайтов сегодня / дневной лимит">{cs ? `${cs.invites_sent_today}/${cs.daily_invite_limit}` : '—'}</div>
+                          <div className="text-right font-semibold tabular-nums text-gray-900">{cs ? cs.accepted : '—'}</div>
+                          <div className="text-right font-semibold tabular-nums text-gray-900">{cs ? cs.replied : '—'}</div>
+                          <div className={`text-right font-semibold tabular-nums ${cs && cs.error > 0 ? 'text-rose-600' : 'text-gray-400'}`}>{cs ? cs.error : '—'}</div>
+                          <div className="text-right text-xs tabular-nums text-gray-500">{created.toLocaleDateString('ru-RU')}</div>
+                          <div className="flex justify-end">
+                            <RowActionsMenu items={campaignActions(c)} vertical />
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
                 </div>
               )}
               <OrphanBases
                 bases={leadLists.filter((l) => !l.campaign_id)}
-                campaigns={campaigns.map((c) => ({ id: c.id, name: c.name, lead_list_id: c.lead_list_id }))}
+                campaigns={campaigns.filter((c) => !c.archived_at).map((c) => ({ id: c.id, name: c.name, lead_list_id: c.lead_list_id }))}
                 onChanged={reloadBases}
               />
             </div>
@@ -1663,7 +1672,7 @@ export default function LiOutreachPage() {
       {tab === 'scraper' && (
         <div className="space-y-4">
           <div className="rounded-xl border border-gray-200 p-4 space-y-3">
-            <h2 className="text-sm font-semibold text-gray-900">Скрапинг лидов</h2>
+            <h2 className="text-sm font-semibold text-gray-900">Скрапинг контактов</h2>
             <div className="flex gap-2">
               <button onClick={() => setScraperType('search')} className={`text-xs px-3 py-1.5 rounded-lg ${scraperType === 'search' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>Поиск по URL</button>
               <button onClick={() => setScraperType('reactions')} className={`text-xs px-3 py-1.5 rounded-lg ${scraperType === 'reactions' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>Реакции на пост</button>
@@ -1681,7 +1690,7 @@ export default function LiOutreachPage() {
                   ))}
               </select>
               <select value={scraperListId} onChange={(e) => setScraperListId(e.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
-                <option value="">Список (опционально)</option>
+                <option value="">База контактов (опционально)</option>
                 {leadLists.map((l) => <option key={l.id} value={l.id}>{l.name}{l.campaign_id ? ` · ${campaigns.find((c) => c.id === l.campaign_id)?.name ?? 'кампания'}` : ''}</option>)}
               </select>
               <input type="number" value={scraperMax} onChange={(e) => setScraperMax(Number(e.target.value))} className="w-24 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
@@ -1701,96 +1710,96 @@ export default function LiOutreachPage() {
                 <div className="h-8 w-8 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
               </div>
             )}
-            {tasks.map((t) => {
-              const params = t.params ?? {};
-              const taskUrl = String(t.type === 'post_reactions' ? (params.post_url ?? '') : (params.search_url ?? ''));
-              const canRepeat = t.type === 'search' || t.type === 'post_reactions';
-              return (
-                <div key={t.id} className="rounded-xl border border-gray-200 px-3 py-2 text-sm">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium">{taskTypeLabelRu(t.type)}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded ${t.status === 'completed' ? 'bg-green-100 text-green-700' : t.status === 'running' ? 'bg-blue-100 text-blue-700' : t.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>{taskStatusLabelRu(t.status)}</span>
-                      <span className="text-xs tabular-nums text-gray-500">{t.progress}/{t.total}</span>
-                      {t.error_message && <span className="text-xs text-red-600">{t.error_message}</span>}
-                    </div>
-                    <div className="flex items-center gap-3">
-                      {canRepeat && t.status !== 'pending' && t.status !== 'running' && (
-                        <button
-                          onClick={() => repeatTask(t)}
-                          className="text-xs text-blue-600 hover:underline"
-                          title="Подставить параметры этой задачи в форму выше"
-                        >
-                          Повторить
-                        </button>
-                      )}
-                      {(t.status === 'pending' || t.status === 'running') && (
-                        <button onClick={() => void cancelTask(t.id)} className="text-xs text-red-600 hover:underline">Отменить</button>
-                      )}
-                    </div>
-                  </div>
-                  {(t.status === 'pending' || t.status === 'running') && (
-                    <div className="mt-2 flex items-center gap-2">
-                      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-gray-100" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={t.total > 0 ? Math.round((t.progress / t.total) * 100) : 0}>
-                        <div className={`h-full rounded-full bg-blue-500 transition-all duration-700 ${t.total > 0 ? '' : 'w-1/3 animate-pulse'}`} style={t.total > 0 ? { width: `${Math.min(100, Math.round((t.progress / t.total) * 100))}%` } : undefined} />
-                      </div>
-                      <span className="text-[11px] tabular-nums text-gray-400">{t.total > 0 ? `${Math.round((t.progress / t.total) * 100)}%` : 'собираем…'}</span>
-                    </div>
-                  )}
-                  {/* Параметры задачи: URL + аккаунт + список + лимит + время.
-                      Лежат в li_tasks.params (jsonb), а не на отдельных колонках —
-                      воркер парсит payload по типу таски. URL обрезаем CSS-ом
-                      (truncate) чтобы длинная LinkedIn-ссылка не растягивала
-                      строку, при клике открываем в новой вкладке. */}
-                  {(taskUrl || params.account_id || params.lead_list_id) && (
-                    <div className="mt-1.5 space-y-0.5 text-xs text-gray-500">
-                      {taskUrl && (
-                        <div className="truncate">
-                          <a
-                            href={taskUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-blue-600 hover:underline"
-                            title={taskUrl}
-                          >
-                            {taskUrl}
-                          </a>
-                        </div>
-                      )}
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
-                        <span>аккаунт: <span className="text-gray-700">{accountLabel(params)}</span></span>
-                        <span>
-                          база:{' '}
-                          {params.lead_list_id && leadLists.some((l) => l.id === params.lead_list_id) ? (
-                            <button
-                              type="button"
-                              onClick={() => openScrapedBase(String(params.lead_list_id))}
-                              className="cursor-pointer text-blue-600 hover:underline"
-                              title="Открыть базу, в которую собраны люди"
-                            >
-                              {listLabel(params)} →
-                            </button>
-                          ) : (
-                            <span className="text-gray-700">{listLabel(params)}</span>
-                          )}
-                        </span>
-                        {typeof params.max_results === 'number' && (
-                          <span>лимит: <span className="text-gray-700">{params.max_results}</span></span>
-                        )}
-                        <span className="text-gray-400">
-                          {new Date(t.created_at).toLocaleString('ru-RU', {
-                            day: '2-digit',
-                            month: 'short',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}
-                        </span>
-                      </div>
-                    </div>
-                  )}
+            {!loadingTasks && tasks.length === 0 && <p className="text-sm text-gray-500">Задач пока нет.</p>}
+            {tasks.length > 0 && (
+              <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+                <table className="w-full min-w-[1000px] table-fixed text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-100 text-xs text-gray-500">
+                      <th className="w-[11%] px-3 py-2 text-left font-medium">Тип</th>
+                      <th className="w-[11%] px-3 py-2 text-left font-medium">Статус</th>
+                      <th className="w-[18%] py-2 pl-3 pr-6 text-left font-medium">Прогресс</th>
+                      <th className="w-[20%] py-2 pl-6 pr-3 text-left font-medium">Источник</th>
+                      <th className="w-[13%] px-3 py-2 text-left font-medium">Аккаунт</th>
+                      
+                      <th className="w-[8%] px-3 py-2 text-right font-medium">Лимит</th>
+                      <th className="w-[10%] px-3 py-2 text-right font-medium">Создана</th>
+                      <th className="w-[96px] px-3 py-2" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tasks.slice(tasksPage * TASKS_PER_PAGE, (tasksPage + 1) * TASKS_PER_PAGE).map((t) => {
+                      const params = t.params ?? {};
+                      const taskUrl = String(t.type === 'post_reactions' ? (params.post_url ?? '') : (params.search_url ?? ''));
+                      const active = t.status === 'pending' || t.status === 'running';
+                      const pct = t.total > 0 ? Math.min(100, Math.round((t.progress / t.total) * 100)) : 0;
+                                            return (
+                        <tr key={t.id} className="li-row-hover border-b border-gray-50 align-top hover:bg-gray-50/50">
+                          <td className="px-3 py-2.5 font-medium text-gray-900">{taskTypeLabelRu(t.type)}</td>
+                          <td className="px-3 py-2.5">
+                            <span className={`rounded-md px-2 py-0.5 text-xs ${t.status === 'completed' ? 'bg-green-100 text-green-700' : t.status === 'running' ? 'bg-blue-100 text-blue-700' : t.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>{taskStatusLabelRu(t.status)}</span>
+                          </td>
+                          <td className="py-2.5 pl-3 pr-6">
+                            <div className="flex items-center gap-2">
+                              <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-gray-100" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+                                <div className={`h-full rounded-full transition-all duration-700 ${t.status === 'failed' ? 'bg-red-400' : t.status === 'completed' ? 'bg-green-500' : 'bg-blue-500'} ${active && t.total === 0 ? 'w-1/3 animate-pulse' : ''}`} style={active && t.total === 0 ? undefined : { width: `${pct}%` }} />
+                              </div>
+                              <span className="w-16 shrink-0 text-right text-xs tabular-nums text-gray-500">{t.progress}/{t.total}</span>
+                            </div>
+                            {t.error_message && <div className="mt-1 text-xs text-red-600">{t.error_message}</div>}
+                          </td>
+                          <td className="py-2.5 pl-6 pr-3">
+                            {taskUrl ? (
+                              <a href={taskUrl} target="_blank" rel="noopener noreferrer" title={taskUrl} className="block truncate text-blue-600 hover:underline">{taskUrl}</a>
+                            ) : (
+                              <span className="text-gray-400">—</span>
+                            )}
+                          </td>
+                          <td className="truncate px-3 py-2.5 text-gray-700" title={accountLabel(params)}>{accountLabel(params)}</td>
+                          <td className="px-3 py-2.5 text-right tabular-nums text-gray-700">{typeof params.max_results === 'number' ? params.max_results : '—'}</td>
+                          <td className="px-3 py-2.5 text-right text-xs tabular-nums text-gray-500">
+                            {new Date(t.created_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                          </td>
+                          <td className="px-3 py-1.5">
+                            <div className="flex items-center justify-end gap-0.5">
+                              {active ? (
+                                <button type="button" onClick={() => void cancelTask(t.id)} className="px-2 py-1 text-xs text-red-600 hover:underline">Отменить</button>
+                              ) : (
+                                <>
+                                  <button type="button" onClick={() => setViewTask(t)} aria-label="Посмотреть собранные контакты" title="Посмотреть собранные контакты" className="li-icon-btn cursor-pointer rounded-lg p-1.5">
+                                    <Eye className="h-4 w-4" />
+                                  </button>
+                                  <button type="button" onClick={() => void deleteTask(t.id)} aria-label="Удалить задачу" title="Удалить задачу из списка" className="li-icon-btn li-icon-btn-danger cursor-pointer rounded-lg p-1.5">
+                                    <Trash2 className="h-4 w-4" />
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {tasks.length > TASKS_PER_PAGE && (
+              <div className="flex items-center justify-between pt-1 text-xs text-gray-500">
+                <span>{tasksPage * TASKS_PER_PAGE + 1}–{Math.min(tasks.length, (tasksPage + 1) * TASKS_PER_PAGE)} из {tasks.length}</span>
+                <div className="flex gap-2">
+                  <button type="button" disabled={tasksPage === 0} onClick={() => setTasksPage((p) => Math.max(0, p - 1))} className="li-page-btn cursor-pointer rounded-lg border px-3 py-1.5 font-medium disabled:cursor-not-allowed disabled:opacity-40">← Назад</button>
+                  <button type="button" disabled={(tasksPage + 1) * TASKS_PER_PAGE >= tasks.length} onClick={() => setTasksPage((p) => p + 1)} className="li-page-btn cursor-pointer rounded-lg border px-3 py-1.5 font-medium disabled:cursor-not-allowed disabled:opacity-40">Вперёд →</button>
                 </div>
-              );
-            })}
+              </div>
+            )}
+            {viewTask && (
+              <TaskLeadsModal
+                key={viewTask.id}
+                title={`Контакты задачи: ${taskTypeLabelRu(viewTask.type)}`}
+                load={() => loadTaskLeads(viewTask.id)}
+                onClose={() => setViewTask(null)}
+              />
+            )}
           </div>
         </div>
       )}
@@ -1820,16 +1829,33 @@ export default function LiOutreachPage() {
             </div>
           ) : accounts.length === 0 ? (
             <div className="text-sm text-gray-500">Нет аккаунтов. Настройте Unipile и нажмите «Синхронизировать».</div>
-          ) : accounts.map((a) => (
-            <AccountCard
-              key={a.id}
-              account={a}
-              isOwn={currentUserId != null && a.user_id === currentUserId}
-              errorCounts24h={accountErrorCounts[a.id]}
-              onUpdated={() => { void loadAccounts(); void loadAccountErrorCounts(); }}
-              onShowLogs={() => setAccountLogsModal(a)}
-            />
-          ))}
+          ) : (
+            <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+              <table className="w-full min-w-[980px] table-fixed text-sm">
+                <thead>
+                  <tr className="border-b border-gray-100 text-xs text-gray-500">
+                    <th className="w-[24%] px-3 py-2 text-left font-medium">Аккаунт</th>
+                    <th className="w-[13%] px-3 py-2 text-left font-medium">Статус</th>
+                    <th className="w-[30%] px-3 py-2 text-left font-medium">Используется в кампании</th>
+                    <th className="w-[20%] px-3 py-2 text-left font-medium">Прокси</th>
+                    <th className="w-[11%] px-3 py-2 text-right font-medium">Добавлен</th>
+                    <th className="w-[56px] px-3 py-2" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {accounts.map((a) => (
+                    <AccountRow
+                      key={a.id}
+                      account={a}
+                      errorCounts24h={accountErrorCounts[a.id]}
+                      onUpdated={() => { void loadAccounts(); void loadAccountErrorCounts(); }}
+                      onShowLogs={() => setAccountLogsModal(a)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 
@@ -1846,23 +1872,22 @@ export default function LiOutreachPage() {
   );
 }
 
-// ---- Account card -----------------------------------------------------------
+// ---- Account row ------------------------------------------------------------
 
-function AccountCard({
+function AccountRow({
   account: a,
-  isOwn,
   errorCounts24h,
   onUpdated,
   onShowLogs,
 }: {
   account: LiAccount;
-  isOwn: boolean;
   errorCounts24h?: { error: number; warning: number };
   onUpdated: () => void;
   onShowLogs: () => void;
 }) {
   const cooling = isAccountInCooldown(a);
   const [proxyDraft, setProxyDraft] = useState(a.proxy_url ?? '');
+  const [editingProxy, setEditingProxy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -1875,6 +1900,7 @@ function AccountCard({
     try {
       await api(`/accounts/${a.id}`, { method: 'PATCH', json: { proxy_url: proxyDraft || null } });
       setMsg('Сохранено');
+      setEditingProxy(false);
       onUpdated();
     } catch (e) {
       setMsg(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
@@ -1908,85 +1934,116 @@ function AccountCard({
     }
   };
 
+  const st = liAccountStatus(a);
+  // Показываем адрес и порт; логин и пароль прокси на экран не выводим.
+  const proxyShown = (() => {
+    const raw = (a.proxy_url ?? '').trim();
+    if (!raw) return null;
+    const noScheme = raw.replace(/^[a-z]+:\/\//i, '');
+    if (noScheme.includes('@')) return noScheme.split('@').pop() ?? noScheme;
+    const [host, port] = noScheme.split(':');
+    return port ? `${host}:${port}` : host;
+  })();
+
   return (
-    <div className={`rounded-xl border px-4 py-3 text-sm space-y-2 ${cooling ? 'border-amber-300 bg-amber-50/60' : 'border-gray-200'}`}>
-      <div className="flex items-center justify-between">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 flex-wrap">
+    <tr className="li-row-hover border-b border-gray-50 align-middle hover:bg-gray-50/50">
+      <td className="px-3 py-2.5">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onShowLogs}
+            title="Открыть логи этого аккаунта"
+            className="min-w-0 cursor-pointer truncate text-left font-medium hover:text-indigo-600 hover:underline"
+          >
+            {a.name || a.unipile_account_id}
+          </button>
+          {errorCounts24h && errorCounts24h.error > 0 && (
             <button
               type="button"
               onClick={onShowLogs}
-              title="Открыть логи этого аккаунта"
-              className="font-medium text-left hover:text-indigo-600 hover:underline transition cursor-pointer"
+              title={`${errorCounts24h.error} ошибок${errorCounts24h.warning ? ` и ${errorCounts24h.warning} предупреждений` : ''} за 24ч — открыть логи`}
+              className="inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 hover:bg-rose-100"
             >
-              {a.name || a.unipile_account_id}
+              ⚠ {errorCounts24h.error}
             </button>
-            {errorCounts24h && errorCounts24h.error > 0 && (
-              <button
-                type="button"
-                onClick={onShowLogs}
-                title={`${errorCounts24h.error} ошибок${errorCounts24h.warning ? ` и ${errorCounts24h.warning} предупреждений` : ''} за 24ч — открыть логи`}
-                className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 hover:bg-rose-100 transition cursor-pointer shrink-0"
-              >
-                ⚠ {errorCounts24h.error}
-              </button>
-            )}
-            {a.headline && <span className="text-xs text-gray-500 truncate">{a.headline}</span>}
-          </div>
-          {cooling && (
-            <div
-              className="text-xs text-amber-700 mt-0.5"
-              title={`Аккаунт в отлёжке до ${new Date(a.cooldown_until!).toLocaleString('ru-RU')}. LinkedIn вернул «${a.cooldown_reason}».`}
-            >
-              В отлёжке ещё {formatCooldownRemaining(a.cooldown_until!)} — {a.cooldown_reason ? COOLDOWN_REASON_LABELS[a.cooldown_reason] : '—'}
-            </div>
           )}
         </div>
-        <div className="flex items-center gap-2 shrink-0 ml-3">
-          {(() => {
-            const st = liAccountStatus(a);
-            return <span className={`text-xs px-2 py-0.5 rounded ${st.cls}`} title={st.hint}>{st.text}</span>;
-          })()}
-          <button
-            onClick={() => void remove()}
-            disabled={deleting}
-            title="Удалить карточку аккаунта из портала (например, устаревший дубль)"
-            className="text-xs text-gray-400 hover:text-red-600 disabled:opacity-40"
+        {a.headline && <div className="mt-0.5 truncate text-xs text-gray-500" title={a.headline}>{a.headline}</div>}
+      </td>
+      <td className="px-3 py-2.5">
+        <span className={`rounded-md px-2 py-0.5 text-xs ${st.cls}`} title={st.hint}>{st.text}</span>
+        {cooling && (
+          <div
+            className="mt-1 text-xs text-amber-700"
+            title={`Аккаунт в отлёжке до ${new Date(a.cooldown_until!).toLocaleString('ru-RU')}. LinkedIn вернул «${a.cooldown_reason}».`}
           >
-            {deleting ? '...' : 'Удалить'}
-          </button>
-        </div>
-      </div>
-      {linkedCampaigns.length > 0 && (
-        <div className="text-xs text-gray-500 truncate" title={linkedCampaigns.map((c) => `${c.name} — ${CAMPAIGN_STATUS_LABEL_RU[c.status] ?? c.status}`).join('\n')}>
-          Кампании: {linkedCampaigns.map((c) => `${c.name} (${CAMPAIGN_STATUS_LABEL_RU[c.status] ?? c.status})`).join(', ')}
-        </div>
-      )}
-      {/* Proxy, logs and delete are open to the whole team; `isOwn` only
-       *  tints the card and the «добавил» chip. */}
-      <div className="flex items-end gap-2">
-        <div className="flex-1">
-          <label className="text-xs text-gray-500">
-            Proxy <span className="text-gray-400">(любой формат: ip:port:user:pass, http://user:pass@host:port, host:port)</span>
-          </label>
-          <input
-            type="text"
-            placeholder="154.81.199.122:63310:VtVmt51R:7GnJr2Yb"
-            value={proxyDraft}
-            onChange={(e) => { setProxyDraft(e.target.value); setMsg(null); }}
-            className="w-full rounded-lg border border-gray-200 px-3 py-1.5 text-sm mt-0.5 font-mono"
-          />
-        </div>
+            ещё {formatCooldownRemaining(a.cooldown_until!)}{a.cooldown_reason ? ` · ${COOLDOWN_REASON_LABELS[a.cooldown_reason]}` : ''}
+          </div>
+        )}
+      </td>
+      <td className="px-3 py-2.5" title={linkedCampaigns.map((c) => `${c.name} — ${CAMPAIGN_STATUS_LABEL_RU[c.status] ?? c.status}`).join('\n')}>
+        {linkedCampaigns.length === 0 ? (
+          <span className="text-sm text-gray-400">Свободен: ни в одной кампании</span>
+        ) : (
+          <div className="space-y-1">
+            {linkedCampaigns.map((c) => (
+              <div key={c.id} className="flex items-center gap-2 text-sm text-gray-900">
+                <span className={`h-2 w-2 shrink-0 rounded-full ${c.status === 'running' ? 'bg-green-500' : c.status === 'draft' ? 'bg-gray-400' : 'bg-amber-500'}`} />
+                <span className="min-w-0 truncate font-medium">{c.name}</span>
+                <span className="shrink-0 text-xs text-gray-500">{CAMPAIGN_STATUS_LABEL_RU[c.status] ?? c.status}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </td>
+      <td className="px-3 py-2.5">
+        {editingProxy ? (
+          <div className="space-y-1.5">
+            <input
+              type="text"
+              autoFocus
+              placeholder="ip:port:user:pass"
+              value={proxyDraft}
+              onChange={(e) => { setProxyDraft(e.target.value); setMsg(null); }}
+              className="w-full rounded-lg border border-gray-200 px-2 py-1 font-mono text-xs"
+            />
+            <div className="flex gap-2">
+              <button type="button" onClick={() => void save()} disabled={saving || !dirty} className="cursor-pointer rounded-lg bg-blue-600 px-2.5 py-1 text-xs font-medium text-white disabled:opacity-40">{saving ? '...' : 'Сохранить'}</button>
+              <button type="button" onClick={() => { setEditingProxy(false); setProxyDraft(a.proxy_url ?? ''); setMsg(null); }} className="cursor-pointer px-2 py-1 text-xs text-gray-500 hover:underline">Отмена</button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <span className={`min-w-0 truncate text-sm ${proxyShown ? 'font-mono text-gray-900' : 'text-gray-400'}`} title={proxyShown ? 'Прокси этого аккаунта' : 'Прокси не указан'}>
+              {proxyShown ?? '—'}
+            </span>
+            <button
+              type="button"
+              onClick={() => setEditingProxy(true)}
+              aria-label="Заменить прокси"
+              title="Заменить прокси"
+              className="li-icon-btn shrink-0 cursor-pointer rounded-lg p-1.5"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+        {msg && <div className={`mt-1 text-xs ${msg.startsWith('Ошибка') ? 'text-red-600' : 'text-green-600'}`}>{msg}</div>}
+      </td>
+      <td className="px-3 py-2.5 text-right align-middle text-xs tabular-nums text-gray-500">{a.created_at ? new Date(a.created_at).toLocaleDateString('ru-RU') : '—'}</td>
+      <td className="px-3 py-1.5 text-right">
         <button
-          onClick={() => void save()}
-          disabled={saving || !dirty}
-          className="rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-medium disabled:opacity-40 shrink-0"
+          type="button"
+          onClick={() => void remove()}
+          disabled={deleting}
+          aria-label="Удалить карточку аккаунта"
+          title="Удалить карточку аккаунта из портала (например, устаревший дубль)"
+          className="li-icon-btn li-icon-btn-danger cursor-pointer rounded-lg p-1.5 disabled:opacity-40"
         >
-          {saving ? '...' : 'Сохранить'}
+          <Trash2 className="h-4 w-4" />
         </button>
-      </div>
-      {msg && <div className={`text-xs ${msg.startsWith('Ошибка') ? 'text-red-600' : 'text-green-600'}`}>{msg}</div>}
-    </div>
+      </td>
+    </tr>
   );
 }
 
@@ -2226,60 +2283,87 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
 
 // ---- Helper components ------------------------------------------------------
 
-function CompanyTable({ rows, search, sortKey }: { rows: DashboardCompanyRow[]; search: string; sortKey: string }) {
-  const filtered = rows
-    .filter((r) => !search || r.company.toLowerCase().includes(search.toLowerCase()))
-    .sort((a, b) => {
-      const key = sortKey as keyof DashboardCompanyRow;
-      return (b[key] as number) - (a[key] as number);
-    });
-
-  if (filtered.length === 0) return <p className="text-xs text-gray-400 py-4">Нет данных по компаниям</p>;
-
-  const maxTotal = Math.max(...filtered.map((r) => r.total), 1);
-
+/** Переключатель с подписью, как в «TG Аутриче». Ползунок — bg-[#ffffff]: тёмная тема перекрашивает bg-white. */
+function LiSwitch({ checked, onChange, label, disabled = false }: { checked: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
   return (
-    <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
-      <table className="w-full text-sm">
-        <thead className="sticky top-0 bg-white">
-          <tr className="border-b border-gray-100">
-            <th className="text-left px-3 py-2 text-xs text-gray-500 font-medium">Компания</th>
-            <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Всего</th>
-            <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Новые</th>
-            <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Инвайты</th>
-            <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Подключ.</th>
-            <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Написано</th>
-            <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Ответили</th>
-            <th className="px-2 py-2 text-xs text-gray-500 font-medium w-28">Воронка</th>
-          </tr>
-        </thead>
-        <tbody>
-          {filtered.slice(0, 50).map((row) => {
-            const replyRate = row.total > 0 ? Math.round((row.replied / row.total) * 100) : 0;
-            const barW = Math.round((row.total / maxTotal) * 100);
-            return (
-              <tr key={row.company} className="border-b border-gray-50 hover:bg-gray-50/50">
-                <td className="px-3 py-2 font-medium text-gray-900 max-w-[220px] truncate">{row.company}</td>
-                <td className="px-2 py-2 text-right tabular-nums text-gray-700">{row.total}</td>
-                <td className="px-2 py-2 text-right tabular-nums text-gray-500">{row.new}</td>
-                <td className="px-2 py-2 text-right tabular-nums text-amber-700">{row.invited}</td>
-                <td className="px-2 py-2 text-right tabular-nums text-blue-700">{row.connected}</td>
-                <td className="px-2 py-2 text-right tabular-nums text-violet-700">{row.messaged}</td>
-                <td className="px-2 py-2 text-right tabular-nums text-green-700 font-medium">{row.replied} <span className="text-gray-400 font-normal">({replyRate}%)</span></td>
-                <td className="px-2 py-2">
-                  <div className="h-2.5 rounded-full bg-gray-100 overflow-hidden flex">
-                    {row.replied > 0 && <div className="h-full bg-green-500" style={{ width: `${Math.round((row.replied / row.total) * barW)}%` }} />}
-                    {row.connected > 0 && <div className="h-full bg-blue-400" style={{ width: `${Math.round((row.connected / row.total) * barW)}%` }} />}
-                    {row.invited > 0 && <div className="h-full bg-amber-400" style={{ width: `${Math.round((row.invited / row.total) * barW)}%` }} />}
-                    {row.new > 0 && <div className="h-full bg-gray-300" style={{ width: `${Math.round((row.new / row.total) * barW)}%` }} />}
-                  </div>
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-      {filtered.length > 50 && <p className="text-xs text-gray-400 text-center py-2">Показаны первые 50 из {filtered.length}</p>}
+    <label className={`inline-flex items-center gap-2.5 text-xs text-gray-700 ${disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}>
+      <span className="relative inline-flex shrink-0">
+        <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} className="peer sr-only" />
+        <span className="block h-5 w-9 rounded-full bg-[#6b7280] transition-colors duration-200 peer-checked:bg-[#6366f1] peer-focus-visible:ring-2 peer-focus-visible:ring-[#a5b4fc]" />
+        <span className="pointer-events-none absolute left-0.5 top-0.5 block h-4 w-4 rounded-full bg-[#ffffff] shadow-sm transition-transform duration-200 peer-checked:translate-x-4" />
+      </span>
+      {label}
+    </label>
+  );
+}
+
+/**
+ * Прогресс кампании и разбивка по наведению — карточка как в «Рассылке».
+ * Рисуется fixed от ячейки: таблица в overflow-x-auto обрезала бы обычную подсказку.
+ */
+function ProcessedCell({
+  cs,
+  processed,
+  doneRatio,
+  pendingActive,
+  completed,
+  error,
+  skipped,
+  children,
+}: {
+  cs: DashboardCampaignStat;
+  processed: number;
+  doneRatio: number;
+  pendingActive: number;
+  completed: number;
+  error: number;
+  skipped: number;
+  children: React.ReactNode;
+}) {
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  // Карточка идёт за курсором: по умолчанию справа-снизу от него; у правого и нижнего края
+  // окна прижимается к курсору с другой стороны (так высота карточки не нужна).
+  const GAP = 3;
+  const follow = (event: React.MouseEvent<HTMLDivElement>) => setPos({ x: event.clientX, y: event.clientY });
+  const anchor: React.CSSProperties = pos
+    ? {
+        position: 'fixed',
+        ...(pos.x + GAP + 272 > window.innerWidth ? { right: window.innerWidth - pos.x + GAP } : { left: pos.x + GAP }),
+        ...(pos.y + GAP + 300 > window.innerHeight ? { bottom: window.innerHeight - pos.y + GAP } : { top: pos.y + GAP }),
+      }
+    : {};
+  const rows: Array<{ label: string; value: number; tone?: string; gap?: boolean }> = [
+    { label: 'Завершено', value: completed, tone: 'text-emerald-600' },
+    { label: 'Ошибки', value: error, tone: error ? 'text-red-600' : undefined },
+    { label: 'Пропущено', value: skipped },
+    { label: 'Осталось', value: pendingActive, gap: true },
+    { label: 'В очереди', value: cs.pending },
+    { label: 'Сейчас обрабатываются', value: cs.in_progress, tone: cs.in_progress ? 'text-blue-600' : undefined },
+    { label: 'Ждут следующего шага', value: cs.waiting },
+  ];
+  return (
+    <div className="cursor-default" onMouseEnter={follow} onMouseMove={follow} onMouseLeave={() => setPos(null)}>
+      {children}
+      {pos && createPortal(
+        <div
+          role="tooltip"
+          style={anchor}
+          className="li-hover-card pointer-events-none z-50 w-64 rounded-xl border p-3 shadow-xl"
+        >
+          <div className="mb-2 border-b border-zinc-200 pb-2 text-sm font-semibold">
+            Обработано {processed} из {cs.leads_total} ({doneRatio}%)
+          </div>
+          <dl className="space-y-1.5">
+            {rows.map((row) => (
+              <div key={row.label} className={`flex items-center justify-between text-sm ${row.gap ? 'mt-2 border-t border-zinc-200 pt-2' : ''}`}>
+                <dt className="text-zinc-500">{row.label}</dt>
+                <dd className={`font-semibold tabular-nums ${row.tone ?? ''}`}>{row.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }
