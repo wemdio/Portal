@@ -99,7 +99,20 @@ blocks:
               [ "$ok_last" = 1 ] || { echo "[scheduled] Не удалось подключиться по SSH после ${SSH_RETRIES} попыток. Проверь с сервера: ss -tn state established '( sport = :22 )' | wc -l и MaxStartups в sshd_config." >&2; exit 1; }
               echo "Last deployed SHA: ${LAST:-<none>}"
 
-              if [ "$COMMIT_SHA" = "$LAST" ]; then
+              # Общий SHA подтверждает портал. Незавершённые вспомогательные
+              # этапы храним отдельно: они повторяются и на том же коммите.
+              PENDING_AUX=$(run_ssh "read pending deploys" \
+                "for target in sender-all sender-1 sender-2 sender-3 sender-4 sender-5 sender-6 sender-7 sender-8 sender-9 dataset-sync; do
+                  if [ -f /home/Portal/prod/.deploy-pending/\$target ]; then printf '%s ' \"\$target\"; fi
+                done")
+              has_pending_aux() { case " $PENDING_AUX " in *" $1 "*) return 0;; *) return 1;; esac; }
+              mark_aux_pending() {
+                run_ssh "mark $1 pending" "mkdir -p /home/Portal/prod/.deploy-pending && touch /home/Portal/prod/.deploy-pending/$1"
+              }
+              clear_aux_pending() {
+                run_ssh "confirm $1 deployed" "rm -f /home/Portal/prod/.deploy-pending/$1"
+              }
+              if [ "$COMMIT_SHA" = "$LAST" ] && [ -z "$PENDING_AUX" ]; then
                 echo "[scheduled] No new commits on main since last deploy — skipping."
                 exit 0
               fi
@@ -110,9 +123,15 @@ blocks:
               fi
               . .semaphore/select-deploy-targets.sh
               select_deploy_targets "$LAST" "$COMMIT_SHA"
+              NEW_SENDER_DEPLOY="$DEPLOY_SENDER"
+              if has_pending_aux sender-all; then NEW_SENDER_DEPLOY=1; DEPLOY_SENDER=1; fi
+              for sender_n in 1 2 3 4 5 6 7 8 9; do
+                if has_pending_aux "sender-$sender_n"; then DEPLOY_SENDER=1; fi
+              done
+              if has_pending_aux dataset-sync; then DEPLOY_DATASET_SYNC=1; fi
               print_deploy_plan
 
-              echo "[scheduled] New commits detected — deploying selected targets only."
+              echo "[scheduled] Deploying selected targets; pending retries: ${PENDING_AUX:-<none>}"
 
               run_ssh "mkdir prod" \
                 "sudo -n mkdir -p /home/Portal/prod && sudo -n chown -R ${USER}:${USER} /home/Portal/prod"
@@ -319,6 +338,11 @@ blocks:
                   else
                     reason="фоновая выкладка оборвалась, результат не подтверждён; требуется проверка состояния"
                   fi
+                  if [ -z "$reason" ]; then
+                    if ! clear_aux_pending "sender-$n"; then
+                      reason="воркеры обновлены, но подтверждение не сохранено; повторная проверка в следующем запуске"
+                    fi
+                  fi
                   if [ -n "$reason" ]; then
                     echo "[scheduled] !!! SENDER NOT DEPLOYED on ${host}: ${reason}. Портал и остальные sender-хосты выкладываются штатно." >&2
                     SENDER_DEPLOY_SKIPPED="${SENDER_DEPLOY_SKIPPED:+${SENDER_DEPLOY_SKIPPED}; }${host}: ${reason}"
@@ -334,11 +358,29 @@ blocks:
                 eval "sender_candidate=\${SENDER_SSH_HOST_${sender_n}:-}"
                 [ -z "$sender_candidate" ] || SENDER_TARGETS="${SENDER_TARGETS} ${sender_n}"
               done
+              # При повторе трогаем только хосты с незавершённой выкладкой.
+              if [ "$NEW_SENDER_DEPLOY" != 1 ]; then
+                retry_targets=""
+                for sender_n in $SENDER_TARGETS; do
+                  if has_pending_aux "sender-$sender_n"; then retry_targets="${retry_targets} $sender_n"; fi
+                done
+                SENDER_TARGETS="$retry_targets"
+              fi
+              for sender_n in 1 2 3 4 5 6 7 8 9; do
+                if has_pending_aux "sender-$sender_n"; then
+                  case " $SENDER_TARGETS " in
+                    *" $sender_n "*) ;;
+                    *) SENDER_DEPLOY_SKIPPED="${SENDER_DEPLOY_SKIPPED:+${SENDER_DEPLOY_SKIPPED}; }sender #${sender_n}: не задан хост для незавершённой выкладки" ;;
+                  esac
+                fi
+              done
               if [ "$DEPLOY_SENDER" = 1 ] && [ -z "$SENDER_TARGETS" ]; then
                 # Не FATAL: блокировать деплой portal-хоста нельзя, а пропуск
                 # sender-хостов оставляет рассылку на прежней версии воркеров.
                 echo "[scheduled] WARNING: DEPLOY_SENDER=1, но ни одного SENDER_SSH_HOST не задано — sender-воркеры ПРОПУЩЕНЫ." >&2
                 echo "[scheduled] WARNING: добавь SENDER_SSH_HOST (и SENDER_SSH_HOST_2…) в секрет portal_secrets и создай /opt/portal-sender/.env по deploy/sender/.env.example." >&2
+                mark_aux_pending sender-all
+                SENDER_DEPLOY_SKIPPED="${SENDER_DEPLOY_SKIPPED:+${SENDER_DEPLOY_SKIPPED}; }не заданы sender-хосты"
               fi
               if [ "$DEPLOY_SENDER" = 1 ] && [ -n "$SENDER_TARGETS" ]; then
                 run_sender_bounded() {
@@ -375,6 +417,10 @@ blocks:
                   run_sender_bounded "$desc" 60 2 \
                     sshpass -p "${SENDER_PASS}" scp ${SSH_BASE} "$@"
                 }
+                # Сначала отмечаем все цели: даже ранний сбой основной выкладки
+                # не потеряет уже запланированное обновление sender-хоста.
+                for sender_n in $SENDER_TARGETS; do mark_aux_pending "sender-$sender_n"; done
+                clear_aux_pending sender-all
                 for sender_n in $SENDER_TARGETS; do
                   if [ "$sender_n" = 1 ]; then
                     SENDER_HOST="$SENDER_SSH_HOST"
@@ -393,7 +439,9 @@ blocks:
                     # Bound each host's phase, including hung SSH/pull. Pull and up
                     # use separate sessions: a timed-out download can never later
                     # continue into a container restart on its own.
-                    SENDER_DEADLINE=$((SECONDS + 300))
+                    # Подготовка и перезапуск имеют независимые бюджеты.
+                    # Скачивание образа больше не отнимает время у drain.
+                    SENDER_DEADLINE=$((SECONDS + 600))
                     HOST_SKIPPED=""
                     if ! run_ssh_sender "sender preflight" "true" 25 2; then
                       HOST_SKIPPED="хост не ответил на проверку SSH"
@@ -419,20 +467,22 @@ blocks:
                       cd ${SENDER_PATH}
                       printf '%s\n' \"${DOCKER_PASSWORD}\" | sudo -n timeout --kill-after=5s 30s docker login -u \"${DOCKER_USERNAME}\" --password-stdin
                       sudo -n timeout --kill-after=10s 180s docker compose -f docker-compose.yml -p portal-sender --env-file .env pull
-                      " 240 1; then
+                      " 240 2; then
                         HOST_SKIPPED="скачивание образа не завершилось; запуск контейнеров не запрашивался"
-                      elif [ "$((SENDER_DEADLINE - SECONDS))" -lt 210 ]; then
-                        # Compose grants old workers 2m to drain. Do not start a
-                        # restart if the host budget cannot cover that grace period.
-                        HOST_SKIPPED="образ скачан, но бюджета недостаточно для безопасного перезапуска; контейнеры не трогали"
-                      elif ! run_ssh_sender "sender compose up" "set -e
+                      else
+                        SENDER_DEADLINE=$((SECONDS + 450))
+                        if ! run_ssh_sender "sender compose up" "set -e
                       cd ${SENDER_PATH}
-                      sudo -n timeout --kill-after=10s 180s docker compose -f docker-compose.yml -p portal-sender --env-file .env up -d --pull never --remove-orphans
+                      # flock не даёт повторному CI пересечься с ещё работающим
+                      # удалённым up после обрыва предыдущей SSH-сессии.
+                      sudo -n flock -n /var/lock/portal-sender-deploy.lock timeout --kill-after=10s 420s docker compose -f docker-compose.yml -p portal-sender --env-file .env up -d --pull never --remove-orphans --wait --wait-timeout 150
                       sudo -n docker ps --filter label=com.docker.compose.project=portal-sender --format '{{.Names}} {{.Status}}'
-                      " 210 1; then
-                        # An ambiguous up must not be blindly replayed: it may have
-                        # already recreated containers before the SSH reply failed.
-                        HOST_SKIPPED="результат обновления контейнеров не подтверждён; требуется проверка состояния"
+                      " 450 1; then
+                          # Не повторяем up в этой попытке. Следующий запуск
+                          # использует тот же compose без force-recreate и ждёт
+                          # завершения прежнего up через блокировку на хосте.
+                          HOST_SKIPPED="результат обновления контейнеров не подтверждён; требуется повторная проверка"
+                        fi
                       fi
                     fi
                     printf '%s' "$HOST_SKIPPED" > "$SENDER_LOG_DIR/host_${sender_n}.skip"
@@ -702,11 +752,12 @@ blocks:
               # Порядок: scp в staging в $HOME пользователя CI → node --check в том же образе, что у крона →
               # прежняя версия в .prev/ → sudo install. Кривой файл НЕ ставится (на проде остаётся прежняя
               # версия). Переписать файл под работающим node безопасно: скрипт читается один раз при старте.
-              # Ошибка шага НЕ откатывает и не повторяет деплой приложения: пишем last_deploy_sha как обычно,
-              # шлём алерт в health-чат и красим прогон в красный (exit 1 в самом конце) — чинить руками:
-              # поправить main или прогнать deploy-sync.sh.
+              # При ошибке сохраняем pending отдельно от last_deploy_sha:
+              # следующий запуск повторит только синк, даже без новых коммитов.
+              # Портал не откатываем; алерт и красный статус сохраняются.
               DATASET_SYNC_FAILED=0
               if [ "$DEPLOY_DATASET_SYNC" = 1 ]; then
+                mark_aux_pending dataset-sync
                 echo "[scheduled] Dataset sync: deploying scripts to ${USER}@${HOST}:/opt/instantly-dataset-sync"
                 DS_FILES="email-read-budget.mjs sync.mjs label-new-replies.mjs label-new-segments.mjs sync-portal-mirror.mjs 018_portal_mirror.sql 022_leads_capture.sql"
                 DS_STAGE=".dataset-sync-stage"
@@ -760,6 +811,8 @@ blocks:
                   curl -fsS -X POST \"https://api.telegram.org/bot\${bot_token}/sendMessage\" \
                     --data-urlencode \"chat_id=\${chat_id}\" \
                     --data-urlencode \"text=⚠️ Scheduled deploy ${COMMIT_SHA}: приложение задеплоено, но скрипты ночного синка instantly_dataset (/opt/instantly-dataset-sync) НЕ обновлены — см. лог Semaphore, шаг dataset-sync. На проде прежняя версия синка.\" >/dev/null || true" || true
+                elif ! clear_aux_pending dataset-sync; then
+                  DATASET_SYNC_FAILED=1
                 fi
               else
                 echo "[scheduled] Dataset sync: изменений в app/scripts/instantly-dataset нет — /opt/instantly-dataset-sync не трогаем"
@@ -774,13 +827,13 @@ blocks:
                 if [ -z \"\${bot_token}\" ] || [ -z \"\${chat_id}\" ]; then echo '[sender] health alert skipped: no token/chat'; exit 0; fi
                 curl -fsS --connect-timeout 5 --max-time 15 -X POST \"https://api.telegram.org/bot\${bot_token}/sendMessage\" \
                   --data-urlencode \"chat_id=\${chat_id}\" \
-                  --data-urlencode \"text=⚠️ Scheduled deploy ${COMMIT_SHA}: портал задеплоен, но обновление воркеров «Рассылки» НЕ подтверждено — ${SENDER_DEPLOY_SKIPPED}. Когда хост поднимется: следующий деплой с правкой sender или вручную по шапке deploy/sender/render-compose.sh.\" >/dev/null || true" || true
+                  --data-urlencode \"text=⚠️ Scheduled deploy ${COMMIT_SHA}: портал задеплоен, но обновление воркеров «Рассылки» НЕ подтверждено — ${SENDER_DEPLOY_SKIPPED}. Незавершённые хосты будут повторно проверены и обновлены при следующем запуске Scheduled deploy, даже без новых коммитов.\" >/dev/null || true" || true
               fi
 
               run_ssh "write last_deploy_sha" \
                 "echo $COMMIT_SHA > /home/Portal/prod/last_deploy_sha"
               echo "[scheduled] Saved last_deploy_sha on server."
-              if [ "$DATASET_SYNC_FAILED" = 1 ]; then
-                echo "[scheduled] Завершаю с ошибкой из-за шага dataset-sync (приложение и last_deploy_sha — штатно, повторного деплоя не будет)." >&2
+              if [ "$DATASET_SYNC_FAILED" = 1 ] || [ -n "$SENDER_DEPLOY_SKIPPED" ]; then
+                echo "[scheduled] Вспомогательная выкладка не завершена. Портал обновлён; незавершённые этапы сохраняются для следующего запуска." >&2
                 exit 1
               fi
