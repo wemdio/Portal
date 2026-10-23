@@ -3,14 +3,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
-import { BarChart3, Megaphone, ScrollText, Search, Users, UserCircle } from 'lucide-react';
+import { BarChart3, Megaphone, Search, Users, UserCircle } from 'lucide-react';
 import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
 import LiDashboard, { type LiActivity } from '@/components/li-outreach/LiDashboard';
 
 // ---- Types ------------------------------------------------------------------
 
-type Tab = 'dashboard' | 'campaigns' | 'leads' | 'scraper' | 'accounts' | 'logs';
-const LI_TABS: readonly Tab[] = ['dashboard', 'campaigns', 'leads', 'scraper', 'accounts', 'logs'];
+type Tab = 'dashboard' | 'campaigns' | 'leads' | 'scraper' | 'accounts';
+const LI_TABS: readonly Tab[] = ['dashboard', 'campaigns', 'leads', 'scraper', 'accounts'];
 const LI_TAB_KEY = 'li-outreach:tab';
 
 type LiAccountCooldownReason = 'invitation_limit' | 'already_invited' | 'account_restricted';
@@ -258,33 +258,16 @@ export default function LiOutreachPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
   const [editingCampaignId, setEditingCampaignId] = useState<string | null>(null);
+  /** Страница кампании: настройки или логи (логи — только у существующей). */
+  const [campaignPageTab, setCampaignPageTab] = useState<'settings' | 'logs'>('settings');
   const [cf, setCf] = useState(DEFAULT_CAMPAIGN_FORM);
 
-  /** Закрывает модалку «Новая кампания» и сбрасывает edit-state. Используется
-   *  из кнопки X, backdrop-клика, Esc-handler'а. Сама форма (`cf`) НЕ
+  /** Закрывает страницу кампании и возвращает к списку. Сама форма (`cf`) НЕ
    *  сбрасывается — её ресет делает openCreateCampaignForm. */
   const closeCampaignModal = useCallback(() => {
     setShowCreate(false);
     setEditingCampaignId(null);
   }, []);
-
-  // Esc-закрытие пока модалка открыта.
-  useEffect(() => {
-    if (!showCreate) return;
-    const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key === 'Escape') closeCampaignModal();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [showCreate, closeCampaignModal]);
-
-  // Body-scroll-lock пока модалка открыта.
-  useEffect(() => {
-    if (!showCreate) return;
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = previous; };
-  }, [showCreate]);
 
   // Dashboard data
   const [dashData, setDashData] = useState<DashboardData | null>(null);
@@ -408,7 +391,7 @@ export default function LiOutreachPage() {
   useEffect(() => {
     if (!tabReady) return;
     if (tab === 'dashboard') { void loadDashboard(); void loadLeads(); void loadCampaigns(); }
-    if (tab === 'campaigns') void loadCampaigns();
+    if (tab === 'campaigns') { void loadCampaigns(); void loadDashboard(); }
     if (tab === 'leads') void loadLeads(leadListFilterId);
     if (tab === 'scraper' || tab === 'dashboard') void loadTasks();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -638,6 +621,7 @@ export default function LiOutreachPage() {
   const openCreateCampaignForm = () => {
     setEditingCampaignId(null);
     setCf(DEFAULT_CAMPAIGN_FORM);
+    setCampaignPageTab('settings');
     setShowCreate(true);
   };
 
@@ -694,6 +678,8 @@ export default function LiOutreachPage() {
         : DEFAULT_CAMPAIGN_FORM.timezone_offset,
     });
     setEditingCampaignId(campaign.id);
+    setSelectedCampaignId(campaign.id);
+    setCampaignPageTab('settings');
     setShowCreate(true);
   };
 
@@ -932,10 +918,9 @@ export default function LiOutreachPage() {
     { id: 'leads', label: 'Лиды', icon: Users },
     { id: 'scraper', label: 'Скрапер', icon: Search },
     { id: 'accounts', label: 'Аккаунты', icon: UserCircle },
-    { id: 'logs', label: 'Логи', icon: ScrollText },
   ] as const;
 
-  const selectedCampaign = useMemo(() => campaigns.find((c) => c.id === selectedCampaignId) ?? null, [campaigns, selectedCampaignId]);
+  const editingCampaign = useMemo(() => campaigns.find((c) => c.id === editingCampaignId) ?? null, [campaigns, editingCampaignId]);
 
 
   return (
@@ -1168,31 +1153,92 @@ export default function LiOutreachPage() {
         <div className="space-y-4">
           {/* Create Campaign Panel */}
           {showCreate && (
-            <div
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="li-campaign-modal-title"
-              className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm"
-              onClick={closeCampaignModal}
-            >
-              <div
-                className="my-6 w-full max-w-4xl rounded-2xl border border-blue-200 bg-white shadow-2xl shadow-slate-900/30"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-                  <h2 id="li-campaign-modal-title" className="text-sm font-semibold text-gray-900">
-                    {editingCampaignId ? 'Редактирование кампании' : 'Новая кампания'}
-                  </h2>
-                  <button
-                    type="button"
-                    onClick={closeCampaignModal}
-                    aria-label="Отмена"
-                    className="rounded-lg p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
-                  >
-                    ✕
-                  </button>
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={closeCampaignModal}
+                  className="cursor-pointer rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                >
+                  ← Кампании
+                </button>
+                <h2 id="li-campaign-modal-title" className="min-w-0 truncate text-lg font-semibold text-gray-900">
+                  {editingCampaignId ? (cf.name || 'Кампания') : 'Новая кампания'}
+                </h2>
+                {editingCampaign && (
+                  <>
+                    <span className={`shrink-0 rounded-md px-2 py-0.5 text-xs ${editingCampaign.status === 'running' ? 'bg-green-100 text-green-700' : editingCampaign.status === 'draft' ? 'bg-gray-100 text-gray-600' : editingCampaign.status === 'completed' ? 'bg-cyan-100 text-cyan-700' : 'bg-amber-100 text-amber-700'}`}>
+                      {CAMPAIGN_STATUS_LABEL_RU[editingCampaign.status] ?? editingCampaign.status}
+                    </span>
+                    <div className="ml-auto flex items-center gap-3 text-xs">
+                      {editingCampaign.status !== 'running' && <button type="button" onClick={() => void startCampaign(editingCampaign.id)} className="cursor-pointer text-green-700 hover:underline">▶ Запустить</button>}
+                      {editingCampaign.status === 'running' && <button type="button" onClick={() => void stopCampaign(editingCampaign.id)} className="cursor-pointer text-amber-700 hover:underline">⏹ Остановить</button>}
+                    </div>
+                  </>
+                )}
+              </div>
+              {editingCampaignId && (
+                <div role="tablist" aria-label="Разделы кампании" className="inline-flex rounded-full border border-gray-200 p-0.5 text-xs font-medium">
+                  {(['settings', 'logs'] as const).map((id) => (
+                    <button
+                      key={id}
+                      type="button"
+                      role="tab"
+                      aria-selected={campaignPageTab === id}
+                      onClick={() => {
+                        setCampaignPageTab(id);
+                        if (id === 'logs' && editingCampaignId) void loadCampaignLogs(editingCampaignId);
+                      }}
+                      className={`cursor-pointer rounded-full px-4 py-1.5 transition ${campaignPageTab === id ? 'bg-[#4f46e5] text-white' : 'text-gray-500 hover:text-gray-800'}`}
+                    >
+                      {id === 'settings' ? 'Настройки' : 'Логи'}
+                    </button>
+                  ))}
                 </div>
-                <div className="space-y-4 px-4 py-4">
+              )}
+              {editingCampaignId && campaignPageTab === 'logs' ? (
+                <div className="space-y-3 rounded-xl border border-gray-200 bg-white p-4">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <h3 className="text-sm font-semibold text-gray-900">Логи кампании</h3>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs text-gray-500">Выгрузить .txt:</span>
+                      {(['24h', '7d'] as const).map((r) => {
+                        const labels: Record<typeof r, string> = { '24h': '24 часа', '7d': '7 дней' };
+                        const busy = exportingCampaignLogsRange === r;
+                        return (
+                          <button
+                            key={r}
+                            type="button"
+                            onClick={() => void exportCampaignLogs(r)}
+                            disabled={exportingCampaignLogsRange !== null}
+                            title={`Скачать логи кампании за последние ${labels[r]}`}
+                            className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {busy ? '...' : labels[r]}
+                          </button>
+                        );
+                      })}
+                      <button type="button" onClick={() => editingCampaignId && void loadCampaignLogs(editingCampaignId)} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">Обновить</button>
+                    </div>
+                  </div>
+                  <div className="max-h-[70vh] overflow-y-auto space-y-1">
+                    {loadingCampaignLogs ? (
+                      <div className="flex items-center justify-center py-10" role="status" aria-label="Загрузка логов">
+                        <div className="h-6 w-6 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
+                      </div>
+                    ) : campaignLogs.length === 0 ? (
+                      <div className="text-xs text-gray-400">Нет логов</div>
+                    ) : campaignLogs.map((log) => (
+                      <div key={log.id} className={`text-xs px-2 py-1 rounded ${log.level === 'error' ? 'bg-red-50 text-red-700' : log.level === 'warning' ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-700'}`}>
+                        <span className="text-gray-400">{new Date(log.created_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>{' '}
+                        {log.lead_name ? <span className="font-medium">[{log.lead_name}]</span> : null}{' '}
+                        {log.message}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4 rounded-xl border border-gray-200 bg-white p-4">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div>
                   <label className="text-xs text-gray-600 block mb-1">Название *</label>
@@ -1459,17 +1505,15 @@ export default function LiOutreachPage() {
                 {creating ? (editingCampaignId ? 'Сохранение...' : 'Создание...') : (editingCampaignId ? 'Сохранить изменения' : 'Создать кампанию')}
               </button>
                 </div>
-              </div>
+              )}
             </div>
           )}
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {!showCreate && (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-gray-900">Кампании</h2>
-                {!showCreate && (
-                  <button onClick={openCreateCampaignForm} className="rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-medium">+ Новая</button>
-                )}
+                <h2 className="text-sm font-semibold text-gray-900">Кампании <span className="font-normal text-gray-400">({campaigns.length})</span></h2>
+                <button onClick={openCreateCampaignForm} className="cursor-pointer rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700">+ Новая</button>
               </div>
               {loadingCampaigns && campaigns.length === 0 ? (
                 <div className="flex items-center justify-center py-16" role="status" aria-label="Загрузка кампаний">
@@ -1477,88 +1521,64 @@ export default function LiOutreachPage() {
                 </div>
               ) : campaigns.length === 0 ? (
                 <div className="text-sm text-gray-500">Нет кампаний</div>
-              ) : campaigns.map((c) => {
-                // isOwn kept for two things now: visual card border (so operators
-                // can still tell at a glance which launches they added) and the
-                // Delete button gate — DELETE stays owner-only in the API for
-                // safety, so we don't render the button on foreign rows.
-                const isOwn = currentUserId != null && c.user_id === currentUserId;
-                return (
-                <div key={c.id} className={`rounded-xl border p-3 text-sm cursor-pointer ${selectedCampaignId === c.id ? 'border-blue-300 bg-blue-50' : isOwn ? 'border-gray-200 hover:bg-gray-50' : 'border-l-4 border-l-purple-400 border-y border-r border-purple-200 bg-purple-50/40 hover:bg-purple-50'}`} onClick={() => setSelectedCampaignId(c.id)}>
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="font-medium text-gray-900 min-w-0 truncate">{c.name}</div>
-                    <span className={`text-xs px-2 py-0.5 rounded-md shrink-0 ${c.status === 'running' ? 'bg-green-100 text-green-700' : c.status === 'draft' ? 'bg-gray-100 text-gray-600' : c.status === 'completed' ? 'bg-cyan-100 text-cyan-700' : 'bg-amber-100 text-amber-700'}`}>{CAMPAIGN_STATUS_LABEL_RU[c.status] ?? c.status}</span>
-                  </div>
-                  {!isOwn && (
-                    <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-purple-100 px-2 py-0.5 text-[10px] font-medium text-purple-700" title="Кампанию добавил другой специалист. Редактирование, старт и стоп доступны всей команде.">
-                      👤 {c.owner_name ?? 'другой спец'}
-                    </div>
-                  )}
-                  <div className="text-xs text-gray-500 mt-1">{(c.steps ?? []).length} шагов • AI: {c.use_ai ? 'вкл' : 'выкл'} • лимит: {c.daily_invite_limit}/день</div>
-                  {c.use_custom_invites && (
-                    <div
-                      className="mt-1 inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 border border-emerald-200"
-                      title="На шаге 1 берётся персональный текст инвайта каждого лида из CSV. AI-персонализация для инвайта пропускается."
-                    >
-                      ✎ персональные инвайты
-                    </div>
-                  )}
-                  <div className="flex gap-2 mt-2">
-                    <button onClick={(e) => { e.stopPropagation(); openEditCampaignForm(c); }} className="text-xs text-blue-700 hover:underline">Редактировать</button>
-                    {c.status !== 'running' && <button onClick={(e) => { e.stopPropagation(); void startCampaign(c.id); }} className="text-xs text-green-700 hover:underline">▶ Запустить</button>}
-                    {c.status === 'running' && <button onClick={(e) => { e.stopPropagation(); void stopCampaign(c.id); }} className="text-xs text-amber-700 hover:underline">⏹ Остановить</button>}
-                    {isOwn && <button onClick={(e) => { e.stopPropagation(); void deleteCampaign(c.id); }} className="text-xs text-red-600 hover:underline">Удалить</button>}
-                  </div>
-                </div>
-                );
-              })}
-            </div>
-            <div className="rounded-xl border border-gray-200 p-4 min-h-[200px]">
-              {!selectedCampaign ? (
-                <div className="text-sm text-gray-400 text-center py-8">Выберите кампанию</div>
               ) : (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <h3 className="font-semibold text-gray-900">{selectedCampaign.name} — Логи</h3>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-xs text-gray-500">Выгрузить .txt:</span>
-                      {(['24h', '7d'] as const).map((r) => {
-                        const labels: Record<typeof r, string> = { '24h': '24 часа', '7d': '7 дней' };
-                        const busy = exportingCampaignLogsRange === r;
-                        return (
-                          <button
-                            key={r}
-                            type="button"
-                            onClick={() => void exportCampaignLogs(r)}
-                            disabled={exportingCampaignLogsRange !== null}
-                            title={`Скачать логи кампании за последние ${labels[r]}`}
-                            className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            {busy ? '...' : labels[r]}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                  <div className="max-h-[400px] overflow-y-auto space-y-1">
-                    {loadingCampaignLogs ? (
-                      <div className="flex items-center justify-center py-10" role="status" aria-label="Загрузка логов">
-                        <div className="h-6 w-6 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3 [&>*]:min-w-0">
+                  {campaigns.map((c) => {
+                    // isOwn: рамка карточки (чья кампания) и кнопка «Удалить» — удаление остаётся
+                    // только у владельца в API, на чужих карточках кнопку не рисуем.
+                    const isOwn = currentUserId != null && c.user_id === currentUserId;
+                    const cs = dashData?.campaign_stats.find((x) => x.id === c.id);
+                    return (
+                      <div
+                        key={c.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => openEditCampaignForm(c)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') openEditCampaignForm(c); }}
+                        className={`group flex cursor-pointer flex-col rounded-xl border bg-white p-4 text-sm transition hover:shadow-sm ${isOwn ? 'border-gray-200 hover:border-indigo-300' : 'border-purple-200 border-l-4 border-l-purple-400 hover:border-purple-300'}`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 truncate font-semibold text-gray-900">{c.name}</div>
+                          <span className={`shrink-0 rounded-md px-2 py-0.5 text-xs ${c.status === 'running' ? 'bg-green-100 text-green-700' : c.status === 'draft' ? 'bg-gray-100 text-gray-600' : c.status === 'completed' ? 'bg-cyan-100 text-cyan-700' : 'bg-amber-100 text-amber-700'}`}>{CAMPAIGN_STATUS_LABEL_RU[c.status] ?? c.status}</span>
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
+                          <span>{(c.steps ?? []).length} шагов</span>
+                          <span>· AI: {c.use_ai ? 'вкл' : 'выкл'}</span>
+                          <span>· лимит {c.daily_invite_limit}/день</span>
+                          {c.use_custom_invites && (
+                            <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700" title="На шаге 1 берётся персональный текст инвайта каждого лида из CSV. AI-персонализация для инвайта пропускается.">✎ персональные инвайты</span>
+                          )}
+                          {!isOwn && (
+                            <span className="rounded-full bg-purple-100 px-2 py-0.5 text-[10px] font-medium text-purple-700" title="Кампанию добавил другой специалист. Редактирование, старт и стоп доступны всей команде.">👤 {c.owner_name ?? 'другой спец'}</span>
+                          )}
+                        </div>
+                        {cs ? (
+                          <div className="mt-3 grid grid-cols-4 gap-2 border-t border-gray-100 pt-3">
+                            {[
+                              { label: 'Лидов', value: cs.leads_total },
+                              { label: 'Сегодня', value: `${cs.invites_sent_today}/${cs.daily_invite_limit}` },
+                              { label: 'Принято', value: cs.accepted },
+                              { label: 'Ответили', value: cs.replied },
+                            ].map((m) => (
+                              <div key={m.label} className="min-w-0">
+                                <div className="text-[10px] text-gray-400">{m.label}</div>
+                                <div className="text-sm font-semibold tabular-nums text-gray-900">{m.value}</div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                        <div className="mt-3 flex items-center gap-3 text-xs">
+                          {c.status !== 'running' && <button onClick={(e) => { e.stopPropagation(); void startCampaign(c.id); }} className="cursor-pointer text-green-700 hover:underline">▶ Запустить</button>}
+                          {c.status === 'running' && <button onClick={(e) => { e.stopPropagation(); void stopCampaign(c.id); }} className="cursor-pointer text-amber-700 hover:underline">⏹ Остановить</button>}
+                          {isOwn && <button onClick={(e) => { e.stopPropagation(); void deleteCampaign(c.id); }} className="ml-auto cursor-pointer text-red-600 hover:underline">Удалить</button>}
+                        </div>
                       </div>
-                    ) : campaignLogs.length === 0 ? (
-                      <div className="text-xs text-gray-400">Нет логов</div>
-                    ) : campaignLogs.map((log) => (
-                      <div key={log.id} className={`text-xs px-2 py-1 rounded ${log.level === 'error' ? 'bg-red-50 text-red-700' : log.level === 'warning' ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-700'}`}>
-                        <span className="text-gray-400">{new Date(log.created_at).toLocaleTimeString()}</span>{' '}
-                        {log.lead_name ? <span className="font-medium">[{log.lead_name}]</span> : null}{' '}
-                        {log.message}
-                      </div>
-                    ))}
-                  </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
-          </div>
+          )}
         </div>
       )}
 
@@ -2089,7 +2109,6 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
       )}
 
       {/* Logs */}
-      {tab === 'logs' && <LiLogsTab campaigns={campaigns} />}
 
       {/* Per-account log modal */}
       {accountLogsModal && (
@@ -2253,213 +2272,6 @@ function AccountCard({
 
 // ---- Logs tab ---------------------------------------------------------------
 
-type LiLogEntry = {
-  id: number;
-  campaign_id: string;
-  level: string;
-  message: string;
-  lead_name: string | null;
-  step_index: number | null;
-  created_at: string;
-  campaign?: { name: string } | null;
-};
-
-function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
-  const [logs, setLogs] = useState<LiLogEntry[]>([]);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [filterCampaignId, setFilterCampaignId] = useState('');
-  const [filterLevel, setFilterLevel] = useState('');
-  const [autoRefresh, setAutoRefresh] = useState(true);
-  const [exportingRange, setExportingRange] = useState<string | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const isAutoScroll = useRef(true);
-
-  const fetchLogs = useCallback(async () => {
-    try {
-      const params = new URLSearchParams({ limit: '300' });
-      if (filterCampaignId) params.set('campaign_id', filterCampaignId);
-      if (filterLevel) params.set('level', filterLevel);
-      const d = await api<{ items: LiLogEntry[]; total: number }>(`/logs?${params.toString()}`);
-      const items = Array.isArray(d?.items) ? d.items : [];
-      setLogs(items.slice().reverse());
-      setTotal(typeof d?.total === 'number' ? d.total : items.length);
-      setLoadError(null);
-    } catch (e) {
-      console.error('[li-outreach] fetchLogs failed', e);
-      setLoadError(e instanceof Error ? e.message : 'Не удалось загрузить логи');
-    } finally {
-      setLoading(false);
-    }
-  }, [filterCampaignId, filterLevel]);
-
-  useEffect(() => { void fetchLogs(); }, [fetchLogs]);
-
-  useEffect(() => {
-    if (!autoRefresh) return;
-    // Каждые 10 сек — раньше было 5, но лид-таблица и без того шумит
-    // сетевыми хвостами, а логи в реальном времени с такой частотой не
-    // нужны. Меньше запросов = меньше нагрузка на воркеры и сеть.
-    const interval = setInterval(() => void fetchLogs(), 10000);
-    return () => clearInterval(interval);
-  }, [fetchLogs, autoRefresh]);
-
-  const handleScroll = useCallback(() => {
-    if (!containerRef.current) return;
-    const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
-    isAutoScroll.current = scrollHeight - scrollTop - clientHeight < 50;
-  }, []);
-
-  useEffect(() => {
-    if (isAutoScroll.current) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [logs]);
-
-  const levelColor = (l: string) => {
-    switch (l) {
-      case 'error': return 'text-rose-400';
-      case 'warning': return 'text-amber-400';
-      default: return 'text-emerald-400';
-    }
-  };
-
-  const levelBadge = (l: string) => {
-    switch (l) {
-      case 'error': return 'ERR ';
-      case 'warning': return 'WARN';
-      default: return 'INFO';
-    }
-  };
-
-  const errorCount = logs.filter((l) => l.level === 'error').length;
-  const warnCount = logs.filter((l) => l.level === 'warning').length;
-
-  // Download buttons honour the currently-applied filters (campaign + level)
-  // so the .txt file matches what the operator is actually looking at.
-  const exportLogs = useCallback(
-    async (range: '24h' | '7d') => {
-      setExportingRange(range);
-      try {
-        const params = new URLSearchParams({ range });
-        if (filterCampaignId) params.set('campaign_id', filterCampaignId);
-        if (filterLevel) params.set('level', filterLevel);
-        const res = await authFetch(`/api/tools/li-outreach/logs/export?${params.toString()}`);
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          alert((data as { error?: string }).error ?? `Не удалось выгрузить логи (HTTP ${res.status})`);
-          return;
-        }
-        const cd = res.headers.get('content-disposition') ?? '';
-        const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(cd);
-        const ascii = /filename="?([^";]+)"?/i.exec(cd);
-        const filename = utf8 ? decodeURIComponent(utf8[1]) : (ascii?.[1] ?? `li-outreach-logs-${range}.txt`);
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = filename;
-        document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      } finally {
-        setExportingRange(null);
-      }
-    },
-    [filterCampaignId, filterLevel],
-  );
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <div className="flex items-center gap-2 flex-wrap">
-          <select
-            value={filterCampaignId}
-            onChange={(e) => { setFilterCampaignId(e.target.value); setLoading(true); }}
-            className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs"
-          >
-            <option value="">Все кампании</option>
-            {campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-          <select
-            value={filterLevel}
-            onChange={(e) => { setFilterLevel(e.target.value); setLoading(true); }}
-            className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs"
-          >
-            <option value="">Все уровни</option>
-            <option value="info">Info</option>
-            <option value="warning">Warning</option>
-            <option value="error">Error</option>
-          </select>
-          <span className="text-xs text-gray-500">
-            {total} записей
-            {errorCount > 0 && <span className="ml-1.5 text-red-600">{errorCount} ошибок</span>}
-            {warnCount > 0 && <span className="ml-1.5 text-amber-600">{warnCount} предупреждений</span>}
-          </span>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs text-gray-500">Выгрузить .txt:</span>
-          {(['24h', '7d'] as const).map((r) => {
-            const labels: Record<typeof r, string> = { '24h': '24 часа', '7d': '7 дней' };
-            const busy = exportingRange === r;
-            return (
-              <button
-                key={r}
-                type="button"
-                onClick={() => void exportLogs(r)}
-                disabled={exportingRange !== null}
-                title={`Скачать логи за последние ${labels[r]}${filterCampaignId ? ' (текущая кампания)' : ' (все кампании)'}${filterLevel ? `, уровень ${filterLevel}` : ''}`}
-                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {busy ? '...' : labels[r]}
-              </button>
-            );
-          })}
-          <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer ml-2">
-            <input
-              type="checkbox"
-              checked={autoRefresh}
-              onChange={(e) => setAutoRefresh(e.target.checked)}
-              className="rounded"
-            />
-            Автообновление
-          </label>
-          <button onClick={() => { setLoading(true); void fetchLogs(); }} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
-            Обновить
-          </button>
-        </div>
-      </div>
-
-      <div
-        ref={containerRef}
-        onScroll={handleScroll}
-        className="rounded-lg border border-gray-800 bg-gray-950 p-3 font-mono text-[11px] leading-relaxed h-[540px] overflow-auto"
-      >
-        {loading && logs.length === 0 && !loadError && <p className="text-gray-500">Загрузка логов...</p>}
-        {loadError && (
-          <div className="text-rose-400">
-            <div className="font-bold">Ошибка загрузки логов</div>
-            <div className="text-gray-400 mt-1 break-all">{loadError}</div>
-          </div>
-        )}
-        {!loading && !loadError && logs.length === 0 && <p className="text-gray-600">Нет логов. Запустите кампанию — здесь появятся записи.</p>}
-        {logs.map((log) => (
-          <div key={log.id} className="flex gap-2 py-[1px] hover:bg-gray-900/50">
-            <span className="text-gray-600 shrink-0">{new Date(log.created_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
-            <span className={`shrink-0 font-bold w-10 ${levelColor(log.level)}`}>{levelBadge(log.level)}</span>
-            {!filterCampaignId && log.campaign && (
-              <span className="shrink-0 text-blue-400 max-w-[140px] truncate">[{log.campaign.name}]</span>
-            )}
-            {log.lead_name && <span className="shrink-0 text-violet-400">{log.lead_name}</span>}
-            {log.step_index != null && <span className="shrink-0 text-gray-600">step:{log.step_index}</span>}
-            <span className="text-gray-300 break-all">{log.message}</span>
-          </div>
-        ))}
-        <div ref={bottomRef} />
-      </div>
-    </div>
-  );
-}
 
 // ---- Per-account log modal --------------------------------------------------
 
