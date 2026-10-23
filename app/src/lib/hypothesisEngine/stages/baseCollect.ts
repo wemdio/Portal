@@ -5337,10 +5337,19 @@ export function heRecheckImportedRows<T extends HeUnifiedRow>(input: {
  */
 const CONSTRUCT_STEPS_TAIL_RU = ['validate_emails', 'cap_emails_per_company', 'enrich_descriptions'];
 
-/** ENG-хвост после поиска почт и описаний: разнос адресов обязателен (см. выше). */
+/**
+ * ENG-хвост после поиска почт и описаний: разнос адресов обязателен (см. выше).
+ * remove_support_emails (с 23.10.2026) — до проверки и капа: EN-ветка шага
+ * убирает служебные ящики (privacy@, compliance@, complaints@, support@…) и
+ * адреса чужих организаций, найденные на сайте компании (регулятор, PR-агентство,
+ * партнёр). Аудит проверочного сбора HST: таких было 63 из 215 готовых контактов.
+ * Стоя до validate_emails, шаг не тратит на них пробы, а cap_emails_per_company
+ * отдаёт пять мест хорошим адресам компании.
+ */
 const CONSTRUCT_STEPS_AFTER_SPLIT_US = [
   'split_emails',
   'dedup_email',
+  'remove_support_emails',
   'validate_emails',
   'cap_emails_per_company',
 ];
