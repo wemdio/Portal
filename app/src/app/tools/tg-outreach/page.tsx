@@ -46,7 +46,6 @@ import {
   CheckCircle2,
   Flame,
   Database,
-  Eye,
   Eraser,
   ShieldCheck,
   FileSpreadsheet,
@@ -3688,6 +3687,12 @@ function CampaignAccountsTab({
     [accounts, errorCounts, loadedAt],
   );
 
+  /** Греются сейчас: срок прогрева ещё в будущем (как в круге рассылки). */
+  const warmingCount = useMemo(() => {
+    const now = loadedAt ?? Date.now();
+    return accounts.filter((a) => a.warmup_until && new Date(a.warmup_until).getTime() > now).length;
+  }, [accounts, loadedAt]);
+
   /**
    * Кого предлагает выключить кнопка «Снять неживые с рассылки».
    *
@@ -3863,7 +3868,14 @@ function CampaignAccountsTab({
           </span>
 
           <span
-            className={`rounded-md px-2 py-1 font-medium ${accountStats.restricted > 0 ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-400'}`}
+            className={`rounded-md px-2 py-1 font-medium ${warmingCount > 0 ? 'bg-yellow-50 text-yellow-700' : 'bg-gray-50 text-gray-400'}`}
+            title="Греются сейчас: в боевую рассылку не идут, пока не выйдет срок прогрева. Они входят в «живо»."
+          >
+            греются {warmingCount} из {accounts.length}
+          </span>
+
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.restricted > 0 ? 'bg-rose-50 text-rose-700' : 'bg-gray-50 text-gray-400'}`}
             title="Сейчас не могут работать: кулдаун после ограничения Telegram, мёртвая сессия, бан, заморозка. Сбои связи с прокси сюда не входят."
           >
             ограничены {accountStats.restricted} из {accounts.length}
@@ -5691,14 +5703,16 @@ function CampaignBasesTab({
     <div className="space-y-4">
       {/* Пока список не пришёл, шапка («Базы контактов (0)», поле имени, кнопка)
           не рисуется: «(0)» врал, а форма создания мигала до загрузки. */}
-      {!loading && bases.length > 0 && (
-        <BasesForecast campaignId={campaignId} refreshKey={[...linked].map((id) => `${id}:${stageOf[id] ?? 0}`).join(',')} />
-      )}
       {!loading && (
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <span className="text-sm font-medium text-gray-700">
-          Базы контактов <span className="text-gray-400 font-normal">({bases.length})</span>
-        </span>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span className="text-sm font-medium text-gray-700">
+            Базы контактов <span className="text-gray-400 font-normal">({bases.length})</span>
+          </span>
+          {bases.length > 0 && (
+            <BasesForecast campaignId={campaignId} refreshKey={[...linked].map((id) => `${id}:${stageOf[id] ?? 0}`).join(',')} />
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <input
             value={newName}
@@ -5772,17 +5786,20 @@ function CampaignBasesTab({
               <div className="min-w-0">
                 <div className="flex items-center gap-2 text-xs font-medium text-gray-800">
                   {linked.has(b.id) && (
-                    <select
-                      value={stageList.indexOf(stageOf[b.id] ?? 0) + 1}
-                      onChange={(e) => { void moveToStage(b.id, Number(e.target.value)); }}
-                      title="Этап рассылки. Базы одного этапа рассылаются параллельно, следующий этап стартует, когда предыдущий выдал все контакты"
-                      aria-label={`Этап рассылки: база ${b.name}`}
-                      className="shrink-0 cursor-pointer rounded-full bg-[#4f46e5] px-1.5 py-0.5 text-[10px] font-semibold text-white outline-none"
-                    >
-                      {Array.from({ length: stageList.length + 1 }, (_, i) => (
-                        <option key={i + 1} value={i + 1}>{i < stageList.length ? `этап ${i + 1}` : `этап ${i + 1} (новый)`}</option>
-                      ))}
-                    </select>
+                    <span className="relative inline-flex shrink-0 items-center">
+                      <select
+                        value={stageList.indexOf(stageOf[b.id] ?? 0) + 1}
+                        onChange={(e) => { void moveToStage(b.id, Number(e.target.value)); }}
+                        title="Этап рассылки. Базы одного этапа рассылаются параллельно, следующий этап стартует, когда предыдущий выдал все контакты"
+                        aria-label={`Этап рассылки: база ${b.name}`}
+                        className="h-5 min-h-0 cursor-pointer appearance-none rounded-full bg-[#4f46e5] py-0 pl-2 pr-5 text-[10px] font-semibold leading-none text-white outline-none"
+                      >
+                        {Array.from({ length: stageList.length + 1 }, (_, i) => (
+                          <option key={i + 1} value={i + 1}>{i < stageList.length ? `этап ${i + 1}` : `этап ${i + 1} (новый)`}</option>
+                        ))}
+                      </select>
+                      <ChevronDown className="pointer-events-none absolute right-1.5 h-3 w-3 text-white/80" />
+                    </span>
                   )}
                   <span className="truncate">{b.name}</span>
                 </div>
@@ -5847,7 +5864,7 @@ function CampaignBasesTab({
                   label={`Действия: ${b.name}`}
                   items={[
                     { label: 'Загрузить контакты', icon: <Upload className="h-3.5 w-3.5" />, onClick: () => { uploadTargetRef.current = b.id; uploadInputRef.current?.click(); } },
-                    { label: 'Посмотреть и править', icon: <Eye className="h-3.5 w-3.5" />, onClick: () => setViewingBase({ id: b.id, name: b.name }) },
+                    { label: 'Редактировать', icon: <Pencil className="h-3.5 w-3.5" />, onClick: () => setViewingBase({ id: b.id, name: b.name }) },
                     ...(b.counts.total > 0 ? [{ label: 'Скачать в Excel', icon: <Download className="h-3.5 w-3.5" />, onClick: () => { void downloadBase(b); } }] : []),
                     ...(b.counts.failed > 0 ? [{ label: 'Вернуть отложенные в очередь', icon: <RefreshCw className="h-3.5 w-3.5" />, onClick: () => { void requeueBase(b); } }] : []),
                     ...(b.counts.total > 0 ? [{ label: 'Очистить базу', icon: <Eraser className="h-3.5 w-3.5" />, danger: true, onClick: () => { void clearBase(b); } }] : []),
@@ -8241,7 +8258,7 @@ function CampaignsSection() {
 export default function TgOutreachPage() {
   // useSearchParams требует границы Suspense, иначе сборка падает на статике.
   return (
-    <div className="w-full text-left">
+    <div className="no-focus-ring w-full text-left">
       <Suspense fallback={null}>
         <CampaignsSection />
       </Suspense>
