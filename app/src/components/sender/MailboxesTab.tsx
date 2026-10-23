@@ -605,6 +605,9 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                         {mailbox.last_error ? (
                           <div className="mt-0.5 text-xs text-amber-600">{mailbox.last_error}</div>
                         ) : null}
+                        {mailbox.status === 'failed' && mailbox.enabled ? (
+                          <div className="mt-0.5 text-xs text-zinc-500">{recheckNote(mailbox.next_recheck_at)}</div>
+                        ) : null}
                         <SenderNameField
                           value={mailbox.display_name ?? ''}
                           onSave={(next) => act(mailbox.id, { displayName: next })}
@@ -848,6 +851,15 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
  * Enter или клик мимо — сохранить, Esc — отменить.
  */
 /** Оценка здоровья: зелёная от 85, жёлтая 60–84, красная ниже; «—» — данных мало. */
+/** Подпись под упавшим ящиком: когда он перепроверится сам. */
+function recheckNote(nextRecheckAt: string | null | undefined): string {
+  if (!nextRecheckAt) return 'Автопроверка остановлена — нажмите «Проверить вход»';
+  const at = new Date(nextRecheckAt);
+  if (at.getTime() <= Date.now()) return 'Перепроверка — в ближайшую минуту';
+  const time = at.toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' });
+  return `Перепроверится сам ${time} (МСК)`;
+}
+
 function HealthBadge({ health }: { health: { score: number | null; sent: number; bounced: number; failed: number } | null }) {
   if (!health || health.score === null) {
     return (

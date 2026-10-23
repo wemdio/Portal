@@ -96,7 +96,7 @@ export async function processManualMessages(opts: { egressIp: string; log?: Log;
         db.from('sender_recipients').select('status').eq('id', message.recipient_id!).maybeSingle(),
         db.from('sender_suppressions').select('email').eq('email', message.to_email).limit(1),
         db.from('sender_campaign_suppressions').select('email')
-          .eq('campaign_id', message.campaign_id!).eq('email', message.to_email).limit(1),
+          .eq('campaign_id', message.campaign_id!).eq('email', message.to_email).neq('reason', 'mailbox_lost').limit(1),
       ]);
       const closed = recipient.error || globalStop.error || campaignStop.error || !recipient.data ||
         ['unsubscribed', 'bounced'].includes(String(recipient.data.status)) ||

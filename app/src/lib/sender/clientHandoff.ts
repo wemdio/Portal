@@ -201,8 +201,10 @@ export async function loadSenderHandoffContext(
   const stopEmails = [...new Set([String(recipient.email).trim().toLowerCase(), to])];
   const [globalStop, campaignStop] = await Promise.all([
     db.from('sender_suppressions').select('email').in('email', stopEmails).limit(1),
+    // «Ящик переписки не работает» закрывает только цепочку, а не адрес:
+    // ответившего потом лида передать клиенту можно.
     db.from('sender_campaign_suppressions').select('email')
-      .eq('campaign_id', String(campaign.id)).in('email', stopEmails).limit(1),
+      .eq('campaign_id', String(campaign.id)).in('email', stopEmails).neq('reason', 'mailbox_lost').limit(1),
   ]);
   const participants = [
     ...((lastReply?.to_emails as string[] | null) ?? []),
