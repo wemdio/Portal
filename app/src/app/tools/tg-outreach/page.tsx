@@ -5273,8 +5273,8 @@ function CampaignBasesTab({
   const [orphans, setOrphans] = useState<OutreachBase[]>([]);
   /** Выбранные базы в порядке цепочки (Set помнит порядок вставки). */
   const [linked, setLinked] = useState<Set<string>>(new Set());
-  /** Режим: false — базы идут по кругу, true — одна за другой. */
-  const [chain, setChain] = useState(false);
+  /** Этап каждой включённой базы: одинаковый — параллельно, следующий стартует, когда предыдущий выдал всё. */
+  const [stageOf, setStageOf] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState('');
   const [busy, setBusy] = useState(false);
@@ -5334,9 +5334,9 @@ function CampaignBasesTab({
       setOrphans(d.orphans ?? []);
     }
     if (linkRes.ok) {
-      const d = (await linkRes.json()) as { items: Array<{ base_id: string }>; chain?: boolean };
+      const d = (await linkRes.json()) as { items: Array<{ base_id: string; stage?: number }> };
       setLinked(new Set(d.items.map((i) => i.base_id)));
-      setChain(Boolean(d.chain));
+      setStageOf(Object.fromEntries(d.items.map((i) => [i.base_id, Number(i.stage ?? 0)])));
     }
     if (accRes.ok) {
       const d = await accRes.json() as { items: OutreachAccount[] };
@@ -5401,13 +5401,13 @@ function CampaignBasesTab({
     } finally { setBusy(false); }
   };
 
-  const saveLinks = async (next: Set<string>, nextChain: boolean) => {
+  const saveLinks = async (next: Set<string>, nextStages: Record<string, number>) => {
     setLinked(next);
-    setChain(nextChain);
+    setStageOf(nextStages);
     setError(null);
     const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/bases`, {
       method: 'PUT',
-      body: JSON.stringify({ base_ids: [...next], chain: nextChain }),
+      body: JSON.stringify({ items: [...next].map((id) => ({ base_id: id, stage: nextStages[id] ?? 0 })) }),
     });
     if (!res.ok) {
       const d = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -5418,11 +5418,31 @@ function CampaignBasesTab({
     }
   };
 
-  /** Поставить/снять галочку: новая база встаёт в конец цепочки. */
+  /** Разные этапы включённых баз по возрастанию: номер этапа для экрана — место в этом списке. */
+  const stageList = [...new Set([...linked].map((id) => stageOf[id] ?? 0))].sort((x, y) => x - y);
+
+  /**
+   * Поставить/снять галочку. В запущенную кампанию новая база встаёт в следующий
+   * этап (в цепочку после текущих); до запуска — в первый этап, параллельно.
+   */
   const toggleLink = async (baseId: string) => {
     const next = new Set(linked);
-    if (next.has(baseId)) next.delete(baseId); else next.add(baseId);
-    await saveLinks(next, chain);
+    const nextStages = { ...stageOf };
+    if (next.has(baseId)) {
+      next.delete(baseId);
+      delete nextStages[baseId];
+    } else {
+      next.add(baseId);
+      const top = stageList.length ? stageList[stageList.length - 1] : 0;
+      nextStages[baseId] = campaignStatus === 'running' && stageList.length ? top + 1 : (stageList[0] ?? 0);
+    }
+    await saveLinks(next, nextStages);
+  };
+
+  /** Перенести базу в этап с номером `rank` (1…N); N+1 — новый этап в конце. */
+  const moveToStage = async (baseId: string, rank: number) => {
+    const target = rank <= stageList.length ? stageList[rank - 1] : (stageList[stageList.length - 1] ?? 0) + 1;
+    await saveLinks(new Set(linked), { ...stageOf, [baseId]: target });
   };
 
   /** Забрать базу без владельца в эту кампанию. */
@@ -5672,7 +5692,7 @@ function CampaignBasesTab({
       {/* Пока список не пришёл, шапка («Базы контактов (0)», поле имени, кнопка)
           не рисуется: «(0)» врал, а форма создания мигала до загрузки. */}
       {!loading && bases.length > 0 && (
-        <BasesForecast campaignId={campaignId} refreshKey={`${[...linked].join(',')}|${chain}`} />
+        <BasesForecast campaignId={campaignId} refreshKey={[...linked].map((id) => `${id}:${stageOf[id] ?? 0}`).join(',')} />
       )}
       {!loading && (
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -5680,25 +5700,6 @@ function CampaignBasesTab({
           Базы контактов <span className="text-gray-400 font-normal">({bases.length})</span>
         </span>
         <div className="flex items-center gap-2">
-          {linked.size > 1 && (
-            <div
-              role="group"
-              aria-label="Режим рассылки баз"
-              title="Параллельно: по контакту из каждой базы по кругу. Цепочкой: сначала вся первая, как закончится — сразу вторая, и так далее без остановки."
-              className="inline-flex rounded-full border border-gray-200 p-0.5 text-[11px] font-medium"
-            >
-              {([false, true] as const).map((mode) => (
-                <button
-                  key={String(mode)}
-                  type="button"
-                  onClick={() => { if (chain !== mode) void saveLinks(linked, mode); }}
-                  className={`rounded-full px-3 py-1 transition cursor-pointer ${chain === mode ? 'bg-[#4f46e5] text-white' : 'text-gray-500 hover:text-gray-800'}`}
-                >
-                  {mode ? 'Цепочкой' : 'Параллельно'}
-                </button>
-              ))}
-            </div>
-          )}
           <input
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
@@ -5770,13 +5771,18 @@ function CampaignBasesTab({
               </span>
               <div className="min-w-0">
                 <div className="flex items-center gap-2 text-xs font-medium text-gray-800">
-                  {chain && linked.has(b.id) && (
-                    <span
-                      title={`Место в цепочке: ${[...linked].indexOf(b.id) + 1}`}
-                      className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-[#4f46e5] px-1 text-[10px] font-semibold text-white"
+                  {linked.has(b.id) && (
+                    <select
+                      value={stageList.indexOf(stageOf[b.id] ?? 0) + 1}
+                      onChange={(e) => { void moveToStage(b.id, Number(e.target.value)); }}
+                      title="Этап рассылки. Базы одного этапа рассылаются параллельно, следующий этап стартует, когда предыдущий выдал все контакты"
+                      aria-label={`Этап рассылки: база ${b.name}`}
+                      className="shrink-0 cursor-pointer rounded-full bg-[#4f46e5] px-1.5 py-0.5 text-[10px] font-semibold text-white outline-none"
                     >
-                      {[...linked].indexOf(b.id) + 1}
-                    </span>
+                      {Array.from({ length: stageList.length + 1 }, (_, i) => (
+                        <option key={i + 1} value={i + 1}>{i < stageList.length ? `этап ${i + 1}` : `этап ${i + 1} (новый)`}</option>
+                      ))}
+                    </select>
                   )}
                   <span className="truncate">{b.name}</span>
                 </div>

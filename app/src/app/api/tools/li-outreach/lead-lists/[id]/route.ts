@@ -15,10 +15,12 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
     const { id } = await ctx.params;
-    const body = (await req.json()) as { name?: string; description?: string };
+    const body = (await req.json()) as { name?: string; description?: string; campaign_id?: string | null };
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (body.name) patch.name = body.name;
     if ('description' in body) patch.description = body.description;
+    // Перенос базы в другую кампанию (null — открепить).
+    if ('campaign_id' in body) patch.campaign_id = body.campaign_id || null;
     const { error } = await supabaseAdmin.from('li_lead_lists').update(patch).eq('id', id);
     if (error) return jsonError(error.message, 500);
     return NextResponse.json({ ok: true });
