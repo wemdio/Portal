@@ -31,7 +31,7 @@ export function BasesForecastLine({
         </>
       )}
       <span className="ml-1 text-[10px] text-gray-400">
-        осталось {forecast.remaining} контактов, темп {forecast.perDay}/день
+        осталось {forecast.remaining} контактов, темп {forecast.perDay}/день{forecast.accounts !== null && forecast.perAccount !== null ? ` (${forecast.accounts} акк. × ${forecast.perAccount})` : ""}
       </span>
     </div>
   );

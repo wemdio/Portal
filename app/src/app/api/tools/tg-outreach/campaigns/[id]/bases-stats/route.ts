@@ -17,7 +17,6 @@ import { withToolTrace } from '@/lib/toolTrace';
 import {
   buildBaseStats,
   buildSendForecast,
-  recentCampaignPace,
   type BaseContact,
   type BaseDialog,
   type BaseForward,
@@ -108,19 +107,30 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
       // Прогноз «до какой даты хватит» — по включённым в рассылку базам и в
       // порядке цепочки, как их берёт воркер (firstTouch/db.ts).
-      const [linksRes, campRes] = await Promise.all([
+      const [linksRes, campRes, accountsRes] = await Promise.all([
         auth.supabase
           .from('tg_outreach_campaign_bases')
           .select('base_id, position')
           .eq('campaign_id', campaignId)
           .order('position', { ascending: true }),
-        auth.supabase.from('tg_outreach_campaigns').select('bases_chain').eq('id', campaignId).maybeSingle(),
+        auth.supabase.from('tg_outreach_campaigns').select('bases_chain, telegram_settings').eq('id', campaignId).maybeSingle(),
+        auth.supabase
+          .from('tg_outreach_accounts')
+          .select('is_active, check_status, cooldown_until')
+          .eq('campaign_id', campaignId)
+          .is('archived_at', null),
       ]);
       const order = (linksRes.data ?? []).map((r) => (r as { base_id: string }).base_id);
-      const chain = Boolean((campRes.data as { bases_chain?: boolean } | null)?.bases_chain);
+      const camp = campRes.data as { bases_chain?: boolean; telegram_settings?: { first_touch_per_account_per_day?: number } | null } | null;
+      const chain = Boolean(camp?.bases_chain);
+      // Темп — мощность парка: аккаунты, что рассылают прямо сейчас (включены, живы, не в кулдауне),
+      // умноженные на норму первых сообщений одного аккаунта в сутки.
+      const perAccount = Math.max(Number(camp?.telegram_settings?.first_touch_per_account_per_day ?? 0) || 0, 0);
+      const senders = ((accountsRes.data ?? []) as Array<{ is_active: boolean; check_status: string | null; cooldown_until: string | null }>)
+        .filter((a) => a.is_active && a.check_status === 'ok' && !(a.cooldown_until && new Date(a.cooldown_until).getTime() > now)).length;
       const forecast = order.length ? buildSendForecast(
         stats, order, chain, now, TZ_OFFSET_HOURS,
-        recentCampaignPace((contactsRes.data ?? []) as BaseContact[], now, TZ_OFFSET_HOURS),
+        { perDay: senders * perAccount, accounts: senders, perAccount },
       ) : null;
 
       return NextResponse.json({

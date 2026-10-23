@@ -285,8 +285,11 @@ export interface ForecastBase {
 export interface SendForecast {
   /** Базы идут цепочкой (одна за другой), а не по кругу. */
   chain: boolean;
-  /** Темп всей кампании, отправок в сутки: средний за последние 3 полных дня, по всем её базам. */
+  /** Темп кампании, отправок в сутки: рассылающие аккаунты × норма одного аккаунта в сутки. */
   perDay: number;
+  /** Сколько аккаунтов рассылает сейчас (живы, включены, не в кулдауне) и сколько каждому можно в сутки. null — не считалось. */
+  accounts: number | null;
+  perAccount: number | null;
   /** Не отправленных контактов во всех включённых базах. */
   remaining: number;
   /** До какой даты хватит всех баз вместе. null — темп нулевой или контактов не осталось. */
@@ -314,12 +317,13 @@ export function buildSendForecast(
   chain: boolean,
   nowMs: number,
   tzOffsetHours = 3,
-  campaignPerDay?: number,
+  pace?: { perDay: number; accounts: number; perAccount: number },
 ): SendForecast {
   const byId = new Map(stats.map((s) => [s.baseId, s]));
   const active = order.map((id) => byId.get(id)).filter((s): s is BaseStats => Boolean(s));
-  // Темп кампании приходит снаружи (recentCampaignPace); без него — сумма темпов включённых баз.
-  const perDay = campaignPerDay ?? Math.round(active.reduce((sum, s) => sum + s.perDay, 0) * 10) / 10;
+  // Темп — мощность парка: рассылающие аккаунты × норма одного в сутки (приходит снаружи);
+  // без него — сумма фактических темпов включённых баз.
+  const perDay = pace?.perDay ?? Math.round(active.reduce((sum, s) => sum + s.perDay, 0) * 10) / 10;
   const remaining = active.reduce((sum, s) => sum + s.remaining, 0);
 
   const dateAfter = (days: number): string => new Date(dayStart(nowMs + days * DAY_MS, tzOffsetHours)).toISOString();
@@ -340,6 +344,8 @@ export function buildSendForecast(
   return {
     chain,
     perDay,
+    accounts: pace?.accounts ?? null,
+    perAccount: pace?.perAccount ?? null,
     remaining,
     endsAt: campaignDate(remaining),
     currentBaseId: current?.baseId ?? null,
@@ -353,32 +359,3 @@ export function formatForecastDate(iso: string): string {
   return new Date(iso).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', timeZone: 'Europe/Moscow' });
 }
 
-/**
- * Свежий темп всей кампании: отправок в сутки за последние полные сутки.
- *
- * Для прогноза «хватит до» темп должен быть общим и свежим: отправляют общие
- * аккаунты кампании, а не отдельная база, и разгон за неделю нельзя усреднять
- * со старыми днями (40 → 65 → 94 в сутки давали «19 в день»). Берём отправки из
- * ВСЕХ баз кампании, включая уже выключенные, без сегодняшних неполных суток.
- */
-export function recentCampaignPace(
-  contacts: Array<{ sent_at: string | null }>,
-  nowMs: number,
-  tzOffsetHours = 3,
-  days = 3,
-): number {
-  const today = dayStart(nowMs, tzOffsetHours);
-  const from = today - days * DAY_MS;
-  let sent = 0;
-  let firstMs: number | null = null;
-  for (const c of contacts) {
-    const t = ts(c.sent_at);
-    if (t === null) continue;
-    if (firstMs === null || t < firstMs) firstMs = t;
-    if (t >= from && t < today) sent++;
-  }
-  if (firstMs === null || sent === 0) return 0;
-  // Кампания моложе окна: делим на реально прошедшие полные сутки, но не меньше одних.
-  const span = Math.min(days, Math.max(Math.round((today - dayStart(firstMs, tzOffsetHours)) / DAY_MS), 1));
-  return Math.round((sent / span) * 10) / 10;
-}

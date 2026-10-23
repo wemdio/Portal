@@ -5770,10 +5770,12 @@ function CampaignBasesTab({
               </span>
               <div className="min-w-0">
                 <div className="flex items-center gap-2 text-xs font-medium text-gray-800">
-                  {chain && linked.has(b.id) && (
+                  {linked.has(b.id) && (
                     <span
-                      title={`Место в цепочке: ${[...linked].indexOf(b.id) + 1}`}
-                      className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-[#4f46e5] px-1 text-[10px] font-semibold text-white"
+                      title={chain
+                        ? `Место в цепочке: ${[...linked].indexOf(b.id) + 1}`
+                        : `Порядок в круге: ${[...linked].indexOf(b.id) + 1}. Параллельно база берётся по очереди с остальными, по контакту из каждой`}
+                      className={`inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full px-1 text-[10px] font-semibold ${chain ? 'bg-[#4f46e5] text-white' : 'bg-gray-200 text-gray-600'}`}
                     >
                       {[...linked].indexOf(b.id) + 1}
                     </span>
