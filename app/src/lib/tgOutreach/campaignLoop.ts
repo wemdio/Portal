@@ -1297,7 +1297,7 @@ export async function handleChat(
     // квалификации: любой из этих путей может вернуть русский текст.
     let triggerBeforeTranslation: 'positive' | 'negative' | null = null;
     if (needsReplyTranslation(replyText, chatMessages) || (removedUntranslatedHandoff && forcePositive)) {
-      log('warning', `${displayName}: русский текст в латинской переписке — исправляю язык перед отправкой`);
+      log('warning', `${displayName}: язык ответа не совпадает с языком собеседника — исправляю перед отправкой`);
       try {
         const originalTrigger = forcePositive ? 'positive' : detectTrigger(replyText, oai);
         // Если срезали русский триггер готового лида, переводим и саму передачу,

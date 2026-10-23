@@ -981,7 +981,7 @@ export default function LiOutreachPage() {
 
 
   return (
-    <div className="min-w-0 space-y-6 overflow-x-clip text-left max-w-full lg:pl-14">
+    <div className="no-focus-ring min-w-0 space-y-6 overflow-x-clip text-left max-w-full lg:pl-14">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">LinkedIn Outreach</h1>
         <p className="text-sm text-gray-500">Кампании, AI-персонализация, скрапинг лидов через Unipile.</p>
