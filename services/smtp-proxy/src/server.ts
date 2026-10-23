@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
 import { smtpCheck, type SmtpCheckRequest, type SmtpCheckResult } from './smtp.js';
+import { createPace, probeProvider } from './pace.js';
 
 const API_KEY = process.env.SMTP_PROXY_API_KEY ?? '';
 const PORT = Number(process.env.PORT ?? '3100');
@@ -22,6 +23,7 @@ function authOk(header: string | undefined): boolean {
 }
 
 const app = Fastify({ logger: true });
+const pace = createPace();
 
 app.addHook('onRequest', async (req, reply) => {
   if (req.url === '/health') return;
@@ -37,6 +39,10 @@ app.post<{ Body: SmtpCheckRequest; Reply: SmtpCheckResult }>('/smtp-check', asyn
 
   if (!email || !mxHost) {
     return { code: 0, exists: null, isCatchAll: null, greylist: false, error: 'Missing required fields' } as SmtpCheckResult;
+  }
+  if (!(await pace(mxHost))) {
+    return { code: 0, exists: null, isCatchAll: null, greylist: false,
+      error: `rate limited by proxy (${probeProvider(mxHost)})` } as SmtpCheckResult;
   }
 
   return smtpCheck({ email, mxHost, heloDomain, heloFrom, checkCatchAll, timeout });

@@ -28,7 +28,20 @@ This file MUST stay behaviour-identical to `../src/smtp.ts`. The worker keys on:
   to decide whether to fail over to the next IP.
 
 If you change the probe semantics in `src/smtp.ts` (codes, catch-all logic,
-fresh-connection retry, error strings), mirror the change here. Verify with a
+fresh-connection retry, error strings), mirror the change here.
+
+Since 2026-10-23 (all three probe IPs back in Spamhaus CSS) both versions also:
+- send the catch-all probe to a plain `name.surname123@domain` mailbox instead of
+  `verify-check-<ts>-…`, which named the verifier;
+- wait for the `221` reply to QUIT in the background (≤ `SMTP_QUIT_WAIT_MS`,
+  default 1500) instead of cutting the connection — the reply to the worker is
+  not delayed;
+- pace probes per provider and per IP (`pace.ts` / `Pace`): token bucket, five
+  minutes' worth at once, then the hourly rate. Defaults per IP: microsoft 3600,
+  google 7200, yandex 7200, mailru 7200, mimecast 1800, proofpoint 1800 per hour;
+  other hosts unpaced. A probe without a token within `SMTP_PROVIDER_WAIT_MS`
+  (default 3000) gets `error: "rate limited by proxy (<provider>)"`; the validator
+  tries another IP and does not mark this one blocked. Verify with a
 parity run: same `{email, mxHost, checkCatchAll}` against this proxy and a Node
 proxy must return the same `exists`/`isCatchAll`/`greylist`.
 
@@ -45,7 +58,9 @@ Env: `SMTP_PROXY_API_KEY` (required), `PORT` (default 3100),
 `EMAIL_VALIDATION_HELO_DOMAIN` (HELO name — must have valid FCrDNS on the probe
 IP), `EMAIL_VALIDATION_MAIL_FROM` (default `<>` null sender),
 `SMTP_PROBE_LOCAL_ADDRESS` (optional egress bind), `SMTP_PROBE_PORT` (default 25),
-`SMTP_CHECK_DEADLINE_MS` (overall per-check deadline, default 21000).
+`SMTP_CHECK_DEADLINE_MS` (overall per-check deadline, default 21000),
+`SMTP_QUIT_WAIT_MS` (default 1500), `SMTP_PROVIDER_HOURLY_LIMITS` (e.g.
+`microsoft=3600,google=7200`; 0 = no limit), `SMTP_PROVIDER_WAIT_MS` (default 3000).
 
 ## Deploy (systemd, as done for 89.19.209.252)
 
