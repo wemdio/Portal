@@ -20,7 +20,7 @@ import { authFetch } from '@/lib/authFetch';
 import EChart from '@/components/charts/EChart';
 import BasesTable from '@/components/tg-outreach/BasesTable';
 import type { BaseStats, SendForecast } from '@/lib/tgOutreach/baseStats';
-import { BasesForecastLine } from '@/components/tg-outreach/BasesForecast';
+import { formatForecastDate } from '@/lib/tgOutreach/baseStats';
 import {
   AXIS_FONT_SIZE,
   AXIS_LINE,
@@ -363,6 +363,15 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
     return period === 'all' ? 'за всё время' : `за ${label.toLowerCase()}`;
   }, [period, custom]);
 
+  // Под датой: когда кончится текущий этап (если их несколько) и сколько осталось.
+  const forecastCaption = (() => {
+    if (!forecast || forecast.remaining <= 0) return undefined;
+    const current = forecast.currentStage;
+    const multi = forecast.stages.filter((st) => st.remaining > 0).length > 1;
+    const stage = multi && current?.endsAt ? `этап ${current.rank} — до ${formatForecastDate(current.endsAt)} · ` : '';
+    return `${stage}осталось ${forecast.remaining} контактов`;
+  })();
+
   return (
     <div className="space-y-3 p-4">
       {/* Переключатель периода */}
@@ -552,7 +561,7 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
             </div>
 
             <div className="text-[11px] font-medium text-gray-400">Темп</div>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               <Metric label="Отправлено сегодня" value={data.dashboard.pace.sentToday} />
               <Metric label="Вчера" value={data.dashboard.pace.sentYesterday} />
               {/* Без подписи цифру читали как «за всё время», хотя считается
@@ -563,14 +572,14 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
                 value={data.dashboard.pace.perDay}
                 caption={paceCaption}
               />
+              <Metric
+                label="Баз хватит"
+                value={forecast && forecast.remaining > 0
+                  ? (forecast.endsAt ? `до ${formatForecastDate(forecast.endsAt)}` : 'темп нулевой')
+                  : '—'}
+                caption={forecastCaption}
+              />
             </div>
-
-            {forecast && forecast.remaining > 0 && (
-              <>
-                <div className="text-[11px] font-medium text-gray-400">До какой даты хватит баз</div>
-                <BasesForecastLine forecast={forecast} />
-              </>
-            )}
 
             {/* Раньше здесь стояли два числа по всем базам разом — «осталось
                 контактов 320». На вопрос «это одна база или пять, и какая из

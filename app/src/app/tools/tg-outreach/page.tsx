@@ -5691,14 +5691,16 @@ function CampaignBasesTab({
     <div className="space-y-4">
       {/* Пока список не пришёл, шапка («Базы контактов (0)», поле имени, кнопка)
           не рисуется: «(0)» врал, а форма создания мигала до загрузки. */}
-      {!loading && bases.length > 0 && (
-        <BasesForecast campaignId={campaignId} refreshKey={[...linked].map((id) => `${id}:${stageOf[id] ?? 0}`).join(',')} />
-      )}
       {!loading && (
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <span className="text-sm font-medium text-gray-700">
-          Базы контактов <span className="text-gray-400 font-normal">({bases.length})</span>
-        </span>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span className="text-sm font-medium text-gray-700">
+            Базы контактов <span className="text-gray-400 font-normal">({bases.length})</span>
+          </span>
+          {bases.length > 0 && (
+            <BasesForecast campaignId={campaignId} refreshKey={[...linked].map((id) => `${id}:${stageOf[id] ?? 0}`).join(',')} />
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <input
             value={newName}
