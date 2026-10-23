@@ -7,7 +7,7 @@ import { heCompanySiteIdentity } from './collectionIdentity';
 import { readHeEngSourceCountry, withHeEngSourceCountry } from './engCompanyCountry';
 import { HE_ENG_OWN_ORGANIZATION_TYPES } from './engCompanySearchCountry';
 import { createHeEngCompanySearchCheckpoint, createHeEngRegistryWebsiteSearchPlan, heEngLegalNameCore, runHeEngCompanySearchPage,
-  type HeEngCompanySearchCandidate, type HeEngCompanySearchCheckpoint, type HeEngCompanySearchPlan } from './engCompanySearch';
+  HE_ENG_SEARCH_QUERY_MAX, type HeEngCompanySearchCandidate, type HeEngCompanySearchCheckpoint, type HeEngCompanySearchPlan } from './engCompanySearch';
 import { HeEngBaseBudgetError, isHeEngBaseBudgetError } from './engBaseBudgetLedger';
 import { ENG_COUNTRIES, normalizeEngCountry } from './engCountries';
 import type { HeEngRegistryCandidate } from './engPublicRegistryTypes';
@@ -662,6 +662,10 @@ export async function resolveHeEngRegistryCandidate(
   // A page already bought under an older query keeps its plan; an unpaid older
   // checkpoint moves to the current query (v2 dropped «LTD.», v3 also «N.V.», «GmbH & Co. KG»).
   let plan = createHeEngRegistryWebsiteSearchPlan(candidate);
+  // Saved before 23.10.2026 under a query longer than any search accepts: its
+  // checkpoint failed validation before a page could be bought, so it is rebuilt.
+  if (state.search && state.search.checkpoint.calls === 0 && !state.search.checkpoint.unavailable &&
+      state.search.plan.tasks.some(task => task.query.length > HE_ENG_SEARCH_QUERY_MAX)) delete state.search;
   const legacyPlan = [createHeEngRegistryWebsiteSearchPlan(candidate, 1), createHeEngRegistryWebsiteSearchPlan(candidate, 2)]
     .find(older => older.fingerprint !== plan.fingerprint && older.fingerprint === state.search?.plan.fingerprint);
   if (state.search && legacyPlan) {
