@@ -224,8 +224,8 @@ export default function CampaignBases({
       />
 
       <p className="text-[11px] text-gray-400">
-        Кампания рассылает одну базу — отмеченную «рассылается». Людей из базы в рассылку добавляет запуск кампании:
-        загрузили новых или сменили базу в идущей кампании — остановите и запустите её снова.
+        Кампания рассылает одну базу — отмеченную «рассылается». Новые люди в ней и новая выбранная база
+        попадают в рассылку сами, в течение ~5 минут, без перезапуска.
       </p>
 
       <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-200 bg-white p-3">
@@ -262,7 +262,7 @@ export default function CampaignBases({
                 </div>
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   {!active && (
-                    <button type="button" disabled={busy !== null} onClick={() => void run(`active:${base.id}`, async () => { await makeActive(base.id); await onChanged(); })} className={button} title="Кампания будет рассылать эту базу. Людей из неё в рассылку добавляет запуск кампании: если кампания уже идёт, остановите и запустите её снова.">
+                    <button type="button" disabled={busy !== null} onClick={() => void run(`active:${base.id}`, async () => { await makeActive(base.id); await onChanged(); })} className={button} title="Кампания будет рассылать эту базу. Люди из неё попадут в рассылку в течение ~5 минут, перезапуск не нужен.">
                       Рассылать эту базу
                     </button>
                   )}
