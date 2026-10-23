@@ -61,6 +61,8 @@ function makeBuilder(table: string) {
     },
     order: () => builder,
     limit: () => builder,
+    // Постраничное чтение (enrollActiveBase): страница заглушки — всё целиком, меньше тысячи строк.
+    range: () => builder,
     single: async () => {
       const rows = apply();
       return { data: rows[0] ?? null, error: rows[0] ? null : { message: 'not found' } };
