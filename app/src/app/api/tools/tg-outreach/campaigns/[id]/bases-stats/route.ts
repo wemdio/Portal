@@ -105,31 +105,33 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         tzOffsetHours: TZ_OFFSET_HOURS,
       });
 
-      // Прогноз «до какой даты хватит» — по включённым в рассылку базам и в
-      // порядке цепочки, как их берёт воркер (firstTouch/db.ts).
+      // Прогноз «до какой даты хватит» — по включённым в рассылку базам и их этапам,
+      // как их берёт воркер (firstTouch/selectContacts.ts).
       const [linksRes, campRes, accountsRes] = await Promise.all([
         auth.supabase
           .from('tg_outreach_campaign_bases')
-          .select('base_id, position')
+          .select('base_id, position, stage')
           .eq('campaign_id', campaignId)
           .order('position', { ascending: true }),
-        auth.supabase.from('tg_outreach_campaigns').select('bases_chain, telegram_settings').eq('id', campaignId).maybeSingle(),
+        auth.supabase.from('tg_outreach_campaigns').select('telegram_settings').eq('id', campaignId).maybeSingle(),
         auth.supabase
           .from('tg_outreach_accounts')
           .select('is_active, check_status, cooldown_until')
           .eq('campaign_id', campaignId)
           .is('archived_at', null),
       ]);
-      const order = (linksRes.data ?? []).map((r) => (r as { base_id: string }).base_id);
-      const camp = campRes.data as { bases_chain?: boolean; telegram_settings?: { first_touch_per_account_per_day?: number } | null } | null;
-      const chain = Boolean(camp?.bases_chain);
+      const items = (linksRes.data ?? []).map((r) => ({
+        baseId: (r as { base_id: string }).base_id,
+        stage: Number((r as { stage?: number }).stage ?? 0),
+      }));
+      const camp = campRes.data as { telegram_settings?: { first_touch_per_account_per_day?: number } | null } | null;
       // Темп — мощность парка: аккаунты, что рассылают прямо сейчас (включены, живы, не в кулдауне),
       // умноженные на норму первых сообщений одного аккаунта в сутки.
       const perAccount = Math.max(Number(camp?.telegram_settings?.first_touch_per_account_per_day ?? 0) || 0, 0);
       const senders = ((accountsRes.data ?? []) as Array<{ is_active: boolean; check_status: string | null; cooldown_until: string | null }>)
         .filter((a) => a.is_active && a.check_status === 'ok' && !(a.cooldown_until && new Date(a.cooldown_until).getTime() > now)).length;
-      const forecast = order.length ? buildSendForecast(
-        stats, order, chain, now, TZ_OFFSET_HOURS,
+      const forecast = items.length ? buildSendForecast(
+        stats, items, now, TZ_OFFSET_HOURS,
         { perDay: senders * perAccount, accounts: senders, perAccount },
       ) : null;
 

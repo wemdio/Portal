@@ -10,20 +10,26 @@ import { formatForecastDate, type SendForecast } from '@/lib/tgOutreach/baseStat
  */
 export function BasesForecastLine({
   forecast,
-  currentName,
+  names,
 }: {
   forecast: SendForecast | null;
-  currentName?: string;
+  /** Названия баз по id — для подписи текущего этапа. */
+  names?: Record<string, string>;
 }) {
   if (!forecast || forecast.remaining <= 0) return null;
   const date = (iso: string | null) => (iso ? `до ${formatForecastDate(iso)}` : 'дату не посчитать — темп нулевой');
+  const pending = forecast.stages.filter((st) => st.remaining > 0);
+  const current = forecast.currentStage;
+  const currentNames = current
+    ? current.baseIds.map((id) => names?.[id]).filter(Boolean).join(', ')
+    : '';
   return (
     <div className="rounded-xl bg-gray-50 px-3 py-2 text-xs text-gray-700">
-      {forecast.chain ? (
+      {pending.length > 1 && current ? (
         <>
-          Текущей базы{currentName ? ` «${currentName}»` : ''} хватит <b>{date(forecast.currentEndsAt)}</b>
+          Этапа {current.rank}{currentNames ? ` («${currentNames}»)` : ''} хватит <b>{date(current.endsAt)}</b>
           {' · '}
-          цепочки баз — <b>{date(forecast.endsAt)}</b>
+          всех этапов — <b>{date(forecast.endsAt)}</b>
         </>
       ) : (
         <>
@@ -59,5 +65,5 @@ export default function BasesForecast({ campaignId, refreshKey }: { campaignId: 
     })();
   }, [campaignId, refreshKey]);
 
-  return <BasesForecastLine forecast={forecast} currentName={forecast?.currentBaseId ? names[forecast.currentBaseId] : undefined} />;
+  return <BasesForecastLine forecast={forecast} names={names} />;
 }
