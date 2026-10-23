@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabaseClient';
 import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
 import { BarChart3, Megaphone, ScrollText, Search, Users, UserCircle } from 'lucide-react';
 import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
+import { LiActivityChart, LiFunnelChart } from '@/components/li-outreach/LiDashboardCharts';
 
 // ---- Types ------------------------------------------------------------------
 
@@ -945,8 +946,8 @@ export default function LiOutreachPage() {
 
           {/* Top stats row */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 [&>*]:min-w-0">
-            <StatCard label="Аккаунты" value={accounts.filter((a) => a.is_active && a.user_id === currentUserId).length} total={accounts.filter((a) => a.user_id === currentUserId).length} accent="green" />
-            <StatCard label="Кампании" value={campaigns.filter((c) => c.status === 'running').length} total={campaigns.length} accent="blue" />
+            <StatCard label="Аккаунты" value={accounts.filter((a) => a.is_active && a.user_id === currentUserId).length} total={accounts.filter((a) => a.user_id === currentUserId).length} accent="green" onClick={() => setTab('accounts')} />
+            <StatCard label="Кампании" value={campaigns.filter((c) => c.status === 'running').length} total={campaigns.length} accent="blue" onClick={() => setTab('campaigns')} />
             <StatCard
               label={dashFunnelCampaign ? `Лиды · ${dashFunnelCampaign.name}` : 'Лиды'}
               value={dashFunnel?.total ?? leadsTotal}
@@ -982,7 +983,7 @@ export default function LiOutreachPage() {
                     ))}
                   </select>
                 </div>
-                <FunnelChart funnel={dashFunnel} />
+                <LiFunnelChart funnel={dashFunnel} />
               </div>
             )}
 
@@ -992,7 +993,7 @@ export default function LiOutreachPage() {
             {dashData && dashData.timeline.length > 0 && (
               <div className="rounded-xl border border-gray-200 bg-white p-5 flex flex-col">
                 <h3 className="text-sm font-semibold text-gray-900 mb-4 flex-shrink-0">Активность за 30 дней</h3>
-                <ActivityTimeline timeline={dashData.timeline} />
+                <LiActivityChart timeline={dashData.timeline} />
               </div>
             )}
           </div>
@@ -2736,14 +2737,15 @@ const ACCENT_STYLES: Record<string, { dot: string; bar: string }> = {
   gray:   { dot: 'bg-gray-400',   bar: 'bg-gray-400' },
 };
 
-function StatCard({ label, value, total, accent = 'gray' }: { label: string; value: number; total?: number; accent?: string }) {
+function StatCard({ label, value, total, accent = 'gray', onClick }: { label: string; value: number; total?: number; accent?: string; onClick?: () => void }) {
   const s = ACCENT_STYLES[accent] ?? ACCENT_STYLES.gray;
   const pct = total && total > 0 ? Math.round((value / total) * 100) : null;
-  return (
-    <div className="rounded-xl border border-gray-200 bg-white p-4">
+  const body = (
+    <>
       <div className="flex items-center gap-1.5">
         <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
         <span className="text-xs text-gray-500">{label}</span>
+        {onClick && <span className="ml-auto text-xs text-gray-300 transition group-hover:text-indigo-500" aria-hidden>→</span>}
       </div>
       <div className="text-2xl font-bold text-gray-900 mt-1">
         {value}{total !== undefined && total !== value ? <span className="text-sm font-normal text-gray-400">/{total}</span> : null}
@@ -2753,115 +2755,22 @@ function StatCard({ label, value, total, accent = 'gray' }: { label: string; val
           <div className={`h-full rounded-full ${s.bar}`} style={{ width: `${pct}%` }} />
         </div>
       )}
-    </div>
+    </>
+  );
+  const base = 'rounded-xl border border-gray-200 bg-white p-4';
+  // Карточка-ссылка: клик открывает соответствующий раздел.
+  return onClick ? (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`group w-full cursor-pointer text-left transition hover:border-indigo-300 hover:shadow-sm ${base}`}
+    >
+      {body}
+    </button>
+  ) : (
+    <div className={base}>{body}</div>
   );
 }
-
-// ---- Funnel Chart (visual horizontal bars) ---------------------------------
-
-const FUNNEL_STAGES: { key: keyof DashboardFunnel; label: string; color: string }[] = [
-  // 'new' — entry stage, раньше был #9ca3af (gray-400) для «нейтральности», но
-  // на тёмной теме полоска и цифра внутри сливались с фоном (фидбек 2026-06-20).
-  // Теперь sky-500 — яркий цианово-синий, отличим от #3b82f6 (connected) и
-  // #06b6d4 (completed), читается на обеих темах.
-  { key: 'new',             label: 'Новые',                color: '#0ea5e9' },
-  { key: 'invited',         label: 'Приглашены',           color: '#f59e0b' },
-  // Side-track: LinkedIn refused the invite as duplicate.
-  // Sits right after 'invited' so the operator can compare
-  // "actually sent" vs "already in LinkedIn's queue" at a glance.
-  { key: 'already_invited', label: 'Уже приглашены ранее', color: '#a8a29e' },
-  { key: 'connected',       label: 'Подключены',           color: '#3b82f6' },
-  { key: 'messaged',        label: 'Написано',             color: '#8b5cf6' },
-  { key: 'replied',         label: 'Ответили',             color: '#10b981' },
-  { key: 'completed',       label: 'Завершено',            color: '#06b6d4' },
-];
-
-function FunnelChart({ funnel }: { funnel: DashboardFunnel }) {
-  const max = Math.max(funnel.total, 1);
-  if (funnel.total === 0) return <p className="text-xs text-gray-400">Нет лидов</p>;
-  return (
-    <div className="space-y-3">
-      {FUNNEL_STAGES.map((stage) => {
-        const count = funnel[stage.key] as number;
-        const pct = Math.round((count / max) * 100);
-        return (
-          <div key={stage.key} className="flex items-center gap-3">
-            <span className="w-28 text-xs font-medium text-gray-700 text-right">{stage.label}</span>
-            <div className="flex-1 h-7 rounded-lg bg-gray-50 overflow-hidden relative">
-              <div
-                className="h-full rounded-lg transition-all duration-500"
-                style={{ width: `${Math.max(pct, count > 0 ? 2 : 0)}%`, backgroundColor: stage.color }}
-              />
-              <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs font-medium text-gray-700 tabular-nums">
-                {count}
-              </span>
-            </div>
-            <span className="w-12 text-right text-xs tabular-nums text-gray-400">{pct}%</span>
-          </div>
-        );
-      })}
-      <div className="flex items-center gap-3 pt-1 border-t border-gray-100">
-        <span className="w-28 text-xs font-semibold text-gray-900 text-right">Всего</span>
-        <span className="text-sm font-bold text-gray-900 tabular-nums">{funnel.total}</span>
-        {funnel.total > 0 && (
-          <span className="text-xs text-gray-500">
-            · конверсия в ответ: <span className="font-medium text-green-700">{Math.round((funnel.replied / funnel.total) * 100)}%</span>
-          </span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ---- Activity Timeline (CSS-only bar chart) --------------------------------
-
-function ActivityTimeline({ timeline }: { timeline: DashboardTimeline[] }) {
-  const maxActions = Math.max(...timeline.map((d) => d.actions), 1);
-  // flex flex-col h-full + chart-bar flex-1 — чтобы график растягивался на
-  // всю доступную высоту parent grid-ячейки (равной воронке), а лейблы
-  // дат и легенда оставались внизу. Раньше chart был фикс-h-28, и при
-  // высоком funnel'е снизу зияло пустое пространство.
-  return (
-    <div className="flex flex-col h-full flex-1">
-      <div className="flex items-end gap-[3px] flex-1 min-h-[7rem]">
-        {timeline.map((day) => {
-          const h = Math.round((day.actions / maxActions) * 100);
-          const hasError = day.errors > 0;
-          const dateObj = new Date(day.date);
-          const label = `${dateObj.getDate()}.${String(dateObj.getMonth() + 1).padStart(2, '0')}`;
-          return (
-            <div key={day.date} className="flex-1 flex flex-col items-center justify-end h-full group relative">
-              <div
-                className={`w-full rounded-t transition-all ${hasError ? 'bg-red-400' : 'bg-blue-400'} group-hover:opacity-80`}
-                style={{ height: `${Math.max(h, day.actions > 0 ? 3 : 0)}%`, minHeight: day.actions > 0 ? 2 : 0 }}
-              />
-              <div className="absolute -top-8 bg-gray-900 text-white text-[10px] px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-10 transition-opacity">
-                {label}: {day.actions} действий{hasError ? `, ${day.errors} ошибок` : ''}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <div className="flex items-center justify-between mt-1.5 text-[10px] text-gray-400 flex-shrink-0">
-        <span>{formatShortDate(timeline[0]?.date)}</span>
-        <span>{formatShortDate(timeline[timeline.length - 1]?.date)}</span>
-      </div>
-      <div className="flex items-center gap-4 mt-2 text-xs text-gray-500 flex-shrink-0">
-        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-blue-400" /> Действия</span>
-        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-400" /> С ошибками</span>
-        <span className="ml-auto tabular-nums">{timeline.reduce((s, d) => s + d.actions, 0)} всего за 30 дней</span>
-      </div>
-    </div>
-  );
-}
-
-function formatShortDate(dateStr?: string): string {
-  if (!dateStr) return '';
-  const d = new Date(dateStr);
-  return `${d.getDate()}.${String(d.getMonth() + 1).padStart(2, '0')}`;
-}
-
-// ---- Company Table ---------------------------------------------------------
 
 function CompanyTable({ rows, search, sortKey }: { rows: DashboardCompanyRow[]; search: string; sortKey: string }) {
   const filtered = rows
