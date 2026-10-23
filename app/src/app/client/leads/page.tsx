@@ -186,6 +186,21 @@ function LeadDetail({
             />
           </div>
         )}
+        {/* Письма Instantly у лида нет (лид из «Рассылки» или ответ не нашёлся) —
+            показываем ответ лида, сохранённый при передаче. */}
+        {!canReplyByEmail && lead.reply_body && (
+          <div className="mb-2">
+            <p className="ds-eyebrow mb-2">ответ лида</p>
+            {lead.reply_subject && (
+              <p className="text-sm font-semibold mb-1" style={{ color: 'var(--cp-paper)' }}>
+                {lead.reply_subject}
+              </p>
+            )}
+            <p className="text-sm whitespace-pre-wrap break-words m-0" style={{ color: 'var(--cp-paper-mute)' }}>
+              {lead.reply_body}
+            </p>
+          </div>
+        )}
       </div>
 
       {/* P1-B: was `{canComment && (...)}` which silently hid the entire 70-

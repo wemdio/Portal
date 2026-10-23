@@ -3,6 +3,7 @@ import { runOwnReplyLeadsPass } from '@/lib/ownReplyLeads/process';
 import { runSenderLeadsPass, senderLeadsAi, SENDER_LEADS_RECOVERY_INTERVAL_MS } from '@/lib/senderLeads/process';
 import { leadTelegramConfig } from '@/lib/senderLeads/telegram';
 import { runAgencyLeadHandoffs } from '@/lib/agencyLeadHandoff/process';
+import { recordSenderHandoffs } from '@/lib/sender/clientHandoff';
 import { syncSenderStopLists } from '@/lib/sender/stopLists';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
@@ -94,6 +95,14 @@ async function main(): Promise<void> {
       } catch (err) {
         log('error', 'Сверка стоп-листов клиента и проекта упала', err);
       }
+    }
+    // Передачи лида из «Рассылки»: письмо ушло — лид в кабинет клиента.
+    // Почтовые хосты базу Instantly не видят, поэтому запись здесь.
+    try {
+      const recorded = await recordSenderHandoffs({ db, instantlyDb: supabaseInstantly, log });
+      if (recorded) log('info', `Передачи «Рассылки»: в кабинет клиента записано лидов ${recorded}`);
+    } catch (err) {
+      log('error', 'Запись передач «Рассылки» в кабинет клиента упала', err);
     }
     // Заявки OutreachOS (лиды кабинета, регистрации) → AMO → General со ссылкой на сделку.
     try {

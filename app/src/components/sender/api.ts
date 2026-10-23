@@ -752,6 +752,37 @@ export function replyToThread(recipientId: string, text: string, draftId?: strin
   });
 }
 
+/** Передача лида клиенту из переписки: кому, кто в копии, черновик по легенде проекта. */
+export interface ThreadHandoffDto {
+  available: boolean;
+  /** Почему передать нельзя; null — можно. */
+  reason: string | null;
+  to: string;
+  cc: string[];
+  draft: string;
+  /** У проекта включён ИИ-пересказ легенды: черновик просят отдельно (ai). */
+  aiAdapt: boolean;
+  mailbox: string | null;
+  /** У кампании есть клиент кабинета — лид запишется ему в «Лиды». */
+  clientLinked: boolean;
+}
+
+/** ai — черновик пересказом легенды ИИ (платный вызов: только по кнопке). */
+export function fetchThreadHandoff(recipientId: string, ai = false) {
+  return authFetchJson<ThreadHandoffDto>(`${BASE}/threads/${recipientId}/handoff${ai ? '?ai=1' : ''}`);
+}
+
+export function handoffThread(recipientId: string, text: string, cc: string[]) {
+  return authFetchJson<{ ok: true; messageId: string; cabinet: 'after_send' | 'no_client' }>(
+    `${BASE}/threads/${recipientId}/handoff`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, cc }),
+    },
+  );
+}
+
 export type ReplyLanguage = 'ru' | 'en';
 
 /** Черновик персонализированного ответа ИИ (lib/senderReplies/draft.ts). */

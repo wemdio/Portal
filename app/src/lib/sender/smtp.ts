@@ -52,6 +52,8 @@ export type SendErrorCode =
   | 'rejected'
   | 'policy_reject'
   | 'inflight_drop'
+  /** Письмо принято, но не всем: часть адресов в копии отклонена. */
+  | 'partial_accept'
   | 'temporary'
   | 'network'
   | 'blocked_target'
@@ -192,7 +194,7 @@ export async function sendSenderMail(cfg: SenderSmtpConfig, mail: OutgoingMail):
     // SMTP may accept the lead but refuse a CC recipient. Replaying would duplicate
     // the message to the lead, so report an ambiguous/partial delivery instead.
     if (mail.cc?.length && info.rejected?.length) {
-      return { ok: false, code: 'inflight_drop', error: `Письмо принято частично; отклонены: ${info.rejected.join(', ')}` };
+      return { ok: false, code: 'partial_accept', error: `Письмо принято частично; отклонены: ${info.rejected.join(', ')}` };
     }
     return { ok: true };
   } catch (e) {
