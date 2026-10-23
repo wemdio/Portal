@@ -17,6 +17,7 @@ import { withToolTrace } from '@/lib/toolTrace';
 import {
   buildBaseStats,
   buildSendForecast,
+  recentCampaignPace,
   type BaseContact,
   type BaseDialog,
   type BaseForward,
@@ -117,7 +118,10 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       ]);
       const order = (linksRes.data ?? []).map((r) => (r as { base_id: string }).base_id);
       const chain = Boolean((campRes.data as { bases_chain?: boolean } | null)?.bases_chain);
-      const forecast = order.length ? buildSendForecast(stats, order, chain, now, TZ_OFFSET_HOURS) : null;
+      const forecast = order.length ? buildSendForecast(
+        stats, order, chain, now, TZ_OFFSET_HOURS,
+        recentCampaignPace((contactsRes.data ?? []) as BaseContact[], now, TZ_OFFSET_HOURS),
+      ) : null;
 
       return NextResponse.json({
         period,
