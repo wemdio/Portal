@@ -14,9 +14,11 @@ verdict logic keys on {code, exists, isCatchAll, greylist, smtpText}.
 Env: SMTP_PROXY_API_KEY (required), PORT (default 3100),
      EMAIL_VALIDATION_HELO_DOMAIN (HELO name), EMAIL_VALIDATION_MAIL_FROM (default ''),
      SMTP_PROBE_LOCAL_ADDRESS (optional egress bind),
-     SMTP_CHECK_DEADLINE_MS (overall per-check deadline, default 21000).
+     SMTP_CHECK_DEADLINE_MS (overall per-check deadline, default 21000),
+     SMTP_QUIT_WAIT_MS (wait for the QUIT reply in the background, default 1500),
+     SMTP_PROVIDER_HOURLY_LIMITS / SMTP_PROVIDER_WAIT_MS (per-provider pace, see pace.ts).
 """
-import os, sys, json, socket, time, hmac, re, errno
+import os, sys, json, socket, time, hmac, re, errno, threading, secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 API_KEY = os.environ.get("SMTP_PROXY_API_KEY", "")
@@ -43,6 +45,16 @@ CATCHALL_RETRY_TIMEOUT = 5.0
 if not API_KEY:
     print("SMTP_PROXY_API_KEY env variable is required", file=sys.stderr)
     sys.exit(1)
+
+def _env_seconds(name, default_ms):
+    try:
+        return float(os.environ.get(name) or default_ms) / 1000.0
+    except ValueError:
+        return float(default_ms) / 1000.0
+
+
+QUIT_WAIT = _env_seconds("SMTP_QUIT_WAIT_MS", "1500")
+PACE_WAIT = _env_seconds("SMTP_PROVIDER_WAIT_MS", "3000")
 
 _FINAL_LINE = re.compile(rb"^\d{3} ", re.M)
 _CTRL = re.compile(r"[\r\n\0]")
@@ -94,21 +106,110 @@ def _connect(mx, timeout):
     raise OSError("no IPv4 address for %s" % mx)
 
 
+_PROBE_FIRST = ["anna", "mark", "olga", "peter", "julia", "david", "maria", "alex",
+                "nina", "tom", "eva", "leon", "sara", "ivan", "lena", "max"]
+_PROBE_LAST = ["berg", "holm", "strand", "wood", "lind", "hart", "vale", "brook",
+               "field", "stone", "dale", "marsh", "west", "ford", "hill", "lake"]
+
+
 def _random_local(domain):
-    return "verify-check-%d-%s@%s" % (int(time.time() * 1000), os.urandom(4).hex(), domain)
+    """Случайный ящик для catch-all (parity с randomProbeAddress в smtp.ts):
+    обычное «имя.фамилия123» вместо «verify-check-…», по которому видно проверку."""
+    return "%s.%s%d@%s" % (secrets.choice(_PROBE_FIRST), secrets.choice(_PROBE_LAST),
+                           100 + secrets.randbelow(900), domain)
 
 
-def _quit_and_close(s):
-    """QUIT — fire-and-forget (parity с quitAndDestroy в smtp.ts): ответ не ждём
-    (это до 3s чистой задержки на пробу), пишем QUIT и сразу закрываем сокет."""
-    try:
-        s.sendall(b"QUIT\r\n")
-    except Exception:
-        pass
-    try:
-        s.close()
-    except Exception:
-        pass
+def _quit_politely(s):
+    """QUIT вежливо, без задержки ответа воркеру (parity с quitPolitely в smtp.ts):
+    «221» ждём в фоновом потоке не дольше SMTP_QUIT_WAIT_MS, потом закрываем.
+    Сокет переходит к этому потоку — вызывающий его больше не закрывает."""
+    def finish():
+        try:
+            s.sendall(b"QUIT\r\n")
+            _read_reply(s, QUIT_WAIT)
+        except Exception:
+            pass
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+    threading.Thread(target=finish, daemon=True).start()
+
+
+# ─── Per-provider pace (parity с pace.ts) ───────────────────────────────────
+_DEFAULT_HOURLY = {"microsoft": 3600, "google": 7200, "yandex": 7200, "mailru": 7200,
+                   "mimecast": 1800, "proofpoint": 1800}
+
+
+def probe_provider(mx):
+    host = (mx or "").lower().rstrip(".")
+    if re.search(r"\.protection\.outlook\.com$|(^|\.)(outlook|hotmail)\.com$", host):
+        return "microsoft"
+    if re.search(r"(^|\.)(google|googlemail)\.com$|\.smtp\.goog$", host):
+        return "google"
+    if re.search(r"(^|\.)yandex\.(ru|net|com)$", host):
+        return "yandex"
+    if re.search(r"(^|\.)mail\.ru$", host):
+        return "mailru"
+    if re.search(r"\.mimecast\.(com|co\.za)$", host):
+        return "mimecast"
+    if re.search(r"\.(pphosted|ppe-hosted)\.com$", host):
+        return "proofpoint"
+    return None
+
+
+def hourly_limits(raw=None):
+    limits = dict(_DEFAULT_HOURLY)
+    for part in (raw if raw is not None else os.environ.get("SMTP_PROVIDER_HOURLY_LIMITS", "")).split(","):
+        if "=" not in part:
+            continue
+        name, value = [x.strip().lower() for x in part.split("=", 1)]
+        try:
+            number = float(value)
+        except ValueError:
+            continue
+        if name in limits and number >= 0:
+            limits[name] = number
+    return limits
+
+
+class Pace:
+    """Token bucket per provider: five minutes' worth may go at once, the rest
+    follows the hourly rate; 0 = no limit."""
+
+    def __init__(self, limits=None, clock=time.monotonic, sleep=time.sleep):
+        self.limits = limits or hourly_limits()
+        self.clock, self.sleep = clock, sleep
+        self.lock = threading.Lock()
+        self.buckets = {}
+
+    def acquire(self, mx, wait=None):
+        provider = probe_provider(mx)
+        per_hour = self.limits.get(provider, 0) if provider else 0
+        if not per_hour:
+            return True
+        wait = PACE_WAIT if wait is None else wait
+        started = self.clock()
+        while True:
+            with self.lock:
+                now = self.clock()
+                capacity = max(10, int(-(-per_hour // 12)))
+                per_sec = per_hour / 3600.0
+                tokens, updated = self.buckets.get(provider, (capacity, now))
+                tokens = min(capacity, tokens + (now - updated) * per_sec)
+                if tokens >= 1:
+                    self.buckets[provider] = (tokens - 1, now)
+                    return True
+                self.buckets[provider] = (tokens, now)
+                pause = (1 - tokens) / per_sec
+            left = wait - (self.clock() - started)
+            if left <= 0:
+                return False
+            self.sleep(min(left, max(0.02, pause)))
+
+
+PACE = Pace()
 
 
 def _fresh_probe(mx, helo, mail_from, recipient, timeout):
@@ -128,7 +229,8 @@ def _fresh_probe(mx, helo, mail_from, recipient, timeout):
         if code != 250:
             return None
         code, text = _cmd(s, "RCPT TO:<%s>" % recipient, timeout)
-        _quit_and_close(s)
+        _quit_politely(s)
+        s = None
         return code
     except Exception:
         return None
@@ -245,7 +347,8 @@ def smtp_check(req):
             except Exception:
                 pass
 
-        _quit_and_close(s)
+        _quit_politely(s)
+        s = None
     except socket.timeout:
         result["error"] = "SMTP timeout waiting for reply"
     except ConnectionRefusedError:
@@ -325,6 +428,9 @@ class Handler(BaseHTTPRequestHandler):
         if not req.get("email") or not req.get("mxHost"):
             return self._json(200, {"code": 0, "exists": None, "isCatchAll": None,
                                     "greylist": False, "error": "Missing required fields"})
+        if not PACE.acquire(req["mxHost"]):
+            return self._json(200, {"code": 0, "exists": None, "isCatchAll": None, "greylist": False,
+                                    "error": "rate limited by proxy (%s)" % probe_provider(req["mxHost"])})
         try:
             self._json(200, smtp_check(req))
         except Exception as e:

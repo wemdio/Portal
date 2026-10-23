@@ -1,5 +1,11 @@
 import { heEngBaseBudgetActive, isHeEngBaseBudgetPreflightFailure, rethrowHeEngBaseBudgetError } from './engBaseBudget';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
+import { HeEngBaseBudgetError } from './engBaseBudgetLedger';
+import {
+  createHeEngCatalogWebsiteSearchPlan, createHeEngCompanySearchCheckpoint, runHeEngCompanySearchPage,
+  type HeEngCompanySearchPlan,
+} from './engCompanySearch';
 
 import { companySiteAlias } from '@/lib/enrich/companySiteAlias';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
@@ -13,8 +19,8 @@ import {
 } from './engCompanyFit';
 import {
   HE_ENG_COMPANY_QUALIFICATION_VERSION, HeEngQualificationScopeError,
-  heEngCompanyKey, heEngCompanyQualified, heEngQualificationVersion,
-  type HeEngCompanyVerdict, type HeEngQualificationInFlight, type HeEngQualificationMemo,
+  heEngCatalogDirectHypothesis, heEngCompanyKey, heEngCompanyQualified, heEngConstructWebsite, heEngQualificationVersion,
+  type HeEngCatalogSiteSearch, type HeEngCompanyVerdict, type HeEngQualificationInFlight, type HeEngQualificationMemo,
   type HeEngQualificationRow, type HeEngQualificationScope,
   type HeEngCollectedCompanyEvidence, type HeEngCompanyQualificationAssessment,
 } from './engCompanyQualificationPolicy';
@@ -81,6 +87,8 @@ const StoredVerdictSchema = z.object({
     url: z.string().min(1).max(2000), quote: z.string().min(12).max(1400) })).max(12),
   checkedAt: z.string().datetime(), countryProof: z.unknown().optional(),
   fitReview: z.object({ model: z.literal(HE_ENG_QUALIFICATION_REVIEW_MODEL), status: z.literal('match'), hypothesisId: z.string() }).optional(),
+  catalogFit: z.object({ source: z.literal('pdl'), industry: z.string().min(1).max(100), hypothesisId: z.string().min(1).max(200) }).optional(),
+  currentWebsite: z.string().min(1).max(2000).optional(),
   audit: AuditSchema.optional(),
 });
 
@@ -129,7 +137,35 @@ function interrupted(ctx: HeStageContext, error?: unknown): void {
   if (candidate?.name === 'AbortError' || candidate?.heJobInterruption === true) throw error;
 }
 
-type PageRead = { pages: HeFetchedPage[]; retryableFailure: boolean; unverifiedRedirect: boolean };
+/**
+ * The catalogue domain itself is gone: its name does not resolve (only a
+ * resolver «no such name», never our resolver failing), or it is parked.
+ * Only then is the company's current site searched for (prepare); robots
+ * blocks, bad certificates, silent servers and redirects to a buyer are not.
+ */
+type PageRead = { pages: HeFetchedPage[]; retryableFailure: boolean; unverifiedRedirect: boolean; dead?: 'dns' | 'parked' };
+
+/** Parking services and marketplaces a lapsed company domain points to. */
+const PARKING_HOSTS = [
+  'sedoparking.com', 'sedo.com', 'dan.com', 'afternic.com', 'hugedomains.com', 'bodis.com', 'parkingcrew.net',
+  'above.com', 'domainmarket.com', 'undeveloped.com', 'buydomains.com', 'brandbucket.com', 'squadhelp.com',
+  'atom.com', 'uniregistry.com', 'domainnamesales.com', 'sav.com', 'efty.com', 'perfectdomain.com', 'godaddy.com',
+];
+const PARKING_TEXT = /\b(?:this domain(?: name)? (?:is|may be) for sale|the domain [a-z0-9.-]+ (?:is|may be) for sale|buy this domain|domain(?: name)? (?:is )?for sale|this (?:web ?page|domain) is parked|parked (?:free|courtesy|domain)|domain parking|this domain has (?:been registered|expired)|inquire about this domain|make an offer on this domain)\b/i;
+
+/**
+ * A parked home page: it lands on a parking service or marketplace, on the
+ * GoDaddy «/lander» shell, or a short page says the domain is for sale.
+ * Measured 23.10.2026: 12 of 197 lost company sites were parked like this.
+ */
+export function heEngParkedPage(page: Pick<HeFetchedPage, 'url' | 'text'>): boolean {
+  let url: URL;
+  try { url = new URL(page.url); } catch { return false; }
+  const host = url.hostname.toLowerCase();
+  if (PARKING_HOSTS.some((parking) => host === parking || host.endsWith(`.${parking}`))) return true;
+  if (/^\/lander\/?$/i.test(url.pathname)) return true;
+  return page.text.length <= 2000 && PARKING_TEXT.test(page.text);
+}
 type QualificationPage = { url: string; text: string; evidenceSource?: 'constructor_website' | 'website' };
 
 /** Country proof is checked separately. A constructor description never supplies geography. */
@@ -184,6 +220,8 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
   const queue: Candidate[] = [{ url: website, depth: 0, priority: 1000, kind: 'home' }];
   let retryableFailure = false;
   let unverifiedRedirect = false;
+  let dnsFailures = 0;
+  let parked = false;
   const attemptedKinds: string[] = [];
   let readSpecificService = false;
   let fallbackTried = false;
@@ -230,6 +268,7 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
     try { page = await fetchPage(candidate.url); }
     catch (error) {
       interrupted(ctx, error);
+      if (isHeSiteUnreachable(error) && error.kind === 'dns') dnsFailures += 1;
       retryableFailure ||= !(isHeSiteUnreachable(error) && error.kind === 'dns');
       unansweredInRow += 1;
       if (candidate.depth === 0 && !fallbackOrigin()) break;
@@ -239,6 +278,8 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
     answered = true;
     unansweredInRow = 0;
     interrupted(ctx);
+    // A parked home page is no company evidence: nothing from it reaches the models.
+    if (page && candidate.depth === 0 && heEngParkedPage(page)) { parked = true; break; }
     if (page && !own(page.url) && companySiteAlias(page.url, website, company)) {
       aliasSites.add(siteBoundary(page.url) ?? page.url);
     }
@@ -279,7 +320,10 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
     }
     queue.sort((a, b) => b.priority - a.priority || a.depth - b.depth);
   }
-  // Only official-site links are followed. Qualification never buys search credits.
+  // Only official-site links are followed; a search for the current site
+  // (prepare) happens only when this read reports the domain itself dead.
+  if (parked && !pages.length) return { pages: [], retryableFailure: false, unverifiedRedirect: false, dead: 'parked' };
+  if (!answered && !retryableFailure && dnsFailures > 0 && !pages.length) return { pages, retryableFailure, unverifiedRedirect, dead: 'dns' };
   return { pages, retryableFailure, unverifiedRedirect };
 }
 
@@ -409,6 +453,26 @@ function fitVerdict(row: HeEngQualificationRow, company: HeEngCompanyFitInput, s
     } } : {}) };
 }
 
+/**
+ * Softer acceptance (heEngCatalogDirectHypothesis) when the company's own site
+ * gave the models no evidence either way. Only for pages read from the
+ * catalogue site itself — a page from another domain proves its identity
+ * through the models — and only with a proven source country.
+ */
+function catalogVerdict(row: HeEngQualificationRow, key: string, scope: HeEngQualificationScope, crossSite: boolean): HeEngCompanyVerdict | null {
+  const direct = crossSite ? null : heEngCatalogDirectHypothesis(row, scope);
+  const location = heEngSourceCountry(row, scope.countries);
+  if (!direct || location.status !== 'confirmed') return null;
+  return { ...unverified(scope, key, 'catalog_industry_match'), status: 'accepted', country: location.country,
+    countryProof: location.proof, hypothesisId: direct.hypothesisId,
+    catalogFit: { source: 'pdl', industry: direct.industry, hypothesisId: direct.hypothesisId } };
+}
+
+/** INSUFFICIENT or a NOT_TARGET without quotes: the models found no contrary evidence. */
+function withoutContraryEvidence(decision: HeEngCompanyFitDecision | undefined): boolean {
+  return decision?.status === 'unverified' && ['activity_unverified', 'hypothesis_unconfirmed'].includes(decision.reason);
+}
+
 function knownResponseCost(response: unknown): number | undefined {
   const usage = (response as { usage?: { cost?: unknown } } | null)?.usage;
   return typeof usage?.cost === 'number' && Number.isFinite(usage.cost) && usage.cost >= 0 ? usage.cost : undefined;
@@ -421,6 +485,11 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     collectedEvidence?: Readonly<Record<string, HeEngCollectedCompanyEvidence>>;
     /** Only a new manual target base may opt in, under the same global $5 ledger. */
     collectionTargetBudget?: true;
+    /**
+     * Base ledger for one paid search per company whose catalogue domain is
+     * dead or parked (owner decision 2026-10-23). Absent: no search, as before.
+     */
+    siteSearch?: { db: SupabaseClient; baseId: string; projectId: string };
     onCheckpoint: (memo: HeEngQualificationMemo) => Promise<void> },
 ): Promise<{ rows: T[]; memo: HeEngQualificationMemo; tokensUsed: number; costUsd: number; complete: boolean; retryAfterMs?: number; pendingCompanyCount: number }> {
   if (input.collectionTargetBudget && !heEngBaseBudgetActive()) {
@@ -499,8 +568,12 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     evidenceSource: z.enum(['constructor_website', 'website']).optional() })).max(MAX_PAGES + 3),
     retryableFailure: z.boolean(), collectedJobId: z.string().uuid().optional(), excerptVersion: z.literal(2).optional(),
     // Present only when a page came from a same-brand domain (companySiteAlias).
-    company: z.string().min(1).max(1000).optional() });
-  if (Object.keys(saved?.prepared ?? {}).length > 16 || Object.keys(saved?.proposals ?? {}).length > 16) throw new HeEngQualificationScopeError('too many cached companies');
+    company: z.string().min(1).max(1000).optional(),
+    // The pages come from this current site found by search (dead/parked catalogue domain).
+    currentWebsite: z.string().min(1).max(2000).optional() });
+  if (Object.keys(saved?.prepared ?? {}).length > 16 || Object.keys(saved?.proposals ?? {}).length > 16 ||
+      Object.keys(saved?.siteSearches ?? {}).length > 16) throw new HeEngQualificationScopeError('too many cached companies');
+  if (input.siteSearch && input.siteSearch.projectId !== scope.projectId) throw new HeEngQualificationScopeError('site search budget belongs to another project');
   const preparedHistory = new Set<string>();
   for (const [key, raw] of Object.entries(saved?.prepared ?? {})) {
     const item = preparedSchema.safeParse(raw);
@@ -511,10 +584,22 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     if (!row) continue;
     const normalized = normalizeLeadWebsite(row.website);
     const website = normalized && (/^https?:\/\//i.test(normalized) ? normalized : `https://${normalized}`);
-    if (item.data.website !== website || (item.data.company !== undefined && item.data.company !== row.company)) {
+    if (item.data.website !== website || (item.data.company !== undefined && item.data.company !== row.company) ||
+        (item.data.currentWebsite !== undefined && (item.data.company === undefined ||
+          heEngConstructWebsite(row, { currentWebsite: item.data.currentWebsite }) === null))) {
       throw new HeEngQualificationScopeError('invalid cached company identity');
     }
     memo.economy.prepared[key] = item.data;
+  }
+  // A paid search result is reused, never bought again; an unfinished one is an unknown charge.
+  for (const [key, raw] of Object.entries(saved?.siteSearches ?? {})) {
+    const item = raw as Partial<HeEngCatalogSiteSearch> | null;
+    if (!/^[a-f0-9]{64}$/.test(key) || !item || typeof item !== 'object' || !item.plan || !Array.isArray(item.plan.tasks) ||
+        item.plan.tasks.length !== 1 || !item.checkpoint || item.checkpoint.planFingerprint !== item.plan.fingerprint ||
+        !Array.isArray(item.candidates) || item.candidates.length > 10) throw new HeEngQualificationScopeError('invalid saved site search');
+    if (!pending.has(key) || memo.verdicts[key]) continue;
+    if (item.checkpoint.inFlight) throw new HeEngBaseBudgetError('unknown_cost');
+    (memo.economy.siteSearches ??= {})[key] = structuredClone(item as HeEngCatalogSiteSearch);
   }
   const safeScope = JSON.parse(withoutEmails(JSON.stringify(scope))) as HeEngQualificationScope;
   for (const [key, proposal] of Object.entries(saved?.proposals ?? {})) {
@@ -548,9 +633,12 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
         ...(proposal ? { classifier: assessment(HE_ENG_QUALIFICATION_MODEL, proposal) } : {}),
         ...(review ? { review: assessment(HE_ENG_QUALIFICATION_REVIEW_MODEL, review) } : {}) };
     }
+    // The constructor crawls the found site; the verdict stays keyed by the catalogue site.
+    if (prepared?.currentWebsite && verdict.status === 'accepted') verdict.currentWebsite = prepared.currentWebsite;
     memo.verdicts[key] = verdict;
     delete memo.economy!.prepared[key];
     delete memo.economy!.proposals![key];
+    delete memo.economy!.siteSearches?.[key];
   }
   function finishRemaining(reason: string): void {
     for (const key of pending.keys()) if (!memo.verdicts[key]) finish(key, unverified(scope, key, reason));
@@ -595,6 +683,47 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
   }
   await save();
   const fetchPage = resolveFetchPage({ ...ctx, market: 'us' }, { companyEvidence: true, companyEvidenceTerms: [...hypothesisWords(scope, true)].slice(0, 32) });
+  /**
+   * The catalogue domain is dead or parked: one paid search page for the
+   * company's current site, then the first hit of the same brand
+   * (companySiteAlias) is read. Owner decision 2026-10-23: only these two
+   * cases and only the same brand — a buyer's or another company's domain is
+   * never read. Its pages are cross-site, so the models confirm identity and
+   * the softer catalogue rule does not apply. The search is durable in the
+   * memo before and after the paid call and is never bought twice.
+   */
+  async function currentSite(key: string, row: T, website: string, company: string): Promise<{ website: string; pages: QualificationPage[] } | null> {
+    const ledger = input.siteSearch;
+    const country = heEngSourceCountry(row, scope.countries);
+    if (!ledger || country.status !== 'confirmed' || !country.country) return null;
+    const searches = memo.economy!.siteSearches ??= {};
+    let search = searches[key];
+    if (!search) {
+      let plan: HeEngCompanySearchPlan;
+      try { plan = createHeEngCatalogWebsiteSearchPlan({ companyKey: key, company, country: country.country }); } catch { return null; }
+      search = searches[key] = { plan, checkpoint: createHeEngCompanySearchCheckpoint(plan), candidates: [] };
+      await save();
+    }
+    if (search.checkpoint.inFlight) throw new HeEngBaseBudgetError('unknown_cost');
+    if (search.checkpoint.calls === 0 && !search.checkpoint.unavailable) {
+      const state = search;
+      await runHeEngCompanySearchPage({ db: ledger.db, baseId: ledger.baseId, projectId: ledger.projectId,
+        plan: state.plan, checkpoint: state.checkpoint, seenWebsites: [website], signal: heStageSignal(ctx),
+        onCheckpoint: async (checkpoint, candidates) => {
+          state.checkpoint = structuredClone(checkpoint);
+          state.candidates = structuredClone(candidates);
+          await save();
+        } });
+    }
+    for (const hit of search.candidates) {
+      let site: string;
+      try { site = `https://${new URL(hit.website).host}/`; } catch { continue; }
+      if (sameSite(site, website) || companySiteAlias(site, website, company) === null) continue;
+      const read = await companyPages(ctx, fetchPage, site, company, scope);
+      return read.pages.length ? { website: site, pages: read.pages.map(({ url, text }) => ({ url, text, evidenceSource: 'website' as const })) } : null;
+    }
+    return null;
+  }
   const limit = Number.isFinite(input.maxCompanies) && input.maxCompanies! >= 1 ? Math.min(16, Math.floor(input.maxCompanies!)) : 16;
   const candidates = [...pending].filter(([key]) => !memo.verdicts[key]).sort(([a], [b]) =>
     Number(!!memo.economy!.proposals![b]) - Number(!!memo.economy!.proposals![a]) ||
@@ -634,7 +763,12 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
         if (!pages.length) {
           const attempts = Math.min(MAX_COMPANY_ATTEMPTS, (memo.attempts![key]?.attempts ?? 0) + 1);
           memo.attempts![key] = { attempts, kind: read.retryableFailure ? 'site_transient' : 'site_unavailable' };
-          if (!read.retryableFailure || attempts >= MAX_COMPANY_ATTEMPTS) finish(key, unverified(scope, key, read.unverifiedRedirect ? 'website_redirect_unverified' : 'site_unavailable_exhausted'));
+          if (!read.retryableFailure || attempts >= MAX_COMPANY_ATTEMPTS) {
+            const current = read.dead ? await currentSite(key, row, website, row.company) : null;
+            if (current) memo.economy!.prepared[key] = { website, pages: current.pages, retryableFailure: false, excerptVersion: 2,
+              company: row.company, currentWebsite: current.website };
+            else finish(key, unverified(scope, key, read.unverifiedRedirect ? 'website_redirect_unverified' : 'site_unavailable_exhausted'));
+          }
         } else memo.economy!.prepared[key] = { website, pages, retryableFailure: read.retryableFailure, excerptVersion: 2,
           ...(pages.some((page) => !sameSite(page.url, website)) ? { company: row.company } : {}),
           ...(reused.length ? { collectedJobId: collected!.jobId } : {}) };
@@ -736,13 +870,14 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     const prepared = memo.economy!.prepared[key];
     if (!prepared || memo.verdicts[key]) return;
     const company = fitInput(key, row, prepared.website, prepared.pages, scope, prepared.excerptVersion);
-    if (!company.quotes.length) { finish(key, unverified(scope, key, 'activity_unverified')); await save(); return; }
+    const catalog = () => catalogVerdict(row, key, scope, prepared.company !== undefined);
+    if (!company.quotes.length) { finish(key, catalog() ?? unverified(scope, key, 'activity_unverified')); await save(); return; }
     if (!memo.economy!.proposals![key]) {
       const proposals = await purchase(buildHeEngCompanyFitClassifierRequest([company], safeScope), [company], false);
       if (!proposals || proposals === 'failed') return;
       const proposal = proposals.get(key)!;
-      if (!heEngCompanyFitNeedsReview(proposal)) finish(key, fitVerdict(row, company, scope,
-        finalizeHeEngCompanyFit(new Map([[key, proposal]]), new Map()).get(key)!), proposal);
+      if (!heEngCompanyFitNeedsReview(proposal)) finish(key, (withoutContraryEvidence(proposal) ? catalog() : null) ??
+        fitVerdict(row, company, scope, finalizeHeEngCompanyFit(new Map([[key, proposal]]), new Map()).get(key)!), proposal);
       else memo.economy!.proposals![key] = proposal;
       await save(); // Persist the first paid answer before buying independent review.
       if (memo.verdicts[key]) return;
@@ -753,7 +888,10 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     const reviews = await purchase(request, request.companies, true);
     if (!reviews || reviews === 'failed') return;
     const final = finalizeHeEngCompanyFit(proposals, reviews);
-    finish(key, fitVerdict(row, company, scope, final.get(key)!), proposals.get(key), reviews.get(key));
+    // A proposed match the reviewer found too little to confirm is no contrary evidence either.
+    const softened = proposals.get(key)?.status === 'match' && final.get(key)?.reason === 'review_disagreement' &&
+      withoutContraryEvidence(reviews.get(key)) ? catalog() : null;
+    finish(key, softened ?? fitVerdict(row, company, scope, final.get(key)!), proposals.get(key), reviews.get(key));
     // Keep a completed, independently checked result even if its charge is unknown.
     // The same durable hold prevents any further purchase in this base.
     await save();
