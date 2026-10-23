@@ -68,6 +68,7 @@ function campaignStatus(status: string): { label: string; tone: string } {
 function uploadText(r: UploadJobResult): string {
   const skipped = [
     r.skippedSuppressed ? `стоп-лист ${r.skippedSuppressed}` : null,
+    r.skippedStopList ? `стоп-лист клиента или проекта ${r.skippedStopList}` : null,
     r.skippedExisting ? `уже были ${r.skippedExisting}` : null,
     r.skippedDuplicates ? `одна почта у нескольких компаний ${r.skippedDuplicates}` : null,
     r.skippedEmptyLetter ? `без письма ${r.skippedEmptyLetter}` : null,

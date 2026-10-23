@@ -73,6 +73,7 @@ function retryPlan(code: SendErrorCode | undefined, attempts: number): 'retry' |
     case 'policy_reject':
       return 'hold';
     case 'inflight_drop':
+    case 'partial_accept':
       return 'unknown';
     case 'rate_limit':
     case 'temporary':

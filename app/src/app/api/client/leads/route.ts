@@ -37,6 +37,8 @@ type LeadListItem = {
   status: string | null;
   ai_reason: string | null;
   created_at: string;
+  /** 'sender' — лид из «Рассылки»: письма Instantly у него нет, ответ — в reply_body. */
+  forwarded_via?: string | null;
   client_lead_comments: CommentCount[];
   email_id?: string | null;
   lead_id?: string | null;
@@ -132,7 +134,11 @@ function timestampDistance(a: string | null, b: string | null): number {
 }
 
 async function enrichFromInstantlyReplies(items: LeadListItem[], accessRows: ClientAccessRow[]) {
-  const pending = items.filter((item) => item.campaign_id && item.lead_email && !item.email_id);
+  // Кампания «Рассылки» Instantly незнакома: искать там ответ — пустой запрос
+  // в общий лимит /emails.
+  const pending = items.filter((item) => (
+    item.campaign_id && item.lead_email && !item.email_id && item.forwarded_via !== 'sender'
+  ));
   if (pending.length === 0) return;
 
   const byCampaign = new Map<string, LeadListItem[]>();

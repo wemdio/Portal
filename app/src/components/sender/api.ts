@@ -222,6 +222,8 @@ export interface ImportRecipientsResult {
   skippedEmptyLetter?: number;
   skippedDuplicates: number;
   skippedSuppressed: number;
+  /** Адрес или сайт компании в стоп-листе клиента или проекта кампании. */
+  skippedStopList?: number;
   /** Сколько строк с данными было в файле до обреза лимитом. */
   fileRows?: number;
   /** Сколько строк реально прочитано, если файл обрезан лимитом. */
@@ -250,6 +252,8 @@ export interface CampaignDetailsDto {
     gap_jitter_seconds: number;
     /** Проект портала; null — кампания ни к какому не привязана. */
     project_id: string | null;
+    /** Клиент кабинета, чей стоп-лист действует на базу; null — без клиента. */
+    client_user_id?: string | null;
   };
   /** Строка на вариант письма: у шага без А/Б-теста она одна (variant_no = 1). */
   steps: { step_no: number; variant_no?: number; delay_hours: number; subject: string; body: string }[];
@@ -502,6 +506,8 @@ export function createCampaign(body: {
   gapJitterSeconds: number;
   /** Проект портала; null — без проекта. */
   projectId: string | null;
+  /** Клиент кабинета (стоп-лист клиента); null — без клиента. */
+  clientUserId: string | null;
   /** Автосохранение недописанной формы: кампанию заведут без проверок. */
   draft?: boolean;
 }) {
@@ -583,6 +589,8 @@ export function updateCampaign(
     gapJitterSeconds: number;
     /** Проект портала; null — отвязать. */
     projectId: string | null;
+    /** Клиент кабинета (стоп-лист клиента); null — отвязать. */
+    clientUserId: string | null;
     /** Автосохранение недописанной формы: правки примут без проверок. */
     draft?: boolean;
   },
@@ -742,6 +750,37 @@ export function replyToThread(recipientId: string, text: string, draftId?: strin
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, draftId: draftId ?? null }),
   });
+}
+
+/** Передача лида клиенту из переписки: кому, кто в копии, черновик по легенде проекта. */
+export interface ThreadHandoffDto {
+  available: boolean;
+  /** Почему передать нельзя; null — можно. */
+  reason: string | null;
+  to: string;
+  cc: string[];
+  draft: string;
+  /** У проекта включён ИИ-пересказ легенды: черновик просят отдельно (ai). */
+  aiAdapt: boolean;
+  mailbox: string | null;
+  /** У кампании есть клиент кабинета — лид запишется ему в «Лиды». */
+  clientLinked: boolean;
+}
+
+/** ai — черновик пересказом легенды ИИ (платный вызов: только по кнопке). */
+export function fetchThreadHandoff(recipientId: string, ai = false) {
+  return authFetchJson<ThreadHandoffDto>(`${BASE}/threads/${recipientId}/handoff${ai ? '?ai=1' : ''}`);
+}
+
+export function handoffThread(recipientId: string, text: string, cc: string[]) {
+  return authFetchJson<{ ok: true; messageId: string; cabinet: 'after_send' | 'no_client' }>(
+    `${BASE}/threads/${recipientId}/handoff`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, cc }),
+    },
+  );
 }
 
 export type ReplyLanguage = 'ru' | 'en';
@@ -950,10 +989,23 @@ export interface SenderProjectDto {
   id: string;
   label: string;
   active: boolean;
+  /** Клиент кабинета у проекта, если указан. */
+  clientUserId?: string | null;
 }
 
 export function fetchSenderProjects() {
   return authFetchJson<{ projects: SenderProjectDto[] }>(`${BASE}/projects`);
+}
+
+/** Клиент кабинета: его стоп-лист действует на базу кампании. */
+export interface SenderClientDto {
+  id: string;
+  label: string;
+  email: string | null;
+}
+
+export function fetchSenderClients() {
+  return authFetchJson<{ clients: SenderClientDto[] }>(`${BASE}/clients`);
 }
 
 /** Вкладка «Контрольные ящики»: свои ящики Яндекс/Gmail/Mail.ru для проверки «входящие или спам». */

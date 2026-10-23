@@ -23,7 +23,7 @@ export async function GET(req: NextRequest) {
 
     const { data, error } = await supabaseAdmin
       .from('projects')
-      .select('id, client, name, status')
+      .select('id, client, name, status, client_user_id')
       .order('client', { ascending: true, nullsFirst: false });
     if (error) return jsonError(error.message, 500);
 
@@ -32,6 +32,8 @@ export async function GET(req: NextRequest) {
         id: String(row.id),
         label: String(row.client || row.name || 'Без названия'),
         active: ACTIVE_STATUSES.has(String(row.status)),
+        // Клиент кабинета у проекта, если указан: форма подставит его в кампанию.
+        clientUserId: row.client_user_id ? String(row.client_user_id) : null,
       })),
     });
   });

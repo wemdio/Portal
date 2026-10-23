@@ -1,5 +1,7 @@
 import { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
+import { buildSenderAutoReport } from '@/lib/sender/autoReport';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { buildAutoReport, extractCampaignIdsFromText } from '@/lib/tools/autoReportBuilder';
 import type { AutoReportProgress } from '@/lib/tools/autoReportBuilder';
 
@@ -34,21 +36,23 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  if (!INSTANTLY_API_KEY) {
-    return new Response(
-      sseEvent({ type: 'error', message: 'Сервис отчётов не настроен (INSTANTLY_API_KEY)' }),
-      { status: 503, headers: { 'Content-Type': 'text/event-stream' } },
-    );
-  }
-
-  let body: { campaignIds?: string[]; urlsOrText?: string };
+  let body: { campaignIds?: string[]; urlsOrText?: string; provider?: string };
   try {
-    body = (await req.json()) as { campaignIds?: string[]; urlsOrText?: string };
+    body = (await req.json()) as { campaignIds?: string[]; urlsOrText?: string; provider?: string };
   } catch {
     return new Response(sseEvent({ type: 'error', message: 'Неверное тело запроса' }), {
       status: 400,
       headers: { 'Content-Type': 'text/event-stream' },
     });
+  }
+
+  // Кампании «Рассылки» считаются из базы — ключ Instantly им не нужен.
+  const fromSender = body.provider === 'sender';
+  if (fromSender ? !supabaseAdmin : !INSTANTLY_API_KEY) {
+    return new Response(
+      sseEvent({ type: 'error', message: fromSender ? 'Сервис отчётов не настроен' : 'Сервис отчётов не настроен (INSTANTLY_API_KEY)' }),
+      { status: 503, headers: { 'Content-Type': 'text/event-stream' } },
+    );
   }
 
   let campaignIds: string[];
@@ -95,7 +99,9 @@ export async function POST(req: NextRequest) {
       };
 
       try {
-        const report = await buildAutoReport(campaignIds, INSTANTLY_API_KEY, onProgress);
+        const report = fromSender && supabaseAdmin
+          ? await buildSenderAutoReport(supabaseAdmin, campaignIds, onProgress)
+          : await buildAutoReport(campaignIds, INSTANTLY_API_KEY, onProgress);
         enqueue({
           type: 'result',
           tableText: report.tableText,

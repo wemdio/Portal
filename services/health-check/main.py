@@ -2130,6 +2130,9 @@ async def _check_sender(conn) -> list[str]:
         )
 
     # 2. Письма с прошедшим временем отправки не уходят — по адресам отправки.
+    # Группируем по самому m.egress_ip, а не по выражению (GROUP BY 1): подзапрос
+    # last_sent ссылается на m.egress_ip, и с 16.10.2026 Postgres отвергал запрос
+    # («subquery uses ungrouped column») — алерт молча не работал.
     try:
         overdue = await conn.fetch(
             "SELECT coalesce(m.egress_ip, 'без адреса') AS ip, count(*) AS n, "
@@ -2140,7 +2143,7 @@ async def _check_sender(conn) -> list[str]:
             "           AND x.sent_at > now() - interval '1 day') AS last_sent "
             "FROM public.sender_messages s JOIN public.sender_mailboxes m ON m.id = s.mailbox_id "
             "WHERE s.status = 'scheduled' AND s.scheduled_at < now() - make_interval(mins => $1) "
-            "GROUP BY 1 HAVING count(*) >= $2",
+            "GROUP BY m.egress_ip HAVING count(*) >= $2",
             SENDER_OVERDUE_MINUTES,
             SENDER_OVERDUE_MIN_MESSAGES,
         )

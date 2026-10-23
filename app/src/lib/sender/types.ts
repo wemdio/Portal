@@ -2,6 +2,13 @@ import type { TlsMode } from './mailboxImport';
 
 export type MailboxStatus = 'pending' | 'verified' | 'failed' | 'disabled';
 export type CampaignStatus = 'draft' | 'running' | 'paused' | 'done';
+
+/**
+ * scheduled_start_error, пока воркер запускает кампанию по расписанию: по ней
+ * он узнаёт, что запуск тем временем не отменили и не перенесли (оба её
+ * стирают), а список показывает «запускается», а не ошибку.
+ */
+export const SCHEDULED_START_CLAIM_MARK = 'запускается';
 export type RecipientStatus = 'active' | 'replied' | 'bounced' | 'unsubscribed' | 'finished' | 'stopped';
 export type MessageStatus = 'scheduled' | 'sending' | 'sent' | 'failed' | 'canceled' | 'unknown';
 export type ReplyKind = 'human' | 'auto_reply' | 'bounce' | 'warmup' | 'unknown';

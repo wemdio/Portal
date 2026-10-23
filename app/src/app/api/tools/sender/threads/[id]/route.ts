@@ -55,7 +55,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         .limit(MAX_ITEMS),
       db
         .from('sender_manual_messages')
-        .select('id, subject, body, status, sent_at, created_at, error')
+        .select('id, subject, body, status, sent_at, created_at, error, cc_emails')
         .eq('recipient_id', id)
         .order('created_at')
         .limit(MAX_ITEMS),
@@ -100,17 +100,23 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       })),
       // Ручные ответы оператора — полноправная часть переписки: без них в ленте
       // не видно, что мы ответили (задача 4.1).
-      ...(manual ?? []).map((x) => ({
-        id: String(x.id),
-        direction: 'out' as const,
-        subject: x.subject,
-        body: x.body,
-        at: (x.sent_at ?? x.created_at) as string | null,
-        note: MANUAL_NOTES[String(x.status)]
+      ...(manual ?? []).map((x) => {
+        const status = (x.status === 'failed' && x.error ? `${MANUAL_NOTES.failed}: ${x.error}` : null)
+          ?? MANUAL_NOTES[String(x.status)]
           ?? (x.status === 'sent' && x.error ? x.error : null)
-          ?? (x.status === 'sent' ? null : `${x.status}${x.error ? `: ${x.error}` : ''}`),
-        fromEmail: null,
-      })),
+          ?? (x.status === 'sent' ? null : `${x.status}${x.error ? `: ${x.error}` : ''}`);
+        // Письмо с копией — передача лида клиенту: копию видно в ленте.
+        const cc = Array.isArray(x.cc_emails) && x.cc_emails.length ? `копия: ${x.cc_emails.join(', ')}` : null;
+        return {
+          id: String(x.id),
+          direction: 'out' as const,
+          subject: x.subject,
+          body: x.body,
+          at: (x.sent_at ?? x.created_at) as string | null,
+          note: [status, cc].filter(Boolean).join(' · ') || null,
+          fromEmail: null,
+        };
+      }),
     ].sort((a, b) => new Date(a.at ?? 0).getTime() - new Date(b.at ?? 0).getTime());
 
     return NextResponse.json({ thread, items });
