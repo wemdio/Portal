@@ -9224,7 +9224,21 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     companiesTotal = new Set(storedRows.map(heCompanyRowKey)).size;
     if (info.construct) info.construct = { ...info.construct, valid_count: storedRows.length };
   }
-  if (adaptive) return finishHeEngTargetRound(ctx, job, base, info, storedRows, finalColumns, usage);
+  if (adaptive) {
+    // Конструктор круга не завершился — это наша авария, а не молчание рынка:
+    // проверенные (оплаченные) компании круга остались без поиска адресов.
+    // Импортированное сохраняем и останавливаемся честно ('error'), а не жжём
+    // следующие круги до ложного 'low_yield' (23.10.2026: два таких круга
+    // остановили 0777749b на 271 из 500). За 45 дней до этого ENG-конструктор
+    // не падал ни разу — падение означает поломку, повтор её не лечит.
+    const constructorFailed = info.construct?.status === 'failed' || info.construct?.status === 'cancelled';
+    if (constructorFailed) {
+      stageLog(ctx, `[base_collect] конструктор ${info.construct?.bc_job_id ?? ''} завершился со статусом ` +
+        `${info.construct?.status} — сбор останавливается с причиной error, собранное сохранено`);
+    }
+    return finishHeEngTargetRound(ctx, job, base, info, storedRows, finalColumns, usage,
+      constructorFailed ? 'error' : undefined);
+  }
   // Считаем по САМИМ строкам, а не по размеру набора ключей: у одной компании
   // после split_emails несколько строк, и оба шага выше могли пометить одну и
   // ту же (у базы с отказавшим гейтом до конструктора — реально могут).
