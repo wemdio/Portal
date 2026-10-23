@@ -37,7 +37,7 @@ import {
   type WebsiteFetchGuard,
 } from '@/lib/enrich/websiteParser';
 import { isBlockedCompanyWebsiteDomain } from '@/lib/companiesDirectory/contactPolicy';
-import { companySiteAlias, sameCompanySiteBoundary } from '@/lib/enrich/companySiteAlias';
+import { companyNameMailDomain, companySiteAlias, sameCompanySiteBoundary } from '@/lib/enrich/companySiteAlias';
 import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator';
 import { isSupportEmail } from './supportEmails';
 import { makeCheckpointGate } from './checkpointGate';
@@ -1132,15 +1132,18 @@ const EN_FREE_MAIL_DOMAINS = new Set([
  * Адрес, найденный на сайте компании, но принадлежащий другой организации:
  * регулятор, омбудсмен, госорган, PR-агентство, рынок Lloyd's, партнёр (аудит
  * 23.10.2026: 20 из 215 готовых контактов). Свой — домен сайта строки с
- * поддоменами или домен того же бренда (companySiteAlias: abc.co.uk ↔ abc.com,
- * wefox.com у wefoxgroup.com). Домен группы под другим брендом (pmagroup.com у
- * PMA Companies) тоже считается чужим: по одному адресу их не отличить от
- * партнёра. Строка без сайта не проверяется.
+ * поддоменами, домен того же бренда (companySiteAlias: abc.co.uk ↔ abc.com,
+ * wefox.com у wefoxgroup.com) или домен из инициалов и начал слов названия
+ * (companyNameMailDomain: aoins.com у Auto-Owners Insurance, pmagroup.com у PMA
+ * Companies). Материнский бренд под другим именем (gbli.com у Penn-America)
+ * остаётся чужим: по одному адресу его не отличить от партнёра. Строка без
+ * сайта не проверяется.
  */
 function isForeignCompanyEmail(email: string, website: string, company: string): boolean {
   const domain = email.slice(email.indexOf('@') + 1).trim().toLowerCase();
   if (!domain || !website.trim() || EN_FREE_MAIL_DOMAINS.has(domain)) return false;
-  return !sameCompanySiteBoundary(domain, website) && companySiteAlias(domain, website, company) === null;
+  return !sameCompanySiteBoundary(domain, website) && companySiteAlias(domain, website, company) === null &&
+    !companyNameMailDomain(domain, company);
 }
 
 export async function stepRemoveSupportEmails(

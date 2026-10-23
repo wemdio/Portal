@@ -63,7 +63,7 @@ export function sameCompanySiteBoundary(a: string, b: string): boolean {
   return !!left && left === companySiteBoundary(b);
 }
 
-type Brand = { registrable: string; label: string };
+type Brand = { registrable: string; label: string; suffix: string };
 
 function brandOf(raw: string): Brand | null {
   try {
@@ -72,7 +72,7 @@ function brandOf(raw: string): Brand | null {
     const parsed = parse(host, { allowPrivateDomains: true });
     if (parsed.isIp || !parsed.domain || !parsed.domainWithoutSuffix || PLATFORMS.has(parsed.domain)) return null;
     const label = parsed.domainWithoutSuffix.replace(/[^a-z0-9]/g, '');
-    return label.length >= 3 ? { registrable: parsed.domain, label } : null;
+    return label.length >= 3 ? { registrable: parsed.domain, label, suffix: parsed.publicSuffix ?? '' } : null;
   } catch { return null; }
 }
 
@@ -104,4 +104,50 @@ export function companySiteAlias(candidateUrl: string, website: string, companyN
   if (words.some((word) => (word.length >= 5 || to.label === word || from.label === word)
     && from.label.startsWith(word) && to.label.startsWith(word))) return 'shared_name_word';
   return null;
+}
+
+/** Words a company appends to its abbreviation in a mail domain: pmagroup.com, ri-net.com. */
+const ABBREVIATION_TAILS = [
+  'group', 'grp', 'companies', 'cos', 'co', 'inc', 'corp', 'llc', 'ltd', 'holdings', 'insurance', 'ins',
+  'global', 'intl', 'usa', 'us', 'uk', 'net', 'online', 'mail', 'email', 'hq',
+];
+
+function abbreviationTail(rest: string): boolean {
+  return !rest || ABBREVIATION_TAILS.some((tail) => rest.startsWith(tail) && abbreviationTail(rest.slice(tail.length)));
+}
+
+/**
+ * ENG mail filter: a mail domain spelled from the company's own name — word
+ * initials or word starts (3+ letters) in name order, beginning with the first
+ * word, optionally with a generic tail: aoins.com («Auto-Owners Insurance»),
+ * ri-net.com («Republic Indemnity»), tmhighland.com («Tokio Marine Highland»),
+ * pnat.com («Penn National»), pmagroup.com («PMA Companies»). Only generic
+ * words of the name may be passed over. A parent or sister brand under another
+ * name (gbli.com at Penn-America, hcsc.com at a Blue Cross plan) cannot be
+ * derived and stays foreign, like regulators, agencies and partners; public
+ * sector zones (.gov, .gouv, .mil, .int) never belong to a company.
+ */
+export function companyNameMailDomain(candidateUrl: string, companyName: string): boolean {
+  const to = brandOf(candidateUrl);
+  if (!to || /(^|\.)(gov|gouv|gob|govt|mil|int)(\.|$)/.test(to.suffix)) return false;
+  const words = companyName.normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  while (words[0] === 'the') words.shift();
+  const label = to.label;
+  // pieces: name pieces used so far; distinct: one of them is a whole distinctive word.
+  const walk = (pos: number, next: number, pieces: number, distinct: boolean): boolean => {
+    const rest = label.slice(pos);
+    if (pieces > 0 && abbreviationTail(rest) && (pieces >= 2 || (distinct && rest.length > 0))) return true;
+    if (!rest) return false;
+    for (let i = next; i < words.length; i++) {
+      const word = words[i];
+      if (rest[0] === word[0] && walk(pos + 1, i + 1, pieces + 1, distinct)) return true;
+      for (let len = Math.min(word.length, rest.length); len >= 3; len--) {
+        if (rest.startsWith(word.slice(0, len)) &&
+          walk(pos + len, i + 1, pieces + 1, distinct || (len === word.length && !GENERIC_WORDS.has(word)))) return true;
+      }
+      if (pieces === 0 || !GENERIC_WORDS.has(word)) break;
+    }
+    return false;
+  };
+  return walk(0, 0, 0, false);
 }
