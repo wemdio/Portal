@@ -6891,6 +6891,18 @@ async function dispatchHeEngSearchBatch(
   if (search.checkpoint.unavailable) state.error = search.checkpoint.unavailable;
 }
 
+/**
+ * Конструктор круга не завершился — это наша авария, а не молчание рынка:
+ * проверенные (оплаченные) компании круга остались без поиска адресов. Такой
+ * круг закрывается с причиной 'error', а не жжёт следующие круги до ложного
+ * 'low_yield' (23.10.2026: два таких круга остановили 0777749b на 271 из 500).
+ * За 45 дней до этого ENG-конструктор не падал ни разу (33 из 33): падение
+ * означает поломку, повтор её не лечит.
+ */
+function heEngConstructFailed(construct: { status?: string } | null | undefined): boolean {
+  return construct?.status === 'failed' || construct?.status === 'cancelled';
+}
+
 /** Publish only already qualified addresses; all waves share this base/ledger. */
 async function finishHeEngTargetRound(
   ctx: HeStageContext, job: HeJob, base: HeAutoBase, info: HeCollectInfo,
@@ -8356,7 +8368,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     closeStats: NonNullable<HeCollectInfo['stats']>,
     importReason: string | null,
   ): Promise<HeStageResult> => {
-    if (adaptive) return finishHeEngTargetRound(ctx, job, base, info, [], [], usage);
+    // Тик импорта упавшего конструктора, где сверка сняла все строки, — тот же
+    // случай, что и с импортом: круг закрывается с причиной 'error'.
+    if (adaptive) return finishHeEngTargetRound(ctx, job, base, info, [], [], usage,
+      heEngConstructFailed(info.construct) ? 'error' : undefined);
     // Сюда же доходит тик ИМПОРТА, если за время работы конструктора
     // межбазовое исключение выросло настолько, что merged опустел, — и
     // результат конструктора тогда не импортируется. Это сознательно, а не
@@ -8996,6 +9011,16 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       if (constructWaitExpired(construct)) {
         const note = `Конструктор баз не завершился за 6ч (job ${construct.bc_job_id}, статус: ${bc?.status ?? 'не найдена'})`;
         info.construct = { ...construct, note };
+        if (adaptive) {
+          // Сбор с целью не валим вместе с контактами прошлых кругов: джоба
+          // отменяется, круг закрывается без её строк с причиной 'error'. Не
+          // ляжет запись финала — повтор стадии увидит отменённую джобу и
+          // придёт к тому же финалу через импорт её частичного результата.
+          await cancelAbandonedConstructJob(ctx, construct.bc_job_id);
+          info.construct = { ...construct, note, status: 'cancelled' };
+          stageLog(ctx, `[base_collect] ${note} — сбор останавливается с причиной error, собранное раньше сохранено`);
+          return finishHeEngTargetRound(ctx, job, base, info, [], [], usage, 'error');
+        }
         if (isRefill) {
           // Ночной долив — терминалом долива, с серией отказов
           // (closeHeRefillBaseUndelivered): раньше здесь всегда писалось
@@ -9225,13 +9250,8 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     if (info.construct) info.construct = { ...info.construct, valid_count: storedRows.length };
   }
   if (adaptive) {
-    // Конструктор круга не завершился — это наша авария, а не молчание рынка:
-    // проверенные (оплаченные) компании круга остались без поиска адресов.
-    // Импортированное сохраняем и останавливаемся честно ('error'), а не жжём
-    // следующие круги до ложного 'low_yield' (23.10.2026: два таких круга
-    // остановили 0777749b на 271 из 500). За 45 дней до этого ENG-конструктор
-    // не падал ни разу — падение означает поломку, повтор её не лечит.
-    const constructorFailed = info.construct?.status === 'failed' || info.construct?.status === 'cancelled';
+    // Импортированное упавшим конструктором сохраняем и останавливаемся честно.
+    const constructorFailed = heEngConstructFailed(info.construct);
     if (constructorFailed) {
       stageLog(ctx, `[base_collect] конструктор ${info.construct?.bc_job_id ?? ''} завершился со статусом ` +
         `${info.construct?.status} — сбор останавливается с причиной error, собранное сохранено`);
