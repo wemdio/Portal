@@ -1182,7 +1182,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
                         иначе не с чем сверить. */}
                     <LetterText
                       text={step.body}
-                      className="mt-1 whitespace-pre-wrap break-words text-sm text-zinc-700"
+                      className="mt-1 break-words text-sm text-zinc-700"
                     />
                   </div>
                 ))}

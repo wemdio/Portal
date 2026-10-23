@@ -19,6 +19,8 @@ const LINK_RE = /\[([^\]\n]+)\]\((https?:\/\/[^\s()]+)\)/g;
 /** Начатая ссылка без адреса или с адресом без схемы: «[Alial](alial.ru)». */
 const BROKEN_LINK_RE = /\[[^\]\n]+\]\((?!https?:\/\/)[^)\n]*\)/;
 
+import { letterMarkupToText } from './letterFormat';
+
 export type LetterChunk =
   | { kind: 'text'; text: string }
   | { kind: 'link'; text: string; url: string };
@@ -42,7 +44,7 @@ export function splitLinkMarkup(source: string): LetterChunk[] {
 
 /** Текстовая часть письма: разметка разворачивается в «подпись (адрес)». */
 export function linkMarkupToText(source: string): string {
-  return splitLinkMarkup(source)
+  return splitLinkMarkup(letterMarkupToText(source))
     .map((chunk) => {
       if (chunk.kind === 'text') return chunk.text;
       // Подпись и есть адрес — скобки с тем же адресом только мешают.

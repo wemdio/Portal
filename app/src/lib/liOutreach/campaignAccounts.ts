@@ -47,14 +47,30 @@ export async function saveCampaignAccounts(
   for (const accountId of unique) {
     if (alreadyHere.has(accountId)) continue;
     const { data: byColumn } = await db
-      .from('li_campaigns').select('id, name').eq('account_id', accountId).neq('id', campaignId).limit(1);
+      .from('li_campaigns').select('id, name, status').eq('account_id', accountId).neq('id', campaignId);
     const { data: byTable } = await db
-      .from('li_campaign_accounts').select('campaign_id').eq('account_id', accountId).neq('campaign_id', campaignId).limit(1);
-    const busy = (byColumn ?? [])[0] as { name?: string } | undefined;
-    if (busy || (byTable ?? []).length > 0) {
-      return busy?.name
-        ? `Аккаунт уже занят кампанией «${busy.name}» — один аккаунт можно использовать только в одной кампании.`
-        : 'Аккаунт уже занят другой кампанией — один аккаунт можно использовать только в одной кампании.';
+      .from('li_campaign_accounts').select('campaign_id').eq('account_id', accountId).neq('campaign_id', campaignId);
+    const owners = new Map<string, { id: string; name: string; status: string }>();
+    for (const c of (byColumn ?? []) as Array<{ id: string; name: string; status: string }>) owners.set(c.id, c);
+    for (const r of (byTable ?? []) as Array<{ campaign_id: string }>) {
+      if (!owners.has(r.campaign_id)) {
+        const { data: c } = await db.from('li_campaigns').select('id, name, status').eq('id', r.campaign_id).maybeSingle();
+        if (c) owners.set(c.id, c as { id: string; name: string; status: string });
+      }
+    }
+    const running = [...owners.values()].find((c) => c.status === 'running');
+    if (running) {
+      return `Аккаунт занят запущенной кампанией «${running.name}» — сначала остановите её.`;
+    }
+    // Остановленная кампания отдаёт аккаунт: снимаем его там и пишем в её журнал.
+    for (const c of owners.values()) {
+      await db.from('li_campaign_accounts').delete().eq('campaign_id', c.id).eq('account_id', accountId);
+      await db.from('li_campaigns').update({ account_id: null }).eq('id', c.id).eq('account_id', accountId);
+      await db.from('li_campaign_logs').insert({
+        campaign_id: c.id,
+        level: 'info',
+        message: `Аккаунт забран в другую кампанию: в этой остановленной он больше не используется.`,
+      });
     }
   }
 

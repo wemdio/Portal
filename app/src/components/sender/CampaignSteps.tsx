@@ -6,7 +6,8 @@ import { hasBrokenLinkMarkup } from '@/lib/mail/linkMarkup';
 import { placeholderKeys } from '@/lib/sender/templateVars';
 import { MAX_VARIANTS, MIN_RECIPIENTS_PER_VARIANT, variantLabel } from '@/lib/sender/variants';
 import type { RecipientColumnsDto } from './api';
-import { LinkInsert } from './LetterLinks';
+import { LetterToolbar, LinkInsert } from './LetterLinks';
+import { toggleBold, toggleBullets, type TextEdit } from '@/lib/mail/letterFormat';
 import { TemplateField, insertLink, insertVariable, placeCaret } from './TemplateField';
 
 /**
@@ -197,6 +198,19 @@ function LetterFields({
     return letter.body.slice(start, end).trim();
   };
 
+  /** Жирный и список правят выделение в тексте и возвращают его на место. */
+  const applyFormat = (edit: (text: string, start: number, end: number) => TextEdit) => {
+    const el = bodyRef.current;
+    const start = el?.selectionStart ?? letter.body.length;
+    const end = el?.selectionEnd ?? start;
+    const next = edit(letter.body, start, end);
+    onChange({ body: next.text });
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(next.selStart, next.selEnd);
+    });
+  };
+
   const addLink = (label: string, url: string) => {
     const { start, end } = linkRange.current;
     const next = insertLink(letter.body, start, end, label, url);
@@ -234,10 +248,16 @@ function LetterFields({
       {/* Ссылка под словом: выделили «Alial» — кнопка подставит подпись, адрес
           вписывается рядом. В тексте это остаётся разметкой с видимым адресом,
           синей ссылкой её покажет предпросмотр. */}
-      <div className="mt-2 flex flex-wrap items-center gap-2">
+      <LetterToolbar
+        disabled={disabled}
+        onBold={() => applyFormat(toggleBold)}
+        onBullets={() => applyFormat(toggleBullets)}
+      >
         <LinkInsert disabled={disabled} onOpen={grabSelection} onInsert={addLink} />
-        <span className="text-xs text-zinc-500">Выделите слово — оно станет подписью ссылки</span>
-      </div>
+      </LetterToolbar>
+      <p className="mt-1 text-center text-xs text-zinc-500">
+        Выделите текст и нажмите «Ж» — жирный, или значок списка — пункты. Слово + «Ссылка» — ссылка под словом
+      </p>
       {hasBrokenLinkMarkup(letter.body) ? (
         <p className="mt-2 text-sm text-amber-600">
           Ссылка без «https://» останется в письме текстом — впишите адрес целиком.

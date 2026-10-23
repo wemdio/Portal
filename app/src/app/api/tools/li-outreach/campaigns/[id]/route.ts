@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError, checkIsAdmin } from '@/lib/liOutreach/apiHelpers';
+import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
 import { collectUnknownPlaceholders, unknownPlaceholderError } from '@/lib/liOutreach/campaignTextCheck';
 import { normalizeTimezoneOffset, normalizeWorkingHours } from '@/lib/liOutreach/schedule';
 import { saveCampaignAccounts } from '@/lib/liOutreach/campaignAccounts';
@@ -44,7 +44,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     // hit a 403).
     const { data: existing } = await supabaseAdmin
       .from('li_campaigns')
-      .select('id')
+      .select('id, status')
       .eq('id', id)
       .maybeSingle();
     if (!existing) return jsonError('Campaign not found', 404);
@@ -63,6 +63,11 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
 
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     for (const key of allowed) { if (key in body) patch[key] = body[key]; }
+    // Архив: запущенную кампанию не убираем из списка, пока она рассылает.
+    if (typeof body.archived === 'boolean') {
+      if (body.archived && existing.status === 'running') return jsonError('Сначала остановите кампанию', 409);
+      patch.archived_at = body.archived ? new Date().toISOString() : null;
+    }
     // working_hours / timezone_offset go through the shared normalizers so
     // garbage values can't reach the DB (the runner regex-matches each entry).
     if ('working_hours' in body) {
@@ -98,11 +103,9 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
     const { id } = await ctx.params;
-    const admin = await checkIsAdmin(auth.user.id);
 
-    let existQ = supabaseAdmin.from('li_campaigns').select('id').eq('id', id);
-    if (!admin) existQ = existQ.eq('user_id', auth.user.id);
-    const { data: existing } = await existQ.maybeSingle();
+    // Удалять может любой специалист: кампании общие, как и редактирование.
+    const { data: existing } = await supabaseAdmin.from('li_campaigns').select('id').eq('id', id).maybeSingle();
     if (!existing) return jsonError('Campaign not found', 404);
 
     const { error } = await supabaseAdmin
