@@ -611,6 +611,12 @@ const HEADER_LABEL_HINT_REGEX =
 // HEADER_LABEL_HINT_REGEX, чтобы не менять распознавание строки заголовков.
 const BRIEF_SCORING_EXTRA_FIELD_REGEX =
   /(\bname\b|categor|категор|рубрик|деятельн|оквэд|okved|отрасл|специализ|description)/i;
+// Размер, выручка, география и вакансии: бриф часто ставит по ним критерии, а
+// без этих колонок модель считала данные неполными и явной ЦА ставила 5–6
+// (23.10.2026). Добираются после основных колонок, чтобы не вытеснить описание
+// из лимита BRIEF_SCORING_MAX_FIELDS_PER_ROW.
+const BRIEF_SCORING_PROFILE_FIELD_REGEX =
+  /(сотрудник|численн|штат|employee|staff|headcount|размер|\bsize\b|выручк|оборот|доход|revenue|income|город|city|регион|region|област|страна|country|ваканси|vacanc|\bjobs?\b)/i;
 const ENRICHMENT_COLUMN_REGEX =
   /(обогащен|описан|description|about|сфера|industry|сотрудник|employee|штат|revenue|оборот|инн|телефон|phone|dadata|фнс|город|city|регион|region)/i;
 
@@ -5597,6 +5603,12 @@ export function DatabaseSpreadsheet() {
           || COMPANY_HEADER_REGEX.test(headerLower)
           || BRIEF_SCORING_EXTRA_FIELD_REGEX.test(headerLower);
         if (!isHinted) continue;
+        addField(header, row[c] ?? '');
+      }
+
+      for (let c = 0; c < tabSnapshot.data[0].length; c += 1) {
+        const header = (headerLabels[c] || toColumnLabel(c)).trim();
+        if (!header || !BRIEF_SCORING_PROFILE_FIELD_REGEX.test(header.toLowerCase())) continue;
         addField(header, row[c] ?? '');
       }
 

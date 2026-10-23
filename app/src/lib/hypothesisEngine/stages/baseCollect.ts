@@ -229,6 +229,7 @@ import {
   type EngContactCollectionDiagnostics,
 } from '@/lib/tools/engContactDiagnostics';
 import { ENG_WEBSITE_EVIDENCE_COL, readEngWebsiteEvidence } from '@/lib/tools/engWebsiteEvidence';
+import { ENG_CONSTRUCT_STEPS_AFTER_SPLIT } from '@/lib/tools/engConstructorSteps';
 import {
   collectHeEngSourceCountries,
   restoreHeEngSourceCountries,
@@ -5344,15 +5345,11 @@ const CONSTRUCT_STEPS_TAIL_RU = ['validate_emails', 'cap_emails_per_company', 'e
  * адреса чужих организаций, найденные на сайте компании (регулятор, PR-агентство,
  * партнёр). Аудит проверочного сбора HST: таких было 63 из 215 готовых контактов.
  * Стоя до validate_emails, шаг не тратит на них пробы, а cap_emails_per_company
- * отдаёт пять мест хорошим адресам компании.
+ * отдаёт пять мест хорошим адресам компании. Список живёт рядом с бюджетным
+ * списком конструктора (engConstructorSteps.ts): новый шаг цепочки обязан быть
+ * и там, иначе конструктор отказывает каждой джобе сбора.
  */
-const CONSTRUCT_STEPS_AFTER_SPLIT_US = [
-  'split_emails',
-  'dedup_email',
-  'remove_support_emails',
-  'validate_emails',
-  'cap_emails_per_company',
-];
+const CONSTRUCT_STEPS_AFTER_SPLIT_US = ENG_CONSTRUCT_STEPS_AFTER_SPLIT;
 
 /** Свыше этого размера enrich_descriptions (per-site фетчи) не укладывается в
  *  6-часовой таймаут конструктора — для больших баз шаг пропускаем. */
@@ -6894,6 +6891,18 @@ async function dispatchHeEngSearchBatch(
   if (search.checkpoint.unavailable) state.error = search.checkpoint.unavailable;
 }
 
+/**
+ * Конструктор круга не завершился — это наша авария, а не молчание рынка:
+ * проверенные (оплаченные) компании круга остались без поиска адресов. Такой
+ * круг закрывается с причиной 'error', а не жжёт следующие круги до ложного
+ * 'low_yield' (23.10.2026: два таких круга остановили 0777749b на 271 из 500).
+ * За 45 дней до этого ENG-конструктор не падал ни разу (33 из 33): падение
+ * означает поломку, повтор её не лечит.
+ */
+function heEngConstructFailed(construct: { status?: string } | null | undefined): boolean {
+  return construct?.status === 'failed' || construct?.status === 'cancelled';
+}
+
 /** Publish only already qualified addresses; all waves share this base/ledger. */
 async function finishHeEngTargetRound(
   ctx: HeStageContext, job: HeJob, base: HeAutoBase, info: HeCollectInfo,
@@ -8359,7 +8368,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     closeStats: NonNullable<HeCollectInfo['stats']>,
     importReason: string | null,
   ): Promise<HeStageResult> => {
-    if (adaptive) return finishHeEngTargetRound(ctx, job, base, info, [], [], usage);
+    // Тик импорта упавшего конструктора, где сверка сняла все строки, — тот же
+    // случай, что и с импортом: круг закрывается с причиной 'error'.
+    if (adaptive) return finishHeEngTargetRound(ctx, job, base, info, [], [], usage,
+      heEngConstructFailed(info.construct) ? 'error' : undefined);
     // Сюда же доходит тик ИМПОРТА, если за время работы конструктора
     // межбазовое исключение выросло настолько, что merged опустел, — и
     // результат конструктора тогда не импортируется. Это сознательно, а не
@@ -8999,6 +9011,16 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       if (constructWaitExpired(construct)) {
         const note = `Конструктор баз не завершился за 6ч (job ${construct.bc_job_id}, статус: ${bc?.status ?? 'не найдена'})`;
         info.construct = { ...construct, note };
+        if (adaptive) {
+          // Сбор с целью не валим вместе с контактами прошлых кругов: джоба
+          // отменяется, круг закрывается без её строк с причиной 'error'. Не
+          // ляжет запись финала — повтор стадии увидит отменённую джобу и
+          // придёт к тому же финалу через импорт её частичного результата.
+          await cancelAbandonedConstructJob(ctx, construct.bc_job_id);
+          info.construct = { ...construct, note, status: 'cancelled' };
+          stageLog(ctx, `[base_collect] ${note} — сбор останавливается с причиной error, собранное раньше сохранено`);
+          return finishHeEngTargetRound(ctx, job, base, info, [], [], usage, 'error');
+        }
         if (isRefill) {
           // Ночной долив — терминалом долива, с серией отказов
           // (closeHeRefillBaseUndelivered): раньше здесь всегда писалось
@@ -9227,7 +9249,16 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     companiesTotal = new Set(storedRows.map(heCompanyRowKey)).size;
     if (info.construct) info.construct = { ...info.construct, valid_count: storedRows.length };
   }
-  if (adaptive) return finishHeEngTargetRound(ctx, job, base, info, storedRows, finalColumns, usage);
+  if (adaptive) {
+    // Импортированное упавшим конструктором сохраняем и останавливаемся честно.
+    const constructorFailed = heEngConstructFailed(info.construct);
+    if (constructorFailed) {
+      stageLog(ctx, `[base_collect] конструктор ${info.construct?.bc_job_id ?? ''} завершился со статусом ` +
+        `${info.construct?.status} — сбор останавливается с причиной error, собранное сохранено`);
+    }
+    return finishHeEngTargetRound(ctx, job, base, info, storedRows, finalColumns, usage,
+      constructorFailed ? 'error' : undefined);
+  }
   // Считаем по САМИМ строкам, а не по размеру набора ключей: у одной компании
   // после split_emails несколько строк, и оба шага выше могли пометить одну и
   // ту же (у базы с отказавшим гейтом до конструктора — реально могут).
