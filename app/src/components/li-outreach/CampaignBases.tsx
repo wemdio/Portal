@@ -328,8 +328,8 @@ export default function CampaignBases({
 }
 
 /**
- * Базы без кампании — наследство общих списков. Прятать их нельзя: это чьи-то
- * загруженные люди; показываем отдельно и просим перенести в кампанию.
+ * Базы без кампании — наследство общих списков. Не удаляем: это чьи-то
+ * загруженные люди; держим в свёрнутом списке и просим перенести в кампанию.
  */
 export function OrphanBases({
   bases,
@@ -363,8 +363,8 @@ export function OrphanBases({
   };
 
   return (
-    <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50/50 p-3">
-      <div className="text-xs font-medium text-amber-900">Базы без кампании ({bases.length})</div>
+    <details className="group space-y-2 rounded-xl border border-amber-200 bg-amber-50/50 p-3">
+      <summary className="cursor-pointer text-xs font-medium text-amber-900">Базы без кампании ({bases.length})</summary>
       <p className="text-[10px] text-amber-800">
         Остались от общих списков и не привязаны ни к одной кампании. Перенесите нужные в кампанию, чтобы они рассылались.
       </p>
@@ -393,6 +393,6 @@ export function OrphanBases({
           </div>
         ))}
       </div>
-    </div>
+    </details>
   );
 }
