@@ -243,6 +243,7 @@ import {
   HeEngQualificationScopeError,
   heEngCompanyKey,
   heEngCompanyQualified,
+  heEngConstructWebsite,
   heEngQualificationVersion,
   heEngLaunchQualified,
   heEngScopeWithinCurrentCountries,
@@ -5556,14 +5557,27 @@ function needsConstruct(merged: HeUnifiedRow[]): boolean {
   return merged.length > 0;
 }
 
+/**
+ * Колонка, которую поиск почт и фильтр адресов конструктора берут раньше
+ * 'Site' (PRIMARY_SITE_HEADERS в tools/dfybUtils.ts). Импорт её не читает: её
+ * нет в CONSTRUCT_HEADER_MAP, website строки остаётся сайтом каталога.
+ */
+const CONSTRUCT_CURRENT_SITE_HEADER_EN = 'Company Website';
+
 /** merged-строки → сетка string[][] конструктора (заголовок по локали рынка). */
 function buildConstructGrid(rows: HeUnifiedRow[], market: HeMarket): string[][] {
   const headers = market === 'us' ? CONSTRUCT_HEADERS_EN : CONSTRUCT_HEADERS_RU;
+  // ENG: у мёртвого или припаркованного домена каталога проверка компаний нашла
+  // текущий сайт того же бренда (вердикт currentWebsite) — конструктор обходит
+  // его. Без таких строк сетка прежняя байт-в-байт.
+  const current = market === 'us' ? rows.map((r) => heEngConstructWebsite(r) ?? '') : [];
+  const withCurrent = current.some(Boolean);
   return [
-    [...headers],
-    ...rows.map((r) => [
+    [...headers, ...(withCurrent ? [CONSTRUCT_CURRENT_SITE_HEADER_EN] : [])],
+    ...rows.map((r, i) => [
       r.company, r.website, r.email, r.phone, r.vacancy_title, r.address,
       r.category, r.employees, r.revenue, r.inn, r.source_detail,
+      ...(withCurrent ? [current[i]] : []),
     ]),
   ];
 }
@@ -8537,6 +8551,8 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     const qualified = await runHeEngCompanyQualification(ctx, {
       rows: restoreHeEngSourceCountries(merged, info.eng_source_countries ?? {}), scope,
       memo: info.eng_company_qualification, maxCompanies: 16, collectionTargetBudget: true,
+      // One paid search per dead or parked catalogue domain, on this base's $5 ledger.
+      siteSearch: { db: paidCheckpointDb(ctx), baseId, projectId: job.project_id },
       onCheckpoint: async (memo) => {
         info.eng_company_qualification = memo;
         const verdicts = Object.values(memo.verdicts).filter((v) => companyKeys.has(v.companyKey));

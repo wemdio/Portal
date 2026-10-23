@@ -6,6 +6,7 @@ import { normalizeEngCountry, readHeCollectCountries } from './engCountries';
 import { HE_ENG_COMPANY_QUALIFICATION_VERSION, type HeEngCompanyQualificationVersion } from './engCompanyQualificationVersion';
 import type { HeEngQualificationBudget } from './engQualificationBudget';
 import type { HeEngCompanyFitDecision } from './engCompanyFit';
+import type { HeEngCompanySearchCandidate, HeEngCompanySearchCheckpoint, HeEngCompanySearchPlan } from './engCompanySearch';
 import { heEngCompanyCountryProofValid, readHeEngSourceCountry } from './engCompanyCountry';
 
 export { HE_ENG_COMPANY_QUALIFICATION_VERSION } from './engCompanyQualificationVersion';
@@ -87,7 +88,21 @@ export interface HeEngCompanyVerdict {
    * way (see heEngCatalogDirectHypothesis). Softer than the two-model match.
    */
   catalogFit?: { source: 'pdl'; industry: string; hypothesisId: string };
+  /**
+   * The catalogue domain no longer exists or is parked; the activity evidence
+   * comes from this current site of the same brand (companySiteAlias), found
+   * by one paid search. row.website stays the catalogue site: it keys the
+   * verdict and the source-country proof. The constructor crawls this site.
+   */
+  currentWebsite?: string;
   audit?: HeEngCompanyQualificationAudit;
+}
+
+/** One paid search for a dead or parked catalogue site; durable before and after the call. */
+export interface HeEngCatalogSiteSearch {
+  plan: HeEngCompanySearchPlan;
+  checkpoint: HeEngCompanySearchCheckpoint;
+  candidates: HeEngCompanySearchCandidate[];
 }
 
 export interface HeEngQualificationMemo {
@@ -115,7 +130,11 @@ export interface HeEngQualificationMemo {
       excerptVersion?: 2;
       /** Present only when a page came from a same-brand domain (companySiteAlias). */
       company?: string;
+      /** The pages were read from this same-brand site found by search (see HeEngCompanyVerdict). */
+      currentWebsite?: string;
     }>;
+    /** Searches for the current site of a dead or parked catalogue site, by company key. */
+    siteSearches?: Record<string, HeEngCatalogSiteSearch>;
     /** Written before 2026-10-23 (one request at a time); read only, never written. */
     inFlight?: HeEngQualificationInFlight;
     /** Durable before each request; a missing response must not buy it again. */
@@ -317,6 +336,24 @@ export async function readHeEngQualificationScope(
 }
 
 /** Evidence belongs to this company AND this exact target, not another base. */
+/**
+ * The site the constructor should crawl for this row: the verdict's current
+ * website when the catalogue domain was dead or parked, else null (crawl
+ * row.website). Only a same-brand domain of the catalogue site is returned.
+ */
+export function heEngConstructWebsite(
+  row: HeEngQualificationRow,
+  proof: Partial<HeEngCompanyVerdict> | null | undefined = row._eng_company_qualification as Partial<HeEngCompanyVerdict> | null | undefined,
+): string | null {
+  const current = proof?.currentWebsite;
+  const website = typeof row.website === 'string' ? row.website : '';
+  const company = typeof row.company === 'string' ? row.company : '';
+  if (typeof current !== 'string' || !/^https:\/\//i.test(current) || current.length > 2000 || !company) return null;
+  const site = heCompanySiteIdentity(website);
+  const found = heCompanySiteIdentity(current);
+  return site && found && found.registrable !== site.registrable && companySiteAlias(current, website, company) !== null ? current : null;
+}
+
 export function heEngCompanyQualified(row: HeEngQualificationRow, scope: HeEngQualificationScope): boolean {
   const version = heEngQualificationVersion(scope);
   const proof = row._eng_company_qualification as Partial<HeEngCompanyVerdict> | null | undefined;
@@ -329,6 +366,9 @@ export function heEngCompanyQualified(row: HeEngQualificationRow, scope: HeEngQu
   const website = typeof row.website === 'string' ? row.website : '';
   const site = heCompanySiteIdentity(website);
   if (!site) return false;
+  // A found current site must be the same brand as the catalogue site; its
+  // pages already pass the evidence check below through the same rule.
+  if (proof.currentWebsite !== undefined && heEngConstructWebsite(row, proof) === null) return false;
   if (proof.catalogFit !== undefined) {
     // Softer path: the catalogue industry stands in for the two-model match;
     // the source country is proven exactly as in the v3 path below.
