@@ -106,13 +106,45 @@ const FIT_RULES = "This is an ACTIVITY-ONLY assessment of ONE company from its o
   'Choose a FIT_H code only for an explicitly supported target service. EXCLUDED_n requires explicit evidence of that numbered customer exclusion. ' +
   'NOT_TARGET requires affirmative incompatible business evidence; absence of a target term, a broad financial/bank/group description or an incomplete page is INSUFFICIENT. ' +
   'Fund investment or asset management, fund management-company (ManCo) activities, fund administration, depositary and custody are distinct activities; proof of one does not automatically prove another. If a selected hypothesis explicitly includes fund management companies or ManCos as an alternative, direct evidence that this company itself performs that role can qualify without additional fund administration, depositary or custody services. Generic investing or asset management alone does not establish a ManCo role; it qualifies only if that activity itself is explicitly selected. ' +
+  'A target may carry seller_offer: what the client\'s own product does for these companies (for example "Acme solves claims, data and AI delivery"). It is sales context, never an activity the target company must provide: do not require it, do not cite its absence and do not choose NOT_TARGET or INSUFFICIENT because of it. ' +
   'Select at most two supplied quote IDs containing the actual supporting activity, not a slogan, navigation menu, address or legal footer. ' +
   'A headline plus its explanatory paragraph may count together. With insufficient evidence return INSUFFICIENT and optionally the most informative quotes. ' +
   'Decide solely from the activity evidence: a proven eligible service is FIT_H even when no employee count or location appears in these passages. Do not invent facts or quote IDs. Explain the activity in at most two short factual sentences. Example shape: {"classification":"INSUFFICIENT","evidence_ids":[],"explanation":"The supplied page contains no description of services."}.';
 
+const SELLER_VERB = /\b(?:solves?|helps?|offers?|delivers?|fixes|automates?|streamlines?|reduces?|enables?)\b/i;
+
+/**
+ * A hypothesis description names the eligible companies first and then, in a
+ * separate last sentence, what the client's product solves for them
+ * (prompts/hypotheses.en.ts). The models read that sentence as a service the
+ * company itself must provide and refused real insurers «not providing claims,
+ * underwriting, data, API or AI delivery» (23.10.2026: 477 of 717 refusals in
+ * one collection cited it). Only a last sentence with a seller verb moves to
+ * seller_offer; the first sentence always stays the target.
+ */
+export function heEngSplitSellerOffer(description: string): { description: string; sellerOffer: string | null } {
+  const sentences: string[] = [];
+  let start = 0;
+  for (const match of description.matchAll(/[.!?]+\s+(?=[A-Z0-9"“])/g)) {
+    const word = description.slice(start, match.index).split(/\s+/).at(-1) ?? '';
+    // «U.S.», «e.g.», «Inc.», an initial: not the end of a sentence. Not
+    // splitting only leaves the offer in place; splitting wrongly would move
+    // a selection condition out of the target.
+    if (/^(?:[a-z]|(?:[a-z]\.)+[a-z]?|inc|ltd|co|corp|plc|llc|etc|vs|no|st)$/i.test(word)) continue;
+    sentences.push(description.slice(start, match.index! + match[0].length));
+    start = match.index! + match[0].length;
+  }
+  sentences.push(description.slice(start));
+  const last = sentences.at(-1)!;
+  if (sentences.length < 2 || !SELLER_VERB.test(last)) return { description, sellerOffer: null };
+  return { description: sentences.slice(0, -1).join('').trim(), sellerOffer: last.trim() };
+}
+
 function buildRequest(company: HeEngCompanyFitInput, scope: HeEngCompanyFitScope, review: boolean, allowedHypothesisIds?: string[]): HeEngCompanyFitRequest {
-  const targets = scope.hypotheses.map((h, i) => ({ code: `FIT_H${i + 1}`, id: h.id, title: h.title, description: h.description }))
-    .filter(h => !allowedHypothesisIds || allowedHypothesisIds.includes(h.id)).map(({ id: _id, ...target }) => target);
+  const targets = scope.hypotheses.map((h, i) => {
+    const { description, sellerOffer } = heEngSplitSellerOffer(h.description);
+    return { code: `FIT_H${i + 1}`, id: h.id, title: h.title, description, ...(sellerOffer ? { seller_offer: sellerOffer } : {}) };
+  }).filter(h => !allowedHypothesisIds || allowedHypothesisIds.includes(h.id)).map(({ id: _id, ...target }) => target);
   const exclude = exclusions(scope).map((text, i) => ({ code: `EXCLUDED_${i + 1}`, text }));
   const quotes = company.quotes.map((quote, i) => ({ id: `q${i + 1}`, url: quote.url, text: quote.text }));
   const codes = [...targets.map(h => h.code), ...exclude.map(e => e.code), 'NOT_TARGET', 'INSUFFICIENT', 'WRONG_COMPANY'];
