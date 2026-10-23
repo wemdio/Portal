@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { authFetchJson, getAccessToken } from '@/lib/authFetch';
 
@@ -62,6 +62,7 @@ export default function CampaignBases({
   bases,
   onChanged,
   onOpenScraper,
+  focusBaseId = null,
 }: {
   campaignId: string;
   /** База, которую кампания рассылает сейчас. */
@@ -70,6 +71,8 @@ export default function CampaignBases({
   /** Перечитать базы и кампании после любого изменения. */
   onChanged: () => Promise<void>;
   onOpenScraper: (listId: string) => void;
+  /** Раскрыть эту базу при открытии (переход из скрапера к собранной базе). */
+  focusBaseId?: string | null;
 }) {
   const [newName, setNewName] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -145,6 +148,16 @@ export default function CampaignBases({
       setLoadingLeads(false);
     }
   };
+
+  // Переход из скрапера: раскрываем собранную базу и прокручиваем к ней.
+  useEffect(() => {
+    if (!focusBaseId) return;
+    setOpenId(focusBaseId);
+    setLeads([]);
+    void loadLeads(focusBaseId);
+    window.setTimeout(() => document.getElementById(`li-base-${focusBaseId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 150);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusBaseId]);
 
   const toggleLeads = async (listId: string) => {
     if (openId === listId) {
@@ -240,7 +253,7 @@ export default function CampaignBases({
           {bases.map((base) => {
             const active = base.id === activeListId;
             return (
-              <div key={base.id} className={`rounded-xl border bg-white p-4 ${active ? 'border-green-300' : 'border-gray-200'}`}>
+              <div key={base.id} id={`li-base-${base.id}`} className={`rounded-xl border bg-white p-4 ${active ? 'border-green-300' : 'border-gray-200'}`}>
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="min-w-0 truncate text-sm font-semibold text-gray-900">{base.name}</div>
                   {active && <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">рассылается</span>}

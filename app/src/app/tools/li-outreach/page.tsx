@@ -260,6 +260,8 @@ export default function LiOutreachPage() {
   const [creating, setCreating] = useState(false);
   const [editingCampaignId, setEditingCampaignId] = useState<string | null>(null);
   /** Страница кампании: настройки или логи (логи — только у существующей). */
+  /** База, которую нужно раскрыть при открытии раздела «Базы» (переход из скрапера). */
+  const [focusBaseId, setFocusBaseId] = useState<string | null>(null);
   const [campaignPageTab, setCampaignPageTab] = useState<'settings' | 'bases' | 'logs'>('settings');
   const [cf, setCf] = useState(DEFAULT_CAMPAIGN_FORM);
 
@@ -407,16 +409,21 @@ export default function LiOutreachPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCampaignId]);
 
-  // Автообновление списка задач раз в 10 сек когда открыт «Скрапер», чтобы
-  // прогресс (X/Y) обновлялся сам и не приходилось перезагружать страницу.
-  // Останавливается когда пользователь уходит на другую вкладку.
+  // Скрапер живой: пока есть задача в работе — обновляем каждые 3 сек (прогресс идёт на глазах),
+  // иначе раз в 15 сек. Когда задача завершилась, перечитываем базы: в них появились люди.
+  const hasActiveTask = tasks.some((t) => t.status === 'pending' || t.status === 'running');
+  const wasActiveTask = useRef(false);
   useEffect(() => {
     if (tab !== 'scraper') return;
     const interval = window.setInterval(() => {
       void loadTasks();
-    }, 10_000);
+    }, hasActiveTask ? 3_000 : 15_000);
     return () => window.clearInterval(interval);
-  }, [tab, loadTasks]);
+  }, [tab, loadTasks, hasActiveTask]);
+  useEffect(() => {
+    if (wasActiveTask.current && !hasActiveTask) void loadLeadLists();
+    wasActiveTask.current = hasActiveTask;
+  }, [hasActiveTask, loadLeadLists]);
 
   // Download the selected campaign's logs as a .txt for the given range.
   // Reuses the existing global export endpoint with campaign_id filter — same
@@ -543,6 +550,19 @@ export default function LiOutreachPage() {
     if (!id) return 'без списка';
     const l = leadLists.find((x) => x.id === id);
     return l?.name ?? 'список удалён';
+  };
+
+  /** Перейти к базе, которую собрал скрапер: страница её кампании → «Базы» → база раскрыта. */
+  const openScrapedBase = (listId: string) => {
+    const list = leadLists.find((l) => l.id === listId);
+    if (!list) return;
+    const campaign = list.campaign_id ? campaigns.find((c) => c.id === list.campaign_id) : null;
+    setTab('campaigns');
+    if (campaign) {
+      openEditCampaignForm(campaign);
+      setCampaignPageTab('bases');
+      setFocusBaseId(listId);
+    }
   };
 
   /** Тип таски → человекочитаемое название. */
@@ -677,6 +697,7 @@ export default function LiOutreachPage() {
         ? Number(campaign.timezone_offset)
         : DEFAULT_CAMPAIGN_FORM.timezone_offset,
     });
+    setFocusBaseId(null);
     setEditingCampaignId(campaign.id);
     setSelectedCampaignId(campaign.id);
     setCampaignPageTab('settings');
@@ -1206,6 +1227,7 @@ export default function LiOutreachPage() {
                   activeListId={editingCampaign?.lead_list_id ?? null}
                   bases={leadLists.filter((l) => l.campaign_id === editingCampaignId)}
                   onChanged={reloadBases}
+                  focusBaseId={focusBaseId}
                   onOpenScraper={(listId) => { setScraperListId(listId); setTab('scraper'); }}
                 />
               ) : editingCampaignId && campaignPageTab === 'logs' ? (
@@ -1657,7 +1679,7 @@ export default function LiOutreachPage() {
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium">{taskTypeLabelRu(t.type)}</span>
                       <span className={`text-xs px-2 py-0.5 rounded ${t.status === 'completed' ? 'bg-green-100 text-green-700' : t.status === 'running' ? 'bg-blue-100 text-blue-700' : t.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>{taskStatusLabelRu(t.status)}</span>
-                      <span className="text-xs text-gray-500">{t.progress}/{t.total}</span>
+                      <span className="text-xs tabular-nums text-gray-500">{t.progress}/{t.total}</span>
                       {t.error_message && <span className="text-xs text-red-600">{t.error_message}</span>}
                     </div>
                     <div className="flex items-center gap-3">
@@ -1675,6 +1697,14 @@ export default function LiOutreachPage() {
                       )}
                     </div>
                   </div>
+                  {(t.status === 'pending' || t.status === 'running') && (
+                    <div className="mt-2 flex items-center gap-2">
+                      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-gray-100" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={t.total > 0 ? Math.round((t.progress / t.total) * 100) : 0}>
+                        <div className={`h-full rounded-full bg-blue-500 transition-all duration-700 ${t.total > 0 ? '' : 'w-1/3 animate-pulse'}`} style={t.total > 0 ? { width: `${Math.min(100, Math.round((t.progress / t.total) * 100))}%` } : undefined} />
+                      </div>
+                      <span className="text-[11px] tabular-nums text-gray-400">{t.total > 0 ? `${Math.round((t.progress / t.total) * 100)}%` : 'собираем…'}</span>
+                    </div>
+                  )}
                   {/* Параметры задачи: URL + аккаунт + список + лимит + время.
                       Лежат в li_tasks.params (jsonb), а не на отдельных колонках —
                       воркер парсит payload по типу таски. URL обрезаем CSS-ом
@@ -1697,7 +1727,21 @@ export default function LiOutreachPage() {
                       )}
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
                         <span>аккаунт: <span className="text-gray-700">{accountLabel(params)}</span></span>
-                        <span>список: <span className="text-gray-700">{listLabel(params)}</span></span>
+                        <span>
+                          база:{' '}
+                          {params.lead_list_id && leadLists.some((l) => l.id === params.lead_list_id) ? (
+                            <button
+                              type="button"
+                              onClick={() => openScrapedBase(String(params.lead_list_id))}
+                              className="cursor-pointer text-blue-600 hover:underline"
+                              title="Открыть базу, в которую собраны люди"
+                            >
+                              {listLabel(params)} →
+                            </button>
+                          ) : (
+                            <span className="text-gray-700">{listLabel(params)}</span>
+                          )}
+                        </span>
                         {typeof params.max_results === 'number' && (
                           <span>лимит: <span className="text-gray-700">{params.max_results}</span></span>
                         )}
