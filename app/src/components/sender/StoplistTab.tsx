@@ -12,6 +12,8 @@ const REASON_LABELS: Record<string, string> = {
   unsubscribe: 'отписка',
   manual: 'вручную',
   complaint: 'жалоба',
+  client_blocklist: 'стоп-лист клиента',
+  project_block: 'стоп-лист проекта',
 };
 
 const SCOPES: { id: SuppressionScope; label: string }[] = [

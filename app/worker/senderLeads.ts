@@ -3,6 +3,8 @@ import { runOwnReplyLeadsPass } from '@/lib/ownReplyLeads/process';
 import { runSenderLeadsPass, senderLeadsAi, SENDER_LEADS_RECOVERY_INTERVAL_MS } from '@/lib/senderLeads/process';
 import { leadTelegramConfig } from '@/lib/senderLeads/telegram';
 import { runAgencyLeadHandoffs } from '@/lib/agencyLeadHandoff/process';
+import { recordSenderHandoffs } from '@/lib/sender/clientHandoff';
+import { syncSenderStopLists } from '@/lib/sender/stopLists';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
@@ -37,6 +39,9 @@ function envMs(name: string, fallback: number, min: number): number {
 }
 
 const INTERVAL_MS = envMs('SENDER_LEADS_INTERVAL_MS', 60_000, 10_000);
+// Сверка живых кампаний «Рассылки» со стоп-листами клиента и проекта: адрес,
+// закрытый после заливки, снимается не позже чем через этот срок.
+const STOPLIST_SYNC_INTERVAL_MS = envMs('SENDER_STOPLIST_SYNC_INTERVAL_MS', 5 * 60_000, 60_000);
 
 async function main(): Promise<void> {
   const db = requireSupabaseAdmin(log);
@@ -44,6 +49,7 @@ async function main(): Promise<void> {
   // Первый обход — сразу после старта. Расписание каждой повторной попытки
   // хранится в БД, поэтому redeploy не обнуляет час ожидания после ошибки.
   let nextRecoveryAt = 0;
+  let nextStopListSyncAt = 0;
 
   // Без ключа или токена воркер не падает: так видно в логах, чего не хватает,
   // а контейнер не уходит в перезапуски.
@@ -77,6 +83,26 @@ async function main(): Promise<void> {
       await runAgencyLeadHandoffs(db, log);
     } catch (err) {
       log('error', 'Передача лидов по email упала', err);
+    }
+    // Стоп-листы клиента и проекта: базу Instantly видит только этот воркер, не
+    // почтовые хосты, поэтому сверка здесь, а планировщик читает её итог —
+    // стоп-лист кампании.
+    if (Date.now() >= nextStopListSyncAt) {
+      nextStopListSyncAt = Date.now() + STOPLIST_SYNC_INTERVAL_MS;
+      try {
+        const sync = await syncSenderStopLists({ db, instantlyDb: supabaseInstantly, log });
+        if (sync.stopped) log('info', `Стоп-листы клиента и проекта: снято получателей ${sync.stopped} в ${sync.campaigns} кампаниях`);
+      } catch (err) {
+        log('error', 'Сверка стоп-листов клиента и проекта упала', err);
+      }
+    }
+    // Передачи лида из «Рассылки»: письмо ушло — лид в кабинет клиента.
+    // Почтовые хосты базу Instantly не видят, поэтому запись здесь.
+    try {
+      const recorded = await recordSenderHandoffs({ db, instantlyDb: supabaseInstantly, log });
+      if (recorded) log('info', `Передачи «Рассылки»: в кабинет клиента записано лидов ${recorded}`);
+    } catch (err) {
+      log('error', 'Запись передач «Рассылки» в кабинет клиента упала', err);
     }
     // Заявки OutreachOS (лиды кабинета, регистрации) → AMO → General со ссылкой на сделку.
     try {

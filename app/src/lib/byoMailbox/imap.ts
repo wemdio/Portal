@@ -38,11 +38,18 @@ export interface FetchedReply {
   uid: number;
   fromEmail: string | null;
   fromName: string | null;
+  /** Кому ещё ушло письмо (To и Cc конверта) — для «ответить всем». */
+  toEmails: string[];
+  ccEmails: string[];
   subject: string | null;
   body: string | null;
   messageId: string | null;
   inReplyTo: string | null;
   receivedAt: string | null;
+}
+
+function envelopeEmails(list: Array<{ address?: string }> | undefined): string[] {
+  return (list ?? []).map((entry) => (entry.address ?? '').trim().toLowerCase()).filter(Boolean);
 }
 
 export interface FetchResult {
@@ -158,6 +165,8 @@ export async function fetchNewReplies(mb: ReplyMailboxRow): Promise<FetchResult 
         uid,
         fromEmail: fromAddr?.address ?? null,
         fromName: fromAddr?.name ?? null,
+        toEmails: envelopeEmails(env?.to),
+        ccEmails: envelopeEmails(env?.cc),
         subject: env?.subject ?? null,
         body,
         messageId: env?.messageId ?? null,

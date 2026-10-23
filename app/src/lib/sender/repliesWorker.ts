@@ -307,6 +307,16 @@ export async function processSenderReplies(opts: { egressIp: string; log?: Log }
             },
             { onConflict: 'mailbox_id,uid', ignoreDuplicates: true },
           );
+          // Адресаты ответа — для «ответить всем» при передаче лида. Отдельной
+          // записью и без проверки ошибки: почтовый хост может обновиться
+          // раньше, чем в базе появятся колонки, а ответ терять нельзя.
+          if (kind === 'human' && (reply.toEmails.length || reply.ccEmails.length)) {
+            await db
+              .from('sender_replies')
+              .update({ to_emails: reply.toEmails, cc_emails: reply.ccEmails })
+              .eq('mailbox_id', mailbox.id)
+              .eq('uid', reply.uid);
+          }
 
           if (kind !== 'warmup') {
             await applyReply({

@@ -34,6 +34,28 @@ export async function GET(_req: NextRequest) {
         } = await supabase.auth.getUser();
         if (!user) return jsonError('Необходима авторизация', 401);
 
+        // Кампании «Рассылки»: из её же таблицы, в форме списка Instantly, чтобы
+        // экран выбора не различал источники. Статусы — коды Instantly.
+        if (_req.nextUrl.searchParams.get('provider') === 'sender') {
+          if (!supabaseAdmin) return jsonError('Сервис не настроен', 503);
+          const { data, error } = await supabaseAdmin
+            .from('sender_campaigns')
+            .select('id, name, status, created_at, updated_at')
+            .order('created_at', { ascending: false });
+          if (error) return jsonError(error.message, 500);
+          const statusCode: Record<string, number> = { draft: 0, running: 1, paused: 2, done: 3 };
+          return NextResponse.json({
+            campaigns: (data ?? []).map((row) => ({
+              id: String(row.id),
+              name: String(row.name ?? ''),
+              status: statusCode[String(row.status)] ?? 0,
+              timestamp_created: row.created_at ?? undefined,
+              timestamp_updated: row.updated_at ?? undefined,
+            })),
+            meta: { source: 'sender' as const, lastSyncedAt: null, stale: false, backgroundSync: false },
+          });
+        }
+
         if (!INSTANTLY_API_KEY) {
           return jsonError('Сервис не настроен (INSTANTLY_API_KEY или INSTANTLY_PORTAL_API_KEY)', 503);
         }

@@ -720,6 +720,17 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
 }
 
 /**
+ * Отчёт по готовым цифрам в форме аналитики Instantly: сводка кампании и строки
+ * шагов. Так строится отчёт по кампаниям «Рассылки» (sender_auto_report) — тем
+ * же построителем, чтобы отчёты клиенту из двух систем читались одинаково.
+ * Порядок кампаний сохраняется; у каждой — ровно одна сводка и один набор шагов.
+ */
+export function buildAutoReportFromProviderItems(items: { summary: Record<string, unknown>; steps: unknown[] }[]) {
+  const mergeItems = items.flatMap((item) => [{ body: item.summary }, { body: item.steps }]);
+  return buildReportFromNormalized(normalizeMergeItems(mergeItems));
+}
+
+/**
  * Fetch data for each campaign from Instantly, then build the report.
  */
 export async function buildAutoReport(
