@@ -105,6 +105,8 @@ export async function reviewVeRelevanceEvidence(input: {
   audienceScope?: VeAudienceScope | null;
   geography?: string | null;
   model?: string; signal?: AbortSignal; onUsage?: (usage: LLMUsage) => void;
+  /** A caller with its own fallback model waits less than the default 90 s. */
+  timeoutMs?: number;
 }) {
   if (input.companies.length < 1 || input.companies.length > 8) throw new Error('Semantic relevance review requires 1..8 companies');
   const companies = z.array(z.object({ evidence: z.array(z.object({
@@ -132,7 +134,7 @@ export async function reviewVeRelevanceEvidence(input: {
   const model = input.model ?? getVeModel('relevanceReview');
   const response: LLMResult<{ reviews: Array<VeRelevanceReviewResult & { i: number }> }> = await callLLMWithSchema(relevanceReviewMessages(input.scope, companies, input.language, input.hypothesisOrigin, input.audienceScope, input.geography), schema, {
     model, maxTokens: 8192, jsonSchema: veNativeJsonSchema(model, 've_relevance_review', nativeSchema),
-    maxHttpAttempts: 1, maxSchemaAttempts: 1, timeoutMs: 90_000, requireCompleteJson: true,
+    maxHttpAttempts: 1, maxSchemaAttempts: 1, timeoutMs: input.timeoutMs ?? 90_000, requireCompleteJson: true,
     signal: input.signal, onUsage: input.onUsage,
   });
   if (input.geography) for (const review of response.data.reviews) {
