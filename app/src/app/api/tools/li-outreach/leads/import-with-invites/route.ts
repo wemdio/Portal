@@ -78,6 +78,7 @@ export async function POST(req: NextRequest) {
       const formData = await req.formData();
       const file = formData.get('file') as File | null;
       const listNameRaw = formData.get('list_name') as string | null;
+      const campaignIdRaw = formData.get('campaign_id') as string | null;
       if (!file) return jsonError('No file provided', 400);
 
       const text = await file.text();
@@ -172,6 +173,7 @@ export async function POST(req: NextRequest) {
           name: listName,
           description: `Импорт CSV с персонализированными инвайтами (${leadsToInsert.length} лидов)`,
           has_custom_invites: true,
+          campaign_id: campaignIdRaw?.trim() || null,
         })
         .select()
         .single();

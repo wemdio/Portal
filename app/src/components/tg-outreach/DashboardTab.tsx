@@ -570,7 +570,7 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
                 <div className="text-[11px] font-medium text-gray-400">До какой даты хватит баз</div>
                 <BasesForecastLine
                   forecast={forecast}
-                  currentName={bases.find((b) => b.baseId === forecast.currentBaseId)?.name}
+                  names={Object.fromEntries(bases.map((b) => [b.baseId, b.name]))}
                 />
               </>
             )}

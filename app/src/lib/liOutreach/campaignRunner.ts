@@ -1,4 +1,5 @@
 import 'server-only';
+import { enrollActiveBase } from '@/lib/liOutreach/enroll';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
@@ -175,6 +176,18 @@ export async function runCampaignTickAllAccounts(
   userId: string,
 ): Promise<{ processed: number; errors: number }> {
   if (!supabaseAdmin) return { processed: 0, errors: 0 };
+  // Дозагруженные в рассылаемую базу люди и новая выбранная база попадают в рассылку без перезапуска.
+  try {
+    const added = await enrollActiveBase(supabaseAdmin, campaignId);
+    if (added > 0) {
+      await supabaseAdmin.from('li_campaign_logs').insert({
+        campaign_id: campaignId, level: 'info',
+        message: `В рассылку добавлено ${added} человек из базы кампании`,
+      });
+    }
+  } catch (err) {
+    console.warn(`[li-outreach] campaign ${campaignId}: enroll from base failed:`, err);
+  }
   const { data: row } = await supabaseAdmin
     .from('li_campaigns').select('account_id').eq('id', campaignId).maybeSingle();
   const accountIds = await loadCampaignAccountIds(

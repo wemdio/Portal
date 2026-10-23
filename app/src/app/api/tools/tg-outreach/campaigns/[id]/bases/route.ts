@@ -16,25 +16,20 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
       const { data, error } = await auth.supabase
         .from('tg_outreach_campaign_bases')
-        .select('base_id, position, tg_outreach_bases(id, name)')
+        .select('base_id, position, stage, tg_outreach_bases(id, name)')
         .eq('campaign_id', id)
         .order('position', { ascending: true });
       if (error) return jsonError(error.message, 500);
 
-      const { data: camp } = await auth.supabase
-        .from('tg_outreach_campaigns').select('bases_chain').eq('id', id).maybeSingle();
-
-      return NextResponse.json({
-        items: data ?? [],
-        chain: Boolean((camp as { bases_chain?: boolean } | null)?.bases_chain),
-      });
+      return NextResponse.json({ items: data ?? [] });
     },
   );
 }
 
 /**
  * Полная замена набора баз кампании: так UI не нужно вычислять дельту.
- * Порядок `base_ids` — порядок цепочки; `chain` (необязательно) — режим.
+ * `items` — базы по порядку и с этапом (`stage`): базы одного этапа рассылаются
+ * параллельно, следующий этап стартует, когда предыдущий выдал всё.
  */
 export async function PUT(req: NextRequest, ctx: Ctx) {
   return withToolTrace(
@@ -44,12 +39,19 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
       if ('error' in auth) return auth.error;
       const { id } = await ctx.params;
 
-      const body = (await req.json().catch(() => null)) as { base_ids?: unknown; chain?: unknown } | null;
-      if (!Array.isArray(body?.base_ids)) return jsonError('base_ids должен быть массивом', 400);
+      const body = (await req.json().catch(() => null)) as { items?: unknown } | null;
+      if (!Array.isArray(body?.items)) return jsonError('items должен быть массивом', 400);
 
-      const baseIds = Array.from(
-        new Set(body.base_ids.filter((v): v is string => typeof v === 'string' && v.trim() !== '')),
-      );
+      const seen = new Set<string>();
+      const items: Array<{ base_id: string; stage: number }> = [];
+      for (const raw of body.items as Array<{ base_id?: unknown; stage?: unknown }>) {
+        const baseId = typeof raw?.base_id === 'string' ? raw.base_id.trim() : '';
+        const stage = Number(raw?.stage);
+        if (!baseId || seen.has(baseId)) continue;
+        if (!Number.isInteger(stage) || stage < 0 || stage > 1000) return jsonError('stage — целое число от 0 до 1000', 400);
+        seen.add(baseId);
+        items.push({ base_id: baseId, stage });
+      }
 
       const { error: delError } = await auth.supabase
         .from('tg_outreach_campaign_bases')
@@ -57,20 +59,14 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
         .eq('campaign_id', id);
       if (delError) return jsonError(delError.message, 500);
 
-      if (baseIds.length) {
+      if (items.length) {
         const { error: insError } = await auth.supabase
           .from('tg_outreach_campaign_bases')
-          .insert(baseIds.map((baseId, position) => ({ campaign_id: id, base_id: baseId, position })));
+          .insert(items.map((item, position) => ({ campaign_id: id, base_id: item.base_id, position, stage: item.stage })));
         if (insError) return jsonError(insError.message, 500);
       }
 
-      if (typeof body.chain === 'boolean') {
-        const { error: chainError } = await auth.supabase
-          .from('tg_outreach_campaigns').update({ bases_chain: body.chain }).eq('id', id);
-        if (chainError) return jsonError(chainError.message, 500);
-      }
-
-      return NextResponse.json({ ok: true, count: baseIds.length });
+      return NextResponse.json({ ok: true, count: items.length });
     },
   );
 }
