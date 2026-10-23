@@ -7,7 +7,7 @@ import type { AgencyHandoffSettings, HandoffScope } from '@/lib/agencyLeadHandof
 interface ManualStatus { status: string; error: string | null; sent_at: string | null; updated_at: string }
 interface HistoryRow {
   id: string; scope: HandoffScope; lead_email: string; status: string; error: string | null;
-  body: string | null; cc_emails: string[] | null; created_at: string; updated_at: string;
+  body: string | null; cc_emails: string[] | null; sent_at: string | null; created_at: string; updated_at: string;
   sender_manual_messages: ManualStatus | ManualStatus[] | null;
 }
 const API = '/api/tools/agency-lead-handoff';
@@ -18,6 +18,10 @@ const STATUS: Record<string, string> = {
   pending: 'готовится', queued: 'в очереди отправки', sending: 'отправляется', sent: 'отправлено',
   failed: 'ошибка', unknown: 'отправка не подтверждена, проверьте исходящие', skipped: 'пропущено',
 };
+/** Дата отправки, а до неё — создания передачи; по Москве, как в остальном портале. */
+const formatMoscow = (iso: string | null) => iso
+  ? new Date(iso).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+  : '';
 const addresses = (s: string) => s.split(/[,;\s]+/).map(v => v.trim()).filter(Boolean);
 
 function SettingsForm({ value, reload }: { value: AgencyHandoffSettings; reload: () => Promise<void> }) {
@@ -35,8 +39,8 @@ function SettingsForm({ value, reload }: { value: AgencyHandoffSettings; reload:
     finally { setBusy(false); }
   };
   const field = 'mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm';
-  return <div className="space-y-3 rounded-lg border border-zinc-200 p-4">
-    <h3 className="font-medium">{LABELS[value.scope]}</h3>
+  return <div className="space-y-3 rounded-lg border border-l-4 border-zinc-200 border-l-blue-500 bg-blue-500/5 p-4">
+    <h3 className="inline-block rounded-md bg-blue-500/15 px-2.5 py-1 text-base font-semibold">{LABELS[value.scope]}</h3>
     <label className="flex items-center gap-2 text-sm">
       <input type="checkbox" checked={form.enabled} onChange={e => setForm({ ...form, enabled: e.target.checked })} />
       Автоматически отвечать новым лидам после передачи в Telegram
@@ -85,8 +89,9 @@ export function HandoffSettings({ folderKey }: { folderKey: string }) {
       const rawStatus = manual?.status ?? row.status;
       const stale = rawStatus === 'sending' && checkedAt - Date.parse(manual?.updated_at ?? row.updated_at) > 10 * 60_000;
       const status = stale ? 'unknown' : rawStatus;
+      const when = formatMoscow(manual?.sent_at ?? row.sent_at ?? row.created_at);
       return <div key={row.id} className="border-t border-zinc-100 pt-2 text-sm">
-        <p>{row.lead_email} · {LABELS[row.scope]} · {STATUS[status] || status}</p>
+        <p>{when} · {row.lead_email} · {LABELS[row.scope]} · {STATUS[status] || status}</p>
         {(manual?.error || row.error) && <p className="text-xs text-red-600">{manual?.error || row.error}</p>}
         {row.cc_emails?.length ? <p className="text-xs text-zinc-500">Копия: {row.cc_emails.join(', ')}</p> : null}
         {row.body && <details className="mt-1 text-xs"><summary className="cursor-pointer">Текст ответа</summary><p className="whitespace-pre-wrap">{row.body}</p></details>}
