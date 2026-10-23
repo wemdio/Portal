@@ -3,14 +3,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
-import { BarChart3, Megaphone, Search, Users, UserCircle } from 'lucide-react';
+import { BarChart3, Megaphone, Search, UserCircle } from 'lucide-react';
 import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
 import LiDashboard, { type LiActivity } from '@/components/li-outreach/LiDashboard';
+import CampaignBases, { OrphanBases } from '@/components/li-outreach/CampaignBases';
 
 // ---- Types ------------------------------------------------------------------
 
-type Tab = 'dashboard' | 'campaigns' | 'leads' | 'scraper' | 'accounts';
-const LI_TABS: readonly Tab[] = ['dashboard', 'campaigns', 'leads', 'scraper', 'accounts'];
+type Tab = 'dashboard' | 'campaigns' | 'scraper' | 'accounts';
+const LI_TABS: readonly Tab[] = ['dashboard', 'campaigns', 'scraper', 'accounts'];
 const LI_TAB_KEY = 'li-outreach:tab';
 
 type LiAccountCooldownReason = 'invitation_limit' | 'already_invited' | 'account_restricted';
@@ -63,7 +64,7 @@ function formatCooldownRemaining(until: string): string {
   const mins = minutes % 60;
   return mins > 0 ? `${hours}ч ${mins}м` : `${hours}ч`;
 }
-type LiLeadList = { id: string; user_id?: string; owner_name?: string | null; name: string; description: string | null; created_at: string; has_custom_invites?: boolean; leads_count?: number };
+type LiLeadList = { id: string; user_id?: string; owner_name?: string | null; name: string; description: string | null; created_at: string; has_custom_invites?: boolean; leads_count?: number; campaign_id?: string | null };
 type LiLead = { id: string; name: string; first_name: string | null; last_name: string | null; position: string | null; company: string | null; profile_url: string | null; status: string; lead_list_id: string | null; invite_text: string | null; created_at: string };
 
 type DashboardCompanyRow = { company: string; total: number; new: number; invited: number; connected: number; messaged: number; replied: number; completed: number; error: number };
@@ -259,7 +260,7 @@ export default function LiOutreachPage() {
   const [creating, setCreating] = useState(false);
   const [editingCampaignId, setEditingCampaignId] = useState<string | null>(null);
   /** Страница кампании: настройки или логи (логи — только у существующей). */
-  const [campaignPageTab, setCampaignPageTab] = useState<'settings' | 'logs'>('settings');
+  const [campaignPageTab, setCampaignPageTab] = useState<'settings' | 'bases' | 'logs'>('settings');
   const [cf, setCf] = useState(DEFAULT_CAMPAIGN_FORM);
 
   /** Закрывает страницу кампании и возвращает к списку. Сама форма (`cf`) НЕ
@@ -391,8 +392,7 @@ export default function LiOutreachPage() {
   useEffect(() => {
     if (!tabReady) return;
     if (tab === 'dashboard') { void loadDashboard(); void loadLeads(); void loadCampaigns(); }
-    if (tab === 'campaigns') { void loadCampaigns(); void loadDashboard(); }
-    if (tab === 'leads') void loadLeads(leadListFilterId);
+    if (tab === 'campaigns') { void loadCampaigns(); void loadDashboard(); void loadLeadLists(); }
     if (tab === 'scraper' || tab === 'dashboard') void loadTasks();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, tabReady, leadListFilterId]);
@@ -915,10 +915,14 @@ export default function LiOutreachPage() {
   const tabs = [
     { id: 'dashboard', label: 'Дашборд', icon: BarChart3 },
     { id: 'campaigns', label: 'Кампании', icon: Megaphone },
-    { id: 'leads', label: 'Лиды', icon: Users },
     { id: 'scraper', label: 'Скрапер', icon: Search },
     { id: 'accounts', label: 'Аккаунты', icon: UserCircle },
   ] as const;
+
+  /** Базы и кампании перечитываем вместе: рассылаемая база — поле кампании. */
+  const reloadBases = useCallback(async () => {
+    await Promise.all([loadLeadLists(), loadCampaigns()]);
+  }, [loadLeadLists, loadCampaigns]);
 
   const editingCampaign = useMemo(() => campaigns.find((c) => c.id === editingCampaignId) ?? null, [campaigns, editingCampaignId]);
 
@@ -1179,7 +1183,7 @@ export default function LiOutreachPage() {
               </div>
               {editingCampaignId && (
                 <div role="tablist" aria-label="Разделы кампании" className="inline-flex rounded-full border border-gray-200 p-0.5 text-xs font-medium">
-                  {(['settings', 'logs'] as const).map((id) => (
+                  {(['settings', 'bases', 'logs'] as const).map((id) => (
                     <button
                       key={id}
                       type="button"
@@ -1191,12 +1195,20 @@ export default function LiOutreachPage() {
                       }}
                       className={`cursor-pointer rounded-full px-4 py-1.5 transition ${campaignPageTab === id ? 'bg-[#4f46e5] text-white' : 'text-gray-500 hover:text-gray-800'}`}
                     >
-                      {id === 'settings' ? 'Настройки' : 'Логи'}
+                      {id === 'settings' ? 'Настройки' : id === 'bases' ? 'Базы' : 'Логи'}
                     </button>
                   ))}
                 </div>
               )}
-              {editingCampaignId && campaignPageTab === 'logs' ? (
+              {editingCampaignId && campaignPageTab === 'bases' ? (
+                <CampaignBases
+                  campaignId={editingCampaignId}
+                  activeListId={editingCampaign?.lead_list_id ?? null}
+                  bases={leadLists.filter((l) => l.campaign_id === editingCampaignId)}
+                  onChanged={reloadBases}
+                  onOpenScraper={(listId) => { setScraperListId(listId); setTab('scraper'); }}
+                />
+              ) : editingCampaignId && campaignPageTab === 'logs' ? (
                 <div className="space-y-3 rounded-xl border border-gray-200 bg-white p-4">
                   <div className="flex items-center justify-between gap-2 flex-wrap">
                     <h3 className="text-sm font-semibold text-gray-900">Логи кампании</h3>
@@ -1286,15 +1298,21 @@ export default function LiOutreachPage() {
                   </details>
                 </div>
                 <div>
-                  <label className="text-xs text-gray-600 block mb-1">Список лидов</label>
-                  <select value={cf.lead_list_id} onChange={(e) => setCf({ ...cf, lead_list_id: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm">
-                    <option value="">Без списка</option>
-                    {leadLists.map((l) => (
-                      <option key={l.id} value={l.id}>
-                        {l.name}{l.has_custom_invites ? ' ✎ (с инвайтами)' : ''}
-                      </option>
-                    ))}
-                  </select>
+                  <label className="text-xs text-gray-600 block mb-1">Рассылаемая база</label>
+                  {editingCampaignId ? (
+                    <select value={cf.lead_list_id} onChange={(e) => setCf({ ...cf, lead_list_id: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm">
+                      <option value="">Без базы</option>
+                      {leadLists.filter((l) => l.campaign_id === editingCampaignId).map((l) => (
+                        <option key={l.id} value={l.id}>
+                          {l.name}{l.has_custom_invites ? ' ✎ (с инвайтами)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-gray-200 px-3 py-2 text-xs text-gray-400">
+                      Базу загрузите после создания кампании — в разделе «Базы».
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1577,392 +1595,13 @@ export default function LiOutreachPage() {
                   })}
                 </div>
               )}
+              <OrphanBases
+                bases={leadLists.filter((l) => !l.campaign_id)}
+                campaigns={campaigns.map((c) => ({ id: c.id, name: c.name, lead_list_id: c.lead_list_id }))}
+                onChanged={reloadBases}
+              />
             </div>
           )}
-        </div>
-      )}
-
-      {/* Leads */}
-      {tab === 'leads' && (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 flex-wrap">
-              <h2 className="text-sm font-semibold text-gray-900">Лиды ({leadsTotal})</h2>
-              {(() => {
-                // Бейдж «персональные инвайты» рядом с заголовком —
-                // показываем, когда выбран список с has_custom_invites=true.
-                // Это даёт пользователю понять, что у лидов в текущей выборке
-                // есть колонка invite_text, и тумблер в редакторе кампании
-                // действительно сработает.
-                const list = leadLists.find((l) => l.id === leadListFilterId);
-                if (!list?.has_custom_invites) return null;
-                return (
-                  <span
-                    className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 border border-emerald-200"
-                    title="Список импортирован через «Импорт CSV с инвайтами». У лидов есть свой персональный текст, кампания может использовать его через тумблер на шаге 1."
-                  >
-                    ✎ персональные инвайты
-                  </span>
-                );
-              })()}
-            </div>
-            <div className="flex gap-2">
-              <button onClick={() => setShowCreateListModal(true)} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
-                Управление листами
-              </button>
-              <button
-                onClick={() => {
-                  if (leadListFilterId && leadListFilterId !== UNLISTED_LEAD_LIST_FILTER) setImportListId(leadListFilterId);
-                  setShowImportModal(true);
-                }}
-                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
-              >
-                Импорт CSV
-              </button>
-              <button
-                onClick={() => {
-                  setImportInvitesListName('');
-                  setShowImportInvitesModal(true);
-                }}
-                className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100"
-                title="Импорт CSV формата «LinkedIn ID, Invite» — у каждого лида свой персонализированный текст инвайта"
-              >
-                Импорт CSV с инвайтами
-              </button>
-              <button onClick={() => void exportLeadsCsv()} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
-                Экспорт CSV
-              </button>
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-gray-200 bg-white p-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs text-gray-500">Списки лидов:</span>
-              <button
-                onClick={() => setLeadListFilterId('')}
-                className={`rounded-md px-2 py-1 text-xs ${leadListFilterId === '' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
-              >
-                Все
-              </button>
-              <button
-                onClick={() => setLeadListFilterId(UNLISTED_LEAD_LIST_FILTER)}
-                className={`rounded-md px-2 py-1 text-xs ${leadListFilterId === UNLISTED_LEAD_LIST_FILTER ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
-              >
-                Без списка
-              </button>
-              {leadLists.map((list) => (
-                <button
-                  key={list.id}
-                  onClick={() => setLeadListFilterId(list.id)}
-                  className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs ${leadListFilterId === list.id ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
-                  title={list.has_custom_invites ? 'Список с персонализированными инвайтами' : undefined}
-                >
-                  {list.name}
-                  {list.has_custom_invites && (
-                    <span className="text-emerald-600" aria-label="Список с персонализированными инвайтами">✎</span>
-                  )}
-                </button>
-              ))}
-            </div>
-            {leadLists.length === 0 && (
-              <p className="text-xs text-gray-400 mt-2">Списков пока нет.</p>
-            )}
-          </div>
-
-          {/* Create List Modal */}
-          {showCreateListModal && (
-            <div className="fixed inset-0 z-40 bg-black/30 p-4 flex items-center justify-center">
-              <div className="w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl">
-                <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
-                  <h3 className="text-sm font-semibold text-gray-900">Управление списками лидов</h3>
-                  <button onClick={() => setShowCreateListModal(false)} disabled={creatingList} className="text-sm text-gray-500 hover:text-gray-700 disabled:opacity-50">✕</button>
-                </div>
-                <div className="p-4 space-y-4">
-                  <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
-                    <div className="text-xs font-medium text-gray-700 mb-2">Создать новый список</div>
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={newListName}
-                        onChange={(e) => setNewListName(e.target.value)}
-                        placeholder="Название списка"
-                        className="flex-1 rounded-md border border-gray-200 bg-white px-3 py-2 text-sm"
-                      />
-                      <button onClick={() => void createLeadList()} disabled={creatingList} className="rounded-md bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50">
-                        {creatingList ? '...' : 'Создать'}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="max-h-[50vh] overflow-y-auto space-y-2 pr-1">
-                    {leadLists.length === 0 ? (
-                      <p className="text-xs text-gray-400">Списков пока нет.</p>
-                    ) : leadLists.map((list) => (
-                      <div key={list.id} className="rounded-lg border border-gray-200 bg-white px-3 py-2.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <button
-                            onClick={() => { setLeadListFilterId(list.id); setShowCreateListModal(false); }}
-                            className={`text-left text-sm font-medium ${leadListFilterId === list.id ? 'text-blue-700' : 'text-gray-900 hover:text-blue-700'}`}
-                          >
-                            {list.name}
-                            <span className="ml-2 text-xs font-normal text-gray-500">({list.leads_count ?? 0} лидов)</span>
-                            {list.owner_name && list.user_id !== currentUserId && (
-                              <span className="ml-2 text-[10px] font-normal text-purple-700" title="Кто создал список. Работать с ним может вся команда.">
-                                👤 {list.owner_name}
-                              </span>
-                            )}
-                          </button>
-                          <div className="flex items-center gap-3">
-                            <button onClick={() => void exportLeadListCsv(list)} className="text-xs text-blue-600 hover:underline">Экспорт</button>
-                            <button onClick={() => void deleteLeadList(list)} className="text-xs text-red-600 hover:underline">Удалить</button>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Import CSV with personalized invites — fixed modal overlay. */}
-          {showImportInvitesModal && (
-            <div className="fixed inset-0 z-40 bg-black/30 p-4 flex items-center justify-center">
-              <div className="w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl flex flex-col">
-                <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
-                  <h3 className="text-sm font-semibold text-gray-900">Импорт CSV с персонализированными инвайтами</h3>
-                  <button
-                    onClick={() => { setShowImportInvitesModal(false); setImportInvitesError(null); }}
-                    disabled={importing}
-                    className="text-sm text-gray-500 hover:text-gray-700 disabled:opacity-50"
-                  >
-                    ✕
-                  </button>
-                </div>
-                <div className="p-4 space-y-3 overflow-y-auto">
-                  <div className="text-xs text-gray-600 space-y-2">
-                    <p>
-                      Формат CSV: <code className="bg-gray-100 px-1 rounded">LinkedIn ID, Invite</code>
-                      {' '}— первая колонка <b>ссылка на профиль LinkedIn</b>, вторая — <b>готовый текст инвайта</b>.
-                    </p>
-                    <pre className="bg-white border border-emerald-200 rounded-lg px-3 py-2 text-[11px] leading-relaxed font-mono text-gray-700 overflow-x-auto">{`LinkedIn ID,Invite
-http://www.linkedin.com/in/ian-parris-95423229,"Hi Ian! IT services at Installation Technology are vital. Happy to connect!"
-http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Слежу за Monese, впечатлён фокусом на мультивалютности."`}</pre>
-                    <p>
-                      На каждый импорт создаётся <b>новый список лидов</b> с пометкой «персонализированные инвайты».
-                      В редакторе кампании для такого списка появится тумблер «Использовать персонализированный инвайт» на шаге&nbsp;1.
-                    </p>
-                  </div>
-                  <div className="flex gap-3 items-end flex-wrap">
-                    <div>
-                      <label className="text-xs text-gray-600 block mb-1">Название списка</label>
-                      <input
-                        type="text"
-                        value={importInvitesListName}
-                        onChange={(e) => setImportInvitesListName(e.target.value)}
-                        placeholder="Пусто = имя файла"
-                        className="rounded-lg border border-gray-200 px-3 py-2 text-sm w-56"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-xs text-gray-600 block mb-1">Файл CSV</label>
-                      <input
-                        type="file"
-                        accept=".csv,text/csv"
-                        disabled={importing}
-                        onChange={(e) => {
-                          const f = e.target.files?.[0];
-                          if (f) void importLeadsWithInvitesCsv(f);
-                        }}
-                        className="text-sm file:mr-2 file:rounded-lg file:border-0 file:bg-emerald-600 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-emerald-700 disabled:opacity-50"
-                      />
-                    </div>
-                    {importing && <span className="text-xs text-gray-500">Загрузка…</span>}
-                  </div>
-                  {importInvitesError && (
-                    <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-                      <span className="font-medium">Ошибка импорта:</span> {importInvitesError}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Import CSV — fixed modal overlay. */}
-          {showImportModal && (
-            <div className="fixed inset-0 z-40 bg-black/30 p-4 flex items-center justify-center">
-              <div className="w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl flex flex-col">
-                <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
-                  <h3 className="text-sm font-semibold text-gray-900">Импорт лидов из CSV</h3>
-                  <button
-                    onClick={() => { setShowImportModal(false); setImportError(null); }}
-                    disabled={importing}
-                    className="text-sm text-gray-500 hover:text-gray-700 disabled:opacity-50"
-                  >
-                    ✕
-                  </button>
-                </div>
-                <div className="p-4 space-y-3 overflow-y-auto">
-                  <p className="text-xs text-gray-500">
-                    Формат CSV: <code className="bg-gray-100 px-1 rounded">name, first_name, last_name, position, company, profile_url, public_identifier</code>
-                    <br />Первая строка — заголовки. Обязательное поле: <code className="bg-gray-100 px-1 rounded">name</code> (или <code className="bg-gray-100 px-1 rounded">first_name</code> + <code className="bg-gray-100 px-1 rounded">last_name</code>).
-                  </p>
-                  <div className="flex gap-3 items-end flex-wrap">
-                    <div>
-                      <label className="text-xs text-gray-600 block mb-1">Список для импорта</label>
-                      <select value={importListId} onChange={(e) => setImportListId(e.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
-                        <option value="">Выберите список…</option>
-                        {leadLists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="text-xs text-gray-600 block mb-1">Файл CSV</label>
-                      <input
-                        type="file"
-                        accept=".csv,text/csv"
-                        disabled={importing}
-                        onChange={(e) => {
-                          const f = e.target.files?.[0];
-                          if (f) void importLeadsCsv(f);
-                        }}
-                        className="text-sm file:mr-2 file:rounded-lg file:border-0 file:bg-blue-600 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-blue-700 disabled:opacity-50"
-                      />
-                    </div>
-                    {importing && <span className="text-xs text-gray-500">Загрузка…</span>}
-                  </div>
-                  {importError && (
-                    <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-                      <span className="font-medium">Ошибка импорта:</span> {importError}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {selectedLeadIds.size > 0 && (
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2">
-              <span className="text-sm text-red-800">Выбрано лидов: {selectedLeadIds.size}</span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setSelectedLeadIds(new Set())}
-                  disabled={deletingLeads}
-                  className="rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
-                >
-                  Снять выбор
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void deleteSelectedLeads()}
-                  disabled={deletingLeads}
-                  className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
-                >
-                  {deletingLeads ? 'Удаление...' : 'Удалить выбранных'}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {(() => {
-            // Колонку «Инвайт» (li_leads.invite_text) показываем, если хоть у
-            // одного из видимых лидов он заполнен. Это покрывает оба сценария:
-            // фильтр на список с has_custom_invites=true (там у всех лидов
-            // invite_text есть) и фильтр «Все» / «Без списка», когда среди
-            // лидов попадаются персонализированные. Если ни у одного лида
-            // invite_text не задан — колонка просто не рендерится, чтобы не
-            // занимать место для обычных списков.
-            const anyInvite = leads.some((l) => l.invite_text && l.invite_text.trim());
-            if (loadingLeads && leads.length === 0) {
-              return (
-                <div className="flex items-center justify-center py-20" role="status" aria-label="Загрузка лидов">
-                  <div className="h-8 w-8 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
-                </div>
-              );
-            }
-            return (
-              <div className="max-h-[600px] overflow-y-auto">
-                <table className="w-full text-sm">
-                  <thead className="bg-gray-50 sticky top-0">
-                    <tr>
-                      <th className="w-10 px-3 py-2">
-                        <input
-                          type="checkbox"
-                          aria-label="Выбрать все видимые лиды"
-                          checked={allVisibleLeadsSelected}
-                          disabled={visibleLeadIds.length === 0 || deletingLeads}
-                          onChange={(e) => toggleVisibleLeadSelection(e.target.checked)}
-                          className="h-4 w-4 rounded border-gray-300 text-blue-600"
-                        />
-                      </th>
-                      <th className="text-left px-3 py-2 text-xs text-gray-500">Ссылка на пользователя</th>
-                      <th className="text-left px-3 py-2 text-xs text-gray-500">Должность</th>
-                      <th className="text-left px-3 py-2 text-xs text-gray-500">Компания</th>
-                      <th className="text-left px-3 py-2 text-xs text-gray-500">Статус</th>
-                      {anyInvite && (
-                        <th className="text-left px-3 py-2 text-xs text-emerald-700" title="Персонализированный текст инвайта">
-                          Инвайт ✎
-                        </th>
-                      )}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {leads.map((lead) => {
-                      const invite = lead.invite_text?.trim() ?? '';
-                      return (
-                        <tr key={lead.id} className="border-b border-gray-100 hover:bg-gray-50">
-                          <td className="px-3 py-2">
-                            <input
-                              type="checkbox"
-                              aria-label={`Выбрать лида ${lead.name}`}
-                              checked={selectedLeadIds.has(lead.id)}
-                              disabled={deletingLeads}
-                              onChange={(e) => toggleLeadSelection(lead.id, e.target.checked)}
-                              className="h-4 w-4 rounded border-gray-300 text-blue-600"
-                            />
-                          </td>
-                          <td className="px-3 py-2">
-                            <div className="flex items-center gap-1.5">
-                              {lead.profile_url ? (
-                                <a href={lead.profile_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">{lead.name}</a>
-                              ) : lead.name}
-                              {invite && (
-                                <span
-                                  className="text-emerald-600 text-xs"
-                                  title="У лида есть персонализированный текст инвайта"
-                                  aria-label="Персонализированный инвайт"
-                                >
-                                  ✎
-                                </span>
-                              )}
-                            </div>
-                          </td>
-                          <td className="px-3 py-2 text-gray-600">{lead.position ?? ''}</td>
-                          <td className="px-3 py-2 text-gray-600">{lead.company ?? ''}</td>
-                          <td className="px-3 py-2"><span className={`text-xs px-2 py-0.5 rounded ${lead.status === 'replied' ? 'bg-green-100 text-green-700' : lead.status === 'connected' ? 'bg-blue-100 text-blue-700' : lead.status === 'invited' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'}`}>{lead.status}</span></td>
-                          {anyInvite && (
-                            <td className="px-3 py-2 max-w-[420px]">
-                              {invite ? (
-                                <span
-                                  className="text-xs text-gray-700 line-clamp-2 block"
-                                  title={invite}
-                                >
-                                  {invite}
-                                </span>
-                              ) : (
-                                <span className="text-xs text-gray-300" title="У этого лида нет персонального инвайта — runner возьмёт шаблон кампании">—</span>
-                              )}
-                            </td>
-                          )}
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            );
-          })()}
         </div>
       )}
 
@@ -1989,7 +1628,7 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
               </select>
               <select value={scraperListId} onChange={(e) => setScraperListId(e.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
                 <option value="">Список (опционально)</option>
-                {leadLists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                {leadLists.map((l) => <option key={l.id} value={l.id}>{l.name}{l.campaign_id ? ` · ${campaigns.find((c) => c.id === l.campaign_id)?.name ?? 'кампания'}` : ''}</option>)}
               </select>
               <input type="number" value={scraperMax} onChange={(e) => setScraperMax(Number(e.target.value))} className="w-24 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
               <button
