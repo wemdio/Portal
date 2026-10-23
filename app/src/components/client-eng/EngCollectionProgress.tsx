@@ -10,6 +10,7 @@ const STEP_LABELS: Record<string, string> = {
   enrich_descriptions: 'Adding company details',
   split_emails: 'Preparing individual contacts',
   dedup_email: 'Removing duplicate addresses',
+  remove_support_emails: 'Removing non-company addresses',
   validate_emails: 'Checking email addresses',
   cap_emails_per_company: 'Applying your contact limit',
   company_qualification: 'Checking companies and countries…',

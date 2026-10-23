@@ -44,6 +44,7 @@ import {
   stepValidateEmails,
   stepSplitEmails,
   stepEnrich,
+  stepRemoveSupportEmails,
   FOUND_EMAIL_COL,
 } from '@/lib/tools/processingSteps';
 import { mergeFoundEmailColumn } from '@/lib/tools/baseConstructorWorker';
@@ -586,5 +587,41 @@ describe('stepFindEmails — step_config.find_emails (stop_at_first / max_per_si
     expect(out[1][1]).toBe(
       Array.from({ length: 8 }, (_, i) => `e${i + 1}@a.ru`).join(', '),
     );
+  });
+});
+
+describe('stepRemoveSupportEmails, English collections', () => {
+  const header = ['Company', 'Website', 'Email'];
+  const run = (rows: string[][], locale?: 'en' | 'ru') => stepRemoveSupportEmails([header, ...rows], noopProgress, locale ? { locale } : undefined);
+  const emails = (out: string[][]) => out.slice(1).map((row) => row[2]);
+
+  it('drops privacy, compliance, complaints and security boxes; keeps press, media, jobs and general ones', async () => {
+    const rows = ['privacy@kin.com', 'data.protection@kin.com', 'ph-compliance@kin.com', 'complaints@kin.com', 'securityteam@kin.com',
+      'dataprotectionofficer@kin.com', 'privacypolicy@kin.com',
+      'press@kin.com', 'media@kin.com', 'jobs@kin.com', 'info@kin.com', 'anna.smith@kin.com', 'legalize@kin.com']
+      .map((email) => ['Kin Insurance', 'kin.com', email]);
+    expect(emails(await run(rows, 'en'))).toEqual(['press@kin.com', 'media@kin.com', 'jobs@kin.com', 'info@kin.com', 'anna.smith@kin.com', 'legalize@kin.com']);
+  });
+
+  it('keeps only the company\'s own or same-brand domain, plus free mail; drops other organisations', async () => {
+    const out = await run([
+      ['Inigo', 'inigoinsurance.com', 'jane@h-advisors.global'],
+      ['Inigo', 'inigoinsurance.com', 'john@inigoinsurance.com'],
+      ['Irish Life', 'irishlife.ie', 'care@irishlifehealth.ie'],
+      ['Wefox Group', 'wefoxgroup.com', 'sales@wefox.com'],
+      ['Ammerländer Versicherung', 'ammerlaender-versicherung.de', 'info@versicherungsombudsmann.de'],
+      ['AIG Ireland', 'aig.ie', 'contact@eu.aig.ie'],
+      ['Smile Dental', 'smiledental.co.uk', 'smiledental@gmail.com'],
+      ['No Site Ltd', '', 'someone@elsewhere.com'],
+    ], 'en');
+    expect(emails(out)).toEqual(['john@inigoinsurance.com', 'care@irishlifehealth.ie', 'sales@wefox.com', 'contact@eu.aig.ie',
+      'smiledental@gmail.com', 'someone@elsewhere.com']);
+  });
+
+  it('a mixed cell keeps the company address; the Russian path is unchanged', async () => {
+    const mixed = await run([['Inigo', 'inigoinsurance.com', 'jane@h-advisors.global, john@inigoinsurance.com']], 'en');
+    expect(emails(mixed)).toEqual(['john@inigoinsurance.com']);
+    const ru = await run([['Ромашка', 'romashka.ru', 'privacy@romashka.ru'], ['Ромашка', 'romashka.ru', 'info@partner.ru'], ['Ромашка', 'romashka.ru', 'support@romashka.ru']]);
+    expect(emails(ru)).toEqual(['privacy@romashka.ru', 'info@partner.ru']);
   });
 });

@@ -37,6 +37,7 @@ import {
   type WebsiteFetchGuard,
 } from '@/lib/enrich/websiteParser';
 import { isBlockedCompanyWebsiteDomain } from '@/lib/companiesDirectory/contactPolicy';
+import { companySiteAlias, sameCompanySiteBoundary } from '@/lib/enrich/companySiteAlias';
 import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator';
 import { isSupportEmail } from './supportEmails';
 import { makeCheckpointGate } from './checkpointGate';
@@ -1078,28 +1079,68 @@ export async function stepSplitEmails(
 export interface StepRemoveSupportEmailsOptions {
   /**
    * Локаль джобы (job.locale). При 'en' дополнительно выкидываем
-   * юридические/комплаенс ящики (legal@, privacy@, abuse@) — в EN-базах это
-   * не точка контакта для аутрича. info@/sales@/hello@ остаются в обеих
-   * локалях. Default 'ru' — прежнее поведение.
+   * юридические, комплаенс- и прочие служебные ящики (legal@, privacy@,
+   * compliance@, complaints@, security@ — см. EN_EXTRA_ROLE_LOCALPARTS) и
+   * адреса на чужом домене (isForeignCompanyEmail) — в EN-базах это не точка
+   * контакта для аутрича. info@/sales@/hello@/press@/media@ остаются.
+   * Default 'ru' — прежнее поведение.
    */
   locale?: ConstructorLocale;
 }
 
 // Доп. ролевые ящики ТОЛЬКО для EN-локали. abuse@ уже покрыт базовым списком
 // supportEmails.ts — здесь для явности контракта, повторная проверка идемпотентна.
-const EN_EXTRA_ROLE_LOCALPARTS = new Set(['legal', 'privacy', 'abuse']);
+// 23.10.2026: + защита данных, комплаенс, жалобы, безопасность. Аудит 215
+// готовых контактов проверочного сбора HST: privacy@ и защита данных — 20,
+// compliance@/legal@ — 7, complaints@ — 6, security@/postmaster@ — 3. press@,
+// media@ (решение владельца 23.10.2026) и hr@/jobs@ (supportEmails.ts) остаются.
+const EN_EXTRA_ROLE_LOCALPARTS = new Set([
+  'legal', 'privacy', 'abuse',
+  'gdpr', 'dpo', 'dataprotection', 'dataprivacy', 'datenschutz',
+  'compliance', 'ethics', 'whistleblowing', 'whistleblower', 'fraud',
+  'complaint', 'complaints', 'ombudsman', 'beschwerde', 'beschwerden',
+  'security', 'securityteam',
+]);
 
-// Та же семантика, что isRoleLocalPart в supportEmails.ts: точное совпадение
-// или слово перед разделителем/цифрой (legal.dept@, privacy2@), но НЕ префикс
-// более длинного слова (legalize@ — персональный/прочий ящик, оставляем).
+// Длинные слова, которых не бывает в именах, ищутся и внутри адреса:
+// dataprotectionofficer@, privacypolicy@, compliancedept@.
+const EN_ROLE_WORDS_INSIDE = ['privacy', 'dataprotection', 'dataprivacy', 'datenschutz', 'compliance', 'complaint', 'whistleblow', 'ombudsman'];
+
+// Любое слово адреса и слова вместе: privacy2@, legal.dept@, ph-compliance@,
+// data.protection@. Короткое слово, которое лишь начинается так же (legalize@),
+// — не служебное: персональный/прочий ящик остаётся.
 function isEnExtraRoleEmail(email: string): boolean {
   const at = email.indexOf('@');
   if (at <= 0) return false;
   const local = email.slice(0, at).trim().toLowerCase();
   if (!local) return false;
-  if (EN_EXTRA_ROLE_LOCALPARTS.has(local)) return true;
-  const m = local.match(/^([a-z]+)(?=[._+\-0-9])/);
-  return !!m && EN_EXTRA_ROLE_LOCALPARTS.has(m[1]);
+  const words = local.split(/[._+\-0-9]+/).filter(Boolean);
+  const joined = words.join('');
+  return EN_EXTRA_ROLE_LOCALPARTS.has(local) || words.some((word) => EN_EXTRA_ROLE_LOCALPARTS.has(word))
+    || EN_EXTRA_ROLE_LOCALPARTS.has(joined) || EN_ROLE_WORDS_INSIDE.some((word) => joined.includes(word));
+}
+
+// Бесплатная почта — не чужая компания: у малого бизнеса это часто
+// единственный адрес на собственном сайте.
+const EN_FREE_MAIL_DOMAINS = new Set([
+  'gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.co.uk', 'hotmail.com', 'hotmail.co.uk', 'outlook.com',
+  'live.com', 'msn.com', 'aol.com', 'icloud.com', 'me.com', 'mac.com', 'proton.me', 'protonmail.com',
+  'gmx.de', 'gmx.net', 'web.de', 't-online.de', 'mail.com',
+]);
+
+/**
+ * Адрес, найденный на сайте компании, но принадлежащий другой организации:
+ * регулятор, омбудсмен, госорган, PR-агентство, рынок Lloyd's, партнёр (аудит
+ * 23.10.2026: 20 из 215 готовых контактов). Свой — домен сайта строки с
+ * поддоменами или домен того же бренда (companySiteAlias: abc.co.uk ↔ abc.com,
+ * wefox.com у wefoxgroup.com). Домен группы под другим брендом (pmagroup.com у
+ * PMA Companies) тоже считается чужим: по одному адресу их не отличить от
+ * партнёра. Строка без сайта не проверяется.
+ */
+function isForeignCompanyEmail(email: string, website: string, company: string): boolean {
+  const domain = email.slice(email.indexOf('@') + 1).trim().toLowerCase();
+  if (!domain || !website.trim() || EN_FREE_MAIL_DOMAINS.has(domain)) return false;
+  return !sameCompanySiteBoundary(domain, website) && companySiteAlias(domain, website, company) === null;
 }
 
 export async function stepRemoveSupportEmails(
@@ -1114,7 +1155,11 @@ export async function stepRemoveSupportEmails(
   const cols = [emailIdx, foundIdx].filter((i) => i >= 0);
   if (cols.length === 0) { await onProgress(100); return data; }
 
-  const isRoleEmail = options?.locale === 'en'
+  const en = options?.locale === 'en';
+  // Тот же выбор сайта, что у find_emails: адреса искались именно на нём.
+  const siteColumnIndexes = en ? findPreferredSiteColumnIndexes(header) : [];
+  const companyIdx = en ? findColumnIndex(header, 'company', 'компания', 'company name') : -1;
+  const isRoleEmail = en
     ? (e: string) => isSupportEmail(e) || isEnExtraRoleEmail(e)
     : isSupportEmail;
 
@@ -1130,11 +1175,13 @@ export async function stepRemoveSupportEmails(
       const emails = cell.match(EMAIL_SPLIT_REGEX);
       if (!emails || emails.length === 0) continue;
       hadEmail = true;
-      const kept = emails.filter((e) => !isRoleEmail(e));
+      const website = en ? getPreferredSiteUrl(row, siteColumnIndexes) : '';
+      const company = companyIdx >= 0 ? (row[companyIdx] || '') : '';
+      const kept = emails.filter((e) => !isRoleEmail(e) && !(en && isForeignCompanyEmail(e, website, company)));
       if (kept.length > 0) hasPersonal = true;
       newRow[ci] = kept.join(', ');
     }
-    // Выкидываем строку, только если в ней БЫЛИ email и ВСЕ они ролевые.
+    // Выкидываем строку, только если в ней БЫЛИ email и ВСЕ они ролевые (у EN — или чужие).
     if (hadEmail && !hasPersonal) continue;
     out.push(newRow);
   }

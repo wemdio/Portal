@@ -40,6 +40,10 @@ const MODEL_PRICES: Record<string, ModelPrices> = {
   'gpt-4o-mini': { in: 0.15, out: 0.60, cached: 0.075 },
   'openai/gpt-5-mini': { in: 0.25, out: 2.0, cached: 0.025 },
   'gpt-5-mini': { in: 0.25, out: 2.0, cached: 0.025 },
+  // Requesty /v1/models, 22.10.2026: the flex tier of the admission confirmation
+  // and V4.1 Flash on DeepSeek's own API (first pass of the relevance gate).
+  'openai/gpt-5-mini:flex': { in: 0.125, out: 1.0, cached: 0.0125 },
+  'deepseek/deepseek-v4.1-flash-1017': { in: 0.30, out: 1.20, cached: 0.006 },
   // Ресёрч/синтез (site_profile, hypotheses, evidence, clustering)
   // opus-5: прайс Requesty уточнить после первых прогонов, пока = opus-4-8
   'claude-opus-5':                  { in: 5.0, out: 25.0 },
@@ -106,17 +110,27 @@ export type VeModelKind = 'research' | 'hypotheses' | 'chain' | 'bulk' | 'collec
 
 export const VE_COLLECTION_MODEL = 'deepinfra/deepseek-v4-flash-0731';
 
-/** One model for the relevance gate and its admission review, without the
- * gpt-5-mini confirmation. On 286 labelled companies (23.10.2026) it admitted
- * 6.5% of adjacent companies against 56% for that confirmation, with the same
- * overall precision at about a third of the cost. Opt-in by VE_RELEVANCE_MODEL;
- * the gate keeps the pair for a frozen audience or geography. */
-export const VE_RELEVANCE_MODEL = 'deepinfra/deepseek-v4.1-flash-1017';
+/** First pass of the relevance gate (descriptions and websites) for bases
+ * without a frozen audience or geography. On 286 labelled companies
+ * (22.10.2026) it passed 38–40% of fitting companies against 26–33% for
+ * VE_COLLECTION_MODEL at the same share of adjacent ones; with the unchanged
+ * gpt-5-mini confirmation the full path kept 31 of 100 fitting companies
+ * against 24.5. DeepInfra's copy of the model hung for an hour that night, so
+ * this is DeepSeek's own API, and a batch it fails goes back to the gate model.
+ * Opt-in by VE_RELEVANCE_MODEL. */
+export const VE_RELEVANCE_MODEL = 'deepseek/deepseek-v4.1-flash-1017';
 
-/** The configured single relevance model, or null for the legacy gate/review pair. */
+/** The configured first-pass model, or null for the legacy gate. Setting it to
+ * VE_COLLECTION_MODEL also restores the legacy gate (rollback without a deploy). */
 export function getVeRelevanceModel(): string | null {
-  return (process.env.VE_RELEVANCE_MODEL ?? '').trim() || null;
+  const model = (process.env.VE_RELEVANCE_MODEL ?? '').trim();
+  return model && model !== VE_COLLECTION_MODEL ? model : null;
 }
+
+/** Established reviewer that confirms the cheap review's admissions. */
+export const VE_CONFIRM_MODEL = 'openai/gpt-5-mini';
+/** The same model on OpenAI's flex tier at half the price; VE_CONFIRM_MODEL takes over a failed call. */
+export const VE_CONFIRM_FLEX_MODEL = 'openai/gpt-5-mini:flex';
 
 // Генерация гипотез без своей настройки идёт на модели исследования.
 const VE_MODEL_DEFAULTS: Record<Exclude<VeModelKind, 'hypotheses'>, string> = {
@@ -174,10 +188,11 @@ function veStrictOutputCompatible(node: unknown): boolean {
 }
 
 /** Native output constraints verified in the Requesty collection-model pilot.
- * Other configured providers retain JSON mode plus the same local validation. */
+ * Other configured providers retain JSON mode plus the same local validation:
+ * DeepSeek's own API answers json_schema with HTTP 400 (22.10.2026). */
 export function veNativeJsonSchema(model: string, name: string, schema: z.ZodType) {
-  if (model !== VE_COLLECTION_MODEL && model !== VE_RELEVANCE_MODEL
-    && !/^(?:openai\/)?(?:gpt-4o-mini|gpt-5-mini)(?:-\d{4}-\d{2}-\d{2})?$/.test(model)) return undefined;
+  if (model !== VE_COLLECTION_MODEL
+    && !/^(?:openai\/)?(?:gpt-4o-mini|gpt-5-mini)(?:-\d{4}-\d{2}-\d{2})?(?::flex)?$/.test(model)) return undefined;
   const jsonSchema = z.toJSONSchema(schema, { io: 'input', override: ({ jsonSchema }) => {
     if (jsonSchema.type === 'object') jsonSchema.additionalProperties = false;
   } });
@@ -373,6 +388,16 @@ function withJsonModeHint(messages: LLMMessage[]): LLMMessage[] {
 }
 
 /**
+ * V4.1 Flash thinks by default on DeepSeek, Together and Fireworks: 5–6 thousand
+ * reasoning tokens per relevance batch, and a 20-company answer ran out of
+ * max_tokens (22.10.2026). The prompts expect the direct answer; every host
+ * accepts reasoning_effort 'none' (DeepInfra already answers without thinking).
+ */
+function veReasoningOff(model: string): { reasoning_effort?: 'none' } {
+  return /deepseek-v4\.1-flash/.test(model) ? { reasoning_effort: 'none' } : {};
+}
+
+/**
  * Короткие повторы: 408 (таймаут апстрима), 425, 5xx.
  * Для 429 очередь сохраняет длительную паузу, освобождая воркер.
  * Остальные 4xx (ключ, схема, баланс) — постоянные.
@@ -430,6 +455,7 @@ async function rawCall(
           model,
           messages: jsonMode ? withJsonModeHint(messages) : messages,
           max_tokens: maxTokens,
+          ...veReasoningOff(model),
           ...(opts?.responseFormat && !jsonMode ? { response_format: opts.responseFormat }
             : jsonMode ? { response_format: opts?.jsonSchema
               ? { type: 'json_schema', json_schema: { name: opts.jsonSchema.name, strict: true, schema: opts.jsonSchema.schema } }
