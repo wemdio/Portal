@@ -229,6 +229,7 @@ import {
   type EngContactCollectionDiagnostics,
 } from '@/lib/tools/engContactDiagnostics';
 import { ENG_WEBSITE_EVIDENCE_COL, readEngWebsiteEvidence } from '@/lib/tools/engWebsiteEvidence';
+import { ENG_CONSTRUCT_STEPS_AFTER_SPLIT } from '@/lib/tools/engConstructorSteps';
 import {
   collectHeEngSourceCountries,
   restoreHeEngSourceCountries,
@@ -5344,15 +5345,11 @@ const CONSTRUCT_STEPS_TAIL_RU = ['validate_emails', 'cap_emails_per_company', 'e
  * адреса чужих организаций, найденные на сайте компании (регулятор, PR-агентство,
  * партнёр). Аудит проверочного сбора HST: таких было 63 из 215 готовых контактов.
  * Стоя до validate_emails, шаг не тратит на них пробы, а cap_emails_per_company
- * отдаёт пять мест хорошим адресам компании.
+ * отдаёт пять мест хорошим адресам компании. Список живёт рядом с бюджетным
+ * списком конструктора (engConstructorSteps.ts): новый шаг цепочки обязан быть
+ * и там, иначе конструктор отказывает каждой джобе сбора.
  */
-const CONSTRUCT_STEPS_AFTER_SPLIT_US = [
-  'split_emails',
-  'dedup_email',
-  'remove_support_emails',
-  'validate_emails',
-  'cap_emails_per_company',
-];
+const CONSTRUCT_STEPS_AFTER_SPLIT_US = ENG_CONSTRUCT_STEPS_AFTER_SPLIT;
 
 /** Свыше этого размера enrich_descriptions (per-site фетчи) не укладывается в
  *  6-часовой таймаут конструктора — для больших баз шаг пропускаем. */
