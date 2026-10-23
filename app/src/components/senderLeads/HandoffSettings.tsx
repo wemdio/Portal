@@ -12,7 +12,7 @@ interface HistoryRow {
 }
 const API = '/api/tools/agency-lead-handoff';
 const LABELS: Record<HandoffScope, string> = {
-  auto_ru: 'Автоаутрич RU', auto_en: 'Автоаутрич EN', own_ru: 'Email-аутрич RU · Polza', own_en: 'Email-аутрич EN · ENagency',
+  auto_ru: 'Автоаутрич RU', auto_en: 'Автоаутрич EN', own_ru: 'Email-аутрич RU · Polza', own_en: 'Email-аутрич EN · ENagency', outreachos: 'OutreachOS',
 };
 const STATUS: Record<string, string> = {
   pending: 'готовится', queued: 'в очереди отправки', sending: 'отправляется', sent: 'отправлено',
@@ -72,7 +72,7 @@ export function HandoffSettings({ folderKey }: { folderKey: string }) {
     return () => { cancelled = true; };
   }, []);
   const en = folderKey === 'auto_en';
-  const scopes = new Set([en ? 'auto_en' : 'auto_ru', en ? 'own_en' : 'own_ru']);
+  const scopes = new Set([en ? 'auto_en' : 'auto_ru', en ? 'own_en' : 'own_ru', ...(en ? [] : ['outreachos'])]);
   return <section className="space-y-3 rounded-xl border border-zinc-200 bg-white p-5">
     <h2 className="text-base font-semibold">Ответ лиду и передача по email</h2>
     <p className="text-sm text-zinc-500">Отправляется один раз после квалификации и доставки лида в чат. При включении старые лиды не получают писем. После отключения новые передачи не отправляются.</p>
