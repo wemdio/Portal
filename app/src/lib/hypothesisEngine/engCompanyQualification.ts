@@ -13,7 +13,7 @@ import {
 } from './engCompanyFit';
 import {
   HE_ENG_COMPANY_QUALIFICATION_VERSION, HeEngQualificationScopeError,
-  heEngCompanyKey, heEngCompanyQualified, heEngQualificationVersion,
+  heEngCatalogDirectHypothesis, heEngCompanyKey, heEngCompanyQualified, heEngQualificationVersion,
   type HeEngCompanyVerdict, type HeEngQualificationInFlight, type HeEngQualificationMemo,
   type HeEngQualificationRow, type HeEngQualificationScope,
   type HeEngCollectedCompanyEvidence, type HeEngCompanyQualificationAssessment,
@@ -81,6 +81,7 @@ const StoredVerdictSchema = z.object({
     url: z.string().min(1).max(2000), quote: z.string().min(12).max(1400) })).max(12),
   checkedAt: z.string().datetime(), countryProof: z.unknown().optional(),
   fitReview: z.object({ model: z.literal(HE_ENG_QUALIFICATION_REVIEW_MODEL), status: z.literal('match'), hypothesisId: z.string() }).optional(),
+  catalogFit: z.object({ source: z.literal('pdl'), industry: z.string().min(1).max(100), hypothesisId: z.string().min(1).max(200) }).optional(),
   audit: AuditSchema.optional(),
 });
 
@@ -407,6 +408,26 @@ function fitVerdict(row: HeEngQualificationRow, company: HeEngCompanyFitInput, s
     ...(decision.status === 'match' && decision.hypothesisId ? { fitReview: {
       model: HE_ENG_QUALIFICATION_REVIEW_MODEL, status: 'match' as const, hypothesisId: decision.hypothesisId,
     } } : {}) };
+}
+
+/**
+ * Softer acceptance (heEngCatalogDirectHypothesis) when the company's own site
+ * gave the models no evidence either way. Only for pages read from the
+ * catalogue site itself — a page from another domain proves its identity
+ * through the models — and only with a proven source country.
+ */
+function catalogVerdict(row: HeEngQualificationRow, key: string, scope: HeEngQualificationScope, crossSite: boolean): HeEngCompanyVerdict | null {
+  const direct = crossSite ? null : heEngCatalogDirectHypothesis(row, scope);
+  const location = heEngSourceCountry(row, scope.countries);
+  if (!direct || location.status !== 'confirmed') return null;
+  return { ...unverified(scope, key, 'catalog_industry_match'), status: 'accepted', country: location.country,
+    countryProof: location.proof, hypothesisId: direct.hypothesisId,
+    catalogFit: { source: 'pdl', industry: direct.industry, hypothesisId: direct.hypothesisId } };
+}
+
+/** INSUFFICIENT or a NOT_TARGET without quotes: the models found no contrary evidence. */
+function withoutContraryEvidence(decision: HeEngCompanyFitDecision | undefined): boolean {
+  return decision?.status === 'unverified' && ['activity_unverified', 'hypothesis_unconfirmed'].includes(decision.reason);
 }
 
 function knownResponseCost(response: unknown): number | undefined {
@@ -736,13 +757,14 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     const prepared = memo.economy!.prepared[key];
     if (!prepared || memo.verdicts[key]) return;
     const company = fitInput(key, row, prepared.website, prepared.pages, scope, prepared.excerptVersion);
-    if (!company.quotes.length) { finish(key, unverified(scope, key, 'activity_unverified')); await save(); return; }
+    const catalog = () => catalogVerdict(row, key, scope, prepared.company !== undefined);
+    if (!company.quotes.length) { finish(key, catalog() ?? unverified(scope, key, 'activity_unverified')); await save(); return; }
     if (!memo.economy!.proposals![key]) {
       const proposals = await purchase(buildHeEngCompanyFitClassifierRequest([company], safeScope), [company], false);
       if (!proposals || proposals === 'failed') return;
       const proposal = proposals.get(key)!;
-      if (!heEngCompanyFitNeedsReview(proposal)) finish(key, fitVerdict(row, company, scope,
-        finalizeHeEngCompanyFit(new Map([[key, proposal]]), new Map()).get(key)!), proposal);
+      if (!heEngCompanyFitNeedsReview(proposal)) finish(key, (withoutContraryEvidence(proposal) ? catalog() : null) ??
+        fitVerdict(row, company, scope, finalizeHeEngCompanyFit(new Map([[key, proposal]]), new Map()).get(key)!), proposal);
       else memo.economy!.proposals![key] = proposal;
       await save(); // Persist the first paid answer before buying independent review.
       if (memo.verdicts[key]) return;
@@ -753,7 +775,10 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     const reviews = await purchase(request, request.companies, true);
     if (!reviews || reviews === 'failed') return;
     const final = finalizeHeEngCompanyFit(proposals, reviews);
-    finish(key, fitVerdict(row, company, scope, final.get(key)!), proposals.get(key), reviews.get(key));
+    // A proposed match the reviewer found too little to confirm is no contrary evidence either.
+    const softened = proposals.get(key)?.status === 'match' && final.get(key)?.reason === 'review_disagreement' &&
+      withoutContraryEvidence(reviews.get(key)) ? catalog() : null;
+    finish(key, softened ?? fitVerdict(row, company, scope, final.get(key)!), proposals.get(key), reviews.get(key));
     // Keep a completed, independently checked result even if its charge is unknown.
     // The same durable hold prevents any further purchase in this base.
     await save();

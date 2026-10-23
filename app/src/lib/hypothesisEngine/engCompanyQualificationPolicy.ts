@@ -81,6 +81,12 @@ export interface HeEngCompanyVerdict {
   countryProof?: unknown;
   /** v3 only: an independent reviewer confirmed the selected activity evidence. */
   fitReview?: { model: 'openai/gpt-5-mini'; status: 'match'; hypothesisId: string };
+  /**
+   * v3 only, instead of fitReview: the catalogue industry itself names the
+   * hypothesis and the company's own site gave the models no evidence either
+   * way (see heEngCatalogDirectHypothesis). Softer than the two-model match.
+   */
+  catalogFit?: { source: 'pdl'; industry: string; hypothesisId: string };
   audit?: HeEngCompanyQualificationAudit;
 }
 
@@ -107,6 +113,8 @@ export interface HeEngQualificationMemo {
       collectedJobId?: string;
       /** Missing = legacy paid quote IDs; v2 retains every long-paragraph segment. */
       excerptVersion?: 2;
+      /** Present only when a page came from a same-brand domain (companySiteAlias). */
+      company?: string;
     }>;
     /** Written before 2026-10-23 (one request at a time); read only, never written. */
     inFlight?: HeEngQualificationInFlight;
@@ -139,8 +147,40 @@ export class HeEngQualificationScopeError extends Error {
 export interface HeEngQualificationRow {
   company?: unknown;
   website?: unknown;
+  /** Catalogue industry of a pdl row (pdl_companies.industry). */
+  category?: unknown;
+  source_detail?: unknown;
   _eng_company_qualification?: unknown;
   _eng_source_country?: unknown;
+}
+
+/**
+ * Catalogue industries narrow enough to stand for a hypothesis named after
+ * them, with the title words that name it. A broad industry («financial
+ * services») never does: fund administrators and payments firms sit inside it
+ * with everyone else. Fund management companies (ManCos) are a distinct
+ * activity from investment management and are not matched here.
+ */
+const CATALOG_DIRECT_INDUSTRIES: Readonly<Record<string, readonly string[]>> = {
+  insurance: ['insurer', 'insurance', 'insurtech', 'reinsur', 'underwrit'],
+  banking: ['bank'],
+  'investment management': ['asset manag', 'investment manag', 'wealth manag'],
+};
+
+/**
+ * Owner decision 2026-10-23 («мягче проверка при прямом совпадении отрасли»):
+ * a pdl company whose industry directly names a selected hypothesis is
+ * accepted when its own site gave the models too little to decide. The
+ * hypothesis it names, or null. Explicit contrary evidence still rejects.
+ */
+export function heEngCatalogDirectHypothesis(
+  row: HeEngQualificationRow, scope: Pick<HeEngQualificationScope, 'hypotheses'>,
+): { hypothesisId: string; industry: string } | null {
+  if (row.source_detail !== 'pdl' || typeof row.category !== 'string') return null;
+  const industry = row.category.trim().toLowerCase();
+  const words = Object.hasOwn(CATALOG_DIRECT_INDUSTRIES, industry) ? CATALOG_DIRECT_INDUSTRIES[industry] : undefined;
+  const hypothesis = words && scope.hypotheses.find((h) => words.some((word) => h.title.toLowerCase().includes(word)));
+  return hypothesis ? { hypothesisId: hypothesis.id, industry } : null;
 }
 
 function digest(value: unknown): string {
@@ -289,6 +329,17 @@ export function heEngCompanyQualified(row: HeEngQualificationRow, scope: HeEngQu
   const website = typeof row.website === 'string' ? row.website : '';
   const site = heCompanySiteIdentity(website);
   if (!site) return false;
+  if (proof.catalogFit !== undefined) {
+    // Softer path: the catalogue industry stands in for the two-model match;
+    // the source country is proven exactly as in the v3 path below.
+    const direct = heEngCatalogDirectHypothesis(row, scope);
+    const fit = proof.catalogFit;
+    return version === 3 && scope.countryPolicy === 'source_country' && proof.reason === 'catalog_industry_match' &&
+      !proof.fitReview && !!fit && fit.source === 'pdl' && !!direct && fit.industry === direct.industry &&
+      fit.hypothesisId === direct.hypothesisId && proof.hypothesisId === direct.hypothesisId &&
+      heEngCompanyCountryProofValid(row, proof.countryProof, scope.countries) &&
+      readHeEngSourceCountry({ ...row, _eng_source_country: proof.countryProof })?.country === country;
+  }
   if (version === 3) {
     const review = proof.fitReview;
     if (scope.countryPolicy !== 'source_country' || review?.model !== 'openai/gpt-5-mini' ||
