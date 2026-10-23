@@ -568,10 +568,7 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
             {forecast && forecast.remaining > 0 && (
               <>
                 <div className="text-[11px] font-medium text-gray-400">До какой даты хватит баз</div>
-                <BasesForecastLine
-                  forecast={forecast}
-                  names={Object.fromEntries(bases.map((b) => [b.baseId, b.name]))}
-                />
+                <BasesForecastLine forecast={forecast} />
               </>
             )}
 

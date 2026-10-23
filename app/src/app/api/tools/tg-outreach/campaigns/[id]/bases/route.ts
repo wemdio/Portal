@@ -53,18 +53,23 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
         items.push({ base_id: baseId, stage });
       }
 
-      const { error: delError } = await auth.supabase
-        .from('tg_outreach_campaign_bases')
-        .delete()
-        .eq('campaign_id', id);
-      if (delError) return jsonError(delError.message, 500);
-
+      // Не «удалить всё и вставить»: два быстрых клика по галочкам шлют два PUT
+      // параллельно, оба удаляют и оба вставляют — второй падал на уникальном
+      // ключе (campaign_id, base_id). Upsert + удаление лишних от гонки защищён.
       if (items.length) {
-        const { error: insError } = await auth.supabase
+        const { error: upError } = await auth.supabase
           .from('tg_outreach_campaign_bases')
-          .insert(items.map((item, position) => ({ campaign_id: id, base_id: item.base_id, position, stage: item.stage })));
-        if (insError) return jsonError(insError.message, 500);
+          .upsert(
+            items.map((item, position) => ({ campaign_id: id, base_id: item.base_id, position, stage: item.stage })),
+            { onConflict: 'campaign_id,base_id' },
+          );
+        if (upError) return jsonError(upError.message, 500);
       }
+
+      let delQuery = auth.supabase.from('tg_outreach_campaign_bases').delete().eq('campaign_id', id);
+      if (items.length) delQuery = delQuery.not('base_id', 'in', `(${items.map((i) => i.base_id).join(',')})`);
+      const { error: delError } = await delQuery;
+      if (delError) return jsonError(delError.message, 500);
 
       return NextResponse.json({ ok: true, count: items.length });
     },

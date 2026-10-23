@@ -5772,17 +5772,20 @@ function CampaignBasesTab({
               <div className="min-w-0">
                 <div className="flex items-center gap-2 text-xs font-medium text-gray-800">
                   {linked.has(b.id) && (
-                    <select
-                      value={stageList.indexOf(stageOf[b.id] ?? 0) + 1}
-                      onChange={(e) => { void moveToStage(b.id, Number(e.target.value)); }}
-                      title="Этап рассылки. Базы одного этапа рассылаются параллельно, следующий этап стартует, когда предыдущий выдал все контакты"
-                      aria-label={`Этап рассылки: база ${b.name}`}
-                      className="shrink-0 cursor-pointer rounded-full bg-[#4f46e5] px-1.5 py-0.5 text-[10px] font-semibold text-white outline-none"
-                    >
-                      {Array.from({ length: stageList.length + 1 }, (_, i) => (
-                        <option key={i + 1} value={i + 1}>{i < stageList.length ? `этап ${i + 1}` : `этап ${i + 1} (новый)`}</option>
-                      ))}
-                    </select>
+                    <span className="relative inline-flex shrink-0 items-center">
+                      <select
+                        value={stageList.indexOf(stageOf[b.id] ?? 0) + 1}
+                        onChange={(e) => { void moveToStage(b.id, Number(e.target.value)); }}
+                        title="Этап рассылки. Базы одного этапа рассылаются параллельно, следующий этап стартует, когда предыдущий выдал все контакты"
+                        aria-label={`Этап рассылки: база ${b.name}`}
+                        className="h-5 min-h-0 cursor-pointer appearance-none rounded-full bg-[#4f46e5] py-0 pl-2 pr-5 text-[10px] font-semibold leading-none text-white outline-none"
+                      >
+                        {Array.from({ length: stageList.length + 1 }, (_, i) => (
+                          <option key={i + 1} value={i + 1}>{i < stageList.length ? `этап ${i + 1}` : `этап ${i + 1} (новый)`}</option>
+                        ))}
+                      </select>
+                      <ChevronDown className="pointer-events-none absolute right-1.5 h-3 w-3 text-white/80" />
+                    </span>
                   )}
                   <span className="truncate">{b.name}</span>
                 </div>
