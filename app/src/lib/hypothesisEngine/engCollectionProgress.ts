@@ -8,6 +8,7 @@ const COLLECTION_STEPS = [
   'enrich_descriptions',
   'split_emails',
   'dedup_email',
+  'remove_support_emails',
   'validate_emails',
   'cap_emails_per_company',
   'company_qualification',

@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { getProviderUsageScope, ProviderUsageWriteError } from '@/lib/providerUsage';
 import { logInfo } from '@/lib/loggerServer';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
-import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel, getVeRelevanceModel, veNativeJsonSchema, veCollectionCacheModel, VE_COLLECTION_MODEL, VE_RELEVANCE_MODEL, LLMValidationError, type LLMMessage, type LLMUsage } from './llm';
+import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel, getVeRelevanceModel, veNativeJsonSchema, veCollectionCacheModel, VE_COLLECTION_MODEL, VE_CONFIRM_FLEX_MODEL, VE_CONFIRM_MODEL, LLMValidationError, type LLMMessage, type LLMUsage } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
 import { VeLlmRateLimitError, type VeLlmRateLimit } from './llmRateLimit';
 import { readRelevanceCheckpoint, relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint, type VeRelevanceFailureCode } from './relevanceCheckpoint';
@@ -28,6 +28,26 @@ const BATCH_SIZE = 20;
 const RECOVERY_BATCH_SIZE = 5;
 const SEMANTIC_BATCH_SIZE = 8;
 const MAX_SEMANTIC_ATTEMPTS = 2;
+/** V4.1 answered a 20-company batch within 27 s whenever its host answered at all (22.10.2026). */
+const RELEVANCE_MODEL_TIMEOUT_MS = 40_000;
+/** Flex answered confirmations as fast as the standard tier (p95 22 s, 22.10.2026). */
+const FLEX_CONFIRM_TIMEOUT_MS = 60_000;
+/** A cheaper model that failed three calls in a row is skipped for 15 minutes and
+ * the established model takes its batches: DeepInfra left V4.1 unanswered for an
+ * hour on 22.10.2026. Shared by the worker's jobs; a success clears the count, and
+ * a failure right after the pause starts the next one. */
+const MODEL_PAUSE_AFTER_FAILURES = 3, MODEL_PAUSE_MS = 15 * 60_000;
+const failingModels = new Map<string, { failures: number; until: number }>();
+const modelPaused = (model: string, now = Date.now()) => (failingModels.get(model)?.until ?? 0) > now;
+/** Records one call of a cheaper model; true when this failure starts a pause. */
+function recordModelCall(model: string, ok: boolean, now = Date.now()): boolean {
+  if (ok) { failingModels.delete(model); return false; }
+  const state = failingModels.get(model) ?? { failures: 0, until: 0 };
+  failingModels.set(model, state);
+  if (++state.failures < MODEL_PAUSE_AFTER_FAILURES) return false;
+  state.until = now + MODEL_PAUSE_MS;
+  return true;
+}
 const configuredMax = Number(process.env.VE_RELEVANCE_MAX_ROWS);
 const MAX_COMPANIES = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.min(10_000, Math.floor(configuredMax)) : 3000;
 const MAX_WEBSITES = 32;
@@ -325,6 +345,12 @@ function transientProviderError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return /Requesty (?:408|425|429|500|502|503|504)\b|VE operation timeout|\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN)\b|fetch failed|network error/i.test(error.message);
 }
+/** The established model may take over any failure of a cheaper one except those
+ * it would share: a stop, an exhausted balance, a checkpoint or journal write. */
+function fallbackAllowed(error: unknown): boolean {
+  return !(error instanceof ProviderUsageWriteError || error instanceof VeRelevanceCheckpointError
+    || isVeProviderBillingError(error) || (error instanceof Error && error.name === 'AbortError'));
+}
 export interface VeRelevanceGateResult {
   error?: string; checkpoint: VeRelevanceCheckpoint; decisions: Map<number, VeRelevanceDecision>;
   /** Only known transient provider failures permit the coordinator's bounded retry. */
@@ -369,14 +395,15 @@ export async function findIrrelevantRows(input: {
 }): Promise<VeRelevanceGateResult> {
   const signal = input.signal ?? getVeActiveJobSignal(); signal?.throwIfAborted();
   const audienceScope = readVeAudienceScope(input.audienceScope);
-  // A configured relevance model both classifies and reviews: its own review is
-  // final, without the gpt-5-mini confirmation reserved for VE_COLLECTION_MODEL.
+  // A configured relevance model runs the first pass and the gpt-5-mini
+  // confirmation moves to its flex tier; reviews and admissions keep their rules.
   // Measured only without a frozen audience or geography (23.10.2026): it left
   // geography quotes empty or looped filling them, and enforced every structured
-  // requirement literally (59% vs 92% of admissions kept), so those keep the pair.
+  // requirement literally (59% vs 92% of admissions kept), so those stay as they were.
   const relevanceModel = input.geography || audienceScope ? null : getVeRelevanceModel();
-  const model = relevanceModel ?? getVeModel('gate'), reviewModel = relevanceModel ?? getVeModel('relevanceReview');
-  const cacheModel = veCollectionCacheModel('gate', model), cacheReviewModel = veCollectionCacheModel('relevanceReview', reviewModel);
+  const gateModel = getVeModel('gate'), reviewModel = getVeModel('relevanceReview');
+  const confirmModel = relevanceModel ? VE_CONFIRM_FLEX_MODEL : VE_CONFIRM_MODEL;
+  const cacheModel = veCollectionCacheModel('gate', relevanceModel ?? gateModel), cacheReviewModel = veCollectionCacheModel('relevanceReview', reviewModel);
   // Target-scope rules changed: reuse only decisions made under these rules.
   const contextHash = relevanceHash(['relevance-evidence-v5-single-citation-repair', input.checkpointScope ?? '', cacheModel, cacheReviewModel, input.language,
     input.verticalName, input.verticalSummary ?? '', input.hypothesisTitle ?? '', input.hypothesisDescription ?? '',
@@ -487,6 +514,23 @@ export async function findIrrelevantRows(input: {
       if (!notified && error instanceof LLMValidationError && error.usage) accountUsage(error.usage);
       throw error;
     }
+  };
+  /** The cheaper model unless it is paused; the established one repeats a batch it fails. */
+  const preferring = async <R>(cheaper: string | null, established: string, call: (model: string) => Promise<R>): Promise<R> => {
+    if (cheaper && !modelPaused(cheaper)) {
+      try {
+        const response = await call(cheaper);
+        recordModelCall(cheaper, true);
+        return response;
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (!fallbackAllowed(error)) throw error;
+        const paused = recordModelCall(cheaper, false);
+        input.log?.(`[relevanceGate] ${cheaper} не ответил (${error instanceof Error ? error.message.slice(0, 160) : String(error)}); вместо него ${established}`
+          + (paused ? `; ${cheaper} на паузе ${MODEL_PAUSE_MS / 60_000} минут` : ''));
+      }
+    }
+    return call(established);
   };
   const citationFailure = (entry: Entry) => {
     failure(entry.key, 1, 'invalid_evidence');
@@ -731,16 +775,27 @@ export async function findIrrelevantRows(input: {
       }
       const reviews = batch.map((entry) => checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]]);
       const attemptModel = reviewModel === VE_COLLECTION_MODEL && semanticAttempts(firstReview) > 0
-        ? 'openai/gpt-5-mini' : reviewModel;
+        ? confirmModel : reviewModel;
       reviews.forEach((review) => { review.attempts = semanticAttempts(review) + 1; review.status = 'started'; review.rules = VE_RELEVANCE_RULES_VERSION; });
       // A graceful stop must not strand a reservation before its HTTP request.
       await save(false); // A failed reservation must still prevent the paid request.
-      let notified = false;
+      const askReviewer = async (model: string) => {
+        let notified = false;
+        try {
+          const response = await reviewVeRelevanceEvidence({ scope, language: input.language, hypothesisOrigin: input.hypothesisOrigin, audienceScope, geography: input.geography,
+            companies: reviews.map((review, index) => reviewCompany(review.proposal, batch[index])), model,
+            ...(model === VE_CONFIRM_FLEX_MODEL ? { timeoutMs: FLEX_CONFIRM_TIMEOUT_MS } : {}),
+            signal: signal ?? undefined, onUsage: (usage) => { notified = true; accountUsage(usage); } });
+          if (!notified) accountUsage(response);
+          return response;
+        } catch (error) {
+          if (!notified && error instanceof LLMValidationError && error.usage) accountUsage(error.usage);
+          throw error;
+        }
+      };
       try {
-        const response = await reviewVeRelevanceEvidence({ scope, language: input.language, hypothesisOrigin: input.hypothesisOrigin, audienceScope, geography: input.geography,
-          companies: reviews.map((review, index) => reviewCompany(review.proposal, batch[index])), model: attemptModel,
-          signal: signal ?? undefined, onUsage: (usage) => { notified = true; accountUsage(usage); } });
-        if (!notified) accountUsage(response);
+        const response = attemptModel === VE_CONFIRM_FLEX_MODEL
+          ? await preferring(attemptModel, VE_CONFIRM_MODEL, askReviewer) : await askReviewer(attemptModel);
         signal?.throwIfAborted();
         for (const assessment of response.data.reviews) {
           const review = reviews[assessment.i];
@@ -768,7 +823,6 @@ export async function findIrrelevantRows(input: {
           applySemantic(batch[assessment.i], review);
         }
       } catch (error) {
-        if (!notified && error instanceof LLMValidationError && error.usage) accountUsage(error.usage);
         signal?.throwIfAborted();
         if (error instanceof ProviderUsageWriteError || error instanceof VeRelevanceCheckpointError) throw error;
         if (rateLimited(error)) {
@@ -880,17 +934,18 @@ export async function findIrrelevantRows(input: {
         }
       }
     });
-    // Verified Requesty routes use native schema constraints.
-    // Provider constraints do not replace local completeness/evidence checks.
-    const jsonSchema = veNativeJsonSchema(model, 've_relevance_batch', schema);
     let classified = false;
     try {
       const fields = batch.map((entry, i) => secondPass
         ? { ...entry.fields, description: '', website_text: '', category: '', excerpts: excerpts[i] } : entry.fields);
-      const llm = await invoke(messages(scope, fields, input.language, secondPass, secondPass, input.hypothesisOrigin, audienceScope, input.geography), schema,
-        { model, maxTokens: 5000, requireCompleteJson: true, jsonSchema,
-          ...(model === VE_COLLECTION_MODEL || model === VE_RELEVANCE_MODEL ? { maxHttpAttempts: 2 as const, timeoutMs: 90_000 } : {}),
-          ...(recovering ? { maxSchemaAttempts: 1 as const } : {}), signal: signal ?? undefined });
+      const chat = messages(scope, fields, input.language, secondPass, secondPass, input.hypothesisOrigin, audienceScope, input.geography);
+      // Verified Requesty routes use native schema constraints.
+      // Provider constraints do not replace local completeness/evidence checks.
+      const llm = await preferring(relevanceModel, gateModel, (model) => invoke(chat, schema,
+        { model, maxTokens: 5000, requireCompleteJson: true, jsonSchema: veNativeJsonSchema(model, 've_relevance_batch', schema),
+          ...(model === relevanceModel ? { maxHttpAttempts: 1 as const, timeoutMs: RELEVANCE_MODEL_TIMEOUT_MS }
+            : model === VE_COLLECTION_MODEL ? { maxHttpAttempts: 2 as const, timeoutMs: 90_000 } : {}),
+          ...(recovering ? { maxSchemaAttempts: 1 as const } : {}), signal: signal ?? undefined }));
       signal?.throwIfAborted(); const data = schema.parse(llm.data);
       classified = true;
       consecutiveMalformedCompanies = 0;
