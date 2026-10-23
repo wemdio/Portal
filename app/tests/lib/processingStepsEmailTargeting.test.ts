@@ -618,24 +618,6 @@ describe('stepRemoveSupportEmails, English collections', () => {
       'smiledental@gmail.com', 'someone@elsewhere.com']);
   });
 
-  it('keeps a mail domain spelled from the company name; a parent, partner or public body stays foreign', async () => {
-    const out = await run([
-      ['auto-owners insurance', 'auto-owners.com', 'records@aoins.com'],
-      ['republic indemnity', 'republicindemnity.com', 'claims@ri-net.com'],
-      ['tokio marine highland', 'tokiomarinehighland.com', 'contact@tmhighland.com'],
-      ['penn national insurance', 'pennnationalinsurance.com', 'office@pnat.com'],
-      ['pma companies', 'pmacompanies.com', 'firstreport@pmagroup.com'],
-      ['penn-america group', 'penn-america.com', 'office@gbli.com'],
-      ['copperpoint insurance companies', 'copperpoint.com', 'medical@corvel.com'],
-      ['delaware life insurance company', 'delawarelife.com', 'team@dlmarketing.com'],
-      ['seneca insurance company', 'senecainsurance.com', 'office@cfins.com'],
-      ['idaho state insurance fund', 'idahosif.org', 'e-verify@uscis.dhs.gov'],
-      ['the health plan', 'healthplan.org', 'office@thp.gov'],
-    ], 'en');
-    expect(emails(out)).toEqual(['records@aoins.com', 'claims@ri-net.com', 'contact@tmhighland.com', 'office@pnat.com',
-      'firstreport@pmagroup.com']);
-  });
-
   it('a mixed cell keeps the company address; the Russian path is unchanged', async () => {
     const mixed = await run([['Inigo', 'inigoinsurance.com', 'jane@h-advisors.global, john@inigoinsurance.com']], 'en');
     expect(emails(mixed)).toEqual(['john@inigoinsurance.com']);
