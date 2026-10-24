@@ -62,7 +62,7 @@ export function RowActionsMenu({ items, vertical = false }: { items: RowAction[]
         <div
           role="menu"
           style={{ position: 'fixed', top: pos.top, right: pos.right }}
-          className="z-50 min-w-48 rounded-lg border border-zinc-300 bg-white py-1.5 text-left shadow-xl ring-1 ring-black/10"
+          className="row-actions-menu z-50 min-w-48 rounded-lg border border-zinc-300 bg-white py-1.5 text-left shadow-xl ring-1 ring-black/10"
           onClick={(e) => e.stopPropagation()}
         >
           {items.map((item) => (

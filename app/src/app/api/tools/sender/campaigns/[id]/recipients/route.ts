@@ -4,12 +4,14 @@ import { importRecipients, SenderOpError, type ImportRecipientsResult } from '@/
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { FileParseError, parseMailboxFile } from '@/lib/sender/fileParse';
 import { recipientRowsFromFile, type RecipientInput } from '@/lib/sender/recipientImport';
+import { applyVars, followUpSubject, recipientVars } from '@/lib/sender/template';
+import { pickVariant, variantLabel } from '@/lib/sender/variants';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
-const PAGE_SIZE = 30;
+const PAGE_SIZE = 20;
 
 const STATUS_LABELS: Record<string, string> = {
   active: 'в работе',
@@ -42,7 +44,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
     let query = supabaseAdmin
       .from('sender_recipients')
-      .select('id, email, name, status, last_step_sent, replied_at, updated_at, sender_mailboxes(email)', {
+      .select('id, email, name, vars, status, last_step_sent, replied_at, updated_at, sender_mailboxes(email)', {
         count: 'exact',
       })
       .eq('campaign_id', id)
@@ -55,13 +57,49 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     const { data, error, count } = await query;
     if (error) return jsonError(error.message, 500);
 
+    // Письма цепочки: каждому получателю — ровно тот вариант, который ему уедет
+    // (вариант считается от id, как в планировщике и предпросмотре).
+    const { data: stepRows } = await supabaseAdmin
+      .from('sender_campaign_steps')
+      .select('step_no, variant_no, subject, body')
+      .eq('campaign_id', id)
+      .order('step_no')
+      .order('variant_no');
+    const stepVariants = new Map<number, { subject: string | null; body: string | null }[]>();
+    for (const step of (stepRows ?? []) as { step_no: number; subject: string | null; body: string | null }[]) {
+      const list = stepVariants.get(step.step_no) ?? [];
+      list.push(step);
+      stepVariants.set(step.step_no, list);
+    }
+    const stepNumbers = [...stepVariants.keys()].sort((a, b) => a - b);
+
+    const columns: string[] = [];
     const recipients = (data ?? []).map((row) => {
       const raw = (row as { sender_mailboxes?: unknown }).sender_mailboxes;
       const mailbox = (Array.isArray(raw) ? raw[0] : raw) as { email?: string } | null | undefined;
+      const vars = ((row as { vars?: Record<string, string> | null }).vars ?? {}) as Record<string, string>;
+      for (const key of Object.keys(vars)) if (!columns.includes(key)) columns.push(key);
+      const templateVars = recipientVars({ email: row.email, name: row.name, vars });
+      let firstSubject = '';
+      const letters = stepNumbers.map((stepNo, index) => {
+        const variants = stepVariants.get(stepNo)!;
+        const variant = pickVariant(String(row.id), stepNo, variants.length);
+        const letter = variants[variant - 1];
+        const rendered = applyVars(letter.subject ?? '', templateVars);
+        if (index === 0) firstSubject = rendered;
+        return {
+          step: stepNo,
+          variant: variants.length > 1 ? variantLabel(variant) : null,
+          subject: index === 0 ? rendered : followUpSubject(rendered, firstSubject),
+          body: applyVars(letter.body ?? '', templateVars),
+        };
+      });
       return {
         id: String(row.id),
         email: row.email,
         name: row.name,
+        vars,
+        letters,
         status: row.status,
         statusLabel: STATUS_LABELS[String(row.status)] ?? String(row.status),
         lastStepSent: row.last_step_sent,
@@ -71,7 +109,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       };
     });
 
-    return NextResponse.json({ recipients, total: count ?? 0, pageSize: PAGE_SIZE });
+    return NextResponse.json({ recipients, columns, total: count ?? 0, pageSize: PAGE_SIZE });
   });
 }
 

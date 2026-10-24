@@ -69,6 +69,34 @@ export async function appendRows(
   const endCol = String.fromCharCode('A'.charCodeAt(0) + numCols - 1);
   const targetRange = `${quoted}!A${startRow}:${endCol}${endRow}`;
 
+  // values.update не расширяет сетку листа: если строка за пределами rowCount,
+  // API отвечает «Range exceeds grid limits». Лист «Лиды маркетинг» упёрся в
+  // 1014 строк — достраиваем сетку до нужной длины заранее.
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: 'sheets(properties(sheetId,title,gridProperties(rowCount)))',
+  });
+  const props = (meta.data.sheets ?? []).find(
+    (s) => s.properties?.title === sheetName,
+  )?.properties;
+  const gridRows = props?.gridProperties?.rowCount;
+  if (props?.sheetId != null && gridRows != null && endRow > gridRows) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            appendDimension: {
+              sheetId: props.sheetId,
+              dimension: 'ROWS',
+              length: endRow - gridRows,
+            },
+          },
+        ],
+      },
+    });
+  }
+
   // Логируем в stdout — при разборе неверных вставок сразу видно куда именно
   // пошла запись и какой был detected lastRow.
   console.log(

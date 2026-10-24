@@ -101,7 +101,7 @@ export async function POST(req: NextRequest) {
     await logError('polza_ru_outreach.library.create.failed', error, { table: key }, { userId: auth.user.id });
     return jsonError(error.message, 500);
   }
-  await logAudit('polza_ru_outreach.library.created', `Наш автоаутрич: запись ${key}`, { table: key, id: data?.id }, { userId: auth.user.id });
+  await logAudit('polza_ru_outreach.library.created', `Русский автоаутрич: запись ${key}`, { table: key, id: data?.id }, { userId: auth.user.id });
   return NextResponse.json({ record: data });
 }
 
@@ -121,7 +121,7 @@ export async function PATCH(req: NextRequest) {
     await logError('polza_ru_outreach.library.update.failed', error, { table: key, id: body.id }, { userId: auth.user.id });
     return jsonError(error.message, 500);
   }
-  await logAudit('polza_ru_outreach.library.updated', `Наш автоаутрич: правка ${key}`, { table: key, id: body.id, patch }, { userId: auth.user.id });
+  await logAudit('polza_ru_outreach.library.updated', `Русский автоаутрич: правка ${key}`, { table: key, id: body.id, patch }, { userId: auth.user.id });
   return NextResponse.json({ record: data });
 }
 
@@ -133,6 +133,6 @@ export async function DELETE(req: NextRequest) {
   if (!key || !id) return jsonError('Нужны table и id', 400);
   const { error } = await auth.supabase.from(TABLES[key].table).delete().eq('id', id);
   if (error) return jsonError(error.message, 500);
-  await logAudit('polza_ru_outreach.library.deleted', `Наш автоаутрич: удаление ${key}`, { table: key, id }, { userId: auth.user.id });
+  await logAudit('polza_ru_outreach.library.deleted', `Русский автоаутрич: удаление ${key}`, { table: key, id }, { userId: auth.user.id });
   return NextResponse.json({ ok: true });
 }

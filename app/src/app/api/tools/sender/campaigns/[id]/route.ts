@@ -17,6 +17,7 @@ import { fillPoolFromFolder } from '@/lib/sender/folders';
 import { syncSenderCampaignStopList } from '@/lib/sender/stopLists';
 import { describeSavedRecipients, mergeVariableStats } from '@/lib/sender/recipientImport';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { loadCampaignTagIds, saveCampaignTags } from '@/lib/sender/campaignTags';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -29,6 +30,8 @@ interface PatchBody {
   /** Правка настроек: приезжает вместо action. */
   name?: string;
   mailboxIds?: string[];
+  /** Теги ящиков, привязанные к кампании целиком. Нет поля — привязку не трогаем. */
+  tagIds?: string[];
   steps?: CampaignStepInput[];
   timezone?: string;
   sendHourFrom?: number;
@@ -72,7 +75,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           .order('variant_no'),
         supabaseAdmin
           .from('sender_campaign_mailboxes')
-          .select('mailbox_id, sender_mailboxes(id, email)')
+          .select('mailbox_id, sender_mailboxes(id, email, tag_id)')
           .eq('campaign_id', id),
         supabaseAdmin
           .from('sender_recipients')
@@ -127,9 +130,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       const raw = (row as { sender_mailboxes?: unknown }).sender_mailboxes;
       const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
       return list
-        .map((m) => m as { id?: string; email?: string })
-        .filter((m): m is { id: string; email: string } => Boolean(m.id && m.email))
-        .map((m) => ({ id: String(m.id), email: String(m.email) }));
+        .map((m) => m as { id?: string; email?: string; tag_id?: string | null })
+        .filter((m): m is { id: string; email: string; tag_id?: string | null } => Boolean(m.id && m.email))
+        .map((m) => ({ id: String(m.id), email: String(m.email), tagId: m.tag_id ? String(m.tag_id) : null }));
     });
 
     const rows = (sample ?? []) as { email: string; name: string | null; vars: Record<string, string> }[];
@@ -162,6 +165,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       campaign,
       steps: steps ?? [],
       mailboxes,
+      tagIds: await loadCampaignTagIds(id),
       repliesByStep,
       variantStats,
       recipients: {
@@ -269,6 +273,8 @@ async function updateSettings(id: string, body: PatchBody) {
   if (poolError) return jsonError(poolError.message, 500);
 
   await replaceSteps(id, steps);
+  // Привязка к тегам целиком: без поля в теле не трогаем (кампанию правят и не из формы).
+  if (Array.isArray(body.tagIds)) await saveCampaignTags(id, body.tagIds.map(String));
 
   // Лид закреплён за ящиком на всю переписку. Если ящик убрали из пула, те,
   // кому ещё не писали, зависли бы навсегда: планировщик ждёт именно «свой»

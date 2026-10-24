@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError, fetchOwnerNames } from '@/lib/liOutreach/apiHelpers';
+import { logCampaignEvent } from '@/lib/liOutreach/campaignLog';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -52,6 +53,9 @@ export async function POST(req: NextRequest) {
       .select()
       .single();
     if (error) return jsonError(error.message, 500);
+    if (data?.campaign_id) {
+      await logCampaignEvent(supabaseAdmin!, data.campaign_id as string, 'info', `Создана база «${data.name}»`, auth.user.email ?? null);
+    }
     return NextResponse.json({ lead_list: data });
   });
 }

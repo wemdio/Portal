@@ -25,7 +25,6 @@ import {
   fetchCampaigns,
   fetchSenderStats,
   type CampaignDto,
-  type SenderStatCounters,
   type SenderStatsDto,
   type SenderStatsPeriod,
   type SenderStatsSource,
@@ -417,125 +416,6 @@ function Steps({ steps }: { steps: SenderStatsDto['steps'] }) {
   );
 }
 
-// ─── Разрезы: кампании / домены / ящики ─────────────────────────────────────
-
-// Домены — отдельной таблицей с репутацией (DomainDeliverability).
-type Breakdown = 'campaigns' | 'mailboxes';
-type SortKey = 'sent' | 'reached' | 'replyRate' | 'leads' | 'bounceRate';
-
-type TableRow = SenderStatCounters & { key: string; name: string; note?: string; sent: number };
-
-const COLUMNS: { key: SortKey; label: string }[] = [
-  { key: 'sent', label: 'Писем' },
-  { key: 'reached', label: 'Получателей' },
-  { key: 'replyRate', label: 'Ответили' },
-  { key: 'leads', label: 'Лиды' },
-  { key: 'bounceRate', label: 'Отбои' },
-];
-
-function sortValue(row: TableRow, key: SortKey): number {
-  if (key === 'replyRate') return rate(row.replied, row.reached) ?? -1;
-  if (key === 'bounceRate') return rate(row.bounced, row.reached) ?? -1;
-  return row[key];
-}
-
-function BreakdownTable({ data }: { data: SenderStatsDto }) {
-  const [view, setView] = useState<Breakdown>('campaigns');
-  const [sort, setSort] = useState<SortKey>('sent');
-
-  const rows: TableRow[] = useMemo(() => {
-    const base: TableRow[] = view === 'campaigns'
-      ? data.campaigns.map((c) => ({
-        ...c, key: c.id, name: c.name, note: c.status === 'running' ? undefined : c.status === 'paused' ? 'на паузе' : c.status === 'done' ? 'завершена' : 'черновик',
-      }))
-      : data.mailboxList.map((m) => ({
-        ...m, key: m.id, name: m.email, note: !m.enabled ? 'выключен' : m.status === 'failed' ? 'ошибка входа' : undefined,
-      }));
-    return [...base].sort((a, b) => sortValue(b, sort) - sortValue(a, sort));
-  }, [data, view, sort]);
-
-  const tabs: { id: Breakdown; label: string }[] = [
-    { id: 'campaigns', label: `Кампании (${data.campaigns.length})` },
-    { id: 'mailboxes', label: `Ящики (${data.mailboxList.length})` },
-  ];
-
-  return (
-    <div className="rounded-xl border border-zinc-200 bg-white">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 px-5 py-3">
-        <h3 className="text-sm font-semibold text-zinc-900">Где работает, а где нет</h3>
-        <div className="inline-flex gap-1 rounded-lg border border-zinc-200 bg-zinc-50 p-0.5">
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => setView(t.id)}
-              className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
-                view === t.id ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100'
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
-      </div>
-      {rows.length === 0 ? (
-        <p className="px-5 py-10 text-center text-sm text-zinc-400">За этот период писем не отправлялось.</p>
-      ) : (
-        <div className="max-h-[480px] overflow-auto">
-          <table className="w-full text-sm">
-            <thead className="sticky top-0 bg-white text-left text-xs uppercase text-zinc-500">
-              <tr className="border-b border-zinc-200">
-                <th className="px-5 py-2 font-medium">
-                  {view === 'campaigns' ? 'Кампания' : 'Ящик'}
-                </th>
-                {COLUMNS.map((col) => (
-                  <th key={col.key} className="px-3 py-2 text-right font-medium">
-                    <button
-                      type="button"
-                      onClick={() => setSort(col.key)}
-                      className={`uppercase hover:text-zinc-800 ${sort === col.key ? 'text-blue-600' : ''}`}
-                      title="Сортировать по убыванию"
-                    >
-                      {col.label}{sort === col.key ? ' ↓' : ''}
-                    </button>
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => {
-                const reply = rate(row.replied, row.reached);
-                const bounce = rate(row.bounced, row.reached);
-                const tone = bounceTone(bounce);
-                return (
-                  <tr key={row.key} className="border-b border-zinc-100 last:border-0">
-                    <td className="px-5 py-2">
-                      <span className="font-medium text-zinc-900">{row.name}</span>
-                      {row.note ? <span className="ml-2 text-xs text-zinc-400">{row.note}</span> : null}
-                    </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-zinc-600">{nf(row.sent)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-zinc-600">{nf(row.reached)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">
-                      <span className="text-emerald-700">{formatRate(reply)}</span>
-                      <span className="ml-1 text-xs text-zinc-400">{row.replied ? `(${nf(row.replied)})` : ''}</span>
-                    </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{nf(row.leads)}</td>
-                    <td className={`px-3 py-2 text-right tabular-nums ${
-                      tone === 'bad' ? 'font-medium text-red-600' : tone === 'warn' ? 'text-amber-600' : 'text-zinc-600'
-                    }`}>
-                      {formatRate(bounce)}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ─── Вкладка ────────────────────────────────────────────────────────────────
 
 /** initialCampaignId — кампания, из строки которой нажали «Статистика». */
@@ -711,7 +591,6 @@ export function StatsTab({ initialCampaignId = null }: { initialCampaignId?: str
             period={period} campaignId={campaignId} source={source} reloadKey={reloadKey}
           />
 
-          <BreakdownTable data={data} />
         </div>
       )}
     </div>

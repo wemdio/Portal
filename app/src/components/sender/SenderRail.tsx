@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { useHeaderBottom } from '@/components/useHeaderBottom';
+import type { ReactNode } from 'react';
 import type { Route } from 'next';
 import { useRouter } from 'next/navigation';
 import { Ban, BarChart3, Inbox, Mail, Network, Send, ShieldCheck, type LucideIcon } from 'lucide-react';
@@ -30,21 +31,7 @@ export type SenderTabId = 'campaigns' | 'mailboxes' | 'threads' | 'stats' | 'see
 export function SenderRail({ active, onSelect }: { active: SenderTabId; onSelect: (tab: SenderTabId) => void }) {
   // Колонка прижата к левому краю окна на всю высоту: верх — сразу под шапкой
   // портала, высоту шапки берём из страницы.
-  const [railTop, setRailTop] = useState(56);
-  useEffect(() => {
-    const measure = () => {
-      const header = document.querySelector('header');
-      const bottom = header ? Math.round(header.getBoundingClientRect().bottom) : 56;
-      setRailTop(Math.max(0, bottom));
-    };
-    measure();
-    window.addEventListener('resize', measure);
-    window.addEventListener('scroll', measure, { passive: true });
-    return () => {
-      window.removeEventListener('resize', measure);
-      window.removeEventListener('scroll', measure);
-    };
-  }, []);
+  const railTop = useHeaderBottom();
 
   return (
     <>

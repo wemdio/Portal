@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
 import { extractPublicIdentifier, resolveLeadCsvColumns } from '@/lib/liOutreach/leadHelpers';
+import { logCampaignEvent } from '@/lib/liOutreach/campaignLog';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -219,6 +221,16 @@ export async function POST(req: NextRequest) {
       imported += batch.length;
     }
 
+    if (listId && supabaseAdmin) {
+      const { data: list } = await supabaseAdmin.from('li_lead_lists').select('name, campaign_id').eq('id', listId).maybeSingle();
+      await logCampaignEvent(
+        supabaseAdmin,
+        (list?.campaign_id as string | null) ?? null,
+        'info',
+        `CSV загружен в базу «${list?.name}»: добавлено ${imported}, пропущено ${(result as { skipped?: number }).skipped ?? 0}`,
+        auth.user.email ?? null,
+      );
+    }
     return NextResponse.json({ imported, ...result });
   });
 }

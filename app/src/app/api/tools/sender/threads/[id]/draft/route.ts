@@ -33,17 +33,23 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   });
 }
 
-/** POST { language } — сгенерировать персонализированный ответ. */
+/**
+ * POST { language, toEmail?, ccEmails? } — сгенерировать персонализированный
+ * ответ: лиду в переписку (с копией) или новому контакту из его ответа.
+ */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'tools.sender.threads.draft.generate' }, async () => {
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return jsonError('Сервис не настроен', 503);
     const { id } = await params;
-    const body = (await req.json().catch(() => null)) as { language?: unknown } | null;
+    const body = (await req.json().catch(() => null)) as { language?: unknown; toEmail?: unknown; ccEmails?: unknown } | null;
     const language = parseLanguage(body?.language) ?? 'ru';
     try {
-      const draft = await generateSenderDraft(supabaseAdmin, id, auth.user.id, language);
+      const draft = await generateSenderDraft(supabaseAdmin, id, auth.user.id, language, {
+        toEmail: body?.toEmail,
+        ccEmails: body?.ccEmails,
+      });
       return NextResponse.json({ draft });
     } catch (err) {
       return fail(err);
