@@ -1732,7 +1732,7 @@ export default function LiOutreachPage() {
                       <th className="w-[20%] py-2 pl-6 pr-3 text-left font-medium">Источник</th>
                       <th className="w-[13%] px-3 py-2 text-left font-medium">Аккаунт</th>
                       
-                      <th className="w-[8%] px-3 py-2 text-right font-medium">Лимит</th>
+                      <th className="w-[8%] px-3 py-2 text-right font-medium">Кол-во контактов</th>
                       <th className="w-[10%] px-3 py-2 text-right font-medium">Создана</th>
                       <th className="w-[96px] px-3 py-2" />
                     </tr>
