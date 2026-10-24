@@ -11,6 +11,7 @@ const RANGES: Record<string, number> = {
   '6h': 6 * 60 * 60 * 1000,
   '24h': 24 * 60 * 60 * 1000,
   '7d': 7 * 24 * 60 * 60 * 1000,
+  '30d': 30 * 24 * 60 * 60 * 1000,
 };
 
 // Cap for JSON payload sanity (~1 MB at ~200 bytes/row). Larger windows than
@@ -162,9 +163,22 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         campaign: { name: campaignNameById.get(row.campaign_id) ?? 'Unknown' },
       }));
 
+      // Точные числа ошибок и предупреждений за период — не зависят от лимита строк.
+      const countLevel = async (level: string) => {
+        const { count } = await supabaseAdmin!
+          .from('li_campaign_logs')
+          .select('id', { count: 'exact', head: true })
+          .eq('account_id', accountId)
+          .eq('level', level)
+          .gte('created_at', sinceIso);
+        return count ?? 0;
+      };
+      const [errorTotal, warningTotal] = await Promise.all([countLevel('error'), countLevel('warning')]);
+
       return NextResponse.json({
         range: rangeKey,
         since: sinceIso,
+        counts: { error: errorTotal, warning: warningTotal },
         truncated,
         account: { id: account.id, name: accountLabel },
         items: enriched,

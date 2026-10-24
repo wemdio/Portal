@@ -1873,6 +1873,7 @@ export default function LiOutreachPage() {
         <AccountLogsModal
           account={accountLogsModal}
           onClose={() => setAccountLogsModal(null)}
+          onUpdated={() => void loadAccounts()}
         />
       )}
     </div>
@@ -2069,8 +2070,40 @@ type AccountLogItem = {
   campaign?: { name: string } | null;
 };
 
-function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: () => void }) {
-  const [range, setRange] = useState<'24h' | '7d'>('24h');
+function AccountLogsModal({ account, onClose, onUpdated }: { account: LiAccount; onClose: () => void; onUpdated: () => void }) {
+  const [range, setRange] = useState<'24h' | '7d' | '30d'>('24h');
+  const [counts, setCounts] = useState<{ error: number; warning: number } | null>(null);
+  const [proxyUrl, setProxyUrl] = useState(account.proxy_url ?? '');
+  const [proxyDraft, setProxyDraft] = useState(account.proxy_url ?? '');
+  const [editingProxy, setEditingProxy] = useState(false);
+  const [savingProxy, setSavingProxy] = useState(false);
+  const [proxyMsg, setProxyMsg] = useState<string | null>(null);
+
+  // Показываем адрес и порт; логин и пароль прокси на экран не выводим.
+  const proxyShown = (() => {
+    const raw = proxyUrl.trim();
+    if (!raw) return null;
+    const noScheme = raw.replace(/^[a-z]+:\/\//i, '');
+    if (noScheme.includes('@')) return noScheme.split('@').pop() ?? noScheme;
+    const [host, port] = noScheme.split(':');
+    return port ? `${host}:${port}` : host;
+  })();
+
+  const saveProxy = async () => {
+    setSavingProxy(true);
+    setProxyMsg(null);
+    try {
+      await api(`/accounts/${account.id}`, { method: 'PATCH', json: { proxy_url: proxyDraft.trim() || null } });
+      setProxyUrl(proxyDraft.trim());
+      setEditingProxy(false);
+      setProxyMsg('Сохранено');
+      onUpdated();
+    } catch (e) {
+      setProxyMsg(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSavingProxy(false);
+    }
+  };
   const [logs, setLogs] = useState<AccountLogItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -2082,10 +2115,11 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
     setLoading(true);
     setError(null);
     try {
-      const d = await api<{ items: AccountLogItem[]; truncated: boolean }>(
+      const d = await api<{ items: AccountLogItem[]; truncated: boolean; counts?: { error: number; warning: number } }>(
         `/accounts/${account.id}/logs?range=${range}`,
       );
       setLogs(d.items ?? []);
+      setCounts(d.counts ?? null);
       setTruncated(Boolean(d.truncated));
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось загрузить логи');
@@ -2109,7 +2143,7 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
   }, [logs]);
 
   const exportTxt = useCallback(
-    async (r: '24h' | '7d') => {
+    async (r: '24h' | '7d' | '30d') => {
       setExportingRange(r);
       try {
         const res = await authFetch(`/api/tools/li-outreach/accounts/${account.id}/logs?range=${r}&format=txt`);
@@ -2152,8 +2186,8 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
     }
   };
 
-  const errorCount = logs.filter((l) => l.level === 'error').length;
-  const warningCount = logs.filter((l) => l.level === 'warning').length;
+  const errorCount = counts?.error ?? logs.filter((l) => l.level === 'error').length;
+  const warningCount = counts?.warning ?? logs.filter((l) => l.level === 'warning').length;
   const cooling = isAccountInCooldown(account);
 
   return (
@@ -2187,6 +2221,31 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
                 </span>
               )}
             </div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+              <span>Прокси:</span>
+              {editingProxy ? (
+                <>
+                  <input
+                    type="text"
+                    autoFocus
+                    placeholder="ip:port:user:pass"
+                    value={proxyDraft}
+                    onChange={(e) => { setProxyDraft(e.target.value); setProxyMsg(null); }}
+                    className="w-64 rounded-lg border border-gray-200 px-2 py-1 font-mono text-xs"
+                  />
+                  <button type="button" onClick={() => void saveProxy()} disabled={savingProxy || proxyDraft.trim() === proxyUrl.trim()} className="cursor-pointer rounded-lg bg-blue-600 px-2.5 py-1 text-xs font-medium text-white disabled:opacity-40">{savingProxy ? '...' : 'Сохранить'}</button>
+                  <button type="button" onClick={() => { setEditingProxy(false); setProxyDraft(proxyUrl); setProxyMsg(null); }} className="cursor-pointer px-1 text-xs text-gray-500 hover:underline">Отмена</button>
+                </>
+              ) : (
+                <>
+                  <span className={proxyShown ? 'font-mono text-gray-700' : 'text-gray-400'}>{proxyShown ?? 'не указан'}</span>
+                  <button type="button" onClick={() => { setProxyDraft(proxyUrl); setEditingProxy(true); }} aria-label="Заменить прокси" title="Заменить прокси" className="li-icon-btn cursor-pointer rounded-lg p-1">
+                    <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                </>
+              )}
+              {proxyMsg && <span className={proxyMsg.startsWith('Ошибка') ? 'text-red-600' : 'text-green-600'}>{proxyMsg}</span>}
+            </div>
           </div>
           <button
             type="button"
@@ -2201,8 +2260,8 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
         <div className="px-5 py-3 border-b border-gray-100 flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-gray-500 mr-1">Период:</span>
-            {(['24h', '7d'] as const).map((r) => {
-              const labels: Record<typeof r, string> = { '24h': '24ч', '7d': '7д' };
+            {(['24h', '7d', '30d'] as const).map((r) => {
+              const labels: Record<typeof r, string> = { '24h': '24ч', '7d': '7д', '30d': '30д' };
               const active = range === r;
               return (
                 <button
@@ -2224,12 +2283,8 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
             {loading ? '…' : (
               <>
                 Всего строк: <span className="font-semibold text-gray-700">{logs.length}</span>
-                {errorCount > 0 && (
-                  <> · <span className="text-rose-600 font-semibold">{errorCount} ошибок</span></>
-                )}
-                {warningCount > 0 && (
-                  <> · <span className="text-amber-600 font-semibold">{warningCount} предупреждений</span></>
-                )}
+                {' · '}<span className={`font-semibold ${errorCount > 0 ? 'text-rose-600' : 'text-gray-500'}`}>Ошибок: {errorCount}</span>
+                {' · '}<span className={`font-semibold ${warningCount > 0 ? 'text-amber-600' : 'text-gray-500'}`}>Предупреждений: {warningCount}</span>
                 {truncated && (
                   <> · <span className="text-gray-400">(показано не всё — обрезано лимитом)</span></>
                 )}
@@ -2238,8 +2293,8 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
           </div>
           <div className="ml-auto flex items-center gap-1.5">
             <span className="text-xs text-gray-500 mr-1">.txt:</span>
-            {(['24h', '7d'] as const).map((r) => {
-              const labels: Record<typeof r, string> = { '24h': '24ч', '7d': '7д' };
+            {(['24h', '7d', '30d'] as const).map((r) => {
+              const labels: Record<typeof r, string> = { '24h': '24ч', '7d': '7д', '30d': '30д' };
               const busy = exportingRange === r;
               return (
                 <button
