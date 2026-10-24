@@ -208,6 +208,53 @@ function CampaignPicker({
   );
 }
 
+export function LiPeriodPicker({
+  period,
+  onChange,
+}: {
+  period: LiDashPeriod;
+  onChange: (next: LiDashPeriod) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <div className="li-period inline-flex gap-0.5 rounded-lg border p-0.5 text-sm" role="group" aria-label="Период">
+        {PERIOD_OPTIONS.map((option) => (
+          <button
+            key={option.mode}
+            type="button"
+            aria-pressed={period.mode === option.mode}
+            onClick={() => onChange({ ...period, mode: option.mode })}
+            className={`li-period-btn cursor-pointer rounded-md px-3 py-1 font-medium ${period.mode === option.mode ? 'li-period-btn-on' : ''}`}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+      {period.mode === 'custom' && (
+        <div className="flex items-center gap-1.5 text-sm">
+          <input
+            type="date"
+            aria-label="С"
+            value={period.from}
+            max={period.to || undefined}
+            onChange={(e) => onChange({ ...period, from: e.target.value })}
+            className="li-filter rounded-lg border px-2 py-1"
+          />
+          <span className="text-gray-400">—</span>
+          <input
+            type="date"
+            aria-label="По"
+            value={period.to}
+            min={period.from || undefined}
+            onChange={(e) => onChange({ ...period, to: e.target.value })}
+            className="li-filter rounded-lg border px-2 py-1"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function LiDashboard({
   data,
   period,
@@ -263,42 +310,7 @@ export default function LiDashboard({
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <CampaignPicker campaigns={data.campaign_stats} value={campaignId} onChange={setCampaignId} />
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="li-period inline-flex gap-0.5 rounded-lg border p-0.5 text-sm" role="group" aria-label="Период">
-            {PERIOD_OPTIONS.map((option) => (
-              <button
-                key={option.mode}
-                type="button"
-                aria-pressed={period.mode === option.mode}
-                onClick={() => onPeriodChange({ ...period, mode: option.mode })}
-                className={`li-period-btn cursor-pointer rounded-md px-3 py-1 font-medium ${period.mode === option.mode ? 'li-period-btn-on' : ''}`}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-          {period.mode === 'custom' && (
-            <div className="flex items-center gap-1.5 text-sm">
-              <input
-                type="date"
-                aria-label="С"
-                value={period.from}
-                max={period.to || undefined}
-                onChange={(e) => onPeriodChange({ ...period, from: e.target.value })}
-                className="li-filter rounded-lg border px-2 py-1"
-              />
-              <span className="text-gray-400">—</span>
-              <input
-                type="date"
-                aria-label="По"
-                value={period.to}
-                min={period.from || undefined}
-                onChange={(e) => onPeriodChange({ ...period, to: e.target.value })}
-                className="li-filter rounded-lg border px-2 py-1"
-              />
-            </div>
-          )}
-        </div>
+        <LiPeriodPicker period={period} onChange={onPeriodChange} />
         <h2 className="ml-auto text-sm font-semibold text-gray-900">
           Статистика{selected ? ` — ${selected.name}` : ''} <span className="font-normal text-gray-400">{periodLabel(period, data)}</span>
         </h2>

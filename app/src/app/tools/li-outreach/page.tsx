@@ -1250,6 +1250,8 @@ export default function LiOutreachPage() {
                 <CampaignSummary
                   stats={dashData?.campaign_stats.find((x) => x.id === editingCampaignId)}
                   periodText={dashData?.period ? `за ${dashData.period.days} дн.` : 'за 30 дней'}
+                  period={dashPeriod}
+                  onPeriodChange={(next) => { setDashPeriod(next); if (next.mode !== 'custom' || (next.from && next.to)) void loadDashboard(next); }}
                   accounts={(editingCampaign?.account_ids ?? [])
                     .map((id) => accounts.find((a) => a.id === id))
                     .filter((a): a is NonNullable<typeof a> => !!a)
