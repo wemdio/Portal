@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 
-import { Download, Eye, EyeOff, Plus, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronUp, Download, Eye, EyeOff, Plus, Trash2 } from 'lucide-react';
 
 import { RowActionsMenu } from '@/components/sender/RowActionsMenu';
 
@@ -24,6 +24,8 @@ export interface LiBase {
   owner_name?: string | null;
   leads_count?: number;
   has_custom_invites?: boolean;
+  /** Место в очереди кампании (1 = первая). */
+  queue_position?: number | null;
 }
 
 interface BaseLead {
@@ -138,6 +140,23 @@ export default function CampaignBases({
 
   const button = 'cursor-pointer rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50';
 
+  // Очередь: по номеру, у баз без номера — по порядку в списке.
+  const ordered = [...bases].sort((a, b) => (a.queue_position ?? Number.MAX_SAFE_INTEGER) - (b.queue_position ?? Number.MAX_SAFE_INTEGER));
+
+  /** Сдвинуть базу в очереди: номера пересобираются по новому порядку, пишем только изменившиеся. */
+  const move = (baseId: string, dir: -1 | 1) =>
+    run(`move:${baseId}`, async () => {
+      const from = ordered.findIndex((b) => b.id === baseId);
+      const to = from + dir;
+      if (from < 0 || to < 0 || to >= ordered.length) return;
+      const next = [...ordered];
+      [next[from], next[to]] = [next[to], next[from]];
+      await Promise.all(
+        next.map((b, i) => (b.queue_position === i + 1 ? null : call(`/lead-lists/${b.id}`, 'PUT', { queue_position: i + 1 }))),
+      );
+      await onChanged();
+    });
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -156,11 +175,12 @@ export default function CampaignBases({
         </div>
       ) : (
         <div className="space-y-3">
-          {bases.map((base) => {
+          {ordered.map((base, index) => {
             const active = base.id === activeListId;
             return (
               <div key={base.id} id={`li-base-${base.id}`} className={`rounded-xl border bg-white p-4 ${active ? 'border-green-300' : 'border-gray-200'}`}>
                 <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded-md bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-gray-600" title="Место в очереди кампании">{index + 1}</span>
                   <div className="min-w-0 truncate text-sm font-semibold text-gray-900">{base.name}</div>
                   {active && <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">рассылается</span>}
                   {base.has_custom_invites && <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">✎ персональные инвайты</span>}
@@ -170,6 +190,16 @@ export default function CampaignBases({
                       <button type="button" disabled={busy !== null} onClick={() => void run(`active:${base.id}`, async () => { await makeActive(base.id); await onChanged(); })} className={button} title="Кампания будет рассылать эту базу. Люди из неё попадут в рассылку в течение ~5 минут, перезапуск не нужен.">
                         Рассылать эту базу
                       </button>
+                    )}
+                    {ordered.length > 1 && (
+                      <>
+                        <button type="button" disabled={busy !== null || index === 0} onClick={() => void move(base.id, -1)} aria-label="Выше в очереди" title="Выше в очереди" className="row-actions-btn cursor-pointer rounded-md p-1.5 disabled:cursor-not-allowed disabled:opacity-30">
+                          <ChevronUp className="h-4 w-4" />
+                        </button>
+                        <button type="button" disabled={busy !== null || index === ordered.length - 1} onClick={() => void move(base.id, 1)} aria-label="Ниже в очереди" title="Ниже в очереди" className="row-actions-btn cursor-pointer rounded-md p-1.5 disabled:cursor-not-allowed disabled:opacity-30">
+                          <ChevronDown className="h-4 w-4" />
+                        </button>
+                      </>
                     )}
                     <button
                       type="button"
