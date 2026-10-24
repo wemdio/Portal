@@ -21,6 +21,10 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     if ('description' in body) patch.description = body.description;
     // Перенос базы в другую кампанию (null — открепить).
     if ('campaign_id' in body) patch.campaign_id = body.campaign_id || null;
+    // Порядок в очереди кампании: задаётся стрелками на вкладке «Базы».
+    if (typeof (body as { queue_position?: unknown }).queue_position === 'number') {
+      patch.queue_position = (body as { queue_position: number }).queue_position;
+    }
     const { error } = await supabaseAdmin.from('li_lead_lists').update(patch).eq('id', id);
     if (error) return jsonError(error.message, 500);
     return NextResponse.json({ ok: true });
