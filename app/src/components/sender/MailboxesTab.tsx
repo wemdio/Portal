@@ -421,7 +421,7 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
             курсора. Высота у обоих вариантов одна. Действия те же, что в
             строке, но на всю выборку. */}
         {selected.size > 0 ? (
-          <div className="flex min-h-12 flex-wrap items-center gap-2 rounded-t-xl border-b border-zinc-200 bg-blue-50/60 px-5 py-2 text-sm">
+          <div className="sender-bulk-bar sticky top-0 z-20 flex min-h-12 flex-wrap items-center gap-2 rounded-t-xl border-b border-zinc-200 bg-blue-50/60 px-5 py-2 text-sm">
             <span className="font-medium text-zinc-900">Выбрано: {selected.size}</span>
             <button
               type="button"

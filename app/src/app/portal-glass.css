@@ -70,6 +70,28 @@ html body :is(.sender-glass, .portal-glass) [role='menu'] {
   backdrop-filter: none;
 }
 
+/* Меню «⋯» строки уходит порталом прямо в body — вне .sender-glass, поэтому
+   правило для [role='menu'] выше его не ловит и стекло темы делало меню
+   полупрозрачным. Плотный фон задаём без привязки к обёртке. */
+html body > .row-actions-menu {
+  background-color: #ffffff !important;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+html[data-portal-theme='dark'] body > .row-actions-menu {
+  background-color: #1c1e26 !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+/* Панель массовых действий над ящиками липнет к шапке при прокрутке: заливка
+   сплошная, иначе строки таблицы просвечивали бы под ней. */
+html body :is(.sender-glass, .portal-glass) .sender-bulk-bar {
+  background-color: #e8f0fd !important;
+}
+html[data-portal-theme='dark'] body :is(.sender-glass, .portal-glass) .sender-bulk-bar {
+  background-color: #1d2a4a !important;
+}
+
 /* Подсказки графиков (ECharts) берут фон с карточки под графиком, а она под
    стеклом полупрозрачная — подсказка просвечивала. Плотный цвет поверхности
    для них — переменная --chart-surface (components/charts/theme.ts). */
