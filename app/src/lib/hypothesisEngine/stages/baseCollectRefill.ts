@@ -242,6 +242,7 @@ import { InstantlyApiError, isInstantlyContactCapacityError } from '@/lib/instan
 import { probeLeadPresence } from '@/lib/instantly/leadPresenceProbe';
 import { resolveClientInstantlyRequestOptions } from '@/lib/instantly/clientAccountOptions';
 import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
+import { filterBlockedContacts, getBlockedContactSnapshot } from '@/lib/clientBlocklist/blockedDomains';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import {
   HE_MAX_EMAILS_PER_COMPANY_DEFAULT,
@@ -252,6 +253,7 @@ import {
   findCompanyKeyColumns,
   heLaunchCompanyKey,
   heLaunchEmailVerdict,
+  heLaunchEmailStrength,
   mapBaseRowsToLeads,
   parseLaunchInfo,
   selectLeadsWithinLaunchCap,
@@ -313,6 +315,28 @@ import {
 // Чужая компания в письмах кампании (только us; правило языка — letterBrandGuard) — та же
 // проверка, что у запуска (launchTemplate.ts, шаг 4b″).
 import { describeHeBrandLeaks, heBrandNeedsOwner, heTemplateBrandLeaks, readHeBrandEngClient } from '../letterBrandGuard';
+import { readHeEngEmailPolicy } from '../engEmailPolicy';
+import {
+  ensureHeEngRefillReserve,
+  HE_ENG_RESERVE_KEY_PATTERN,
+  HE_ENG_RESERVE_KEY_PREFIX,
+  heEngReserveAvailableRows,
+  heEngReserveEmail,
+  isHeEngReserveKey,
+  planHeEngReserveDispatch,
+  planHeEngReserveSettlement,
+  recoverHeEngTerminalReserveClaims,
+  type HeEngReserveRow,
+  type HeEngReserveSettlement,
+} from '../engCollectionReserve';
+import {
+  HE_ENG_COMPANY_QUALIFICATION_REQUIRED,
+  heEngCompanyQualified,
+  heEngLaunchQualified,
+  heEngScopeWithinCurrentCountries,
+  readHeEngQualificationScope,
+  type HeEngQualificationScope,
+} from '../engCompanyQualificationPolicy';
 import type { HeMarket } from '../market';
 import type { HeChainLetter, HeJob, HeOperatorMapping } from '../types';
 import { addUsage, stageLog, type HeStageContext, type HeStageResult, type HeUsage } from './shared';
@@ -503,6 +527,20 @@ export async function resolveHeRefillCollectCompanies(
     market: HeMarket;
   },
 ): Promise<HeRefillCollectSizing> {
+  let hasPreparedReserve = false;
+  if (input.market === 'us') {
+    hasPreparedReserve = await ensureHeEngRefillReserve(ctx, {
+      projectId: input.projectId, verticalId: input.verticalId,
+      oldestPreparedAt: new Date(Date.now() - HE_REFILL_CARRYOVER_MAX_AGE_DAYS * DAY_MS).toISOString(),
+      keyOf: heRefillCarryKeyFn,
+      expiry: (rows, preparedAtMs) => heRefillCarryExpiry(rows as HeRefillCarryRow[], preparedAtMs),
+    });
+    if (hasPreparedReserve) {
+      await recoverHeEngTerminalReserveClaims(ctx, {
+        projectId: input.projectId, verticalId: input.verticalId, currentBaseId: input.baseId,
+      });
+    }
+  }
   const config = await loadRefillConfig(ctx, input.projectId);
   const dailyLeadsCap = config?.dailyLeadsCap ?? HE_AUTO_DEFAULT_DAILY_LEADS_CAP;
   // Остаток читаем best-effort: это ПРЕДПОЛЁТ, он обязан ошибаться в сторону
@@ -527,7 +565,7 @@ export async function resolveHeRefillCollectCompanies(
   const remainingLeadsCap = Math.max(0, dailyLeadsCap - appendedToday);
   const carriedCompanies =
     input.market === 'us'
-      ? await countHeRefillCarryover(ctx, input.verticalId, input.baseId, { sendableOnly: true })
+      ? await countHeRefillCarryover(ctx, input.verticalId, input.baseId, { sendableOnly: true, requireReadableReserve: hasPreparedReserve })
       : 0;
   return {
     limit: Math.min(
@@ -881,6 +919,8 @@ export interface HeRefillSkipProbe {
 }
 
 export interface HeRefillStats {
+  /** Company proof is missing/stale; no provider call and no failed-slice penalty. */
+  company_qualification_held?: true;
   /** Строк собрано сборкой (после импорта конструктора). */
   collected: number;
   /** Строк с непустым email. */
@@ -913,6 +953,11 @@ export interface HeRefillStats {
   appended: number;
   /** Отрезано blocklist'ом владельца пресета. */
   skipped_blocklist: number;
+  /**
+   * Из skipped_blocklist — закрыто доменной записью Do not contact (домен
+   * адреса или сайта компании). Только market='us'; нет ключа — не 'us'.
+   */
+  skipped_blocklist_domain?: number;
   /** Отсеяно Instantly при загрузке (дубли кампании и пр.). */
   skipped_instantly: number;
   /**
@@ -2163,8 +2208,10 @@ function refillStreakVerdict(
       cancelled?: unknown;
       budget_outcome?: unknown;
       sending_skip?: unknown;
+      company_qualification_held?: unknown;
     };
     if (stats.cancelled === true) return 'skip';
+    if (stats.company_qualification_held === true) return 'skip';
     if (typeof stats.sending_skip === 'string') return 'skip';
     if (stats.budget_outcome === 'cap_exhausted' || stats.budget_outcome === 'already_reserved') {
       return 'skip';
@@ -2271,7 +2318,7 @@ async function refillFailStreak(
   }
 }
 
-interface RefillTemplatePick {
+export interface RefillTemplatePick {
   /** Основная кампания запуска (segment=null) — цель долива по умолчанию. */
   campaignId: string;
   presetId: string;
@@ -2505,15 +2552,37 @@ export function pickRefillTemplate(
  * регистра/пробелов. Здесь он НЕ переписан осознанно: два пути допуска
  * адресов, которые можно поправить по отдельности, рано или поздно разойдутся,
  * а расхождение видно только по баунсам, то есть уже по репутации доменов.
- * Почему catch_all не допущен — в докблоке HE_LAUNCH_ACCEPTED_EMAIL_STATUSES.
+ * Для подтверждённого ENG-клиента также допускается catch_all, после OK.
  *
  * 'missing' (вердикта нет вовсе) отклоняется, как и 'rejected', но считается
  * отдельно: ночной долив идёт без человека рядом, и «валидация не доработала»
  * обязано быть видно в воронке, а не выглядеть как «адреса плохие».
  */
+class HeRefillCompanyQualificationHold extends Error {
+  constructor(cause?: unknown) {
+    super(HE_ENG_COMPANY_QUALIFICATION_REQUIRED, { cause });
+    this.name = 'HeRefillCompanyQualificationHold';
+  }
+}
+
+/** Refuse before mapping/claim settlement: missing proof is not an invalid email. */
+function assertRefillCompanyQualification(
+  rows: HeUnifiedRow[],
+  emailStatuses: Array<string | null> | null,
+  scope: HeEngQualificationScope | null,
+): void {
+  if (!scope) return;
+  const unqualified = rows.some((row, i) => row.email.trim() !== '' &&
+    (row as { _low_relevance?: boolean })._low_relevance !== true &&
+    heLaunchEmailVerdict(emailStatuses?.[i] ?? null, { allowCatchAll: true }) === 'accepted' &&
+    !heEngCompanyQualified(row, scope));
+  if (unqualified) throw new HeRefillCompanyQualificationHold();
+}
+
 export function selectRefillLeadRows(
   rows: HeUnifiedRow[],
   emailStatuses: Array<string | null> | null,
+  options: { allowCatchAll?: boolean } = {},
 ): {
   leadRows: HeUnifiedRow[];
   /**
@@ -2537,11 +2606,25 @@ export function selectRefillLeadRows(
     // Строки вне вертикали (релевант-гейт base_collect) в долив не идут.
     if ((row as { _low_relevance?: boolean })._low_relevance === true) continue;
     withEmail += 1;
-    const verdict = heLaunchEmailVerdict(emailStatuses?.[i] ?? null);
+    const verdict = heLaunchEmailVerdict(emailStatuses?.[i] ?? null, options);
     if (verdict === 'missing') unverified += 1;
     if (verdict !== 'accepted') continue;
-    leadRows.push(row);
+    leadRows.push(options.allowCatchAll ? { ...row, _email_status: emailStatuses?.[i] } as HeUnifiedRow : row);
     leadRowIndexes.push(i);
+  }
+  if (options.allowCatchAll) {
+    // Address deduplication happens in mapBaseRowsToLeads next. Put the OK
+    // occurrence first, keeping its index in the persisted source base.
+    const ordered = leadRows.map((row, i) => ({ row, sourceIndex: leadRowIndexes[i] }))
+      .sort((a, b) => heLaunchEmailStrength(emailStatuses?.[b.sourceIndex], options) -
+        heLaunchEmailStrength(emailStatuses?.[a.sourceIndex], options));
+    return {
+      leadRows: ordered.map(({ row }) => row),
+      leadRowIndexes: ordered.map(({ sourceIndex }) => sourceIndex),
+      withEmail,
+      valid: leadRows.length,
+      unverified,
+    };
   }
   return { leadRows, leadRowIndexes, withEmail, valid: leadRows.length, unverified };
 }
@@ -2568,6 +2651,7 @@ function selectRefillLeadsByCompany<L extends object>(input: {
   leadRows: HeUnifiedRow[];
   columns: string[];
   granted: number;
+  allowCatchAll?: boolean;
 }): { toSend: L[]; companiesHeldBack: number } {
   const positionOf = new Map<L, number>();
   input.leads.forEach((lead, position) => positionOf.set(lead, position));
@@ -2580,6 +2664,7 @@ function selectRefillLeadsByCompany<L extends object>(input: {
     columns: input.columns,
     leadRowIndices: keptRowIndices,
     limit: input.granted,
+    allowCatchAll: input.allowCatchAll,
   });
   return {
     toSend: selection.keptLeadPositions.map((position) => input.kept[position]),
@@ -3938,6 +4023,9 @@ interface HeRefillCarryCompany {
   companyKey: string;
   rows: HeRefillCarryRow[];
   columns: string[];
+  updatedAt?: string;
+  /** New ENG reserve preserves retired contacts as a durable outcome journal. */
+  reserveRows?: HeRefillCarryRow[];
 }
 
 function chunked<T>(items: readonly T[], size: number): T[][] {
@@ -3962,8 +4050,9 @@ export function heRefillCarryKeyFn(columns: readonly string[]): (row: Record<str
  * Сколько компаний вертикали ждёт в очереди (pending, срок не вышел) — плюс те,
  * что уже держит ЭТА база (`baseId`): повтор прогона после смерти воркера
  * должен видеть свой прошлый захват, иначе он решил бы, что очереди нет, и
- * купил бы сборку, которую очередь покрывала. Оценка, а не захват. Не бросает:
- * не прочиталось — ноль, то есть поведение как до переноса.
+ * купил бы сборку, которую очередь покрывала. Оценка, а не захват. Для legacy
+ * ошибка чтения по-прежнему даёт ноль. Если новый ENG-резерв уже найден,
+ * requireReadableReserve запрещает покупать новый сбор при недоступной очереди.
  *
  * Читателей два, и вопрос у них разный:
  *  - размер сборки (resolveHeRefillCollectCompanies) — `sendableOnly`: только
@@ -3977,22 +4066,32 @@ export async function countHeRefillCarryover(
   ctx: HeStageContext,
   verticalId: string,
   baseId: string,
-  opts?: { sendableOnly?: boolean },
+  opts?: { sendableOnly?: boolean; requireReadableReserve?: boolean },
 ): Promise<number> {
   try {
     let query = ctx.supabase
       .from('he_refill_carryover')
-      .select('status, claimed_base_id')
+      .select('status, claimed_base_id, company_key, lead_rows')
       .eq('vertical_id', verticalId)
       .in('status', ['pending', 'claimed'])
       .gt('expires_at', new Date().toISOString());
     if (opts?.sendableOnly) query = query.is('settle_reason', null);
     const { data, error } = await query.limit(HE_REFILL_CARRYOVER_CLAIM_MAX);
     if (error) throw new Error(error.message);
-    return ((data ?? []) as Array<{ status?: unknown; claimed_base_id?: unknown }>).filter(
-      (row) => row.status === 'pending' || row.claimed_base_id === baseId,
-    ).length;
+    return ((data ?? []) as Array<{ status?: unknown; claimed_base_id?: unknown; company_key?: unknown; lead_rows?: unknown }>).reduce((count, row) => {
+      if (row.status !== 'pending' && row.claimed_base_id !== baseId) return count;
+      // A new reserve stores actual checked contacts. Legacy carry remains a
+      // conservative one-contact estimate per company.
+      if (typeof row.company_key === 'string' && isHeEngReserveKey(row.company_key)) {
+        const rows = Array.isArray(row.lead_rows) ? row.lead_rows.filter((r): r is HeEngReserveRow => !!r && typeof r === 'object' && !Array.isArray(r)) : [];
+        return count + heEngReserveAvailableRows(rows).length;
+      }
+      return count + 1;
+    }, 0);
   } catch (e) {
+    if (opts?.requireReadableReserve) {
+      throw new Error(`ENG reserve count unavailable; new collection was not started: ${e instanceof Error ? e.message : String(e)}`);
+    }
     stageLog(
       ctx,
       `[base_collect] refill: очередь переноса не прочитана ` +
@@ -4021,12 +4120,15 @@ function parseCarryCompany(raw: unknown): (HeRefillCarryCompany & { status: stri
     (row): row is HeRefillCarryRow => !!row && typeof row === 'object' && !Array.isArray(row),
   );
   const columns = r.lead_columns.filter((c): c is string => typeof c === 'string');
+  const reserve = isHeEngReserveKey(r.company_key);
   return {
     id: r.id,
     sourceBaseId: r.source_base_id,
     companyKey: r.company_key,
-    rows,
+    rows: reserve ? heEngReserveAvailableRows(rows) as HeRefillCarryRow[] : rows,
     columns,
+    ...(typeof r.updated_at === 'string' ? { updatedAt: r.updated_at } : {}),
+    ...(reserve ? { reserveRows: rows } : {}),
     status: typeof r.status === 'string' ? r.status : '',
     claimedBy: typeof r.claimed_base_id === 'string' ? r.claimed_base_id : null,
   };
@@ -4088,7 +4190,7 @@ async function heRefillCarryPeerConflicts(
   const windows = [...input.sources.values()];
   let query = ctx.supabase
     .from('he_bases')
-    .select('id, columns, data')
+    .select('id, columns, data, eng_collection_pool:collect_info->eng_collection_pool')
     .eq('project_id', input.projectId)
     .neq('status', 'failed');
   if (windows.length > 0 && windows.every((w) => Number.isFinite(w.createdAtMs) && Number.isFinite(w.updatedAtMs))) {
@@ -4098,9 +4200,10 @@ async function heRefillCarryPeerConflicts(
   }
   const { data: bases, error } = await query;
   if (error) throw new Error(`he_bases peers: ${error.message}`);
-  const peers = ((bases ?? []) as Array<{ id?: unknown; columns?: unknown; data?: unknown }>).filter(
-    (b): b is { id: string; columns?: unknown; data?: unknown } =>
-      typeof b.id === 'string' && Array.isArray(b.data) && b.data.length > 0,
+  const peers = ((bases ?? []) as Array<{ id?: unknown; columns?: unknown; data?: unknown; eng_collection_pool?: { rows?: unknown } }>).filter(
+    (b): b is { id: string; columns?: unknown; data?: unknown; eng_collection_pool?: { rows?: unknown } } =>
+      typeof b.id === 'string' && ((Array.isArray(b.data) && b.data.length > 0) ||
+        (Array.isArray(b.eng_collection_pool?.rows) && b.eng_collection_pool.rows.length > 0)),
   );
   if (peers.length === 0) return conflicts;
 
@@ -4134,10 +4237,18 @@ async function heRefillCarryPeerConflicts(
     const keyOf = heRefillCarryKeyFn(columns.length > 0 ? columns : [...HE_AUTO_COLLECT_COLUMNS]);
     const blocking: Record<string, unknown>[] = [];
     const queued: Record<string, unknown>[] = [];
-    for (const item of peer.data as unknown[]) {
+    const readyRows = Array.isArray(peer.data) ? peer.data : [];
+    const readyKeys = new Set(readyRows.filter((row): row is Record<string, unknown> => !!row && typeof row === 'object').map(keyOf));
+    const reserveRows = Array.isArray(peer.eng_collection_pool?.rows) ? peer.eng_collection_pool.rows.slice(0, 5500) : [];
+    for (const item of [...readyRows, ...reserveRows]) {
       if (!item || typeof item !== 'object') continue;
       const row = item as Record<string, unknown>;
-      const st = states.get(`${peer.id}\u0000${keyOf(row)}`);
+      const key = keyOf(row);
+      // A company among the first 500 may already have been launched; its
+      // pending reserve must not make another base's copy safe. Companies
+      // wholly in the reserve use the namespaced queue state for tie-breaking.
+      const st = states.get(`${peer.id}\u0000${key}`) ?? (!readyKeys.has(key)
+        ? states.get(`${peer.id}\u0000${HE_ENG_RESERVE_KEY_PREFIX}${key}`) : undefined);
       if (!st || st.status === 'sent' || (st.status === 'dropped' && !HE_REFILL_CARRY_NEVER_SENT_DROPS.has(st.reason ?? ''))) {
         blocking.push(row);
       } else if (st.status === 'claimed' || (st.status === 'pending' && st.expiresAtMs > input.nowMs)) {
@@ -4183,6 +4294,16 @@ async function claimHeRefillCarryover(
   const note = (what: string, e: unknown) =>
     stageLog(ctx, `[base_collect] refill: перенос — ${what} (${e instanceof Error ? e.message : String(e)})`);
 
+  try {
+    await recoverHeEngTerminalReserveClaims(ctx, {
+      projectId: input.projectId, verticalId: input.verticalId, currentBaseId: input.baseId,
+    });
+  } catch (e) {
+    // Unknown ownership remains held. Never replace missing evidence with a
+    // guess that the previous sender must have stopped.
+    note('не удалось подтвердить завершение владельца резерва', e);
+  }
+
   // Истёкшие — в 'released'. Только учёт: исключение сборок считает истёкшую
   // 'pending' отпущенной и без этой записи, а захват ниже её не берёт.
   try {
@@ -4206,6 +4327,9 @@ async function claimHeRefillCarryover(
       .eq('vertical_id', input.verticalId)
       .eq('status', 'claimed')
       .neq('claimed_base_id', input.baseId)
+      // An active/unknown reserve claim must never be stolen or replayed.
+      // The old company-level recovery rule remains unchanged for legacy carry.
+      .not('company_key', 'like', HE_ENG_RESERVE_KEY_PATTERN)
       .select('id');
     if (error) throw new Error(error.message);
     out.dropped += (data ?? []).length;
@@ -4227,7 +4351,7 @@ async function claimHeRefillCarryover(
     const readCandidates = async (marked: boolean, limit: number): Promise<unknown[]> => {
       let query = ctx.supabase
         .from('he_refill_carryover')
-        .select('id, source_base_id, company_key, lead_rows, lead_columns, status, claimed_base_id')
+        .select('id, source_base_id, company_key, lead_rows, lead_columns, status, claimed_base_id, updated_at')
         .eq('vertical_id', input.verticalId)
         .in('status', ['pending', 'claimed'])
         .gt('expires_at', now);
@@ -4321,32 +4445,64 @@ async function claimHeRefillCarryover(
 
   const usable = candidates.filter((c) => live.has(c.sourceBaseId) && !conflicts.has(c.id));
   const taken = new Set<string>();
+  const takenVersions = new Map<string, HeRefillCarryCompany>();
   for (const c of usable) {
     if (c.status === 'claimed') {
       taken.add(c.id);
       out.heldBefore.add(c.id);
     }
   }
-  for (const ids of chunked(usable.filter((c) => c.status === 'pending').map((c) => c.id), HE_REFILL_CARRYOVER_ID_CHUNK)) {
+  for (const ids of chunked(usable.filter((c) => c.status === 'pending' && !c.reserveRows).map((c) => c.id), HE_REFILL_CARRYOVER_ID_CHUNK)) {
     try {
       const { data, error } = await ctx.supabase
         .from('he_refill_carryover')
         .update({ status: 'claimed', claimed_base_id: input.baseId, claimed_at: now, updated_at: now })
         .in('id', ids)
         .eq('status', 'pending')
-        .select('id');
+        .select('id, source_base_id, company_key, lead_rows, lead_columns, status, claimed_base_id, updated_at');
       if (error) throw new Error(error.message);
-      for (const row of (data ?? []) as Array<{ id?: unknown }>) {
-        if (typeof row.id === 'string') taken.add(row.id);
+      for (const row of data ?? []) {
+        const claimed = parseCarryCompany(row);
+        if (claimed) {
+          taken.add(claimed.id);
+          // A different refill may have settled a partial reserve between
+          // our initial read and this claim. Use the rows returned by the
+          // atomic UPDATE, never the stale pre-claim contact set.
+          takenVersions.set(claimed.id, claimed);
+        } else if (typeof row.id === 'string' && usable.some((company) => company.id === row.id && !company.reserveRows)) {
+          // Legacy carry rows never change their contact set on settlement.
+          taken.add(row.id);
+        }
       }
     } catch (e) {
       note('захват оборвался — берём то, что успели', e);
       break;
     }
   }
+  for (const company of usable.filter((c) => c.status === 'pending' && c.reserveRows)) {
+    const previousUpdate = company.updatedAt ? Date.parse(company.updatedAt) : NaN;
+    if (!Number.isFinite(previousUpdate)) continue;
+    const claimedAt = new Date(Math.max(Date.now(), previousUpdate + 1)).toISOString();
+    try {
+      const { data, error } = await ctx.supabase.from('he_refill_carryover')
+        .update({ status: 'claimed', claimed_base_id: input.baseId, claimed_at: claimedAt, updated_at: claimedAt })
+        .eq('id', company.id).eq('status', 'pending').eq('updated_at', company.updatedAt!)
+        .select('id, source_base_id, company_key, lead_rows, lead_columns, status, claimed_base_id, updated_at');
+      if (error) throw new Error(error.message);
+      const claimed = Array.isArray(data) ? parseCarryCompany(data[0]) : null;
+      if (claimed) {
+        taken.add(claimed.id);
+        takenVersions.set(claimed.id, claimed);
+      }
+    } catch (e) {
+      note('захват резерва оборвался — берём только подтверждённые захваты', e);
+      break;
+    }
+  }
   out.companies = usable
     .filter((c) => taken.has(c.id))
-    .map(({ id, sourceBaseId, companyKey, rows, columns }) => ({ id, sourceBaseId, companyKey, rows, columns }));
+    .map((company) => takenVersions.get(company.id) ?? company)
+    .map(({ id, sourceBaseId, companyKey, rows, columns, reserveRows, updatedAt }) => ({ id, sourceBaseId, companyKey, rows, columns, ...(reserveRows ? { reserveRows } : {}), ...(updatedAt ? { updatedAt } : {}) }));
   return out;
 }
 
@@ -4371,6 +4527,7 @@ interface HeRefillCarrySettle {
    */
   returned: Array<{ id: string; held: boolean | null }>;
   dropped: Array<{ id: string; reason: string }>;
+  reserve?: Array<{ id: string; outcome: HeEngReserveSettlement; updatedAt?: string }>;
 }
 
 /**
@@ -4398,6 +4555,11 @@ function planHeRefillCarrySettle(input: {
   batch: readonly object[];
   reached: ReadonlySet<number>;
   unknown: ReadonlySet<string> | null;
+  refillBaseId?: string;
+  outcome?: Pick<AppendLeadsResult, 'acceptedIndexes' | 'skippedIndexes'> | null;
+  keptEmails?: ReadonlyMap<string, ReadonlySet<string>> | null;
+  heldEmails?: ReadonlyMap<string, ReadonlySet<string>>;
+  dispatchedEmails?: ReadonlyMap<string, ReadonlySet<string>>;
 }): HeRefillCarrySettle {
   const reachedIds = new Set<string>();
   for (const position of input.reached) {
@@ -4407,6 +4569,26 @@ function planHeRefillCarrySettle(input: {
   }
   const out: HeRefillCarrySettle = { sent: [], returned: [], dropped: [] };
   for (const company of input.companies) {
+    if (company.reserveRows) {
+      const emailsAt = (positions: Iterable<number>): Set<string> => new Set([...positions].flatMap((position) => {
+        const lead = input.batch[position];
+        return lead && input.ownerOf.get(lead) === company.id
+          ? [heEngReserveEmail(lead as Record<string, unknown>)].filter(Boolean) : [];
+      }));
+      const outcome = planHeEngReserveSettlement({
+        rows: company.reserveRows, refillBaseId: input.refillBaseId ?? '', now: new Date().toISOString(),
+        reachedEmails: emailsAt(input.reached),
+        acceptedEmails: emailsAt(input.outcome?.acceptedIndexes ?? []),
+        rejectedEmails: emailsAt(input.outcome?.skippedIndexes ?? []),
+        keptEmails: input.inKept === null ? null : input.keptEmails?.get(company.id) ?? new Set<string>(),
+        heldEmails: input.heldEmails?.get(company.id) ?? new Set<string>(),
+        currentDispatchEmails: input.dispatchedEmails?.get(company.id) ?? new Set<string>(),
+        previousOutcomeUnknown: input.unknown?.has(company.id) === true,
+        heldReason: HE_REFILL_CARRY_HELD_REASON,
+      });
+      (out.reserve ??= []).push({ id: company.id, outcome, updatedAt: company.updatedAt });
+      continue;
+    }
     if (reachedIds.has(company.id)) out.sent.push(company.id);
     else if (input.unknown?.has(company.id)) out.dropped.push({ id: company.id, reason: 'fate_unknown' });
     else if (input.inKept === null) out.returned.push({ id: company.id, held: null });
@@ -4432,15 +4614,17 @@ async function settleHeRefillCarryover(
   const db = paidCheckpointDb(ctx);
   const now = new Date().toISOString();
   let ok = true;
-  const apply = async (ids: readonly string[], patch: Record<string, unknown>) => {
+  const apply = async (ids: readonly string[], patch: Record<string, unknown>, expectedUpdatedAt?: string) => {
     for (const chunk of chunked(ids, HE_REFILL_CARRYOVER_ID_CHUNK)) {
       try {
-        const { error } = await db
+        let query = db
           .from('he_refill_carryover')
           .update(patch)
           .in('id', chunk)
           .eq('status', 'claimed')
           .eq('claimed_base_id', baseId);
+        if (expectedUpdatedAt) query = query.eq('updated_at', expectedUpdatedAt);
+        const { error } = await query;
         if (error) throw new Error(error.message);
       } catch (e) {
         ok = false;
@@ -4467,6 +4651,21 @@ async function settleHeRefillCarryover(
   for (const { id, reason } of settle.dropped) byReason.set(reason, [...(byReason.get(reason) ?? []), id]);
   for (const [reason, ids] of byReason) {
     await apply(ids, { status: 'dropped', settled_at: now, settle_reason: reason, updated_at: now });
+  }
+  // Rows and status change in one conditional UPDATE after the provider
+  // outcome. A failed write leaves the claim held, never makes it reusable.
+  for (const { id, outcome, updatedAt } of settle.reserve ?? []) {
+    if (!updatedAt || !Number.isFinite(Date.parse(updatedAt))) {
+      ok = false;
+      stageLog(ctx, '[base_collect] refill: reserve settlement has no claim version; contacts remain held');
+      continue;
+    }
+    await apply([id], {
+      lead_rows: outcome.rows, status: outcome.status, settle_reason: outcome.reason,
+      updated_at: new Date(Math.max(Date.now(), Date.parse(updatedAt) + 1)).toISOString(),
+      settled_at: outcome.status === 'pending' ? null : now,
+      ...(outcome.status === 'pending' ? { claimed_base_id: null, claimed_at: null } : {}),
+    }, updatedAt);
   }
   return ok;
 }
@@ -4892,8 +5091,11 @@ export async function runHeRefillAppend(args: {
   const carriedLeadOwner = new Map<object, string>();
   /** null — до чёрного списка долив не дошёл. */
   let carriedInKept: Set<string> | null = null;
+  let carriedKeptEmails: Map<string, Set<string>> | null = null;
   /** Перенесённые компании, у которых шаг 3a этой ночи снял хоть один лид. */
   const carriedHeld = new Set<string>();
+  const carriedHeldEmails = new Map<string, Set<string>>();
+  const carriedDispatchedEmails = new Map<string, Set<string>>();
   /** Пачка, отданная провайдеру (позиции = индексы attempted/deferred). */
   let sentBatch: readonly object[] = [];
   /**
@@ -4916,7 +5118,7 @@ export async function runHeRefillAppend(args: {
   /** Индексы (в ownLeadRows) своих строк, чей лид снял шаг 3a. */
   const ownHeldRows: number[] = [];
   /** Результат долива, если appendLeads вернулся штатно. */
-  let appendOutcome: { attemptedIndexes: readonly number[]; deferredIndexes?: readonly number[] } | null = null;
+  let appendOutcome: AppendLeadsResult | null = null;
   const runStats: HeRefillStats = {
     collected: finalRows.length,
     with_email: 0,
@@ -4965,15 +5167,17 @@ export async function runHeRefillAppend(args: {
     const queued = queue?.queued ?? 0;
     const queuedHeld = queue?.queuedHeld ?? 0;
     const releasedHiring = queue?.releasedHiring ?? 0;
-    const returnedHeld = settle?.returned.filter((r) => r.held === true).length ?? 0;
+    const reserve = settle?.reserve ?? [];
+    const returnedHeld = (settle?.returned.filter((r) => r.held === true).length ?? 0) +
+      reserve.filter((r) => r.outcome.status === 'pending' && r.outcome.reason === HE_REFILL_CARRY_HELD_REASON).length;
     const touched = (claim?.released ?? 0) + (claim?.dropped ?? 0) + queued + releasedHiring;
     if (!settle && touched === 0) return;
     runStats.carryover = {
       offered: claim?.companies.length ?? 0,
-      sent: settle?.sent.length ?? 0,
-      returned: settle?.returned.length ?? 0,
+      sent: (settle?.sent.length ?? 0) + reserve.filter((r) => r.outcome.status === 'sent').length,
+      returned: (settle?.returned.length ?? 0) + reserve.filter((r) => r.outcome.status === 'pending').length,
       ...(returnedHeld > 0 ? { returned_held: returnedHeld } : {}),
-      dropped: (settle?.dropped.length ?? 0) + (claim?.dropped ?? 0),
+      dropped: (settle?.dropped.length ?? 0) + reserve.filter((r) => r.outcome.status === 'dropped').length + (claim?.dropped ?? 0),
       released: claim?.released ?? 0,
       queued,
       ...(queuedHeld > 0 ? { queued_held: queuedHeld } : {}),
@@ -5129,7 +5333,7 @@ export async function runHeRefillAppend(args: {
     // 1. Кампания и маппинг — из запущенного шаблона вертикали.
     const { data: templateRows, error: tErr } = await ctx.supabase
       .from('he_templates')
-      .select('id, launch_info, personalization_plan, letters, created_at')
+      .select('id, base_id, launch_info, personalization_plan, letters, created_at')
       .eq('vertical_id', base.vertical_id)
       .not('launch_info', 'is', null);
     if (tErr) throw new Error(`he_templates read: ${tErr.message}`);
@@ -5165,15 +5369,55 @@ export async function runHeRefillAppend(args: {
     //     Сайт и бриф проекта не прочитались — отказ долива до провайдера
     //     (общий catch): не знаем, чьи это письма, — не отправляем.
     let brandHold: string | null = null;
+    let allowCatchAll = false;
+    let qualificationScope: HeEngQualificationScope | null = null;
     if (usLetterGate) {
       const { data: projectRow, error: projectErr } = await ctx.supabase
         .from('he_projects')
-        .select('website_url, brief, created_by')
+        .select('website_url, brief, created_by, market')
         .eq('id', job.project_id)
         .maybeSingle();
       if (projectErr) throw new Error(`he_projects read: ${projectErr.message}`);
       if (!projectRow) throw new Error(`he_projects ${job.project_id}: not found`);
       const brandRow = projectRow as { website_url?: unknown; brief?: unknown; created_by?: unknown };
+      allowCatchAll = await readHeEngEmailPolicy(ctx.supabase, projectRow);
+      if (allowCatchAll) {
+        try {
+          const brief = projectRow.brief as Record<string, unknown> | null;
+          qualificationScope = await readHeEngQualificationScope(ctx.supabase, {
+            project: { id: job.project_id, brief },
+            verticalId: base.vertical_id,
+            collectInfo: info as unknown as Record<string, unknown>,
+          });
+          if (!heEngScopeWithinCurrentCountries(qualificationScope, brief)) {
+            throw new HeRefillCompanyQualificationHold();
+          }
+          const targetTemplate = (templateRows ?? []).find((row) => row.id === pick.templateId);
+          if (!targetTemplate || typeof targetTemplate.base_id !== 'string') {
+            throw new HeRefillCompanyQualificationHold();
+          }
+          const { data: targetBase, error: targetError } = await ctx.supabase.from('he_bases')
+            .select('id, source, collect_info')
+            .eq('id', targetTemplate.base_id).eq('project_id', job.project_id)
+            .eq('vertical_id', base.vertical_id).maybeSingle();
+          if (targetError) throw targetError;
+          if (!targetBase) throw new HeRefillCompanyQualificationHold();
+          if (targetBase.source === 'auto') {
+            const targetScope = await readHeEngQualificationScope(ctx.supabase, {
+              project: { id: job.project_id, brief },
+              verticalId: base.vertical_id,
+              collectInfo: targetBase.collect_info as Record<string, unknown> | null,
+            });
+            if (targetScope.key !== qualificationScope.key ||
+                !heEngLaunchQualified(targetTemplate.launch_info, targetScope, targetTemplate.base_id) ||
+                !heEngScopeWithinCurrentCountries(targetScope, brief)) {
+              throw new HeRefillCompanyQualificationHold();
+            }
+          }
+        } catch (err) {
+          throw err instanceof HeRefillCompanyQualificationHold ? err : new HeRefillCompanyQualificationHold(err);
+        }
+      }
       const brandLeaks = heTemplateBrandLeaks(
         'us',
         {
@@ -5192,8 +5436,9 @@ export async function runHeRefillAppend(args: {
 
     // 3. Лиды: email + допущенный вердикт валидации, маппинг колонок →
     //    переменные шаблона.
+    assertRefillCompanyQualification(finalRows, emailStatuses, qualificationScope);
     const { leadRows, leadRowIndexes, withEmail, valid, unverified } =
-      selectRefillLeadRows(finalRows, emailStatuses);
+      selectRefillLeadRows(finalRows, emailStatuses, { allowCatchAll });
     runStats.with_email = withEmail;
     runStats.valid = valid;
     runStats.unverified = unverified;
@@ -5350,9 +5595,15 @@ export async function runHeRefillAppend(args: {
         const carriedLeads: typeof leads = [];
         const carriedSourceRows: number[] = [];
         for (const company of carryClaim.companies) {
+          assertRefillCompanyQualification(
+            company.rows,
+            company.rows.map((row) => typeof row._email_status === 'string' ? row._email_status : null),
+            qualificationScope,
+          );
           const picked = selectRefillLeadRows(
             company.rows,
             company.rows.map((row) => (typeof row._email_status === 'string' ? row._email_status : null)),
+            { allowCatchAll },
           );
           let heldHere = 0;
           const offset = carriedRows.length;
@@ -5390,6 +5641,9 @@ export async function runHeRefillAppend(args: {
               heldHere += 1;
               heldUnfilledDetails.add(carriedUnfilled.detail);
               carriedHeld.add(company.id);
+              const held = carriedHeldEmails.get(company.id) ?? new Set<string>();
+              held.add(lead.email.trim().toLowerCase());
+              carriedHeldEmails.set(company.id, held);
               return;
             }
             carriedLeads.push(lead);
@@ -5406,17 +5660,39 @@ export async function runHeRefillAppend(args: {
           // Снятых лидов не больше допущенных строк: лид растёт из строки.
           carriedValid += picked.valid - heldHere;
         }
-        // Один адрес — один лид: свой лид с адресом, который уже несёт
-        // перенесённая компания, в пачку не идёт (провайдер отсеял бы его как
-        // дубль, но решать это до отправки дешевле и честнее для воронки).
-        const carriedEmails = new Set(carriedLeads.map((lead) => lead.email));
-        sendLeads = [...carriedLeads];
-        sendLeadSourceRows = [...carriedSourceRows];
-        leads.forEach((lead, i) => {
-          if (carriedEmails.has(lead.email)) return;
-          sendLeads.push(lead);
-          sendLeadSourceRows.push(carriedRows.length + leadSourceRows[i]);
-        });
+        // Один адрес — один лид. ENG сохраняет сильнейший вердикт вместе с
+        // его источником; при равенстве перенос остаётся первым. Остальные
+        // проекты сохраняют прежний безусловный приоритет переноса.
+        if (allowCatchAll) {
+          // A stronger own row may replace carried catch_all, and two carried
+          // companies may contain the same address. Keep the winning lead
+          // object so leadSources/ownLeadRow/carriedLeadOwner stay attached.
+          const candidates = [
+            ...carriedLeads.map((lead, i) => ({ lead, rowIndex: carriedSourceRows[i] })),
+            ...leads.map((lead, i) => ({ lead, rowIndex: carriedRows.length + leadSourceRows[i] })),
+          ].sort((a, b) =>
+            heLaunchEmailStrength(leadSources.get(b.lead)?.row._email_status, { allowCatchAll }) -
+            heLaunchEmailStrength(leadSources.get(a.lead)?.row._email_status, { allowCatchAll }),
+          );
+          const seen = new Set<string>();
+          sendLeads = [];
+          sendLeadSourceRows = [];
+          for (const { lead, rowIndex } of candidates) {
+            if (seen.has(lead.email)) continue;
+            seen.add(lead.email);
+            sendLeads.push(lead);
+            sendLeadSourceRows.push(rowIndex);
+          }
+        } else {
+          const carriedEmails = new Set(carriedLeads.map((lead) => lead.email));
+          sendLeads = [...carriedLeads];
+          sendLeadSourceRows = [...carriedSourceRows];
+          leads.forEach((lead, i) => {
+            if (carriedEmails.has(lead.email)) return;
+            sendLeads.push(lead);
+            sendLeadSourceRows.push(carriedRows.length + leadSourceRows[i]);
+          });
+        }
         sendLeadRows = [...carriedRows, ...leadRows];
       }
     }
@@ -5450,15 +5726,52 @@ export async function runHeRefillAppend(args: {
 
     // 4. Blocklist владельца (сами считаем — число нужно в журнале;
     //    appendLeadsToClientCampaign продублирует фильтр внутри, это дёшево).
-    const blockedSet = await getBlockedEmailSet(supabaseInstantly, ownerUserId);
-    const { kept, blockedCount } = filterBlockedLeads(sendLeads, blockedSet);
-    runStats.skipped_blocklist = blockedCount;
+    //    us — снимок адресов И доменов компаний (план 2026-10-16-eng-countries,
+    //    §1B): доменная запись закрывает домен адреса, lead.website и сайт
+    //    строки базы лида — своей (колонки finalColumns) или базы-источника
+    //    перенесённой компании (её колонки); строку и колонки лида знает
+    //    leadSources. Сбой снимка бросает, как и прежнее чтение: ночь не шлёт.
+    //    Остальные рынки — прежние две строки.
+    let kept: typeof sendLeads;
+    if (args.market === 'us') {
+      const snapshot = await getBlockedContactSnapshot(supabaseInstantly, ownerUserId);
+      const websiteColumnOf = new Map<string[], string | null>();
+      const filtered = filterBlockedContacts(sendLeads, snapshot, (lead) => {
+        const source = leadSources.get(lead);
+        if (!source) return null;
+        let column = websiteColumnOf.get(source.columns);
+        if (column === undefined) {
+          column = findCompanyKeyColumns(source.columns).website;
+          websiteColumnOf.set(source.columns, column);
+        }
+        return column ? source.row[column] : null;
+      });
+      kept = filtered.kept;
+      runStats.skipped_blocklist = filtered.blockedCount;
+      runStats.skipped_blocklist_domain = filtered.blockedByDomain;
+    } else {
+      const blockedSet = await getBlockedEmailSet(supabaseInstantly, ownerUserId);
+      const filtered = filterBlockedLeads(sendLeads, blockedSet);
+      kept = filtered.kept;
+      runStats.skipped_blocklist = filtered.blockedCount;
+    }
+    if (allowCatchAll) {
+      kept.sort((a, b) =>
+        heLaunchEmailStrength(leadSources.get(b)?.row._email_status, { allowCatchAll }) -
+        heLaunchEmailStrength(leadSources.get(a)?.row._email_status, { allowCatchAll }));
+    }
     ownKept = kept;
     if (carryClaim && carryClaim.companies.length > 0) {
       carriedInKept = new Set();
+      carriedKeptEmails = new Map();
       for (const lead of kept) {
         const owner = carriedLeadOwner.get(lead);
-        if (owner) carriedInKept.add(owner);
+        if (owner) {
+          carriedInKept.add(owner);
+          const emails = carriedKeptEmails.get(owner) ?? new Set<string>();
+          emails.add(lead.email.trim().toLowerCase());
+          carriedKeptEmails.set(owner, emails);
+        }
       }
     }
 
@@ -5609,6 +5922,7 @@ export async function runHeRefillAppend(args: {
           leadRows: sendLeadRows,
           columns: finalColumns,
           granted: budget.granted,
+          allowCatchAll,
         });
         toSend = cut.toSend;
         if (cut.companiesHeldBack > 0) runStats.capped_companies = cut.companiesHeldBack;
@@ -5724,6 +6038,41 @@ export async function runHeRefillAppend(args: {
       heldCount = routing.held.length;
       heldReached = routing.held.flatMap((lead, i) => (routing.heldPinned.has(lead) ? [sendCount + i] : []));
       segmentGroups = routing.groups.filter((group) => group.segment !== null).length;
+      // Persist only the capped/routed contact slice before any provider call.
+      // A recovery quarantines this manifest, never all 2–5k claimed reserve.
+      if (carryClaim) {
+        const dispatchEmails = new Map<string, Set<string>>();
+        const pinned = new Set(heldReached);
+        sentBatch.forEach((lead, index) => {
+          if (index >= sendCount && !pinned.has(index)) return;
+          const owner = carriedLeadOwner.get(lead);
+          if (!owner) return;
+          const emails = dispatchEmails.get(owner) ?? new Set<string>();
+          emails.add(heEngReserveEmail(lead as Record<string, unknown>));
+          dispatchEmails.set(owner, emails);
+        });
+        for (const company of carryClaim.companies) {
+          const emails = dispatchEmails.get(company.id);
+          if (!company.reserveRows || !emails?.size) continue;
+          const previousUpdate = company.updatedAt ? Date.parse(company.updatedAt) : NaN;
+          if (!Number.isFinite(previousUpdate)) throw new Error('ENG reserve dispatch: missing claim version');
+          const dispatchedAt = new Date(Math.max(Date.now(), previousUpdate + 1)).toISOString();
+          const rows = planHeEngReserveDispatch({
+            rows: company.reserveRows, emails, refillBaseId: base.id, now: dispatchedAt,
+          }) as HeRefillCarryRow[];
+          const { data: marked, error: markError } = await ctx.supabase.from('he_refill_carryover')
+            .update({ lead_rows: rows, updated_at: dispatchedAt })
+            .eq('id', company.id).eq('status', 'claimed').eq('claimed_base_id', base.id)
+            .eq('updated_at', company.updatedAt!).select('id');
+          if (markError || !marked?.some((row) => row.id === company.id)) {
+            throw new Error(`ENG reserve dispatch checkpoint failed: ${markError?.message ?? 'claim is no longer owned'}`);
+          }
+          company.reserveRows = rows;
+          company.updatedAt = dispatchedAt;
+          carriedDispatchedEmails.set(company.id, emails);
+          ctx.onActivity?.();
+        }
+      }
       const appendGroup = (campaignId: string, groupLeads: typeof toSend) => appendLeadsToClientCampaign({
         userId: ownerUserId,
         campaignId,
@@ -5797,6 +6146,9 @@ export async function runHeRefillAppend(args: {
         // рядом, и разница «некуда грузить» против «адреса плохие» решает,
         // пересобирать базу или ждать места.
         pauseOnWorkspaceCapacity: true,
+        // us — фильтр внутри долива тоже по снимку с доменами (шаг 4 выше);
+        // остальные рынки — прежний фильтр адресов.
+        blocklistDomains: args.market === 'us',
         // Признак жизни на КАЖДОЙ попытке отправки чанка (хук зовётся после
         // допуска лимитера, прямо перед HTTP). Без него ночной долив был
         // невидим для сторожа простоя стадии: blocklist, кап и загрузка идут
@@ -6104,6 +6456,9 @@ export async function runHeRefillAppend(args: {
           reached,
           // Успешная ветка: бронь выдана этому прогону, неизвестных нет.
           unknown: null,
+          refillBaseId: base.id, outcome: appendOutcome,
+          keptEmails: carriedKeptEmails, heldEmails: carriedHeldEmails,
+          dispatchedEmails: carriedDispatchedEmails,
         });
       }
       ownQueue = planOwnQueue(reached);
@@ -6155,7 +6510,10 @@ export async function runHeRefillAppend(args: {
         `, лидов ${runStats.appended} ` +
         `(valid ${runStats.valid}, без вердикта ${runStats.unverified}, ` +
         (runStats.held_unfilled ? `письмо прочиталось бы неверно ${runStats.held_unfilled}, ` : '') +
-        `blocklist ${runStats.skipped_blocklist}, кап-отрез ${runStats.capped}` +
+        `blocklist ${runStats.skipped_blocklist}` +
+        // Из них доменными записями — только у us, где ключ есть: строка RU прежняя.
+        (runStats.skipped_blocklist_domain ? ` (из них по домену ${runStats.skipped_blocklist_domain})` : '') +
+        `, кап-отрез ${runStats.capped}` +
         // Причина отреза и сколько КОМПАНИЙ остались без письма — рядом с
         // числом строк: «отрезано 150» без них не отличает дневной кап от
         // повтора прогона и не говорит, сколько оплаченных компаний сгорело.
@@ -6271,6 +6629,8 @@ export async function runHeRefillAppend(args: {
     // компании в пул без серии отказов, без очереди собственных компаний.
     const cancelled = refillUserCancelled(ctx) || ownershipLoss !== null;
     if (cancelled) runStats.cancelled = true;
+    const companyQualificationHeld = e instanceof HeRefillCompanyQualificationHold;
+    if (companyQualificationHeld) runStats.company_qualification_held = true;
     // Отмена выигрывает у пропуска шага 4c: чтения проверки после обрыва
     // сигнала отказывают, и её «не читается» — следствие отмены, а не причина.
     if (cancelled) delete runStats.sending_skip;
@@ -6350,7 +6710,7 @@ export async function runHeRefillAppend(args: {
     } else if ((budgetSpentElsewhere || sendingSkipped) && ownQueue && (await writeHeRefillCarryQueue(ctx, ownQueue))) {
       released = false;
       budgetStopCarried = true;
-    } else if (budgetSpentElsewhere || sendingSkipped || cancelled) {
+    } else if (budgetSpentElsewhere || sendingSkipped || cancelled || companyQualificationHeld) {
       released = true;
     } else {
       failStreak = await refillFailStreak(ctx, base.vertical_id, base.id);
@@ -6371,7 +6731,13 @@ export async function runHeRefillAppend(args: {
         held: carriedHeld,
         batch: sentBatch,
         reached,
-        unknown: predecessorHoldsBudget ? carryClaim.heldBefore : null,
+        unknown: predecessorHoldsBudget ? carryClaim.heldBefore
+          : delivered && !appendOutcome && !partial
+            ? new Set(carryClaim.companies.filter((company) => company.reserveRows).map((company) => company.id))
+            : null,
+        refillBaseId: base.id, outcome: appendOutcome ?? partial,
+        keptEmails: carriedKeptEmails, heldEmails: carriedHeldEmails,
+        dispatchedEmails: carriedDispatchedEmails,
       });
     }
     // В воронку — только очередь, которая записана (п. 3) или будет записана

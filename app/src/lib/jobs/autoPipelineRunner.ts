@@ -62,6 +62,7 @@ import {
 } from './autoPipelineChunk';
 import { fetchTopUpFromBaseOfBases } from './baseOfBasesSource';
 import { fetchTopUpFromCache } from './baseOfBasesFromCache';
+import { loadSeenDomains, loadSeenEmployerIds } from './autoPipelineHistory';
 import { cleanCompanyNames } from '@/lib/companyNameCleanupBatch';
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import {
@@ -211,42 +212,7 @@ async function loadConfig(clientUserId: string): Promise<AutoPipelineConfig | nu
   return data as AutoPipelineConfig;
 }
 
-export async function loadSeenEmployerIds(clientUserId: string): Promise<Set<string>> {
-  if (!supabaseAdmin) throw new Error('supabaseAdmin not initialized');
-  const { data, error } = await supabaseAdmin
-    .from('client_auto_pipeline_seen_employers')
-    .select('hh_employer_id')
-    .eq('client_user_id', clientUserId);
-  if (error) throw new Error(`Failed to load seen employer ids: ${error.message}`);
-  if (!data) return new Set();
-  return new Set(data.map((r) => (r as { hh_employer_id: string }).hh_employer_id));
-}
-
-/**
- * Domain-set всех уже виденных компаний — для dedup top-up из BoB. HH-парсер
- * dedup'ится по hh_employer_id (числовой), BoB-домены другие. Поэтому BoB
- * нуждается в separate domain-based dedup.
- */
-export async function loadSeenDomains(clientUserId: string): Promise<Set<string>> {
-  if (!supabaseAdmin) throw new Error('supabaseAdmin not initialized');
-  const { data, error } = await supabaseAdmin
-    .from('client_auto_pipeline_seen_employers')
-    .select('domain')
-    .eq('client_user_id', clientUserId)
-    // dry-run прогоны НЕ «жгут» кэш: их домены не попадают в дедуп, чтобы
-    // боевой запуск (или повторный замер) мог их обработать заново. В дедуп
-    // идут только реально обработанные (routed/stored/skipped/failed).
-    .neq('status', 'dry_run')
-    .not('domain', 'is', null);
-  if (error) throw new Error(`Failed to load seen domains: ${error.message}`);
-  if (!data) return new Set();
-  const set = new Set<string>();
-  for (const r of data) {
-    const d = (r as { domain: string | null }).domain;
-    if (d) set.add(d.toLowerCase());
-  }
-  return set;
-}
+export { loadSeenDomains, loadSeenEmployerIds } from './autoPipelineHistory';
 
 /**
  * Закрывает «протухшие» running-прогоны клиента.
@@ -879,11 +845,14 @@ export async function runAutoPipelineForClient(
       config.base_of_bases_enabled &&
       freshFromHh.length < config.daily_target_employers
     ) {
-      const seenDomains = await loadSeenDomains(clientUserId);
-      for (const e of freshFromHh) {
-        const d = deriveDomain(e.siteUrl);
-        if (d) seenDomains.add(d);
-      }
+      const currentRunDomains = freshFromHh.flatMap((employer) => {
+        const domain = deriveDomain(employer.siteUrl);
+        return domain ? [domain] : [];
+      });
+      // The cache RPC filters complete historical domain/INN facts in SQL.
+      // Do not download that same history again merely to select cached rows.
+      const seenDomains = new Set(currentRunDomains);
+      const seenBobEmployerIds = new Set<string>();
       const neededFromBob = config.daily_target_employers - freshFromHh.length;
 
       // 1. Сначала пробуем взять готовые активные домены из кэша
@@ -895,6 +864,8 @@ export async function runAutoPipelineForClient(
         clientUserId,
         neededCount: neededFromBob,
         seenDomains,
+        seenEmployerIds: seenBobEmployerIds,
+        currentRunDomains,
         excludePatterns,
         log: (m) => void logAudit('auto-pipeline.bob-cache', m, logCtx),
       });
@@ -908,6 +879,9 @@ export async function runAutoPipelineForClient(
       const stillNeeded = neededFromBob - cacheResult.employers.length;
       let bobLiveResult: Awaited<ReturnType<typeof fetchTopUpFromBaseOfBases>> | null = null;
       if (config.base_of_bases_live_fallback === true && stillNeeded > 0) {
+        // The legacy live source does not use the RPC, so it still needs the
+        // full paginated history plus domains already chosen from this cache.
+        for (const domain of await loadSeenDomains(clientUserId)) seenDomains.add(domain);
         bobLiveResult = await fetchTopUpFromBaseOfBases({
           clientUserId,
           neededCount: stillNeeded,

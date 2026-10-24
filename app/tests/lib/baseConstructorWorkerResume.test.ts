@@ -24,9 +24,12 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { resumeFailedConstructorJob } from '@/lib/tools/baseConstructorResume';
 import { MAX_MANUAL_CONSTRUCTOR_JOBS } from '@/lib/tools/baseConstructorCapacity';
 import { describeConstructorProgress } from '@/lib/tools/baseConstructorProgress';
+import { ENG_CONSTRUCT_STEPS_AFTER_SPLIT } from '@/lib/tools/engConstructorSteps';
 import {
   EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
   ENRICH_CHECKPOINT_ATTEMPTED_COL,
+  stepEmailDedup,
+  stepSplitEmails,
   stepValidateEmails,
   type ProgressFn,
 } from '@/lib/tools/processingSteps';
@@ -84,9 +87,9 @@ jest.mock('@/lib/tools/processingSteps', () => {
     ...original,
     stepRemoveEmpty: stepNoop,
     stepFullDedup: stepNoop,
-    stepEmailDedup: stepNoop,
+    stepEmailDedup: jest.fn(stepNoop),
     stepFindEmails: stepNoop,
-    stepSplitEmails: stepNoop,
+    stepSplitEmails: jest.fn(stepNoop),
     stepSiteCheck: stepNoop,
     stepEnrich: stepNoop,
     stepNameCleanup: stepNoop,
@@ -216,6 +219,45 @@ describe('runBaseConstructorJob resume logic', () => {
     expect(stepKeys).not.toContain('dedup_full');
     expect(stepKeys).not.toContain('check_sites');
     expect(stepKeys).not.toContain('find_emails');
+  });
+
+  it('normalizes scalar cells before mapping and real email dedup on fresh and resumed jobs', async () => {
+    const actual = jest.requireActual<typeof import('@/lib/tools/processingSteps')>('@/lib/tools/processingSteps');
+    for (const locale of ['ru', 'en']) {
+      for (const resumed of [false, true]) {
+        admin.__reset();
+        jest.clearAllMocks();
+        jest.mocked(stepEmailDedup).mockImplementationOnce(actual.stepEmailDedup);
+        const saved = [
+          ['Inbox', 2026, 'ИНН', 'Выручка', 'Заметка', 'Flag'],
+          ['example@example.invalid', 'tag', '0012345678', 0, null, false],
+          ['example@example.invalid', 'tag', '0012345678', 0, '  подробнее  ', false],
+          ['other@example.invalid', 7, 1234567890, 1234.5, null, true],
+        ];
+        const original = structuredClone(saved);
+        admin.__setCurrentJob({
+          id: 'job-scalar-cells', user_id: 'u', file_name: 'test.csv', locale,
+          status: resumed ? 'processing' : 'pending',
+          selected_steps: resumed ? ['split_emails', 'dedup_email'] : ['dedup_email'],
+          step_config: { column_mapping: JSON.stringify({ email: 'Inbox' }) },
+          current_step: resumed ? 2 : 0,
+          current_step_key: resumed ? 'dedup_email' : null,
+          current_step_progress: resumed ? 50 : 0,
+          data: saved,
+        });
+
+        await runBaseConstructorJob('job-scalar-cells');
+
+        expect(stepSplitEmails).not.toHaveBeenCalled();
+        expect(stepEmailDedup).toHaveBeenCalledTimes(1);
+        expect(admin.__getUpdates().find(update => update.status === 'completed')?.data).toEqual([
+          [locale === 'en' ? 'Email' : 'email', '2026', 'ИНН', 'Выручка', 'Заметка', 'Flag'],
+          ['example@example.invalid', 'tag', '0012345678', '0', '  подробнее  ', 'false'],
+          ['other@example.invalid', '7', '1234567890', '1234.5', '', 'true'],
+        ]);
+        expect(saved).toEqual(original);
+      }
+    }
   });
 
   it('resume with mid-step (progress<100): re-runs current step', async () => {
@@ -360,6 +402,30 @@ describe('runBaseConstructorJob resume logic', () => {
       (u) => 'current_step_progress' in u && 'started_at' in u,
     );
     expect(heartbeats.length).toBeGreaterThan(0);
+  });
+
+  it('ENG base budget runs every step of the ENG collection chain and still refuses paid steps', async () => {
+    // 23.10.2026: remove_support_emails joined the chain but not the budget
+    // list, and every collection job failed at its start.
+    const chain = ['find_emails', 'enrich_descriptions', ...ENG_CONSTRUCT_STEPS_AFTER_SPLIT];
+    const job = {
+      id: 'job-eng-budget', user_id: 'u', file_name: 'eng.csv', locale: 'en', status: 'pending',
+      step_config: { he_eng_base_budget: { base_id: 'base', project_id: 'project' } },
+      current_step: 0, current_step_progress: 0,
+      data: [['Company', 'Site', 'Email'], ['Acme', 'https://acme.example', 'sales@acme.example']],
+    };
+    admin.__setCurrentJob({ ...job, selected_steps: chain });
+    await runBaseConstructorJob('job-eng-budget');
+    const ran = admin.__getUpdates().map((u) => u.current_step_key);
+    expect(ran).toEqual(expect.arrayContaining([...chain, 'done']));
+    expect(admin.__getUpdates().some((u) => u.status === 'failed')).toBe(false);
+
+    admin.__reset();
+    admin.__setCurrentJob({ ...job, selected_steps: [...chain, 'ta_scoring'] });
+    await runBaseConstructorJob('job-eng-budget');
+    expect(admin.__getUpdates()).toContainEqual(expect.objectContaining({
+      status: 'failed', error_message: 'ENG base budget: unbudgeted_constructor_step',
+    }));
   });
 
   it('resume после завершённого enrich не передаёт checkpoint metadata дальше', async () => {

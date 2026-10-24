@@ -79,6 +79,7 @@ import {
 } from '../letterBrandGuard';
 import { getWinnerPatterns, matchSegmentLabels, type HeWinnerPattern } from '../datasetStats';
 import { projectMarket } from '../market';
+import { readHeEngBaseFirst } from '../engBaseFirst';
 import { selectCaseForVertical, type HeCase } from '../caseBank';
 import type { HeChainLanguage, HeChainLetter, HeEvidenceItem, HeHypothesis, HeJob, HeVertical } from '../types';
 import {
@@ -317,6 +318,13 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   const vertical = verticalRow as HeVertical;
 
   const project = await readProject(ctx.supabase, job.project_id);
+  // A chain queued before the ENG cutover can still reach this worker.
+  // Finish it without a model call; its normal follow-up resumes collection.
+  // Staff/legacy projects and the RU engine retain the original stage.
+  if (await readHeEngBaseFirst(ctx.supabase, project)) {
+    stageLog(ctx, '[chain] ENG writes letters after base analysis; preliminary sequence skipped');
+    return { result: { skipped: 'eng_base_first' }, tokensUsed: 0, costUsd: 0 };
+  }
 
   const { data: hyps, error: hError } = await ctx.supabase
     .from('he_hypotheses')
@@ -336,8 +344,16 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // style_override/offer_override/signature_override попадают в промпт
   // отдельными блоками (styleExample / offerOverride / signatureOverride) —
   // из JSON-снапшота брифа их вырезаем, чтобы не дублировать длинные тексты
-  // в материалах.
-  const { style_override: _s, offer_override: _o, signature_override: _sig, ...briefRest } = brief;
+  // в материалах. collect_countries (страны сбора — замок сборки, план
+  // 2026-10-16-eng-countries) письмам не нужен и в материалы не идёт; ключа
+  // нет — JSON прежний байт в байт.
+  const {
+    style_override: _s,
+    offer_override: _o,
+    signature_override: _sig,
+    collect_countries: _cc,
+    ...briefRest
+  } = brief;
   // Английская цепочка 'us': business_override тоже уходит отдельным блоком
   // («CLIENT'S OWN WORDS» вместе с оффером) — из JSON брифа её промпта его
   // вырезаем. RU/PL и английская цепочка проекта 'ru' видят бриф как раньше

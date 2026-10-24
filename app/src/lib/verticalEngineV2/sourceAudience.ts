@@ -1,10 +1,14 @@
 import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { VE_AUDIENCE_GENERATION_VERSION, readVeAudienceScope, veAudienceScopeKey, veAudienceScopeText, type VeAudienceScope } from './audienceScope';
-import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, type VeNicheSourceProfile } from './nicheSourcePolicy';
+import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, normalizeVeRetailSourcePlan, type VeNicheSourceProfile } from './nicheSourcePolicy';
+import { deriveVeRetailAudienceScope, veRetailSourceProfileForScope, type VeRetailSourceProfile } from './legacyRetailAudience';
+import { VE_YANDEX_CATALOG_MAPPING_REVISION } from './yandexCatalog';
 import { veSourceStrategyKey } from './adaptiveCollection';
-import type { VeMarket } from './market';
+import { projectMarket, type VeMarket } from './market';
 import type { VeCollectTask, VeSourcePlan } from './prompts/sourcePlan';
+import { isVeRestaurantCatalogAudience } from './restaurantSourcePolicy';
+import { readVeCollectionGeography, type VeCollectionGeography } from './collectionGeography';
 
 export interface VeSourceAudienceHypothesis {
   id: string; title: string; description?: string | null; status: string | null;
@@ -15,6 +19,17 @@ export interface VeCollectionAudienceSnapshot {
   applied_at: string; reason: 'new_preview' | 'explicit_continuation';
 }
 export interface VeSourceCostPolicy { version: 1; website_discovery: 'existing_only' | 'existing_then_configured' }
+
+/** Read market only for the narrowly eligible legacy correction. Missing
+ * metadata is not permission to enqueue a RU-only rewrite in an ENG project. */
+export async function withVeRetailRefreshMarket<T extends Record<string, unknown>>(
+  db: SupabaseClient, projectId: string, hypothesis: T,
+): Promise<T & { collection_market?: VeMarket }> {
+  if (!deriveVeRetailAudienceScope(hypothesis as unknown as VeSourceAudienceHypothesis) && !isVeRestaurantCatalogAudience(hypothesis)) return hypothesis;
+  const { data, error } = await db.from('ve_projects').select('market').eq('id', projectId).maybeSingle();
+  if (error || !data) throw new Error(`Collection audience market: ${error?.message ?? 'project unavailable'}`);
+  return { ...hypothesis, collection_market: projectMarket(data) };
+}
 
 const text = (value: string) => value.toLowerCase().replace(/ё/g, 'е');
 /** A sector named fintech includes payment providers, not only that subtype.
@@ -63,7 +78,7 @@ export function readVeSourceCostPolicy(value: unknown): VeSourceCostPolicy | nul
 export function veNewAudienceSourceCostPolicy(hypothesis: VeSourceAudienceHypothesis, generationVersion: unknown, market: VeMarket): VeSourceCostPolicy {
   if (generationVersion != null && generationVersion !== VE_AUDIENCE_GENERATION_VERSION) throw new Error('Unsupported VE audience generation version');
   const scope = readVeAudienceScope(hypothesis.audience_scope);
-  const restricted = market === 'ru' && (isVeBroadFintechAudience(hypothesis) || detectVeNicheSourceProfile([hypothesis])
+  const restricted = market === 'ru' && (isVeBroadFintechAudience(hypothesis) || veAudienceRetailProfile([hypothesis]) || detectVeNicheSourceProfile([hypothesis])
     || scope?.any_of.some((title) => detectVeNicheSourceProfile([{ title }])));
   return { version: 1, website_discovery: generationVersion === VE_AUDIENCE_GENERATION_VERSION
     && scope && !restricted ? 'existing_then_configured' : 'existing_only' };
@@ -79,7 +94,7 @@ interface RefreshableInfo {
   collection_mode?: string; audience_snapshot?: unknown; audience_scope_refresh_requested?: boolean;
   hypotheses?: VeSourceAudienceHypothesis[]; refill?: boolean; campaign_id?: string; supply_batch_id?: string;
   construct?: { status?: string }; preview_pipeline?: { batches: unknown[] };
-  adaptive_collection?: { pending?: unknown }; tasks?: Array<{ status?: string; source?: string; task?: VeCollectTask }>;
+  adaptive_collection?: { pending?: unknown }; tasks?: Array<{ status?: string; source?: string; task?: VeCollectTask; catalog?: { mapping_revision?: number } }>;
   company_name_recovery?: unknown; validation_retry?: boolean; relevance_review_requested?: boolean;
   saved_email_recovery?: { batch?: unknown };
 }
@@ -96,6 +111,25 @@ export function needsLegacyFintechAudienceRefresh(info: RefreshableInfo): boolea
   const next = normalizeVeAudienceSourcePlan({ tasks: old }, info.hypotheses).plan.tasks;
   return next.some((task, index) => ['companies_directory', 'yandex_maps'].includes(task.source)
     && veSourceStrategyKey(task) !== veSourceStrategyKey(old[index]));
+}
+/** Preview-only correction of the two audited legacy generator definitions.
+ * A changed or manual brief cannot opt in through title keywords alone. */
+export function needsLegacyRetailAudienceRefresh(info: RefreshableInfo): boolean {
+  if (!canRefreshVeAudienceSources(info) || info.hypotheses?.length !== 1
+    || !info.tasks?.length || info.tasks.some((state) => !state.task)) return false;
+  const hypothesis = info.hypotheses[0];
+  const scope = deriveVeRetailAudienceScope(hypothesis);
+  if (!scope) return false;
+  const profile = veRetailSourceProfileForScope(scope, hypothesis.origin);
+  if (!profile) return false;
+  const next = normalizeVeRetailSourcePlan({ tasks: info.tasks.map((state) => state.task!) }, profile);
+  return info.tasks.some((state, index) => ['companies_directory', 'yandex_maps'].includes(state.source ?? '')
+    && (veSourceStrategyKey(state.task!) !== veSourceStrategyKey(next.tasks[index])
+      || (state.source === 'yandex_maps' && state.catalog?.mapping_revision !== VE_YANDEX_CATALOG_MAPPING_REVISION)));
+}
+export function veAudienceRetailProfile(hypotheses: VeSourceAudienceHypothesis[]): VeRetailSourceProfile | null {
+  if (hypotheses.length !== 1) return null;
+  return veRetailSourceProfileForScope(hypotheses[0].audience_scope, hypotheses[0].origin);
 }
 /** Every alternative must share a niche before it can specialize the entire
  * plan. Title words or one PSP branch cannot override a mixed sector scope. */
@@ -115,8 +149,10 @@ const FINTECH_TERMS = ['финтех', 'fintech', 'финансовые техн
  * tools or queries are appended; one existing directory branch retains PSP
  * identity lookup when another directory branch can cover the wider sector. */
 export function normalizeVeAudienceSourcePlan(plan: VeSourcePlan, hypotheses: VeSourceAudienceHypothesis[]): {
-  plan: VeSourcePlan; profile: VeNicheSourceProfile | null; decision: 'sector_fintech' | 'niche' | 'unchanged';
+  plan: VeSourcePlan; profile: VeNicheSourceProfile | null; decision: 'sector_fintech' | 'retail' | 'niche' | 'unchanged';
 } {
+  const retail = veAudienceRetailProfile(hypotheses);
+  if (retail) return { plan: normalizeVeRetailSourcePlan(plan, retail), profile: null, decision: 'retail' };
   const scope = hypotheses.length === 1 ? readVeAudienceScope(hypotheses[0].audience_scope) : null;
   const fintech = hypotheses.length === 1 && isVeBroadFintechAudience(hypotheses[0])
     && (!scope || (scope.required.length === 0 && scope.any_of.every((title) => /финтех|fintech/.test(text(title))
@@ -156,11 +192,13 @@ export function normalizeVeAudienceSourcePlan(plan: VeSourcePlan, hypotheses: Ve
     profile, decision: profile ? 'niche' : 'unchanged' };
 }
 
-/** Follow the actual approved launch lineage, never today's edited hypothesis.
- * Legacy approved previews return null and retain their existing supply path. */
+/** Follow the actual approved launch lineage, never today's edited hypothesis
+ * or brief. Geography is independent of structured audience rollout: a manual
+ * preview can freeze it without having an audience snapshot or cost policy. */
 export async function loadVeApprovedSupplyAudience(db: SupabaseClient, input: {
   projectId: string; hypothesisId: string; batchId: string; baseId: string;
-}): Promise<{ snapshot: VeCollectionAudienceSnapshot; costPolicy: VeSourceCostPolicy } | null> {
+}): Promise<{ snapshot: VeCollectionAudienceSnapshot | null; costPolicy: VeSourceCostPolicy | null;
+  geography: VeCollectionGeography | null } | null> {
   const { data: batch, error: batchError } = await db.from('ve_contact_supply_batches')
     .select('plan_id,base_id').eq('id', input.batchId).maybeSingle();
   if (batchError || !batch || batch.base_id !== input.baseId || !batch.plan_id) throw new Error('Supply audience batch is unavailable');
@@ -171,12 +209,15 @@ export async function loadVeApprovedSupplyAudience(db: SupabaseClient, input: {
     .select('base_id,project_id,hypothesis_id').eq('id', plan.item_id).maybeSingle();
   if (itemError || !item || !item.base_id || item.project_id !== input.projectId || item.hypothesis_id !== input.hypothesisId) throw new Error('Supply audience launch is unavailable');
   const { data: source, error: sourceError } = await db.from('ve_bases')
-    .select('id,project_id,hypothesis_id,audience_snapshot:collect_info->audience_snapshot,cost_policy:collect_info->cost_policy')
+    .select('id,project_id,hypothesis_id,audience_snapshot:collect_info->audience_snapshot,cost_policy:collect_info->cost_policy,collection_geography:collect_info->collection_geography')
     .eq('id', item.base_id).maybeSingle();
   if (sourceError || !source || source.project_id !== input.projectId || source.hypothesis_id !== input.hypothesisId) throw new Error('Supply source audience is unavailable');
   const snapshot = readVeCollectionAudienceSnapshot(source.audience_snapshot);
   const costPolicy = readVeSourceCostPolicy(source.cost_policy);
+  const geography = readVeCollectionGeography(source.collection_geography);
   if (snapshot && (snapshot.hypotheses.length !== 1 || snapshot.hypotheses[0].id !== input.hypothesisId
     || !costPolicy)) throw new Error('Supply source audience does not match approval');
-  return snapshot && costPolicy ? { snapshot: structuredClone(snapshot), costPolicy: structuredClone(costPolicy) } : null;
+  return snapshot || geography ? { snapshot: snapshot ? structuredClone(snapshot) : null,
+    costPolicy: costPolicy ? structuredClone(costPolicy) : null,
+    geography: geography ? structuredClone(geography) : null } : null;
 }

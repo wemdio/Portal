@@ -236,6 +236,9 @@ export async function runVeOutreachStartStage(job: VeJob, ctx: VeStageContext, i
     if (observed.errors.length) {
       item.status = 'waiting'; item.code = 'VE_CAMPAIGN_SYNC_PENDING';
       item.error = 'Кампании сохранены. Ожидаем подтверждения их состояния из Instantly; повторно создавать их не нужно.';
+    } else if (observed.senderErrors?.length) {
+      item.status = 'waiting'; item.code = 'VE_CAMPAIGN_SYNC_PENDING';
+      item.error = `Кампании сохранены в «Рассылке». Их состояние пока не подтверждено: ${observed.senderErrors[0].replace(/^[^:]*:\s*/, '')}`.slice(0, 500);
     } else {
       item.status = 'active'; item.code = 'VE_CAMPAIGNS_PREPARED';
     }

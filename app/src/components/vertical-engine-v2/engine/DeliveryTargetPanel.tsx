@@ -6,10 +6,11 @@ import { contactTargetDailyPlan, parseContactTarget, type ContactTargetState } f
 import { VE_API, veEnginePost } from './api';
 import { HE } from './design';
 import { StatusBox } from './ui';
+import type { ContactUploadMode } from './ContactUploadModePanel';
 
 const number = (value: number) => value.toLocaleString('ru-RU');
-export function DeliveryTargetPanel({ projectId, disabled = false, onSaved }: {
-  projectId: string; disabled?: boolean; onSaved?: () => void;
+export function DeliveryTargetPanel({ projectId, disabled = false, onSaved, uploadMode = 'daily' }: {
+  projectId: string; disabled?: boolean; onSaved?: () => void; uploadMode?: ContactUploadMode;
 }) {
   const id = useId();
   const [plan, setPlan] = useState<ContactTargetState | null>(null);
@@ -78,8 +79,10 @@ export function DeliveryTargetPanel({ projectId, disabled = false, onSaved }: {
             ? 'Укажите целое число от 1 до 1 000 000.'
             : `Минимум ${number(plan.minimum_target)}: уже учтённые, загруженные и зарезервированные контакты сохраняются.`}</p>
         </div>
-        {valid && daily !== null ? <p>Расчётный дневной план по новой цели: <strong>до {number(daily)} контактов</strong>.</p> : null}
-        <p className={HE.muted}>Новая цель изменит будущие порции и добор. Сегодняшний дневной лимит повторно не увеличится. Фактическая загрузка зависит от готового запаса и состояния кампаний.</p>
+        {uploadMode === 'daily' && valid && daily !== null ? <p>Расчётный дневной план по новой цели: <strong>до {number(daily)} контактов</strong>.</p> : null}
+        <p className={HE.muted}>{uploadMode === 'all_ready'
+          ? 'Новая цель изменит доступный объём загрузки и дальнейший добор. Уже загруженные контакты сохраняются.'
+          : 'Новая цель изменит будущие порции и добор. Сегодняшний дневной лимит повторно не увеличится. Фактическая загрузка зависит от готового запаса и состояния кампаний.'}</p>
         <div className="flex flex-wrap gap-3">
           <button type="submit" className={HE.btnPrimary} disabled={busy || disabled || !plan.can_edit || !valid || target === plan.target_contacts}>
             {busy ? 'Сохраняем…' : 'Сохранить цель'}</button>
@@ -87,7 +90,7 @@ export function DeliveryTargetPanel({ projectId, disabled = false, onSaved }: {
             setEditing(false); setValue(String(plan.target_contacts)); setError('');
           }}>Отмена</button>
         </div>
-      </form> : daily !== null ? <p className={HE.muted}>Расчётный дневной план: до {number(daily)} контактов. Дедлайн: {plan.deadline.split('-').reverse().join('.')}.</p> : null}
+      </form> : uploadMode === 'daily' && daily !== null ? <p className={HE.muted}>Расчётный дневной план: до {number(daily)} контактов. Дедлайн: {plan.deadline.split('-').reverse().join('.')}.</p> : <p className={HE.muted}>Дедлайн: {plan.deadline.split('-').reverse().join('.')}.</p>}
       {!plan.can_edit ? <p role="status" className={HE.muted}>Цель можно изменить после завершения подготовки текущего запуска. Затем обновите план.</p> : null}
     </> : busy ? <p role="status" className={HE.muted}>Загружаем общий план…</p> : null}
     {saved ? <p role="status">Общая цель сохранена. Уже загруженные контакты остаются в кампаниях.</p> : null}

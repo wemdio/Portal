@@ -20,7 +20,8 @@ const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(sta
 export const veSourceStrategyKey = (task: VeCollectTask) => {
   const filters = task.source === 'companies_directory' ? { ...task.directory_filters, includeIp: task.directory_filters?.includeIp ?? false }
     : task.source === 'hh_live' ? task.hh_query : task.source === 'pdl' ? task.pdl_filters
-      : task.source === 'funded' ? task.funded_filters : task.source === 'eng_hiring' ? task.eng_hiring_query : task.maps_query;
+      : task.source === 'funded' ? task.funded_filters : task.source === 'eng_hiring' ? task.eng_hiring_query
+        : task.source === 'known_websites' ? task.known_websites : task.maps_query;
   return createHash('sha256').update(JSON.stringify(stable({ source: task.source, filters }))).digest('hex');
 };
 export const veReadyContactKeys = (rows: Array<Record<string, unknown>>) => [...new Set(rows.map((row) => String(row.email ?? '').trim().toLowerCase()).filter(Boolean))]
@@ -211,6 +212,7 @@ export function veDryLiveSources(completed: VeAdaptiveResult[], liveKeys: Iterab
 const VE_DRY_SOURCE_FROM: Record<string, string> = {
   companies_directory: 'реестра', yandex_maps: 'Яндекс Карт', google_maps: 'Google Maps', hh_live: 'вакансий hh.ru',
   eng_hiring: 'вакансий', pdl: 'каталога PDL', funded: 'каталога стартапов',
+  known_websites: 'официальных сайтов платформ',
 };
 const ruPlural = (value: number, one: string, few: string, many: string) => {
   const tens = value % 100, units = value % 10;

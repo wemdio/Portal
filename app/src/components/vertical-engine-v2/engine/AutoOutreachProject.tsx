@@ -27,6 +27,7 @@ import { BaseRow, BaseAnalysisCards } from './steps/Step4Base';
 import { FinalLettersEditor } from './FinalLettersEditor';
 import { OutreachLaunchPanel } from './OutreachLaunchPanel';
 import { DeliveryRatePanel } from './DeliveryRatePanel';
+import { ContactUploadModePanel, type ContactUploadMode } from './ContactUploadModePanel';
 import { DeliveryTargetPanel } from './DeliveryTargetPanel';
 import { CampaignProgress } from './CampaignProgress';
 import { ManualBaseLibrary } from './ManualBaseLibrary';
@@ -162,8 +163,8 @@ export function AudienceSummary({
         : preparedForLaunch}</p>
       {partial && readyForReview ? <p className={HE.muted}>{preparedForLaunch}</p> : null}
       {!partial || readyForReview ? <p className={HE.faint}>
-        Контакты будут загружаться в Instantly дневными партиями. Темп и срок появятся на шаге «Запуск» после выбора
-        проекта и настроек отправки; план считается по общему обязательству проекта сразу для всех гипотез.
+        На шаге «Запуск» выберите загрузку всех готовых контактов сразу или дневными порциями.
+        Общая цель проекта учитывает все запущенные гипотезы.
       </p> : null}
       <details>
         <summary className="ve2-link cursor-pointer">Расчёт объёма и прогноз</summary>
@@ -234,6 +235,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   const [broadRequesting, setBroadRequesting] = useState(false);
   const [activeHypothesis, setActiveHypothesis] = useState('');
   const [activeLetterBaseId, setActiveLetterBaseId] = useState<string | undefined>();
+  const resultTemplateToFocus = useRef<string | null>(null);
   const [presetId, setPresetId] = useState('');
   const dirtyRef = useRef(false);
   const libraryDirtyRef = useRef(false);
@@ -320,6 +322,12 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
       setRefreshing(false);
     }
   }, [projectId]);
+  const uploadModeSaved = useCallback((mode: ContactUploadMode) => {
+    detailMutationRevision.current += 1;
+    setDetail(current => current ? { ...current, project: { ...current.project, contact_upload_mode: mode } } : current);
+    void refresh();
+  }, [refresh]);
+  const uploadMode = detail?.project.contact_upload_mode === 'all_ready' ? 'all_ready' : 'daily';
   const working =
     detail?.jobs.some((j) => ['pending', 'running'].includes(j.status)) ||
     snapshot?.preparations.some(
@@ -352,6 +360,14 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         run?.items.some((item) => item.template_id === t.id))
     );
   });
+  useEffect(() => {
+    if (step !== 5 || !resultTemplateToFocus.current) return;
+    const card = document.getElementById(`ve-campaign-${resultTemplateToFocus.current}`);
+    resultTemplateToFocus.current = null;
+    if (!card) return;
+    card.focus({ preventScroll: true });
+    card.scrollIntoView({ block: 'start' });
+  }, [step]);
   const visibleHypotheses = selectPreparationHypotheses(detail?.hypotheses ?? [], selectedIds,
     snapshot?.preparations ?? [], detail?.bases ?? []);
   const titles = useMemo(
@@ -1105,6 +1121,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                 const { base, canPauseOrphan } = selectHypothesisPreparationBase(h.id, p, detail.bases, detail.jobs);
                 const historicalBases = savedBases.filter((item) => item.id !== base?.id);
                 const savedLetters = selectHypothesisLetters(h.id, p, detail.bases, detail.templates).template;
+                const launchedTemplate = resultTemplates.find((item) => item.id === p?.template_id)
+                  ?? resultTemplates.find((item) => item.base_id === base?.id);
                 const review = base ? snapshot?.reviews[base.id] : null,
                   approval = base ? snapshot?.setup.approved_bases[base.id] : null;
                 const approved =
@@ -1116,6 +1134,13 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                       <h3 className="ve2-h3">{h.title}</h3>
                       <DownloadVerifiedContacts projectId={projectId} hypothesisId={h.id} hypothesisTitle={h.title} />
                     </div>
+                    {launchStates[h.id]?.launched ? (
+                      <button type="button" className={HE.btnGhost}
+                        aria-label={`Управлять добором: ${h.title}`}
+                        onClick={() => {
+                          if (jump(5)) resultTemplateToFocus.current = launchedTemplate?.id ?? null;
+                        }}>Управлять добором</button>
+                    ) : null}
                     {!launchStates[h.id]?.launched ? <PreparationProgress compact preparation={p} base={base} jobs={detail.jobs} approved={approved}
                       preparationSelected={selectedIds.includes(h.id)} hypothesisTitle={h.title}
                       canPauseOrphan={canPauseOrphan && h.status !== 'rejected' && !!h.vertical_id}
@@ -1161,12 +1186,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                             </div>
                           </details>
                         ) : null}
-                        {launchStates[h.id]?.launched ? (
-                          <div className="space-y-2">
-                            <p className={HE.muted}>База уже передана в запуск.</p>
-                            <button type="button" className={HE.btnGhost} aria-label={`Посмотреть результаты: ${h.title}`} onClick={() => jump(5)}>Посмотреть результаты</button>
-                          </div>
-                        ) : review && p?.status === 'ready' && !p.paused_at ? <>
+                        {!launchStates[h.id]?.launched && review && p?.status === 'ready' && !p.paused_at ? <>
                         <label className="flex items-start gap-3">
                           <input
                             type="checkbox"
@@ -1191,7 +1211,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                           disabled={busy || locked || contactLimitUnsaved}
                           onClick={() => configureLaunch([h.id])}>К запуску этой базы</button>
                         : <p className={HE.muted}>{launchStates[h.id]?.label}</p>}
-                        </> : p?.status === 'ready' && !p.paused_at ? <p className={HE.muted}>
+                        </> : !launchStates[h.id]?.launched && p?.status === 'ready' && !p.paused_at ? <p className={HE.muted}>
                           Одобрение появится после подтверждения актуальной версии базы и писем. Статус обновляется автоматически.
                         </p> : null}
                       </>
@@ -1236,6 +1256,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
               key={launchHypothesisIds.join(',') || 'empty'}
               projectId={projectId}
               snapshot={snapshot}
+              uploadMode={uploadMode}
+              onUploadModeSaved={uploadModeSaved}
               templates={detail.templates}
               titles={titles}
               hypothesisIds={launchHypothesisIds}
@@ -1254,11 +1276,13 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
               <h2 className="ve2-h2">{run?.status === 'waiting' && run.items.some(item => item.code === 'VE_LAUNCH_REVIEW_REQUIRED')
                 ? 'Кампании ожидают проверки специалиста' : run ? RUN_LABELS[run.status] : 'Результаты'}</h2>
               {run?.error ? <StatusBox tone="error">{run.error}</StatusBox> : null}
-              {run?.request.target_contacts ? <DeliveryTargetPanel key={projectId} projectId={projectId}
+              {run ? <ContactUploadModePanel key={projectId} projectId={projectId} mode={uploadMode}
+                disabled={busy || ['queued', 'running'].includes(run.status)} onSaved={uploadModeSaved} /> : null}
+              {run?.request.target_contacts ? <DeliveryTargetPanel key={projectId} projectId={projectId} uploadMode={uploadMode}
                 disabled={busy || ['queued', 'running', 'waiting'].includes(run.status)} onSaved={() => void refresh()} /> : null}
               {run?.request.preset_id && run.items.length ? <DeliveryRatePanel projectId={projectId}
                 presetId={run.request.preset_id} templateIds={run.items.map(item => item.template_id)}
-                disabled={busy || ['queued', 'running'].includes(run.status)} /> : null}
+                disabled={busy || ['queued', 'running'].includes(run.status)} supplyOnly={uploadMode === 'all_ready'} /> : null}
               {!locked && resultTemplates.length ? (
                 <button
                   type="button"
@@ -1294,6 +1318,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                   <CampaignProgress
                     key={t.id}
                     template={t}
+                    uploadMode={uploadMode}
                     required={base?.source === 'auto' && base.collect_info?.collection_mode === 'preview'}
                     title={hypothesisId ? (titles[hypothesisId] ?? 'Гипотеза') : (base?.filename ?? 'Кампания')}
                     headerAction={hypothesisId ? <DownloadVerifiedContacts projectId={projectId} hypothesisId={hypothesisId} /> : undefined}

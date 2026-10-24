@@ -5,6 +5,7 @@ import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import type { Account, Campaign, PaginatedResponse } from '@/lib/instantly/types';
 import { normalizeLaunchMailboxIds, launchMailboxScopesEqual } from './launchPortfolio';
 import { readContactDeliveryPages } from './contactDeliveryInventory';
+import { transportOf } from './senderTransport/transport';
 import { VE_CAMPAIGN_SENDING_SETTINGS, DeliveryRateError, calculateDeliveryRate, distributeDeliveryRate, isSendingCampaign, type DeliveryRatePolicy, type DeliveryRateRow } from './contactDeliveryRate';
 
 // consumer — подпись в счётчиках instantly_api_usage_hourly: без неё расчёт
@@ -34,7 +35,7 @@ export async function previewDeliveryRate(portalDb: SupabaseClient, instantlyDb:
   projectId: string; presetId: string; templateIds: string[]; policy: DeliveryRatePolicy;
 }) {
   const { data: project, error: projectError } = await portalDb.from('ve_projects')
-    .select('id, launch_preset_id, launch_instantly_account_id, portal_project_id').eq('id', input.projectId).maybeSingle();
+    .select('id, launch_preset_id, launch_instantly_account_id, portal_project_id, contact_upload_mode').eq('id', input.projectId).maybeSingle();
   if (projectError || !project) throw new DeliveryRateError('Проект вертикалей не найден.');
   if (project.launch_preset_id && project.launch_preset_id !== input.presetId) throw new DeliveryRateError('Профиль отправки закреплён за другим клиентом.');
   const { data: preset, error } = await instantlyDb.from('client_campaign_presets')
@@ -44,9 +45,9 @@ export async function previewDeliveryRate(portalDb: SupabaseClient, instantlyDb:
   const accountId = resolveInstantlyAccountId(preset.instantly_account_id);
   if (project.launch_instantly_account_id && project.launch_instantly_account_id !== accountId) throw new DeliveryRateError('Рабочее пространство профиля изменилось.');
   const mailboxes = normalizeLaunchMailboxIds(preset.email_account_ids);
-  const items = await readContactDeliveryPages<{id: string; template_id: string; status: string; mailbox_ids: string[]; instantly_account_id: string}>(
+  const items = await readContactDeliveryPages<{id: string; template_id: string; status: string; mailbox_ids: string[]; instantly_account_id: string; transport?: unknown}>(
     'rate launch items', (from, to) => portalDb.from('ve_launch_queue_items')
-      .select('id, template_id, status, mailbox_ids, instantly_account_id', {count: 'exact'}).eq('project_id', input.projectId)
+      .select('id, template_id, status, mailbox_ids, instantly_account_id, transport', {count: 'exact'}).eq('project_id', input.projectId)
       .order('id', {ascending:true}).range(from,to));
   const activeItems = items.filter(item => item.status === 'active');
   for (const item of activeItems) {
@@ -59,9 +60,12 @@ export async function previewDeliveryRate(portalDb: SupabaseClient, instantlyDb:
   if (templateError || templates?.length !== templateIds.length || templates.some(t => t.status !== 'ready' || !Array.isArray(t.letters) || !t.letters.length)) throw new DeliveryRateError('Итоговые письма ещё не готовы.');
   const { data: bases, error: baseError } = await portalDb.from('ve_bases').select('id, project_id').in('id', [...new Set(templates.map(t=>t.base_id))]);
   if (baseError || templates.some(t=>!bases?.some(b=>b.id===t.base_id && b.project_id===input.projectId))) throw new DeliveryRateError('Письма относятся к другому проекту.');
-  const children = activeItems.length ? await readContactDeliveryPages<{id:string;campaign_id:string}>(
+  // Кампании «Рассылки» в Instantly не читаются и не правятся: темп Instantly
+  // распределяется только по его кампаниям. Сверка набора почт выше — для всех.
+  const providerItems = activeItems.filter(item => transportOf(item.transport) === 'instantly');
+  const children = providerItems.length ? await readContactDeliveryPages<{id:string;campaign_id:string}>(
     'rate active campaigns', (from,to)=>portalDb.from('ve_launch_queue_campaigns').select('id, campaign_id',{count:'exact'})
-      .in('item_id',activeItems.map(item=>item.id)).order('id',{ascending:true}).range(from,to)) : [];
+      .in('item_id',providerItems.map(item=>item.id)).order('id',{ascending:true}).range(from,to)) : [];
   const ownIds = new Set(children.map(child=>child.campaign_id));
   const options = { ...READ_OPTIONS, accountId };
   const [accounts, campaigns] = await Promise.all([
@@ -115,7 +119,11 @@ export async function previewDeliveryRate(portalDb: SupabaseClient, instantlyDb:
   }));
   const snapshot = calculateDeliveryRate({mailboxIds:mailboxes,accounts,otherCampaigns:external,otherCampaignTagMailboxIds:[...tagMailboxes],sequenceSteps:steps,
     policy:input.policy,windowMinutes,gapMinutes:preset.email_gap_minutes});
-  return { snapshot, own, accountId, bound: Boolean(project.portal_project_id), templateIds };
+  if (project.contact_upload_mode != null && !['daily', 'all_ready'].includes(project.contact_upload_mode)) {
+    throw new DeliveryRateError('Не удалось определить режим загрузки проекта.');
+  }
+  return { snapshot, own, accountId, bound: Boolean(project.portal_project_id), templateIds,
+    uploadMode: project.contact_upload_mode === 'all_ready' ? 'all_ready' as const : 'daily' as const };
 }
 
 async function rateRpc(db: SupabaseClient, name: string, args: Record<string,unknown>) {
@@ -128,7 +136,7 @@ export async function saveDeliveryRate(portalDb:SupabaseClient, instantlyDb:Supa
 }) {
   const preview = await previewDeliveryRate(portalDb,instantlyDb,input);
   if (preview.snapshot.effective_capacity <= 0) throw new DeliveryRateError('Нет доступной мощности: проверьте состояние почт, их лимиты и длину цепочки.');
-  distributeDeliveryRate(preview.snapshot.effective_capacity, preview.own.map(c => c.id));
+  if (preview.uploadMode === 'daily') distributeDeliveryRate(preview.snapshot.effective_capacity, preview.own.map(c => c.id));
   return rateRpc(portalDb,'ve_save_contact_delivery_rate',{
     p_project_id:input.projectId,p_preset_id:input.presetId,p_template_ids:preview.templateIds,
     p_mode:input.policy.mode,p_manual_limit:input.policy.mode==='manual'?input.policy.manual_limit:null,
@@ -146,7 +154,11 @@ export async function refreshDeliveryRate(portalDb:SupabaseClient, instantlyDb:S
     const current=await previewDeliveryRate(portalDb,instantlyDb,{projectId,presetId:rate.preset_id,templateIds:rate.template_ids,policy:rate});
     if(current.snapshot.effective_capacity<=0) throw new DeliveryRateError('Лимиты и состояние отправителей пока не позволяют добавлять новые контакты.');
     const ids=current.own.map(c=>c.id);
-    const newLimits=distributeDeliveryRate(current.snapshot.effective_capacity,ids);
+    // In all-ready mode the forecast sizes collection reserve only. Do not
+    // recreate its Portal throttle as Instantly's per-campaign lead cap.
+    const newLimits=current.uploadMode === 'all_ready'
+      ? Object.fromEntries(ids.map(id => [id, VE_CAMPAIGN_SENDING_SETTINGS.daily_limit]))
+      : distributeDeliveryRate(current.snapshot.effective_capacity,ids);
     const options={...READ_OPTIONS,accountId:current.accountId};
     const renew = async () => {
       const owned=await rateRpc(portalDb,'ve_claim_contact_delivery_rate',{p_project_id:projectId,p_revision:rate.revision,p_token:token});

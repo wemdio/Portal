@@ -1,11 +1,13 @@
 /**
  * Стадия hypotheses — проход (a): мгновенный исчерпывающий список
- * гипотез-кандидатов (25–40, tier 1/2/3) из «генетической памяти» модели.
+ * гипотез-кандидатов (RU — 25–40, tier 1/2/3; us — с 16.10.2026 до 15 широких
+ * аудиторий без квот, prompts/hypotheses.en.ts) из «генетической памяти» модели.
  * Кандидаты сохраняются в job.result.candidates — их верифицирует стадия
  * evidence. На этом шаге поиск и доказательства НЕ используются.
  *
  * Мягкие проверки ответа (оба рынка, только строка лога): квоты промпта
- * (25–40 кандидатов, tier 2 ≥ 8, tier 3 ≥ 8) и повторы title.
+ * (RU — 25–40 кандидатов, tier 2 ≥ 8, tier 3 ≥ 8; us — не больше 15) и повторы
+ * title.
  *
  * Только market='us':
  *  - пол схемы (HeHypothesesBatchSchemaUs): не меньше HE_HYPOTHESES_FLOOR_US
@@ -41,6 +43,7 @@ import { projectMarket, type HeMarket } from '../market';
 import { buildHypothesesInstantMessages } from '../prompts/hypotheses';
 import { buildHypothesesInstantMessagesEn } from '../prompts/hypotheses.en';
 import { readHeIcpFrame } from '../icpFrame';
+import { HE_COLLECT_COUNTRIES_INVALID, engCountryLabel, readHeCollectCountries } from '../engCountries';
 import { getPortfolioProfile, type HePortfolioEntry } from '../datasetStats';
 import type { HeJob } from '../types';
 import {
@@ -59,12 +62,14 @@ import type { HeCompetitorEntry } from './competitors';
 /* ─────────────── пол ответа и разметка (только market='us') ─────────────── */
 
 /**
- * Пол списка кандидатов рынка 'us'. Промпт просит 25–40; ответ короче 8 —
- * отказ или обрубок, а не «рынков мало», и одна осмысленная попытка (повтор
- * схемы видит весь прошлый ответ и ошибку) дешевле исследования, построенного
- * на трёх гипотезах.
+ * Пол списка кандидатов рынка 'us'. С 16.10.2026 EN-промпт просит до 15 широких
+ * аудиторий без минимума (обычно 6–12), и честный ответ из 4–6 аудиторий
+ * повтором не наказывается: повтор оплачивает генерацию всего ответа заново.
+ * Ответ короче 3 — отказ или обрубок, а не «рынков мало»: одна осмысленная
+ * попытка (повтор схемы видит весь прошлый ответ и ошибку) дешевле
+ * исследования, построенного на одной-двух гипотезах.
  */
-const HE_HYPOTHESES_FLOOR_US = 8;
+const HE_HYPOTHESES_FLOOR_US = 3;
 
 /**
  * Схема ответа рынка 'us': общий кандидат (пробелы по краям title срезаются) и
@@ -80,7 +85,7 @@ const HeHypothesesBatchSchemaUs = z.object({
     .array(HeHypothesisCandidateSchema.extend({ title: z.string().trim() }))
     .refine(
       (list) => list.filter((h) => h.title).length >= HE_HYPOTHESES_FLOOR_US,
-      `return 25-40 hypotheses: fewer than ${HE_HYPOTHESES_FLOOR_US} with a non-empty title is not a complete answer`,
+      `return the distinct fitting audiences (up to 15): fewer than ${HE_HYPOTHESES_FLOOR_US} with a non-empty title is not a complete answer`,
     ),
 });
 
@@ -175,9 +180,10 @@ async function callHypothesesUs(
 
 /**
  * Мягкие проверки ответа модели — только строка лога, без отказа (оба рынка):
- * квоты промпта (25–40 кандидатов, tier 2 ≥ 8, tier 3 ≥ 8) и повторы title.
+ * квоты промпта и повторы title. RU — 25–40 кандидатов, tier 2 ≥ 8, tier 3 ≥ 8
+ * (как раньше); us — с 16.10.2026 квот нет, проверяется только потолок 15.
  */
-function logSoftChecks(ctx: HeStageContext, candidates: HeHypothesisCandidate[]): void {
+function logSoftChecks(ctx: HeStageContext, candidates: HeHypothesisCandidate[], market: HeMarket): void {
   const tiers = candidates.reduce<Record<number, number>>((acc, h) => {
     acc[h.tier] = (acc[h.tier] ?? 0) + 1;
     return acc;
@@ -190,9 +196,13 @@ function logSoftChecks(ctx: HeStageContext, candidates: HeHypothesisCandidate[])
     else seen.add(key);
   }
   const issues: string[] = [];
-  if (candidates.length < 25 || candidates.length > 40) issues.push(`кандидатов ${candidates.length} (просили 25–40)`);
-  if ((tiers[2] ?? 0) < 8) issues.push(`tier 2: ${tiers[2] ?? 0} (просили ≥ 8)`);
-  if ((tiers[3] ?? 0) < 8) issues.push(`tier 3: ${tiers[3] ?? 0} (просили ≥ 8)`);
+  if (market === 'us') {
+    if (candidates.length > 15) issues.push(`кандидатов ${candidates.length} (просили до 15)`);
+  } else {
+    if (candidates.length < 25 || candidates.length > 40) issues.push(`кандидатов ${candidates.length} (просили 25–40)`);
+    if ((tiers[2] ?? 0) < 8) issues.push(`tier 2: ${tiers[2] ?? 0} (просили ≥ 8)`);
+    if ((tiers[3] ?? 0) < 8) issues.push(`tier 3: ${tiers[3] ?? 0} (просили ≥ 8)`);
+  }
   if (duplicates) issues.push(`повторов title: ${duplicates}`);
   if (issues.length) stageLog(ctx, `[hypotheses] мягкая проверка ответа: ${issues.join('; ')}`);
 }
@@ -391,6 +401,25 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
     );
   }
 
+  // Страны сбора проекта (brief.collect_countries) — замок сборки: компании вне
+  // списка не соберутся, и промпт обязан не предлагать рынки, которых в этих
+  // странах нет (план 2026-10-16-eng-countries, §1A). Только us и только
+  // непустой список — иначе вход промпта прежний байт в байт. Значения, которых
+  // справочник больше не знает, и заглушка испорченного ключа в промпт не идут:
+  // по ним не собирается ничего. Уже написанные гипотезы не переписываются —
+  // список действует на новые прогоны.
+  const collectCountries = market === 'us'
+    ? (() => {
+      const read = readHeCollectCountries(project.brief?.collect_countries);
+      return read.countries
+        .filter((c) => c !== HE_COLLECT_COUNTRIES_INVALID && !read.unavailable.includes(c))
+        .map(engCountryLabel);
+    })()
+    : [];
+  if (collectCountries.length) {
+    stageLog(ctx, `[hypotheses] страны сбора проекта в промпте: ${collectCountries.length}`);
+  }
+
   // Отклонённые человеком гипотезы проекта (us): запрет в промпте и фильтр ниже.
   const rejectedTitles = market === 'us' ? await readRejectedTitles(ctx, job.project_id) : [];
   if (rejectedTitles.length) {
@@ -400,7 +429,12 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
     );
   }
 
-  stageLog(ctx, '[hypotheses] мгновенный проход: 25–40 кандидатов…');
+  stageLog(
+    ctx,
+    market === 'us'
+      ? '[hypotheses] мгновенный проход: до 15 широких аудиторий…'
+      : '[hypotheses] мгновенный проход: 25–40 кандидатов…',
+  );
   // Объект собираем переменной, а не литералом в вызове: поля portfolioProfile /
   // markupHistory добавляются в HypothesesPromptInput параллельным изменением —
   // так стадия компилируется и до, и после приземления промпт-контракта.
@@ -417,6 +451,7 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
       ? { businessOverride: project.brief.business_override.trim() }
       : {}),
     ...(icpFrame ? { icpFrame } : {}),
+    ...(collectCountries.length ? { collectCountries } : {}),
     ...(rejectedTitles.length ? { rejectedTitles: rejectedTitles.slice(0, REJECTED_TITLES_PROMPT_LIMIT) } : {}),
   };
   const messages = (market === 'us' ? buildHypothesesInstantMessagesEn : buildHypothesesInstantMessages)(promptInput);
@@ -432,7 +467,7 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
     addUsage(usage, llm);
     candidates = llm.data.hypotheses;
   }
-  logSoftChecks(ctx, candidates);
+  logSoftChecks(ctx, candidates, market);
 
   if (market === 'us') {
     // Пустой title, отклонённое человеком и повторы title внутри ответа — до

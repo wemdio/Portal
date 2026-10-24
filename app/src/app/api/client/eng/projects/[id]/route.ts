@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
+import { logAudit, logWarn } from '@/lib/loggerServer';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { isValidUuid } from '@/lib/apiValidation';
@@ -18,14 +19,23 @@ import {
 } from '@/lib/hypothesisEngine/researchJob';
 import { loadClientHeProject, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import { isAnalyzingBaseLive, liveBaseIdsFromJobs } from '@/lib/hypothesisEngine/autopilotNext';
-import { readHeChainExhaustedVerticals } from '@/lib/hypothesisEngine/autopilotReconcile';
 import { projectMarket } from '@/lib/hypothesisEngine/market';
 import {
   OFFER_OVERRIDE_MAX_LENGTH,
+  heCollectCountriesBroadened,
   patchHeProjectBrief,
+  resumeHeDryVerticalsAfterCountriesBroadened,
   type HeBriefField,
   type HeBriefPatchBody,
+  type HeBriefPatchClientFields,
 } from '@/lib/hypothesisEngine/projectBriefPatch';
+import {
+  heCollectCountriesErrorText,
+  parseHeCollectCountries,
+  readHeCollectCountries,
+} from '@/lib/hypothesisEngine/engCountries';
+import { heEngCollectCountriesEnabled } from '@/lib/hypothesisEngine/engRolloutFlags';
+import { resumeHeVerticalNightlyRefill } from '@/lib/hypothesisEngine/autoPipeline';
 import {
   heIcpFrameInputErrorText,
   parseHeIcpFramePatch,
@@ -39,6 +49,7 @@ import {
 import { readHeEngAutoLaunchDetail } from '@/lib/hypothesisEngine/engAutoLaunch';
 import { readHeEngTypicalDurations } from '@/lib/hypothesisEngine/engEstimates';
 import { readHeEngSendingAccess } from '@/lib/hypothesisEngine/engSendingAccess';
+import { readHeEngCollectionProgress } from '@/lib/hypothesisEngine/engCollectionProgress';
 import { heBrandNeedsOwner, readHeBrandEngClient } from '@/lib/hypothesisEngine/letterBrandGuard';
 import { heTeamFixableFailureOf } from '@/lib/hypothesisEngine/clientErrors';
 import {
@@ -253,7 +264,11 @@ const SETTING_SAVE_FAILED = 'Failed to save the project setting';
  * PATCH-роутов только этот) и настройка проекта «до N адресов одной компании». Значения
  * приходят `unknown` — проверяют их нормализаторы, а не тип запроса.
  */
-type EngProjectPatchBody = HeBriefPatchBody & { max_emails_per_company?: unknown; icp?: unknown };
+type EngProjectPatchBody = HeBriefPatchBody & {
+  max_emails_per_company?: unknown;
+  icp?: unknown;
+  collect_countries?: unknown;
+};
 
 /**
  * Единственный текст отказа по значению настройки. Границы подставляются из
@@ -266,7 +281,8 @@ const CONTACT_CAP_RANGE =
   + ` to ${HE_MAX_EMAILS_PER_COMPANY_MAX}, or null to use the default`;
 
 const NO_FIELDS =
-  'Provide offer_override, style_override, signature_override, business_override, icp or max_emails_per_company';
+  'Provide offer_override, style_override, signature_override, business_override, icp, collect_countries'
+  + ' or max_emails_per_company';
 
 /**
  * Рамку ЦА читают только EN-промпты (рынок us): профиля сайта
@@ -277,6 +293,20 @@ const NO_FIELDS =
  * лишь запрос в обход формы.
  */
 const ICP_MARKET_ONLY_US = 'The target audience fields apply only to projects in the US market';
+
+/**
+ * Страны сбора (brief.collect_countries) соблюдает только сборка рынка us
+ * (план 2026-10-16-eng-countries, §1A): на проекте другого рынка список лёг бы
+ * в brief и не читался бы никогда.
+ */
+const COUNTRIES_MARKET_ONLY_US = 'Countries apply only to projects in the US market';
+
+/**
+ * Запись списка стран выключена (HE_ENG_COLLECT_COUNTRIES): пока хоть один
+ * контейнер работает на старой сборке, его воркер проигнорировал бы список
+ * молча. Машинный код — чтобы экран отличал «недоступно» от ошибки ввода.
+ */
+const COUNTRIES_UNAVAILABLE = 'Choosing countries is not available yet.';
 
 // GET — деталка СВОЕГО проекта (та же сборка, что у staff-роута, но со скоупом
 // владельца: чужой проект отвечает 404, существование не раскрываем) —
@@ -430,12 +460,6 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   // ОСТАНОВКИ, КОТОРЫЕ ЧИНИТ КОМАНДА (readTeamFixStops): только у исследованного
   // проекта — карточки рынков шага 3 и шапка мастера рисуются у него.
   //
-  // ИСЧЕРПАННЫЙ ТОРМОЗ ЦЕПОЧЕК (readHeChainExhaustedVerticals, 14.10.2026):
-  // рынки, чьи засчитанные прогоны цепочки дошли до порога, — «Launch» их
-  // пропустит, поэтому карточка шага 3 зовёт в Support, а не к «Launch». Только
-  // у исследованного проекта; сбой чтения — ключа нет (карточка говорит
-  // по-старому).
-  //
   // ВЫКЛЮЧАТЕЛЬ ОТПРАВКИ АККАУНТА (readHeEngSendingAccess — то же чтение, что у
   // GET …/launch, без записи и алерта): тоже только у исследованного проекта.
   // При 'revoked' «Launch», «Launch now», «Rewrite letters» и «Collect again»
@@ -443,7 +467,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   // рисует или выключает; с опросом деталки экран видит включение и выключение
   // без перезагрузки. Сбой чтения и нет таблицы — ключа нет (экран берёт
   // чтение GET …/launch).
-  const [autoLaunch, durations, teamFixStops, sendingAccess, chainExhausted] = await Promise.all([
+  const [autoLaunch, durations, teamFixStops, sendingAccess, collectionProgress] = await Promise.all([
     readHeEngAutoLaunchDetail(supabaseAdmin, id, {
       verticals: detail.detail.verticals as Array<Record<string, unknown>>,
       hypotheses: detail.detail.hypotheses as Array<Record<string, unknown>>,
@@ -452,13 +476,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     readHeEngTypicalDurations(supabaseAdmin),
     rawProject.status === 'researched' ? readTeamFixStops(id) : Promise.resolve(null),
     rawProject.status === 'researched' ? readHeEngSendingAccess(supabaseAdmin, result.auth.userId) : Promise.resolve(null),
-    rawProject.status === 'researched'
-      ? readHeChainExhaustedVerticals(
-        supabaseAdmin,
-        id,
-        Array.isArray(detail.detail.chains) ? detail.detail.chains : [],
-      ).catch(() => null)
-      : Promise.resolve(null),
+    readHeEngCollectionProgress(supabaseAdmin, result.auth.userId, Array.isArray(detail.detail.bases) ? detail.detail.bases : []),
   ]);
   const accountAccess: 'not_enabled' | 'revoked' | null | undefined =
     sendingAccess === null || sendingAccess.state === 'error' || sendingAccess.state === 'unavailable'
@@ -489,13 +507,15 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   );
   return NextResponse.json({
     ...projected,
-    bases:
-      analysisLive.size === 0
-        ? refill.bases
-        : refill.bases.map((b) => {
-            const live = typeof b.id === 'string' ? analysisLive.get(b.id) : undefined;
-            return live === undefined ? b : { ...b, analysis_live: live };
-          }),
+    bases: refill.bases.map((b) => {
+      const baseId = typeof b.id === 'string' ? b.id : '';
+      const live = analysisLive.get(baseId);
+      return {
+        ...b,
+        ...(live === undefined ? {} : { analysis_live: live }),
+        ...(collectionProgress.has(baseId) ? { collection_progress: collectionProgress.get(baseId) } : {}),
+      };
+    }),
     templates: withRunDays(projected.templates, Array.isArray(detail.detail.templates) ? detail.detail.templates : []),
     ...(refill.totals.length > 0 ? { refill_totals: refill.totals } : {}),
     ...(busyRes.error ? {} : { has_active_jobs: (busyRes.data ?? []).length > 0 }),
@@ -504,7 +524,6 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     estimates: { research_minutes: durations.researchMinutes, prepare_hours: durations.prepareHours },
     ...(teamFixStops ? { team_fix_stops: teamFixStops } : {}),
     ...(accountAccess !== undefined ? { account_access: accountAccess } : {}),
-    ...(chainExhausted ? { chain_exhausted: chainExhausted } : {}),
   });
 }
 
@@ -566,6 +585,21 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       icpPatch = parsed.patch;
     }
 
+    // Страны сбора — до БД и строго (parseHeCollectCountries): незнакомая или
+    // скрытая страна — 400, а не тихий пропуск. null и [] — снять список.
+    // Выключатель проверяется первым: при выключенном запись не принимается
+    // вовсе, каким бы ни было значение.
+    const countriesRequested = body?.collect_countries !== undefined;
+    let countries: string[] = [];
+    if (countriesRequested) {
+      if (!heEngCollectCountriesEnabled()) {
+        return NextResponse.json({ error: COUNTRIES_UNAVAILABLE, code: 'countries_unavailable' }, { status: 400 });
+      }
+      const parsed = parseHeCollectCountries(body.collect_countries);
+      if (!parsed.ok) return jsonError(heCollectCountriesErrorText(parsed), 400);
+      countries = parsed.countries;
+    }
+
     // Поля брифа мержит общий со staff `patchHeProjectBrief`, и он же отвечает
     // `no_fields` на пустое тело. Звать его на запрос ТОЛЬКО с настройкой
     // нельзя — вернул бы 400 на корректный запрос, поэтому наличие полей
@@ -574,7 +608,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       || body?.style_override !== undefined
       || body?.signature_override !== undefined
       || body?.business_override !== undefined
-      || icpRequested;
+      || icpRequested
+      || countriesRequested;
     if (!capRequested && !briefRequested) return jsonError(NO_FIELDS, 400);
 
     const owned = await loadClientHeProject(supabaseAdmin, id, result.auth.userId);
@@ -583,6 +618,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     // сохранённой.
     if (icpRequested && projectMarket(owned.project as { market?: string | null }) !== 'us') {
       return jsonError(ICP_MARKET_ONLY_US, 409);
+    }
+    if (countriesRequested && projectMarket(owned.project as { market?: string | null }) !== 'us') {
+      return jsonError(COUNTRIES_MARKET_ONLY_US, 409);
     }
 
     // Настройка пишется ПЕРВОЙ: ответ обеих ветвей собирается из строки,
@@ -634,11 +672,19 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     // рынок проекта: 'us' — тот же отказ, RU — оффер любой длины, как до порта
     // ENG); проверка стоит в функции на прежнем месте, поэтому порядок отказов
     // кабинета прежний.
+    // Страны — тем же аргументом и той же записью; без них аргумент прежний
+    // (undefined, если нет и рамки).
+    const clientFields: HeBriefPatchClientFields | undefined = icpRequested || countriesRequested
+      ? {
+        ...(icpRequested ? { icp: icpPatch } : {}),
+        ...(countriesRequested ? { collect_countries: countries } : {}),
+      }
+      : undefined;
     const patch = await patchHeProjectBrief(
       supabaseAdmin,
       id,
       body,
-      icpRequested ? { icp: icpPatch } : undefined,
+      clientFields,
       { offerMaxLength: OFFER_OVERRIDE_MAX_LENGTH },
     );
     if (!patch.ok) {
@@ -658,6 +704,33 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
             userId: result.auth.userId,
             projectId: id,
           });
+      }
+    }
+
+    if (countriesRequested) {
+      // «До» — сохранённое прочтение (fail-closed, как его видит сборка), «после» —
+      // ровно то, что записано.
+      const before = readHeCollectCountries(
+        ((owned.project as { brief?: Record<string, unknown> | null }).brief ?? null)?.collect_countries,
+      ).countries;
+      void logAudit('client.eng.project.collect_countries_changed', 'ENG cabinet collection countries changed', {
+        userId: result.auth.userId,
+        projectId: id,
+        before,
+        after: countries,
+      });
+      // Расширение — новые компании: «сухие» ночные доборы рынков проекта снова
+      // в деле (одна перепланировка на рынок). Best effort: запись уже прошла.
+      if (heCollectCountriesBroadened(before, countries)) {
+        const reset = await resumeHeDryVerticalsAfterCountriesBroadened(supabaseAdmin, id, resumeHeVerticalNightlyRefill);
+        if (reset.failed.length > 0) {
+          void logWarn('client.eng.project.collect_countries_dry_reset_failed', 'Dry refill reset after countries broadening failed', {
+            userId: result.auth.userId,
+            projectId: id,
+            resumed: reset.resumed,
+            failed: reset.failed,
+          });
+        }
       }
     }
 

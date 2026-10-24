@@ -20,6 +20,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { canonicalEngCountries } from './engCountries';
 import { mergeHeIcpFrame, type HeIcpFramePatch } from './icpFrame';
 import { projectMarket } from './market';
 
@@ -81,6 +82,14 @@ export interface HeBriefPatchClientFields {
    * записи, что и overrides, — один read-merge-write на запрос.
    */
   icp?: HeIcpFramePatch | null;
+  /**
+   * Страны сбора (brief.collect_countries, верхний ключ brief, не рамка ЦА):
+   * уже разобранный вызывающим список (parseHeCollectCountries в
+   * engCountries.ts — значения каталога, без повторов, по алфавиту). null или
+   * [] — снять список (сборка снова выбирает страны сама). Пишут клиентский
+   * ENG-роут и staff-роут collect-countries; RU-инструмент — никогда.
+   */
+  collect_countries?: string[] | null;
 }
 
 /**
@@ -117,12 +126,14 @@ export async function patchHeProjectBrief(
   const signatureRaw = body?.signature_override;
   const businessRaw = body?.business_override;
   const icpPatch = clientFields?.icp;
+  const countriesPatch = clientFields?.collect_countries;
   if (
     offerRaw === undefined &&
     styleRaw === undefined &&
     signatureRaw === undefined &&
     businessRaw === undefined &&
-    icpPatch === undefined
+    icpPatch === undefined &&
+    countriesPatch === undefined
   ) {
     return { ok: false, error: { code: 'no_fields' } };
   }
@@ -205,6 +216,10 @@ export async function patchHeProjectBrief(
     if (icp) brief.icp = icp;
     else delete brief.icp;
   }
+  if (countriesPatch !== undefined) {
+    if (countriesPatch && countriesPatch.length > 0) brief.collect_countries = canonicalEngCountries(countriesPatch);
+    else delete brief.collect_countries;
+  }
 
   const { data: project, error } = await supabase
     .from('he_projects')
@@ -229,7 +244,9 @@ export type HeEngCreateBriefError = Extract<HeBriefPatchError, { code: 'bad_type
  *    сайта, стадия site_profile строит по нему профиль, когда сайт не открылся
  *    (без него такой прогон падает);
  *  - icp — рамка ЦА, её читает стадия hypotheses на рынке us (проект кабинета
- *    всегда us).
+ *    всегда us);
+ *  - collect_countries — страны сбора: их читают стадия hypotheses и замок
+ *    сборки (план 2026-10-16-eng-countries, §1A).
  * offer/style/signature исследование не читает (их читают письма и шаблон) —
  * они остаются на шаге «Brief».
  *
@@ -257,5 +274,59 @@ export function buildHeEngCreateBrief(
     const icp = mergeHeIcpFrame(undefined, clientFields.icp);
     if (icp) brief.icp = icp;
   }
+  // Страны сбора: пустой список не пишется (ключа нет — поведение прежнее).
+  if (clientFields.collect_countries && clientFields.collect_countries.length > 0) {
+    brief.collect_countries = canonicalEngCountries(clientFields.collect_countries);
+  }
   return { ok: true, brief: Object.keys(brief).length > 0 ? brief : null };
+}
+
+/**
+ * Список стран сбора РАСШИРЕН (план 2026-10-16-eng-countries, §1A «Dry-vertical
+ * reset»): прежний список был непуст, а новый пуст (ограничение снято) или
+ * содержит страну, которой в прежнем не было. Сужение — не расширение: новых
+ * компаний оно не даёт, и «сухую» вертикаль будить незачем.
+ */
+export function heCollectCountriesBroadened(before: readonly string[], after: readonly string[]): boolean {
+  if (before.length === 0) return false;
+  if (after.length === 0) return true;
+  const old = new Set(before);
+  return after.some((c) => !old.has(c));
+}
+
+/**
+ * После расширения списка — снять пометку «сухой» ночной добор с вертикалей
+ * проекта, у которых она стоит (refill_dry_since): новые страны — новые
+ * компании, и прежний вывод «доборы ничего не приносят» к ним не относится.
+ * Сам возврат передаёт вызывающий роут (resumeHeVerticalNightlyRefill из
+ * autoPipeline.ts): этот модуль тянет и браузер, тяжёлый серверный импорт сюда
+ * не кладём. Best effort: не бросает, итог — для журнала роута.
+ */
+export async function resumeHeDryVerticalsAfterCountriesBroadened(
+  supabase: SupabaseClient,
+  projectId: string,
+  resume: (supabase: SupabaseClient, verticalId: string) => Promise<void>,
+): Promise<{ resumed: string[]; failed: Array<{ verticalId: string | null; message: string }> }> {
+  const resumed: string[] = [];
+  const failed: Array<{ verticalId: string | null; message: string }> = [];
+  try {
+    const { data, error } = await supabase
+      .from('he_verticals')
+      .select('id')
+      .eq('project_id', projectId)
+      .not('refill_dry_since', 'is', null);
+    if (error) return { resumed, failed: [{ verticalId: null, message: error.message }] };
+    for (const row of (data ?? []) as Array<{ id?: unknown }>) {
+      if (typeof row.id !== 'string') continue;
+      try {
+        await resume(supabase, row.id);
+        resumed.push(row.id);
+      } catch (e) {
+        failed.push({ verticalId: row.id, message: e instanceof Error ? e.message : String(e) });
+      }
+    }
+  } catch (e) {
+    failed.push({ verticalId: null, message: e instanceof Error ? e.message : String(e) });
+  }
+  return { resumed, failed };
 }

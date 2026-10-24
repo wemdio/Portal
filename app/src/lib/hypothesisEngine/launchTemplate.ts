@@ -167,6 +167,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { buildCampaignPayloadFromPreset } from '@/lib/clientLaunch/buildCampaignPayload';
 import { hasUsableCampaignSequences } from '@/lib/clientLaunch/campaignSequences';
 import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
+import { filterBlockedContacts, getBlockedContactSnapshot } from '@/lib/clientBlocklist/blockedDomains';
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
 import { createCampaign, createLeads, updateCampaign } from '@/lib/instantly/client';
 import type { CampaignCreatePayload } from '@/lib/instantly/types';
@@ -191,6 +192,19 @@ import {
   type HeTemplateStandInUse,
 } from './templateOperatorGate';
 import { describeHeLaunchWindow, resolveHeLaunchSendingWindow, type HeLaunchWindowSource } from './launchSchedule';
+import { readHeCollectCountries } from './engCountries';
+import { readHeEngBaseFirst } from './engBaseFirst';
+import { rethrowHeEngBaseBudgetError, withHeEngBaseBudget } from './engBaseBudget';
+import { getHeClientFailure } from './clientErrors';
+import {
+  HE_ENG_COMPANY_QUALIFICATION_REQUIRED,
+  heEngCompanyQualified,
+  heEngLaunchQualified,
+  heEngQualifiedLaunchStamp,
+  heEngScopeWithinCurrentCountries,
+  readHeEngQualificationScope,
+  type HeEngQualificationScope,
+} from './engCompanyQualificationPolicy';
 import { projectMarket, type HeMarket } from './market';
 import { HE_OPS_STAGE_TEMPLATE_LAUNCH, notifyHeClientStop } from './opsAlert';
 import {
@@ -210,8 +224,10 @@ import {
   HE_LAUNCH_MAX_LEADS,
   buildLaunchCampaignName,
   buildLaunchSequence,
+  findCompanyKeyColumns,
   findEmailColumn,
   heConstructContactCap,
+  heLaunchEmailStrength,
   heLaunchEmailVerdict,
   heLaunchIsIncomplete,
   heLaunchRefusesOverCap,
@@ -284,6 +300,8 @@ interface HeLaunchMessages {
   unverifiedSentNote: (unverified: number) => string;
   unparsedEmailNote: (multiAddress: number, malformed: number) => string;
   blockedContactsNote: (blocked: number) => string;
+  /** us-запуск: контакты, чей домен (адреса или сайта компании) в списке Do not contact. */
+  blockedByDomainNote: (blocked: number) => string;
   instantlyFailedFallback: string;
   zeroAccepted: string;
   /**
@@ -546,6 +564,10 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       'выбрать за специалиста, какому из адресов он относится, нельзя.',
     blockedContactsNote: (blocked) =>
       `Исключено контактов из чёрного списка клиента: ${blocked.toLocaleString('ru-RU')}.`,
+    // Текст staff для us-запуска; RU-путь (runHeTemplateLaunchAsBeforePort)
+    // доменов не читает и эту строку не печатает.
+    blockedByDomainNote: (blocked) =>
+      `Исключено контактов, чей домен в чёрном списке клиента: ${blocked.toLocaleString('ru-RU')}.`,
     instantlyFailedFallback: 'Не удалось создать кампанию',
     zeroAccepted: 'Система рассылки не приняла ни одного контакта. Кампания оставлена на паузе.',
     launchInfoSaveWarning: (intermediateSaved) =>
@@ -634,9 +656,13 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       `Окно отправки новых кампаний us-запуска: ${window} — ` +
       (source === 'template'
         ? 'выбор клиента для этого шаблона'
-        : source === 'client'
-          ? 'последний выбор клиента на другом его шаблоне'
-          : 'дефолт ENG-кабинета') +
+        : source === 'project'
+          ? 'окно «Launch» этого проекта'
+          : source === 'client'
+            ? 'последний выбор клиента на другом шаблоне этого проекта'
+            : source === 'suggested'
+              ? 'пояс по списку стран проекта, часы дефолта ENG-кабинета'
+              : 'дефолт ENG-кабинета') +
       '. Часы пресета us-проекту не ставятся.',
     launchWindowReadFailedNote:
       'Сохранённые окна отправки клиента не прочитались — новые кампании созданы с окном из строки выше. ' +
@@ -790,6 +816,8 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       'so picking one of those addresses would mean writing to an unverified one.',
     blockedContactsNote: (blocked) =>
       `Contacts left out because they are on your blocked-contacts list: ${blocked.toLocaleString('en-US')}.`,
+    blockedByDomainNote: (blocked) =>
+      `Contacts left out because their company's domain is on your Do not contact list: ${blocked.toLocaleString('en-US')}.`,
     instantlyFailedFallback: 'Failed to create the campaign',
     zeroAccepted: 'The mailing system did not accept any contacts. The campaign was left paused.',
     // Вторая ветка называет нашу колонку — клиентский роут заменит её общей
@@ -952,9 +980,13 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       `New campaigns of this launch use the sending window ${window} — ` +
       (source === 'template'
         ? 'the one picked for this template'
-        : source === 'client'
-          ? 'the one picked most recently for your other campaigns'
-          : 'the default for US campaigns') +
+        : source === 'project'
+          ? 'the one picked when you launched this project'
+          : source === 'client'
+            ? 'the one picked most recently for your other campaigns in this project'
+            : source === 'suggested'
+              ? "the time zone of your project's countries with the default hours"
+              : 'the default for US campaigns') +
       '. You can change it in the sending window of this template.',
     launchWindowReadFailedNote:
       'Your saved sending windows could not be read, so the new campaigns of this launch use the window ' +
@@ -1442,7 +1474,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   //    отличие от data.
   const { data: baseRow, error: baseErr } = await portalDb
     .from('he_bases')
-    .select('id, project_id, filename, columns, data, source, collect_info')
+    .select('id, project_id, vertical_id, filename, columns, data, source, collect_info')
     .eq('id', template.base_id)
     .single();
   if (baseErr) {
@@ -1452,6 +1484,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     };
   }
   const base = baseRow as Pick<HeBase, 'id' | 'project_id' | 'filename' | 'columns' | 'data'> & {
+    vertical_id?: string;
     source?: string;
     collect_info?: unknown;
   };
@@ -1564,6 +1597,42 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       templateLetters,
       segmentWhens,
     });
+  }
+  // Only a confirmed ENG owner permits catch_all. An unreadable owner must
+  // stop before any sender call; locale or project market alone is not enough.
+  let allowCatchAll: boolean;
+  try {
+    allowCatchAll = await readHeEngBaseFirst(portalDb, projectRow);
+  } catch (err) {
+    await logError(`${eventPrefix}.email_policy_failed`, err, { userId, templateId, projectId: base.project_id });
+    return { status: 500, body: { error: t.marketReadFailed } };
+  }
+  // Both client and staff launch routes reach this shared continuation. Only
+  // verified ENG-client ownership opens the same persistent budget as collection
+  // and letters; the RU return above and US staff projects keep their old path.
+  const runUsLaunch = async (): Promise<HeTemplateLaunchOutcome> => {
+  let qualificationScope: HeEngQualificationScope | null = null;
+  const qualificationBrief = projectRow.brief as Record<string, unknown> | null | undefined;
+  if (allowCatchAll && base.source === 'auto') {
+    try {
+      if (!base.vertical_id || base.vertical_id !== template.vertical_id) {
+        throw new Error('ENG company qualification: base vertical does not match the template');
+      }
+      qualificationScope = await readHeEngQualificationScope(portalDb, {
+        project: { id: base.project_id, brief: qualificationBrief },
+        verticalId: base.vertical_id,
+        collectInfo: base.collect_info as Record<string, unknown> | null,
+      });
+      // Existing campaigns may contain recipients absent from today's base.
+      // A filtered retry must never grant a stamp to their unknown history.
+      if (!heEngScopeWithinCurrentCountries(qualificationScope, qualificationBrief) ||
+          (existingLaunch && !heEngLaunchQualified(template.launch_info, qualificationScope, base.id))) {
+        return { status: 409, body: { error: HE_ENG_COMPANY_QUALIFICATION_REQUIRED } };
+      }
+    } catch (err) {
+      await logError(`${eventPrefix}.company_qualification_failed`, err, { userId, templateId, projectId: base.project_id });
+      return { status: 409, body: { error: HE_ENG_COMPANY_QUALIFICATION_REQUIRED } };
+    }
   }
   // undefined = дефолты buildLaunchCampaignName, т.е. прежнее имя RU-запуска.
   const campaignNaming = market === 'us' ? HE_ENG_CAMPAIGN_NAMING : undefined;
@@ -1835,6 +1904,13 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     market,
     templateId,
     clientUserId: typeof preset.client_user_id === 'string' ? preset.client_user_id.trim() : '',
+    // Окно «Launch» и выбор клиента — только этого проекта; страны проекта —
+    // подсказанному поясу (§1C плана 2026-10-16-eng-countries).
+    projectId: typeof base.project_id === 'string' && base.project_id ? base.project_id : null,
+    projectCountries: readHeCollectCountries(
+      ((projectRow as { brief?: unknown }).brief as { collect_countries?: unknown } | null | undefined)
+        ?.collect_countries,
+    ).countries,
     explicit: input.sendingWindow ?? null,
   });
   if (windowPlan.readError) {
@@ -1882,7 +1958,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   //     отдельное решение владельца, см. отчёт лейна.
   if (market === 'us' && heConstructContactCap(base.collect_info) === null) {
     const rowsWithVerdict = allRows.reduce(
-      (n, r) => n + (heLaunchEmailVerdict(r._email_status) === 'missing' ? 0 : 1),
+      (n, r) => n + (heLaunchEmailVerdict(r._email_status, { allowCatchAll }) === 'missing' ? 0 : 1),
       0,
     );
     if (rowsWithVerdict > 0) {
@@ -1937,8 +2013,13 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   let skippedUnverified = 0;
   let unverifiedSent = 0;
   let skippedIrrelevant = 0;
+  let skippedCompanyQualification = 0;
   const rows = filterRows
     ? allRows.filter((r) => {
+        if (qualificationScope && !heEngCompanyQualified(r, qualificationScope)) {
+          skippedCompanyQualification += 1;
+          return false;
+        }
         // Порядок причин прежний: строка и нерелевантная, и невалидная
         // по-прежнему считается нерелевантной (чтобы счётчики RU-запуска
         // автобазы не поехали).
@@ -1947,7 +2028,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
           return false;
         }
         if (gateEmailColumn && String(r[gateEmailColumn] ?? '').trim() === '') return true;
-        const verdict = heLaunchEmailVerdict(r._email_status);
+        const verdict = heLaunchEmailVerdict(r._email_status, { allowCatchAll });
         if (verdict === 'rejected') {
           skippedInvalid += 1;
           return false;
@@ -1964,6 +2045,15 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
         return true;
       })
     : allRows;
+  if (skippedCompanyQualification > 0) {
+    return { status: 409, body: { error: HE_ENG_COMPANY_QUALIFICATION_REQUIRED } };
+  }
+  // Sort before address deduplication: if the same address occurs twice,
+  // its ok row wins over catch_all. The resulting sender order also puts ok
+  // first when the base is below the launch cap. Legacy staff keeps its order.
+  if (allowCatchAll) {
+    rows.sort((a, b) => heLaunchEmailStrength(b._email_status, { allowCatchAll }) - heLaunchEmailStrength(a._email_status, { allowCatchAll }));
+  }
   const {
     leads: mappedLeads,
     emailColumn,
@@ -2030,7 +2120,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   //     Fail-closed и ДО первого вызова рассыльщика: список не прочитался или
   //     у пресета нет владельца — запуск не состоялся, кампании не созданы.
   //     Тихо отправить «на всякий случай» нельзя: ради этих адресов список и
-  //     существует. Ошибку getBlockedEmailSet не разбираем на виды (она сама
+  //     существует. Ошибку getBlockedContactSnapshot не разбираем на виды (она сама
   //     бросает и на сбое БД, и на неполной выдаче) — любая означает «не знаем
   //     список», а значит «не отправляем».
   //
@@ -2045,22 +2135,33 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   const clientUserId =
     typeof preset.client_user_id === 'string' ? preset.client_user_id.trim() : '';
   let blockedContacts = 0;
+  // Из них — закрытых доменной записью (адрес, сайт лида или сайт строки).
+  let blockedByDomain = 0;
   try {
     if (!clientUserId) {
       throw new Error(`пресет ${effectivePresetId}: пустой client_user_id — чей чёрный список применять, неизвестно`);
     }
-    const blockedEmails = await getBlockedEmailSet(instantlyDb, clientUserId);
-    // filterBlockedLeads — единственный носитель правил нормализации; здесь по
-    // его результату восстанавливается параллельность leadRowIndices (адреса
-    // лидов уже lowercase и уникальны, так что Set по ним однозначен).
-    const filtered = filterBlockedLeads(leads, blockedEmails);
+    // Снимок списка: адреса И домены компаний (план 2026-10-16-eng-countries,
+    // §1B). Доменная запись закрывает домен адреса, lead.website и сайт строки
+    // базы — колонку сайта ищет findCompanyKeyColumns, а не жёсткое имя.
+    // Ошибка снимка (в том числе список сверх лимита) — тот же отказ ниже.
+    const snapshot = await getBlockedContactSnapshot(instantlyDb, clientUserId);
+    const websiteColumn = findCompanyKeyColumns(columns).website;
+    const rowIndicesBefore = leadRowIndices;
+    // filterBlockedContacts — единственный носитель правил совпадения; `kept`
+    // — те же объекты в исходном порядке, поэтому параллельность
+    // leadRowIndices восстанавливается по ссылке на лида.
+    const filtered = filterBlockedContacts(leads, snapshot, (_lead, i) =>
+      websiteColumn ? rows[rowIndicesBefore[i]]?.[websiteColumn] : null,
+    );
     blockedContacts = filtered.blockedCount;
+    blockedByDomain = filtered.blockedByDomain;
     if (blockedContacts > 0) {
-      const allowed = new Set(filtered.kept.map((l) => l.email));
+      const allowed = new Set<object>(filtered.kept);
       const keptLeads: typeof leads = [];
       const keptRowIndices: number[] = [];
       leads.forEach((lead, i) => {
-        if (!allowed.has(lead.email)) return;
+        if (!allowed.has(lead)) return;
         keptLeads.push(lead);
         keptRowIndices.push(leadRowIndices[i]);
       });
@@ -2086,6 +2187,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       baseId: base.id,
       presetId: effectivePresetId,
       blockedContacts,
+      blockedByDomain,
     });
     return { status: 400, body: { error: t.allContactsBlocked } };
   }
@@ -2129,8 +2231,10 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   //
   //     Теперь у market='us' потолок ВЫБИРАЕТ, а не отказывает: сначала по
   //     одному сильнейшему адресу каждой компании, потом вторые (правило и его
-  //     причина — selectLeadsWithinLaunchCap в launchHandoff.ts). Компании при
-  //     этом не пропадают молча: сколько компаний и адресов уехало и сколько
+  //     причина — selectLeadsWithinLaunchCap в launchHandoff.ts). У ENG
+  //     компании обходятся отдельно внутри ok, затем catch_all: любой ok
+  //     имеет приоритет перед catch_all другой компании.
+  //     Компании при этом не пропадают молча: сколько компаний и адресов уехало и сколько
   //     снял потолок, идёт в warnings ответа (его читает и кабинет) и в аудит.
   //     Сам HE_LAUNCH_MAX_LEADS не меняется: его величина — решение владельца с
   //     последствиями для чанкования на стороне рассыльщика, см. отчёт лейна.
@@ -2167,8 +2271,9 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       columns,
       leadRowIndices,
       limit: HE_LAUNCH_MAX_LEADS,
+      allowCatchAll,
     });
-    // Оба массива переписываются вместе и в исходном порядке базы: их
+    // Оба массива переписываются вместе в порядке отбора (ENG: ok первыми): их
     // параллельность держит сплит по сегментам ниже, а порядок — приоритет
     // задач плана сборки.
     const keptLeads: typeof leads = [];
@@ -2394,6 +2499,12 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       detailed.assignments.forEach((segment, idx) => answers.set(positions[idx], segment));
       return { answers, held: detailed.unanswered.map((idx) => positions[idx]) };
     } catch (err) {
+      try {
+        rethrowHeEngBaseBudgetError(err);
+      } catch (budgetError) {
+        await releaseClaim();
+        throw budgetError;
+      }
       await logError(`${eventPrefix}.segment_classify_failed`, err, { userId, templateId });
       classifier.failureKinds.push('unknown');
       return { answers: new Map(), held: [...positions] };
@@ -2767,6 +2878,9 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       preset_id: effectivePresetId,
       created_at: attemptStartedAt,
       campaigns: all,
+      ...(qualificationScope
+        ? { eng_company_qualification: heEngQualifiedLaunchStamp(qualificationScope, base.id) }
+        : {}),
       // Счётчики рассыльщика целиком, а не только принятые: без «сколько
       // запрошено» молчаливая частичная загрузка неотличима от «столько адресов
       // и было» (launchHandoff.ts, HeTemplateLaunchCampaign).
@@ -3192,8 +3306,13 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   if (multiAddressRows > 0 || malformedEmailRows > 0) {
     warnings.push(t.unparsedEmailNote(multiAddressRows, malformedEmailRows));
   }
-  if (blockedContacts > 0) {
-    warnings.push(t.blockedContactsNote(blockedContacts));
+  // Адреса и домены — двумя фразами: число по адресам без доменных, чтобы
+  // сумма двух строк совпадала с blockedContacts аудита.
+  if (blockedContacts - blockedByDomain > 0) {
+    warnings.push(t.blockedContactsNote(blockedContacts - blockedByDomain));
+  }
+  if (blockedByDomain > 0) {
+    warnings.push(t.blockedByDomainNote(blockedByDomain));
   }
   // Потолок запуска (шаг 5b) — первым делом среди «почему уехало не всё»: он
   // единственный, кто снимает ПРОВЕРЕННЫЕ адреса, и единственный, чьё число
@@ -3242,7 +3361,11 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   if (
     sendingWindow &&
     windowCampaignIds.length > 0 &&
-    (windowPlan.source === 'template' || windowPlan.source === 'client' || windowPlan.source === 'default')
+    (windowPlan.source === 'template' ||
+      windowPlan.source === 'project' ||
+      windowPlan.source === 'client' ||
+      windowPlan.source === 'suggested' ||
+      windowPlan.source === 'default')
   ) {
     warnings.push(t.launchWindowNote(describeHeLaunchWindow(sendingWindow), windowPlan.source));
     if (windowPlan.readError) warnings.push(t.launchWindowReadFailedNote);
@@ -3323,6 +3446,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       multiAddressRows,
       malformedEmailRows,
       blockedContacts,
+      blockedByDomain,
       // Потолок запуска: что он оставил и что снял. В аудите, а не только в
       // ответе, чтобы владелец видел по журналу, у каких запусков потолок
       // реально мешает, — это и есть вход в решение «поднимать ли 2000».
@@ -3393,6 +3517,22 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
         : {}),
     },
   };
+  };
+  try {
+    return allowCatchAll
+      ? await withHeEngBaseBudget(portalDb, base.id, base.project_id, runUsLaunch, 'launch')
+      : await runUsLaunch();
+  } catch (error) {
+    let budgetError: unknown;
+    try {
+      rethrowHeEngBaseBudgetError(error);
+    } catch (stopped) {
+      budgetError = stopped;
+    }
+    if (!budgetError) throw error;
+    const failure = getHeClientFailure(budgetError);
+    return { status: 409, body: { error: failure.title, code: failure.code } };
+  }
 }
 
 /* ───────────── RU-проект: запуск как до порта ENG ───────────── */

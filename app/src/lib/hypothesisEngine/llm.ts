@@ -62,6 +62,8 @@
  * бросает: платный вызов её не ждёт, и её сбой стадию не роняет.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import { z } from 'zod';
 
 import { isHeProviderBillingError, isHeProviderConfigurationError } from './clientErrors';
@@ -74,6 +76,11 @@ import {
 } from './costTelemetry';
 import type { HeMarket } from './market';
 import { HE_US_REQUESTY_KEY_ENV, heUsProviderKey } from './providerKeys';
+import {
+  rethrowHeEngBaseBudgetError,
+  reserveHeEngRequestyCall,
+  settleHeEngRequestyCall,
+} from './engBaseBudget';
 
 const API_URL = 'https://router.requesty.ai/v1/chat/completions';
 
@@ -464,16 +471,22 @@ export interface HeLlmSchemaCallOptions extends HeLlmCallOptions {
 }
 
 export interface HeLlmTextCallOptions extends HeLlmCallOptions {
+  /** Explicitly budgeted ENG calls may forbid transport repeats; ordinary callers keep all three retries. */
+  transportRetries?: 0;
+  /** Ask for one JSON object without adding schema repair attempts. Default text behavior is unchanged. */
+  jsonMode?: true;
+  /** Opt-in native structure; local parsing still validates every answer. No repair call. */
+  jsonSchema?: { name: string; schema: Record<string, unknown> };
   fallbackModel?: string;
   minChars?: number;
   log?: (msg: string) => void;
 }
 
 /**
- * Канал активной джобы воркера: отмена, признак жизни и лог прогона. Воркер
- * single-flight (handleJob выполняет строго одну джобу за раз), поэтому канал —
- * модульный: worker/hypothesisEngine.ts ставит его перед runHeStage и снимает
- * после. Вне воркера (API-роуты, CLI) канала нет — поведение прежнее.
+ * Канал активной джобы воркера: отмена, признак жизни и лог прогона. Параллельные
+ * ENG-сборки открывают withHeActiveJobScope; worker/hypothesisEngine.ts ставит
+ * канал перед runHeStage и снимает после. Последовательные legacy-вызовы
+ * сохраняют модульный канал. Вне воркера (API-роуты, CLI) его по-прежнему нет.
  */
 export interface HeActiveJobChannel {
   /**
@@ -517,29 +530,46 @@ export interface HeLlmSpend {
   costUsd: number;
 }
 
+// Старые последовательные вызовы сохраняют прежний канал. Только явно
+// обёрнутые ENG-джобы получают собственный канал для всех async-потомков.
 let activeJob: HeActiveJobChannel | null = null;
+const activeJobStorage = new AsyncLocalStorage<{ channel: HeActiveJobChannel | null }>();
+
+export function withHeActiveJobScope<T>(work: () => Promise<T>): Promise<T> {
+  return activeJobStorage.run({ channel: null }, work);
+}
+
+function getHeActiveJob(): HeActiveJobChannel | null {
+  const scope = activeJobStorage.getStore();
+  // Пустой scoped-канал не наследует legacy-джобу. После finally её сигнал,
+  // лог и расход также не должны попасть в поздний ответ ENG-запроса.
+  return scope ? scope.channel : activeJob;
+}
 
 export function setHeActiveJob(channel: HeActiveJobChannel | null): void {
-  activeJob = channel;
+  const scope = activeJobStorage.getStore();
+  if (scope) scope.channel = channel;
+  else activeJob = channel;
 }
 
 /**
  * Сигнал того же канала для стадий (stages/io.ts): отмена доходит не только до
  * LLM-запроса, но и до чтения сайта и поиска. Отдельного параметра контракта
- * для этого не вводим — воркер односоточный, источник сигнала один.
+ * для этого не вводим: ENG-джоба читает свой async-контекст, последовательные
+ * legacy-вызовы — прежний общий канал.
  */
 export function getHeActiveJobSignal(): AbortSignal | null {
-  return activeJob?.signal ?? null;
+  return getHeActiveJob()?.signal ?? null;
 }
 
 /** Попытка запроса началась/ответила — продлить окно сторожа простоя. */
 function noteLlmActivity(): void {
-  activeJob?.onActivity?.();
+  getHeActiveJob()?.onActivity?.();
 }
 
 /** Строка транспорта в лог прогона (или в лог процесса, если канала нет). */
 function llmLog(msg: string): void {
-  const sink = activeJob?.log;
+  const sink = getHeActiveJob()?.log;
   if (sink) sink(msg);
   else console.warn(msg);
 }
@@ -1041,6 +1071,8 @@ async function rawCall(
   signal: AbortSignal,
   /** Язык подсказки json_object-режима (jsonHintLanguage); без JSON-режима не читается. */
   hintLanguage: HeJsonHintLanguage = 'ru',
+  maxRetries: number = MAX_HTTP_RETRIES,
+  jsonSchema?: HeLlmTextCallOptions['jsonSchema'],
 ): Promise<{ text: string; response: RequestyResponse }> {
   // Ключ читаем ДО цикла: пробел в конфигурации повтором не лечится, а сообщение
   // с именем env-переменной клиентский маппинг узнаёт как 'configuration'.
@@ -1049,23 +1081,33 @@ async function rawCall(
     model,
     messages: jsonMode ? withJsonModeHint(messages, hintLanguage) : messages,
     max_tokens: maxTokens,
-    ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
+    ...(jsonSchema ? { response_format: { type: 'json_schema', json_schema: { ...jsonSchema, strict: true } } }
+      : jsonMode ? { response_format: { type: 'json_object' } } : {}),
   });
 
   for (let attempt = 0; ; attempt++) {
     signal.throwIfAborted();
+    // Only confirmed client ENG base scopes have a ledger. Every real POST,
+    // including retries/repairs/fallbacks, reserves its full upper cost first.
+    // A denied reservation stays outside the transport catch: no paid request
+    // was made and a budget stop must never turn into a transient retry.
+    const budgetCall = await reserveHeEngRequestyCall(model, body, maxTokens, signal);
     let failure: HeLlmHttpError | HeLlmTransportError;
     // Отсчёт от отправки ЭТОЙ попытки (пауза бэкоффа сюда не входит): по нему
     // retryWaitMs отличает отказ «на входе» от отказа после генерации.
     const sentAt = Date.now();
     // Код ответа этой попытки — для строки журнала расхода (journalRequestyCall).
     let httpStatus: number | undefined;
+    let dispatched = false;
+    let journaled = false;
     try {
       // Признак жизни ДО запроса и сразу ПОСЛЕ ответа: между ними идёт самое
       // длинное законное молчание движка — генерация ответа моделью. Отметка на
       // каждой попытке, включая транспортные повторы, — именно этим сторож
       // простоя отличает работающий платный вызов от зависшей стадии.
       noteLlmActivity();
+      signal.throwIfAborted();
+      dispatched = true;
       const res = await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
@@ -1106,6 +1148,10 @@ async function rawCall(
         // Ответ принят — строка журнала с токенами и ценой (до решения
         // вызывающего о годности ответа: оплачен он в любом случае).
         journalRequestyCall(model, 'ok', httpStatus, response);
+        journaled = true;
+        // Settle the provider's actual charge before any schema validation can
+        // request another paid repair. Unknown charge retains its entire reserve.
+        await settleHeEngRequestyCall(budgetCall, response.usage?.cost);
         return { text: response.choices?.[0]?.message?.content ?? '', response };
       }
       const text = await res.text();
@@ -1122,10 +1168,16 @@ async function rawCall(
           : undefined,
       );
       journalRequestyCall(model, 'failed', httpStatus);
+      journaled = true;
+      // HTTP failures do not establish a zero provider charge. A scoped ENG
+      // base books the full reserve for it (settleHeEngRequestyCall).
+      await settleHeEngRequestyCall(budgetCall, undefined);
     } catch (err) {
       // Пригодного ответа нет: отмена, свой срок, обрыв, тело 200 не
       // дочиталось или не конверт чата — исполнен ли запрос, неизвестно.
-      journalRequestyCall(model, 'aborted', httpStatus);
+      if (!journaled) journalRequestyCall(model, 'aborted', httpStatus);
+      await settleHeEngRequestyCall(budgetCall, dispatched ? undefined : 0);
+      rethrowHeEngBaseBudgetError(err);
       throwIfInterrupted(signal, err);
       // Уже классифицированный отказ (конверт 200 выше) сохраняем как есть:
       // иначе класс снова назначал бы catch-all, и «тот же запрос ответит тем
@@ -1139,12 +1191,12 @@ async function rawCall(
     }
 
     const elapsedMs = Date.now() - sentAt;
-    const waitMs = retryWaitMs(failure, attempt, elapsedMs);
+    const waitMs = attempt >= maxRetries ? null : retryWaitMs(failure, attempt, elapsedMs);
     if (waitMs === null) {
       // Транзиент, которому повтор не положен только из-за окна, — в лог: иначе
       // по логу не отличить «повторы кончились» от «повтор мог оплатить
       // генерацию второй раз».
-      if (failure.kind === 'transient' && attempt < MAX_HTTP_RETRIES && elapsedMs > LLM_UNCERTAIN_RETRY_WINDOW_MS) {
+      if (failure.kind === 'transient' && attempt < maxRetries && elapsedMs > LLM_UNCERTAIN_RETRY_WINDOW_MS) {
         llmLog(
           `[he-llm] ${model}: ${failure.kind} (${failure.message.slice(0, 160)}) через ${elapsedMs} мс после отправки — ` +
             `внутри вызова не повторяем: провайдер мог исполнить запрос и выставить счёт`,
@@ -1157,7 +1209,7 @@ async function rawCall(
     // повтор. Вне воркера — прежний console.warn процесса.
     llmLog(
       `[he-llm] ${model}: ${failure.kind} (${failure.message.slice(0, 160)}) — ` +
-        `повтор ${attempt + 1}/${MAX_HTTP_RETRIES} через ${waitMs} мс`,
+        `повтор ${attempt + 1}/${maxRetries} через ${waitMs} мс`,
     );
     await sleep(waitMs, signal);
   }
@@ -1235,7 +1287,7 @@ export async function callLLMWithSchema<T>(
 ): Promise<LLMResult<T>> {
   const maxTokens = opts.maxTokens ?? 4096;
   // Канал читаем ОДИН раз, в начале вызова (см. HeActiveJobChannel.onSpend).
-  const job = activeJob;
+  const job = getHeActiveJob();
   // Правило учёта — тоже один раз на вызов (см. шапку файла).
   const eng = heLlmEngAccounting(opts.market);
   return callLLMWithSchemaAttempts(
@@ -1420,11 +1472,11 @@ async function callLLMWithSchemaAttempts<T>(
  */
 export async function callLLMText(
   messages: LLMMessage[],
-  opts: HeLlmCallOptions,
+  opts: HeLlmTextCallOptions,
 ): Promise<LLMTextResult> {
   const maxTokens = opts.maxTokens ?? 8192;
   // Канал читаем ОДИН раз, в начале вызова (см. HeActiveJobChannel.onSpend).
-  const job = activeJob;
+  const job = getHeActiveJob();
   // Правило учёта — тоже один раз на вызов (см. шапку файла).
   const eng = heLlmEngAccounting(opts.market);
   // Попытка одна (повтора схемы у свободного текста нет), поэтому срок попытки
@@ -1433,7 +1485,9 @@ export async function callLLMText(
     'LLM request',
     llmAttemptTimeoutMs(maxTokens),
     job?.signal ?? null,
-    (signal) => rawCall(messages, opts.model, maxTokens, false, signal),
+    (signal) => rawCall(messages, opts.model, maxTokens, opts.jsonMode === true, signal,
+      opts.jsonMode === true ? jsonHintLanguage(messages) : undefined,
+      opts.transportRetries === 0 ? 0 : MAX_HTTP_RETRIES, opts.jsonSchema),
   );
   const { promptTokens, completionTokens, tokensUsed, reportedCostUsd } = usageOf(response);
   const costUsd = eng

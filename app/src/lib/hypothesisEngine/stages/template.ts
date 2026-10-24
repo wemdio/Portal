@@ -1,5 +1,8 @@
 /**
- * Стадия template: база + вертикаль + цепочка → финальный шаблон 85/15.
+ * Стадия template: проверенная база + материалы клиента → финальный шаблон.
+ * ENG-клиент: первая генерация писем после base_analyze, без чтения he_chains;
+ * четыре английских письма с паузами 0/3/7/12 дней. RU/staff: прежняя готовая
+ * цепочка вертикали остаётся обязательным источником шаблона 85/15.
  *  1) LLM-план (fixed_block ~85% + personalization_plan + letters[].segment_variants);
  *  2) LLM финальных писем по плану (маркеры ---LETTER N--- + ---SEGMENT: <when>---,
  *     у письма 1 — A/B-вариант ---LETTER 1 B---): основной текст — дефолт для
@@ -90,6 +93,7 @@
  */
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
+import { rethrowHeEngBaseBudgetError } from '../engBaseBudget';
 import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
 import {
@@ -103,6 +107,8 @@ import {
   buildTemplateLettersMessages,
   buildTemplatePlanMessages,
   buildTemplateRewriteMessages,
+  heEngTemplateBriefFacts,
+  type HeEngTemplateSource,
 } from '../prompts/template';
 import { buildChainRuleFixHint, clientWordsFromBrief } from '../prompts/chain';
 import {
@@ -117,6 +123,7 @@ import {
 import { selectCaseForVertical, type HeCase } from '../caseBank';
 import { getWinnerPatterns, matchSegmentLabels, type HeWinnerPattern } from '../datasetStats';
 import { projectMarket } from '../market';
+import { readHeEngBaseFirst } from '../engBaseFirst';
 import { findEmailColumn } from '../launchHandoff';
 import { applyHeChainTiming } from '../chainTiming';
 import {
@@ -159,6 +166,8 @@ import type {
 } from '../types';
 import {
   HeChainCritiqueSchema,
+  HE_CHAIN_TARGET_LETTERS_EN,
+  CHAIN_WAIT_DAYS,
   extractLetterBVariants,
   parsedToChainLetters,
   selectPromptHypotheses,
@@ -724,6 +733,14 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     };
   }
 
+  // A confirmed ENG client writes the final letters only after the base has
+  // been checked and analysed. Ready templates above still reuse for free.
+  // RU and staff projects retain the existing chain-first path.
+  const engBaseFirst = await readHeEngBaseFirst(ctx.supabase, project);
+  if (engBaseFirst && base.status !== 'analyzed') {
+    throw new Error(`he_bases ${baseId}: ENG letters require an analyzed base (status=${base.status})`);
+  }
+
   const analysisParsed = HeBaseAnalysisSchema.safeParse(base.analysis);
   if (!analysisParsed.success) {
     throw new Error('he_bases.analysis отсутствует или битый: сначала выполните стадию base_analyze');
@@ -740,14 +757,16 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
 
   // Разметка специалиста по гипотезам вертикали: rejected уходят из промпта,
   // accepted — первыми (см. selectPromptHypotheses в stages/chain).
-  const { data: hyps, error: hError } = await ctx.supabase
-    .from('he_hypotheses')
-    .select('title, description, tier, status')
+  const hypothesisTable = ctx.supabase.from('he_hypotheses');
+  const hypothesisQuery = engBaseFirst
+    ? hypothesisTable.select('title, description, tier, status, evidence')
+    : hypothesisTable.select('title, description, tier, status');
+  const { data: hyps, error: hError } = await hypothesisQuery
     .eq('project_id', job.project_id)
     .eq('vertical_id', base.vertical_id);
   if (hError) throw new Error(`he_hypotheses read: ${hError.message}`);
   const hypSelection = selectPromptHypotheses(
-    (hyps ?? []) as Array<Pick<HeHypothesis, 'title' | 'description' | 'tier' | 'status'>>,
+    (hyps ?? []) as Array<Pick<HeHypothesis, 'title' | 'description' | 'tier' | 'status'> & Partial<Pick<HeHypothesis, 'evidence'>>>,
   );
   if (hypSelection.fallbackUsed) {
     stageLog(ctx, '[template] все гипотезы вертикали отклонены специалистом — используем полный список без разметки');
@@ -757,20 +776,25 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     description: h.description,
     tier: h.tier,
     confirmed: h.status === 'accepted',
+    ...(engBaseFirst ? { evidence: Array.isArray(h.evidence) ? h.evidence : [] } : {}),
   }));
 
-  const { data: chainRow, error: cError } = await ctx.supabase
-    .from('he_chains')
-    .select('*')
-    .eq('vertical_id', base.vertical_id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (cError) throw new Error(`he_chains read: ${cError.message}`);
-  if (!chainRow) throw new Error('Нет цепочки вертикали: сначала выполните стадию chain');
-  const chain = chainRow as HeChain;
-  const chainLetters = (Array.isArray(chain.letters) ? chain.letters : []) as HeChainLetter[];
-  if (!chainLetters.length) throw new Error('he_chains.letters пуст — перегенерируйте цепочку');
+  let chain: HeChain | null = null;
+  let chainLetters: HeChainLetter[] = [];
+  if (!engBaseFirst) {
+    const { data: chainRow, error: cError } = await ctx.supabase
+      .from('he_chains')
+      .select('*')
+      .eq('vertical_id', base.vertical_id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (cError) throw new Error(`he_chains read: ${cError.message}`);
+    if (!chainRow) throw new Error('Нет цепочки вертикали: сначала выполните стадию chain');
+    chain = chainRow as HeChain;
+    chainLetters = (Array.isArray(chain.letters) ? chain.letters : []) as HeChainLetter[];
+    if (!chainLetters.length) throw new Error('he_chains.letters пуст — перегенерируйте цепочку');
+  }
 
   // Кейс-банк: лучший кейс клиента под вертикаль → главное доказательство
   // fixed_block/писем. Best-effort: сбой чтения he_cases не роняет генерацию.
@@ -835,8 +859,24 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     );
   }
 
-  // Язык всех промптов стадии наследуется от цепочки вертикали (he_chains.language).
-  const language = (chain.language === 'en' || chain.language === 'pl' ? chain.language : 'ru') as HeChainLanguage;
+  // The ENG cabinet has no source chain: its final sequence is English.
+  // Legacy projects still inherit the source chain language unchanged.
+  const language: HeChainLanguage = engBaseFirst
+    ? 'en'
+    : chain?.language === 'en' || chain?.language === 'pl' ? chain.language : 'ru';
+  const engTemplateSource: HeEngTemplateSource | undefined = engBaseFirst ? {
+    waitDays: CHAIN_WAIT_DAYS.slice(0, HE_CHAIN_TARGET_LETTERS_EN),
+    websiteUrl: project.website_url,
+    brief,
+    verticalSummary: vertical.summary ?? '',
+    synonyms: Array.isArray(vertical.synonyms) ? vertical.synonyms : [],
+    hypotheses,
+    baseAnalysis: analysis,
+    columns: planColumns,
+  } : undefined;
+  const targetLetters = engBaseFirst
+    ? HE_CHAIN_TARGET_LETTERS_EN
+    : Math.min(chainLetters.length, TEMPLATE_MAX_LETTERS);
   // Английские письма проекта 'us' — всё, что перенос ENG поменял в письмах;
   // иначе (RU, PL и английские письма проекта 'ru') — как до переноса.
   const usEnglish = heUsEnglishLetters(language, market);
@@ -866,6 +906,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       verticalName: vertical.name,
       verticalSummary: vertical.summary ?? '',
       chainLetters,
+      engBaseFirst: engTemplateSource,
       baseAnalysis: analysis,
       columns: planColumns,
       hypotheses,
@@ -887,6 +928,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     plan: plan.data,
     verticalName: vertical.name,
     chainLetters,
+    engBaseFirst: engTemplateSource,
     baseAnalysis: analysis,
     clientCase,
     styleExample,
@@ -904,7 +946,8 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     const parsed = parseLettersFromModelOutput(seg.cleaned);
     const sliced = parsed.slice(0, TEMPLATE_MAX_LETTERS);
     // wait_days — лесенка цепочки CHAIN_WAIT_DAYS (внутри parsedToChainLetters), по индексу письма;
-    // у 'us' перед записью её заменяют паузы цепочки (applyHeChainTiming ниже).
+    // legacy 'us' перед записью заменяет её паузами цепочки; ENG-клиент
+    // сохраняет прежнюю лесенку ENG, без промежуточной цепочки.
     const letters = parsedToChainLetters(sliced).map((l, i): HeChainLetterAB => {
       const { variants: _legacy, ...rest } = l;
       const idx = sliced[i]?.letter_index ?? i + 1;
@@ -923,7 +966,8 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   addUsage(usage, llm);
   let { parsed, letters } = buildLetters(llm.text);
 
-  // Английские письма 'us': шаблон не имеет права укоротить цепочку. Цель — число писем
+  // ENG-клиент: прежнее целевое число финальных писем. Legacy английские письма 'us':
+  // шаблон не имеет права укоротить цепочку. Цель — число писем
   // he_chains.letters (их клиент видел и правил на шаге Letters; второго
   // источника числа нет), не больше того, что стадия берёт вообще. Писем меньше
   // цели → тот же ОДИН повтор, что и при < 3, с английской подсказкой; из двух
@@ -931,20 +975,23 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   // длине» нет: стадия падает, только если и после повтора меньше 3 писем, как
   // раньше. RU/PL и английские письма проекта 'ru' — прежний порог < 3 и
   // русская подсказка.
-  const targetLetters = Math.min(chainLetters.length, TEMPLATE_MAX_LETTERS);
   const retryBelow = usEnglish ? Math.max(TEMPLATE_MIN_LETTERS, targetLetters) : TEMPLATE_MIN_LETTERS;
   if (parsed.length < retryBelow) {
     stageLog(
       ctx,
       usEnglish
-        ? `[template] распознано ${parsed.length} писем, в цепочке ${targetLetters} — retry с фидбэком`
+        ? engBaseFirst
+          ? `[template] распознано ${parsed.length} писем, нужно ${targetLetters} финальных ENG-писем — retry с фидбэком`
+          : `[template] распознано ${parsed.length} писем, в цепочке ${targetLetters} — retry с фидбэком`
         : `[template] распознано ${parsed.length} писем — retry с фидбэком`,
     );
     const first = { llm, parsed, letters };
     const retryMessages: LLMMessage[] = [
       ...messages,
       { role: 'assistant', content: llm.text.slice(0, 2000) },
-      { role: 'user', content: usEnglish ? lengthRetryHintEn(targetLetters, parsed.length) : RETRY_HINT },
+      { role: 'user', content: engBaseFirst
+        ? `Write exactly ${targetLetters} complete emails numbered consecutively from 1 to ${targetLetters}, not ${parsed.length}. This is the final sequence for the prepared base. Keep the required output markers, email 1 A/B variants, plan and all regulations. Do not add a source chain or placeholders for future emails.`
+        : usEnglish ? lengthRetryHintEn(targetLetters, parsed.length) : RETRY_HINT },
     ];
     llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
     addUsage(usage, llm);
@@ -1003,7 +1050,16 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   // проверяются полностью; сегментные варианты — только по числам (это
   // фрагменты, без приветствия/CTA). Нарушения → один фикс-проход ДО маппинга
   // операторов и критика: критик должен ревьюить финальную механику текста.
-  const factCorpus = [
+  const factCorpus = (engBaseFirst ? [
+    // Only client facts can authorize figures in a new ENG sequence. Audience
+    // thresholds, model scores, base counts and the generated plan are not
+    // evidence that the client achieved those numbers.
+    JSON.stringify(heEngTemplateBriefFacts(brief)),
+    clientCase ? JSON.stringify(clientCase) : '',
+    signatureOverride ?? '',
+    clientWords.offerOverride ?? '',
+    clientWords.businessOverride ?? '',
+  ] : [
     JSON.stringify(analysis),
     chainLetters.map((l) => `${l.subject ?? ''}\n${l.body}`).join('\n'),
     vertical.name,
@@ -1017,7 +1073,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     // цитировать дословно, оставались в корпусе, даже если бриф из него
     // когда-то уберут (стадия chain у них так и сделала). Остальные — корпус прежний.
     ...(usEnglish ? [clientWords.offerOverride ?? '', clientWords.businessOverride ?? ''] : []),
-  ].join('\n');
+  ]).join('\n');
   // Чтение чисел: английские письма 'us' — запятая разделяет тысячи
   // (letterChecks); остальные — прежнее чтение. Письма сверяются так же, как
   // прочитан корпус.
@@ -1139,6 +1195,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         );
       }
     } catch (e) {
+      rethrowHeEngBaseBudgetError(e);
       stageLog(ctx, `[template] фикс-проход недоступен: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
@@ -1442,6 +1499,9 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         styleExample,
         winnerPatterns,
         clientWords,
+        engBaseFirst: engTemplateSource,
+        clientCase,
+        signatureOverride,
       }),
       HeChainCritiqueSchema,
       { model, maxTokens: 4096 },
@@ -1466,6 +1526,8 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
           winnerPatterns,
           signatureOverride,
           clientWords,
+          engBaseFirst: engTemplateSource,
+          clientCase,
         }),
         { model, maxTokens: 16384 },
       );
@@ -1507,6 +1569,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       }
     }
   } catch (e) {
+    rethrowHeEngBaseBudgetError(e);
     stageLog(ctx, `[template] критик-луп недоступен: ${e instanceof Error ? e.message : String(e)} — оставляем исходные письма`);
   }
 
@@ -1641,13 +1704,15 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   // таким номером (chainTiming.ts). Последним шагом перед записью: ни одна
   // проверка выше паузы не читает, а повторы и рерайт собирают письма заново
   // через parsedToChainLetters. RU/PL — лесенка, как раньше.
-  if (market === 'us') {
+  if (market === 'us' && !engBaseFirst) {
     const timing = applyHeChainTiming(letters, chainLetters);
     letters = timing.letters;
     stageLog(
       ctx,
       `[template] паузы писем: из цепочки ${timing.fromChain}, по лесенке ${timing.fromLadder} (первое письмо без паузы)`,
     );
+  } else if (engBaseFirst) {
+    stageLog(ctx, `[template] финальная ENG-цепочка после проверки базы: ${letters.length} письма, паузы ${letters.map((l) => l.wait_days).join('/')} дней`);
   }
 
   const personalizationPlan: HePersonalizationPlan = {

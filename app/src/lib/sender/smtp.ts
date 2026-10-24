@@ -52,6 +52,14 @@ export type SendErrorCode =
   | 'rejected'
   | 'policy_reject'
   | 'inflight_drop'
+  /**
+   * Временный отказ на входе (421/454 при AUTH): письмо ни при чём, ящик
+   * сейчас не пускает. Отправка держит ящик («Ошибка» и автоперепроверка),
+   * проверка входа считает сбой временным.
+   */
+  | 'auth_temporary'
+  /** Письмо принято, но не всем: часть адресов в копии отклонена. */
+  | 'partial_accept'
   | 'temporary'
   | 'network'
   | 'blocked_target'
@@ -111,8 +119,15 @@ export function classifySmtpError(error: unknown): SendErrorCode {
   const is5xx = (typeof code === 'number' && code >= 500 && code < 600)
     || (enhanced != null && enhanced.startsWith('5'));
 
+  // 4xx — «попробуйте позже». На шаге входа это отдельный код: nodemailer
+  // любой отказ AUTH подписывает «Invalid login», и 421 «Server busy» или 454
+  // у Gmail раньше объявляли ящик сломанным насовсем, а перепроверять его
+  // было некому. Временный отказ входа — дело ящика, а не письма.
+  if (typeof code === 'number' && code >= 400 && code < 500) {
+    if (netCode === 'EAUTH' || /^invalid login/.test(text)) return 'auth_temporary';
+    return /rate limit|too many|quota|throttl/.test(text) ? 'rate_limit' : 'temporary';
+  }
   if (/invalid login|authentication failed|auth.*(failed|invalid)|535/.test(text)) return 'auth';
-  if (code === 421 || code === 450 || code === 451 || code === 452) return 'temporary';
   if (/rate limit|too many|quota|throttl|4\.7\.0|try again later/.test(text)) return 'rate_limit';
 
   if (is5xx) {
@@ -192,7 +207,7 @@ export async function sendSenderMail(cfg: SenderSmtpConfig, mail: OutgoingMail):
     // SMTP may accept the lead but refuse a CC recipient. Replaying would duplicate
     // the message to the lead, so report an ambiguous/partial delivery instead.
     if (mail.cc?.length && info.rejected?.length) {
-      return { ok: false, code: 'inflight_drop', error: `Письмо принято частично; отклонены: ${info.rejected.join(', ')}` };
+      return { ok: false, code: 'partial_accept', error: `Письмо принято частично; отклонены: ${info.rejected.join(', ')}` };
     }
     return { ok: true };
   } catch (e) {

@@ -29,9 +29,11 @@ export async function loadContactDeliverySettings(
   preset: Pick<ClientCampaignPreset, 'daily_max_leads' | 'daily_limit' | 'schedule_days' | 'schedule_timezone'>,
 ) {
   const { data: binding, error } = await db.from('ve_projects')
-    .select('portal_project_id, portal_period_id, target_contacts, launch_preset_id, sender_daily_capacity, delivery_schedule_days, delivery_timezone')
+    .select('portal_project_id, portal_period_id, target_contacts, launch_preset_id, sender_daily_capacity, delivery_schedule_days, delivery_timezone, contact_upload_mode')
     .eq('id', veProjectId).maybeSingle();
   if (error || !binding) throw new Error('Не удалось прочитать закреплённый план проекта');
+  const uploadMode = binding.contact_upload_mode ?? 'daily';
+  if (uploadMode !== 'daily' && uploadMode !== 'all_ready') throw new Error('Неизвестный режим загрузки контактов');
   if (binding.launch_preset_id && binding.launch_preset_id !== input.presetId) {
     throw new Error('Пресет не совпадает с закреплённым за проектом');
   }
@@ -53,5 +55,5 @@ export async function loadContactDeliverySettings(
   }
   // Validate the IANA zone before persisting or forecasting.
   new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format();
-  return { scheduleDays, dailyCapacity: dailyCapacity as number, timezone: timezone as string };
+  return { scheduleDays, dailyCapacity: dailyCapacity as number, timezone: timezone as string, uploadMode: uploadMode as 'daily' | 'all_ready' };
 }

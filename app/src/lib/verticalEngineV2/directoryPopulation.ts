@@ -16,6 +16,8 @@ import type { VeCollectTask } from './prompts/sourcePlan';
 export interface VeDirectoryPopulationSlice {
   okved_prefixes: string[] | null;
   region_codes: string[] | null;
+  /** Группы лицензий: та же проверка, что p_licence_groups в выборке. */
+  licence_groups?: string[];
   include_ip: boolean;
   has_email: boolean;
   revenue_from?: number;
@@ -69,6 +71,7 @@ export function veDirectoryFiltersSlice(
     include_ip: filters.includeIp ?? false,
     has_email: filters.hasEmail === true,
   };
+  if (filters.licenceGroups?.length) slice.licence_groups = [...filters.licenceGroups];
   if (finite(filters.revenueFrom)) slice.revenue_from = filters.revenueFrom;
   if (finite(filters.revenueTo)) slice.revenue_to = filters.revenueTo;
   if (finite(filters.employeesFrom)) slice.employees_from = filters.employeesFrom;
@@ -121,6 +124,7 @@ export async function getVeDirectoryPlanPopulation(
 
 /** Источники без размера рынка: карты и вакансии не сообщают, сколько компаний в срезе. */
 const VE_UNSIZED_SOURCE_LABELS: Record<string, string> = {
+  known_websites: 'официальные сайты платформ',
   hh_live: 'вакансии hh.ru', eng_hiring: 'вакансии', yandex_maps: 'Яндекс Карты', google_maps: 'Google Maps',
   pdl: 'каталог PDL', funded: 'каталог стартапов',
 };

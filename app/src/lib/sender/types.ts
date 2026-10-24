@@ -2,11 +2,18 @@ import type { TlsMode } from './mailboxImport';
 
 export type MailboxStatus = 'pending' | 'verified' | 'failed' | 'disabled';
 export type CampaignStatus = 'draft' | 'running' | 'paused' | 'done';
+
+/**
+ * scheduled_start_error, пока воркер запускает кампанию по расписанию: по ней
+ * он узнаёт, что запуск тем временем не отменили и не перенесли (оба её
+ * стирают), а список показывает «запускается», а не ошибку.
+ */
+export const SCHEDULED_START_CLAIM_MARK = 'запускается';
 export type RecipientStatus = 'active' | 'replied' | 'bounced' | 'unsubscribed' | 'finished' | 'stopped';
 export type MessageStatus = 'scheduled' | 'sending' | 'sent' | 'failed' | 'canceled' | 'unknown';
 export type ReplyKind = 'human' | 'auto_reply' | 'bounce' | 'warmup' | 'unknown';
-/** Кто создал рассылку: человек в форме или заливка автоаутрича RU / EN. */
-export type CampaignSourceKind = 'manual' | 'polza_ru' | 'polza_en';
+/** Кто создал рассылку: форма, заливка автоаутрича RU / EN или запуск Движка вертикалей (ve2). */
+export type CampaignSourceKind = 'manual' | 'polza_ru' | 'polza_en' | 've2';
 
 /** password — пароль приложения из выгрузки; google_sa — ключ служебного аккаунта. */
 export type MailboxAuthType = 'password' | 'google_sa';
@@ -41,6 +48,12 @@ export interface MailboxRow {
   last_verified_at: string | null;
   last_error: string | null;
   last_send_at: string | null;
+  /** Когда ящик упал; null — не в «Ошибке». Ведёт база (sender_mailboxes_failure_clock). */
+  failed_at?: string | null;
+  /** Автоперепроверок с падения (или временных сбоев проверки «на проверке»). */
+  recheck_attempts?: number;
+  /** Следующая автопроверка входа; null — не запланирована. */
+  next_recheck_at?: string | null;
   imap_last_uid: number | null;
   imap_uidvalidity: string | null;
   imap_checked_at: string | null;

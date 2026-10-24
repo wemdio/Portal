@@ -605,6 +605,18 @@ const MIN_COLUMN_WIDTH = 30;
 const COMPANY_HEADER_REGEX = /(компан|company|организац)/i;
 const HEADER_LABEL_HINT_REGEX =
   /(названи|компан|company|сайт|website|url|домен|email|почта|контакт|телефон|phone|industry|сфера|описан|about|адрес|address)/i;
+// Колонки, которые «Оценка ЦА» отправляет ИИ сверх подсказок заголовка: название
+// и деятельность компании. Без них выгрузки Яндекс Карт (Name, Categories)
+// уходили в оценку одними адресом, сайтом и телефоном (15.10.2026). Отдельно от
+// HEADER_LABEL_HINT_REGEX, чтобы не менять распознавание строки заголовков.
+const BRIEF_SCORING_EXTRA_FIELD_REGEX =
+  /(\bname\b|categor|категор|рубрик|деятельн|оквэд|okved|отрасл|специализ|description)/i;
+// Размер, выручка, география и вакансии: бриф часто ставит по ним критерии, а
+// без этих колонок модель считала данные неполными и явной ЦА ставила 5–6
+// (23.10.2026). Добираются после основных колонок, чтобы не вытеснить описание
+// из лимита BRIEF_SCORING_MAX_FIELDS_PER_ROW.
+const BRIEF_SCORING_PROFILE_FIELD_REGEX =
+  /(сотрудник|численн|штат|employee|staff|headcount|размер|\bsize\b|выручк|оборот|доход|revenue|income|город|city|регион|region|област|страна|country|ваканси|vacanc|\bjobs?\b)/i;
 const ENRICHMENT_COLUMN_REGEX =
   /(обогащен|описан|description|about|сфера|industry|сотрудник|employee|штат|revenue|оборот|инн|телефон|phone|dadata|фнс|город|city|регион|region)/i;
 
@@ -5587,8 +5599,16 @@ export function DatabaseSpreadsheet() {
         const header = (headerLabels[c] || toColumnLabel(c)).trim();
         if (!header) continue;
         const headerLower = header.toLowerCase();
-        const isHinted = HEADER_LABEL_HINT_REGEX.test(headerLower) || COMPANY_HEADER_REGEX.test(headerLower);
+        const isHinted = HEADER_LABEL_HINT_REGEX.test(headerLower)
+          || COMPANY_HEADER_REGEX.test(headerLower)
+          || BRIEF_SCORING_EXTRA_FIELD_REGEX.test(headerLower);
         if (!isHinted) continue;
+        addField(header, row[c] ?? '');
+      }
+
+      for (let c = 0; c < tabSnapshot.data[0].length; c += 1) {
+        const header = (headerLabels[c] || toColumnLabel(c)).trim();
+        if (!header || !BRIEF_SCORING_PROFILE_FIELD_REGEX.test(header.toLowerCase())) continue;
         addField(header, row[c] ?? '');
       }
 

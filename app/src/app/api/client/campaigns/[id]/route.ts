@@ -29,7 +29,7 @@ import { upsertInstantlyCatalogFromCampaign } from '@/lib/tools/instantlyCampaig
 
 export const dynamic = 'force-dynamic';
 
-const DETAIL_TTL = 15 * 60 * 1000;
+const ANALYTICS_TTL = 15 * 60 * 1000;
 
 interface CampaignPatchBody {
   campaign_name?: unknown;
@@ -85,16 +85,18 @@ export async function GET(
 
   try {
     const [campaign, analyticsData, stepsData] = await Promise.all([
-      cached(`instantly:${instantlyRequestOptions.accountId}:campaign:${campaignId}`, () => getCampaign(campaignId, instantlyRequestOptions), DETAIL_TTL),
+      // Editable settings must be fresh, including edits from other sessions.
+      // A stale configuration can otherwise be saved over a newer sequence.
+      getCampaign(campaignId, instantlyRequestOptions),
       cached(
         `instantly:${instantlyRequestOptions.accountId}:analytics:${campaignId}`,
         () => getCampaignAnalytics({ campaign_id: campaignId }, instantlyRequestOptions).catch(() => []),
-        DETAIL_TTL,
+        ANALYTICS_TTL,
       ),
       cached(
         `instantly:${instantlyRequestOptions.accountId}:steps:${campaignId}`,
         () => getCampaignAnalyticsSteps({ campaign_id: campaignId }, instantlyRequestOptions).catch(() => []),
-        DETAIL_TTL,
+        ANALYTICS_TTL,
       ),
     ]);
 
@@ -241,19 +243,12 @@ export async function PATCH(
 
     invalidate(`instantly:${instantlyRequestOptions.accountId}:campaign:${campaignId}`);
     invalidate(`instantly:${instantlyRequestOptions.accountId}:steps:${campaignId}`);
-    await upsertInstantlyCatalogFromCampaign(updatedCampaign, instantlyRequestOptions.accountId);
+    // The successful PATCH can return an older, nonempty sequence. Echo the
+    // accepted edit, as persisted in our journal, instead of reverting the UI
+    // to those stale fields. Unedited provider fields remain untouched.
+    const campaignForResponse = { ...updatedCampaign, ...updatePayload };
+    await upsertInstantlyCatalogFromCampaign(campaignForResponse, instantlyRequestOptions.accountId);
     await logAudit('client.campaign.patch', 'Client edited campaign launch', { campaignId, launchId }, { userId });
-
-    const baseCampaignForResponse = hasUsableCampaignSequences(updatedCampaign.sequences)
-      ? updatedCampaign
-      : { ...updatedCampaign, name: campaignName, sequences };
-
-    // If we just changed the schedule, guarantee the response reflects it —
-    // so when the client re-opens edit mode it sees the value it just set,
-    // even if Instantly's PATCH response omitted/staled campaign_schedule.
-    const campaignForResponse = scheduleOverride
-      ? { ...baseCampaignForResponse, campaign_schedule: buildCampaignSchedule(scheduleOverride) }
-      : baseCampaignForResponse;
 
     return NextResponse.json({
       campaign: campaignForResponse,

@@ -49,6 +49,16 @@ export type HeClientErrorCode =
    * принадлежать вертикали.
    */
   | 'hypothesis_mismatch'
+  /** No company had confirmed evidence for both the selected audience and countries. */
+  | 'company_unverified'
+  /** Company checking stopped at its own lifetime spending limit. */
+  | 'qualification_limit'
+  /** A paid company-check result is missing or cannot be trusted. */
+  | 'qualification_incomplete'
+  /** The base's shared collection, analysis and letters budget is exhausted. */
+  | 'base_budget_limit'
+  /** Its remaining budget or a provider price cannot be verified safely. */
+  | 'base_budget_unavailable'
   /** В источниках не осталось новых компаний после исключения уже собранных. */
   | 'segment_exhausted'
   /**
@@ -60,6 +70,19 @@ export type HeClientErrorCode =
   | 'already_collected'
   /** Источник не отдал строк (ошибка чтения каталога или пустая выдача). */
   | 'source'
+  /**
+   * План сборки пуст из-за списка стран проекта: ни один источник не покрывает
+   * выбранные страны для этого рынка, коллекторы не вызывались
+   * (stages/baseCollect.ts; план docs/handoff/2026-10-16-eng-countries, §1A).
+   */
+  | 'countries_uncovered'
+  /**
+   * Сборка не дала строк, и главная причина — список Do not contact клиента:
+   * все найденные компании на его доменах (§1B).
+   */
+  | 'do_not_contact'
+  /** Список Do not contact клиента больше лимита — сборка не может его проверить (§1B). */
+  | 'do_not_contact_over_cap'
   /**
    * Адрес сайта клиента не привёл к публичному серверу (род `dns`
    * HeSiteUnreachableError: домен не резолвится, адрес невалидный или
@@ -140,7 +163,18 @@ export interface HeClientFailure {
 export const HE_COLLECT_STOP_REPEATS_CODES = [
   'audience_mismatch',
   'hypothesis_mismatch',
+  'company_unverified',
+  'qualification_limit',
+  'qualification_incomplete',
+  'base_budget_limit',
+  'base_budget_unavailable',
   'segment_exhausted',
+  // Повтор упрётся в тот же список стран / тот же Do not contact, пока клиент
+  // его не поправит (§1A, §1B). Список сверх лимита — так же: его текст зовёт
+  // «Collect again», а кнопка рисуется только у кодов этого списка.
+  'countries_uncovered',
+  'do_not_contact',
+  'do_not_contact_over_cap',
 ] as const satisfies readonly HeClientErrorCode[];
 
 export function heCollectStopRepeats(code: unknown): boolean {
@@ -417,6 +451,26 @@ export const HE_REFILL_RUN_WHAT_TO_DO_EN =
   'This was one run of the daily top-up, and a top-up run is not restarted by hand; «Daily top-up» in the Command Center shows whether it goes on. Message Support if it keeps stopping.';
 
 const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
+  base_budget_limit: {
+    title: 'Preparation stopped to keep this base within its $5 limit.',
+    whatIsSaved: 'Completed work is kept. Collection, analysis and letters share this limit.',
+    whatToDo: 'Review the saved results with Support. Retrying the same base does not reset its budget.',
+  },
+  base_budget_unavailable: {
+    title: 'Preparation stopped because the remaining budget could not be confirmed.',
+    whatIsSaved: 'Completed work is kept. No further paid requests will run while the cost is uncertain.',
+    whatToDo: 'Contact Support to check the cost record before continuing.',
+  },
+  qualification_limit: {
+    title: 'Company checking stopped at its spending limit.',
+    whatIsSaved: 'Completed checks are saved. Companies without confirmed evidence were not added to this base.',
+    whatToDo: 'Contact Support to review the saved results before starting another collection. A new collection may reach the same limit.',
+  },
+  qualification_incomplete: {
+    title: 'Company checking could not complete reliably.',
+    whatIsSaved: 'Saved results are kept. Unchecked companies were not treated as unsuitable or added to this base.',
+    whatToDo: 'Contact Support to review the saved results before starting another collection.',
+  },
   // 'billing' и 'configuration' читаются клиентом ОДИНАКОВО (HE_TEAM_ON_IT_EN):
   // «команда уже работает» здесь правда, потому что воркер шлёт алерт на каждый
   // такой отказ (opsAlert.ts). «Продолжится само» не пишем: шаг терминален.
@@ -458,6 +512,11 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     whatIsSaved: 'No contacts were bought for this market.',
     whatToDo:
       `This was a deliberate stop — mailing such a list would hurt the markets that do work. ${COLLECT_AGAIN_EN} To collect another market instead, tick it on step 2 «Choose markets» and press «Launch» on step 3.`,
+  },
+  company_unverified: {
+    title: 'No companies could be confirmed for the selected audience and countries.',
+    whatIsSaved: 'No contacts from this collection are ready to send. Your other bases and campaigns are not affected.',
+    whatToDo: 'Review the selected audience and countries before collecting again. Message Support if these choices are correct; repeating the same collection may give the same result.',
   },
   /**
    * Сборка, в которой релевант-гейт снял все компании, судя целью по
@@ -527,6 +586,34 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
       'Those companies and addresses stay in the audiences that already hold them; this collection does not add them a second time.',
     whatToDo:
       'Press «Launch» on step 3 to collect this market again — a new collection skips the companies you already have; if it keeps coming back empty, message Support.',
+  },
+  /**
+   * Список стран проекта (§1A): план сборки опустел, потому что ни один
+   * источник не покрывает выбранные страны для этого рынка. Коллекторы не
+   * вызывались — компаний не покупали. «Launch» такую вертикаль заново не
+   * собирает (HE_COLLECT_STOP_REPEATS_CODES); повтор — явная «Collect again»
+   * после правки списка на шаге 1.
+   */
+  countries_uncovered: {
+    title: 'None of our company sources cover the countries chosen for this project for this market.',
+    whatIsSaved: 'No companies were collected or bought for this market in this collection. ' + FINISHED_WORK_KEPT,
+    whatToDo:
+      'Add countries or clear the list in «Countries» on step 1, then press «Collect again» for this market on step 3.',
+  },
+  /**
+   * Список Do not contact клиента (§1B): все компании, которые нашла сборка,
+   * — на доменах из списка. Они не добавлены ни в эту базу, ни в кампании.
+   */
+  do_not_contact: {
+    title: 'Every company found for this market is on your Do not contact list.',
+    whatIsSaved: 'None of those companies were added. ' + FINISHED_WORK_KEPT,
+    whatToDo: 'Remove the domains you want to reach from Do not contact, then press «Collect again».',
+  },
+  /** Список Do not contact сверх лимита (§1B): сборка не может его проверить и остановилась. */
+  do_not_contact_over_cap: {
+    title: 'Your Do not contact list is over its limit of 10,000 entries.',
+    whatIsSaved: FINISHED_WORK_KEPT,
+    whatToDo: 'Remove entries you no longer need, then press «Collect again».',
   },
   source: {
     title: 'The company sources did not return any rows for this market.',

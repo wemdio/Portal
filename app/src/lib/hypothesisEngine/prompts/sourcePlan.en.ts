@@ -25,8 +25,17 @@
  * callLLMWithSchema. Входной тип переиспользован из RU-модуля.
  */
 
+import { engCountryIso2, ENG_COUNTRY_US } from '../engCountries';
 import type { LLMMessage } from '../llm';
 import type { SourcePlanPromptInput } from './sourcePlan';
+
+/**
+ * Вход EN-промптов плана: RU-тип плюс список стран сбора проекта (§1A плана
+ * docs/handoff/2026-10-16-eng-countries). `countries` ставится ТОЛЬКО непустым
+ * (collectPlanInput в stages/baseCollect.ts): нет поля — ни ключ плана, ни
+ * тексты сообщений не меняются ни на байт. RU-модуль sourcePlan.ts не тронут.
+ */
+export type SourcePlanPromptInputEn = SourcePlanPromptInput & { countries?: string[] };
 
 const SYSTEM_EN = `You are a head of lead research, an expert in planning lead sources for B2B outreach on the US/EU and other English-speaking markets. Given a sales vertical and its hypotheses you produce an EXECUTABLE lead-base collection plan: 1–4 tasks, each targeting exactly one source with its parameters.
 
@@ -80,6 +89,34 @@ RULES:
 - rationale — one concrete line: WHAT we collect and WHY it is not what the listed slices already collected.
 - Answer in English, ONLY JSON, no markdown fences.`;
 
+/**
+ * Блок TARGET COUNTRIES в конец пользовательского сообщения — только при
+ * непустом списке; иначе пустая строка, и сообщение байт-в-байт прежнее.
+ * SYSTEM-константы выше не меняются: страны применяет код (замок
+ * sourcePlanCountryGate.ts), промпт лишь объясняет модели, что срез без отрасли
+ * и имени или карты без США будут сняты, — чтобы она не тратила на них задачу.
+ */
+function targetCountriesBlock(input: SourcePlanPromptInputEn, kind: 'plan' | 'repair' | 'widen'): string {
+  const countries = input.countries;
+  if (!countries || countries.length === 0) return '';
+  const lines = [
+    `TARGET COUNTRIES (hard limit set by the client; anything outside is discarded): ${countries.join(', ')}.`,
+    '- Countries are applied by code — omit "countries" from pdl_filters' + (kind === 'plan' ? ' and funded_filters.' : '.'),
+    '- Every pdl slice must name industries or a name substring: a slice with only countries or sizes is discarded.',
+  ];
+  if (kind === 'plan') {
+    const codes = [...new Set(countries.map(engCountryIso2).filter((c): c is string => c !== null))];
+    lines.push(
+      `- eng_hiring countries are set by code${codes.length > 0 ? ` (ATS codes: ${codes.join(', ')})` : ''} — omit them.`,
+      countries.includes(ENG_COUNTRY_US)
+        ? '- google_maps covers the United States only: use it only with a US geo (a US state or city with its state).'
+        : '- google_maps covers the United States only, and the United States is not listed: do not use google_maps.',
+    );
+  }
+  if (kind === 'widen') lines.push('- An adjacent-country move must stay inside this list.');
+  return `\n\n${lines.join('\n')}`;
+}
+
 /** Срез, прочитанный до конца и не закрывший цель, — обратная связь планировщику. */
 export interface HeTriedSlice {
   /** Источник среза (pdl/funded/eng_hiring) — модель должна видеть, что уже отработано. */
@@ -110,7 +147,7 @@ export interface HeTriedSlice {
  * модель по тому же входу вернула бы ровно тот срез, который уже дочитан.
  */
 export function buildCatalogWidenMessagesEn(
-  input: SourcePlanPromptInput,
+  input: SourcePlanPromptInputEn,
   tried: HeTriedSlice[],
 ): LLMMessage[] {
   const user = `VERTICAL: ${input.verticalName}
@@ -130,7 +167,7 @@ Return ONLY JSON, strictly in this shape:
   "rationale": string,
   "pdl_filters": { "industries"?: string[], "sizes"?: string[], "countries"?: string[], "name"?: string }
 }
-At least one filter is required.`;
+At least one filter is required.${targetCountriesBlock(input, 'widen')}`;
 
   return [
     { role: 'system', content: SYSTEM_CATALOG_WIDEN_EN },
@@ -143,7 +180,7 @@ At least one filter is required.`;
  * pdl-срез. Источник задаётся кодом (всегда pdl), модель отвечает только за
  * фильтры — отсюда узкая схема HeCatalogRepairSchema вместо полного плана.
  */
-export function buildCatalogRepairMessagesEn(input: SourcePlanPromptInput): LLMMessage[] {
+export function buildCatalogRepairMessagesEn(input: SourcePlanPromptInputEn): LLMMessage[] {
   const user = `VERTICAL: ${input.verticalName}
 ${input.verticalSummary ?? ''}
 Vertical synonyms: ${input.synonyms?.length ? input.synonyms.join(', ') : '—'}
@@ -158,7 +195,7 @@ Return ONLY JSON, strictly in this shape:
   "rationale": string,
   "pdl_filters": { "industries"?: string[], "sizes"?: string[], "countries"?: string[], "name"?: string }
 }
-At least one filter is required.`;
+At least one filter is required.${targetCountriesBlock(input, 'repair')}`;
 
   return [
     { role: 'system', content: SYSTEM_CATALOG_REPAIR_EN },
@@ -166,7 +203,7 @@ At least one filter is required.`;
   ];
 }
 
-export function buildSourcePlanMessagesEn(input: SourcePlanPromptInput): LLMMessage[] {
+export function buildSourcePlanMessagesEn(input: SourcePlanPromptInputEn): LLMMessage[] {
   const user = `VERTICAL: ${input.verticalName}
 ${input.verticalSummary ?? ''}
 Vertical synonyms: ${input.synonyms?.length ? input.synonyms.join(', ') : '—'}
@@ -189,7 +226,7 @@ Build the base collection plan (1–4 tasks). Return ONLY JSON, strictly in this
     }
   ]
 }
-For source="pdl" the "pdl_filters" object is required; for "funded" — "funded_filters"; for "eng_hiring" — "eng_hiring_query"; for "google_maps" — "maps_query".`;
+For source="pdl" the "pdl_filters" object is required; for "funded" — "funded_filters"; for "eng_hiring" — "eng_hiring_query"; for "google_maps" — "maps_query".${targetCountriesBlock(input, 'plan')}`;
 
   return [
     { role: 'system', content: SYSTEM_EN },

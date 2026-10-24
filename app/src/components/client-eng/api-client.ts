@@ -40,6 +40,7 @@ import type {
 // Только тип: код отказа гейта платных шагов (lib/hypothesisEngine/engPaidAccess)
 // — один словарь на роуты и на экран; сам модуль в клиентский бандл не едет.
 import type { EngPaidAccessCode } from '@/lib/hypothesisEngine/engPaidAccess';
+import type { EngCollectionProgress, EngCompanyQualificationSummary } from '@/lib/hypothesisEngine/engCollectionProgress';
 import type { HeBrandInputLeak } from '@/lib/hypothesisEngine/letterBrandGuard';
 import type { EngResearchRetryVerdict } from '@/lib/hypothesisEngine/researchJob';
 // Только типы автозапуска (S3) — см. «Запуск проекта одной кнопкой» ниже.
@@ -70,6 +71,7 @@ import type {
 // Письмо цепочки у обоих контуров одно и то же, его реэкспорт остаётся.
 export type { HeChainLetterDto } from '@/components/hypothesis-engine/api';
 export type { HeEngSendingAction, HeEngSendingSecondaryAction, HeEngSendingSummary, HeEngStartErrorCode };
+export type { EngCollectionProgress, EngCollectionStep } from '@/lib/hypothesisEngine/engCollectionProgress';
 
 import type { HeBaseSummary as HeBaseSummaryDto } from '@/components/hypothesis-engine/api';
 
@@ -125,7 +127,25 @@ export type EngProject = Pick<
    * компилятору молча прочитать `undefined`.
    */
   autopilot_hold?: ClientEngAutopilotHold | null;
+  /**
+   * Можно ли сейчас выбирать страны сбора (выключатель HE_ENG_COLLECT_COUNTRIES,
+   * план §1A). Ключа нет — сервер старше: карточку «Countries» не рисуем.
+   * Сам список — в `brief.collect_countries` (engCollectCountriesOf).
+   */
+  collect_countries_enabled?: boolean;
 };
+
+/**
+ * Страны сбора проекта из `brief` (план §1A): `collect_countries` — значения
+ * каталога, `unavailable` — сохранённые, которых каталог больше не знает
+ * (сборка по ним ничего не находит). Ключей нет — список пуст.
+ */
+export function engCollectCountriesOf(brief: unknown): { countries: string[]; unavailable: string[] } {
+  const b = brief && typeof brief === 'object' ? (brief as Record<string, unknown>) : null;
+  const strings = (raw: unknown): string[] =>
+    Array.isArray(raw) ? raw.filter((v): v is string => typeof v === 'string' && v.length > 0) : [];
+  return { countries: strings(b?.collect_countries), unavailable: strings(b?.collect_countries_unavailable) };
+}
 
 /** Гипотеза после разметки: без `evidence` (цитаты и ссылки стадии). */
 export type EngHypothesis = Pick<
@@ -206,6 +226,21 @@ export interface EngConstructInfo {
   per_address_verdicts?: boolean;
 }
 
+/** Actual checked contacts, not an estimate of the audience still available. */
+export interface EngCollectionTarget {
+  version: 1;
+  ready_target: number;
+  /** Zero for new collections; older checkpoints may retain their reserve goal. */
+  reserve_target: number;
+  ready_count: number;
+  /** Additional checked contacts collected, never an estimate of future potential. */
+  reserve_count: number;
+  total_ready: number;
+  phase: 'collecting' | 'building_reserve' | 'complete' | 'stopped';
+  stop_reason: 'budget_limit' | 'sources_exhausted' | 'low_yield' | 'safety_limit' | 'error' | null;
+  rounds_completed: number;
+}
+
 /**
  * collect_info с полями ENG-конвейера (construct + stats). Только то, что
  * отдаёт проекция (COLLECT_STATS_FIELDS / CONSTRUCT_FIELDS): поле, которого
@@ -213,6 +248,10 @@ export interface EngConstructInfo {
  */
 export interface EngCollectInfo extends HeCollectInfo {
   construct?: EngConstructInfo;
+  /** New target-based collections only; older bases have no target metadata. */
+  eng_collection_target?: EngCollectionTarget;
+  /** Aggregate company checks only; the underlying verdicts stay on the server. */
+  company_qualification?: EngCompanyQualificationSummary;
   stats?: {
     tasks_total?: number;
     tasks_done?: number;
@@ -220,6 +259,8 @@ export interface EngCollectInfo extends HeCollectInfo {
     rows_total?: number;
     /** Строк, которые гейт релевантности пометил как вне вертикали. */
     low_relevance?: number;
+    /** Компаний, пропущенных сборкой: они в списке Do not contact клиента (план §1B). */
+    excluded_do_not_contact?: number;
   };
 }
 
@@ -245,6 +286,8 @@ export type EngBaseSummary = Omit<
 > & {
   analysis: EngBaseAnalysis | null;
   collect_info?: EngCollectInfo | null;
+  /** Live constructor metadata in ENG detail; null means the snapshot could not be read. */
+  collection_progress?: EngCollectionProgress | null;
   /**
    * Причина падения сборки. Обязательна на экране с тех пор, как автопилот
    * умеет осознанно НЕ строить базу (проба среза): один статус 'failed'
@@ -280,6 +323,8 @@ export interface EngProjectListItem {
   created_at: string;
   vertical_count: number;
   base_count: number;
+  /** Выбор стран сбора включён (строка идёт той же проекцией, что проект); нет ключа — не сказано. */
+  collect_countries_enabled?: boolean;
 }
 
 /**
@@ -355,8 +400,21 @@ export type EngProjectDetailResponse = Omit<
    * таких рынков нет вовсе (или ответ старше).
    */
   refill_totals?: EngRefillTotal[];
+  /**
+   * Выбор стран сбора включён (то же, что `project.collect_countries_enabled`;
+   * экран читает оба места — engCollectCountriesEnabled).
+   */
+  collect_countries_enabled?: boolean;
 };
 export type { EngTeamFixStop };
+
+/** Включён ли выбор стран сбора: ключ проекта или верхний ключ деталки; нет ни одного — нет. */
+export function engCollectCountriesEnabled(detail: {
+  project?: { collect_countries_enabled?: boolean } | null;
+  collect_countries_enabled?: boolean;
+}): boolean {
+  return detail.project?.collect_countries_enabled === true || detail.collect_countries_enabled === true;
+}
 
 /** Итог ночного добора одного рынка (GET /eng/projects/[id], `refill_totals`). */
 export interface EngRefillTotal {
@@ -428,7 +486,18 @@ export interface EngProjectLaunchInfo {
   /** Часы отправки, сохранённые с «Launch»; null — «Launch» ещё не нажимали. */
   schedule: EngSendingWindow | null;
   default: EngSendingWindow;
+  /** Прежние 8 поясов: из них и только из них — подбор по поясу браузера. */
   timezones: EngSendingWindowTimezoneOption[];
+  /**
+   * Полный список поясов с группами (план §1C, выключатель HE_ENG_TIMEZONES_ALL).
+   * Нет ключа — выпадашка рисует `timezones`.
+   */
+  timezone_options?: EngSendingWindowTimezoneOption[];
+  /**
+   * Пояс по странам сбора проекта (suggestEngTimezoneForCountries): все страны
+   * в одном часовом классе и США среди них нет. Нет ключа — подсказки нет.
+   */
+  suggested_timezone?: string;
   weekdays: EngSendingWindowWeekdayOption[];
   sending_access: EngSendingAccessState;
 }
@@ -551,6 +620,8 @@ export async function fetchEngTemplateRewriteTries(templateId: string): Promise<
 
 interface EngProjectsResponse {
   projects?: EngProjectListItem[];
+  /** Выбор стран сбора включён — если роут списка отдаёт его верхним ключом. */
+  collect_countries_enabled?: boolean;
   error?: string;
 }
 
@@ -619,6 +690,8 @@ export interface EngSendingWindow {
 export interface EngSendingWindowTimezoneOption {
   value: string;
   label: string;
+  /** Группа выпадашки (`<optgroup>`) у полного списка; у прежних 8 её нет. */
+  group?: string;
 }
 
 export interface EngSendingWindowWeekdayOption {
@@ -647,6 +720,8 @@ export interface EngSendingWindowResponse {
   mixed?: boolean;
   default?: EngSendingWindow;
   timezones?: EngSendingWindowTimezoneOption[];
+  /** Полный список поясов с группами (план §1C); нет ключа — рисуем `timezones`. */
+  timezone_options?: EngSendingWindowTimezoneOption[];
   weekdays?: EngSendingWindowWeekdayOption[];
   launched?: boolean;
   error?: string;
@@ -846,9 +921,23 @@ async function engApiFetch<T = unknown>(path: string, init?: RequestInit): Promi
   return data;
 }
 
-export async function fetchEngProjects(): Promise<EngProjectListItem[]> {
+/**
+ * Список проектов и выключатель выбора стран (для формы создания): верхний
+ * ключ ответа или ключ любой строки. null — сервер не сказал (строк нет, ключа
+ * нет): форма рисует выбор стран свёрнутым и переживает 400
+ * `countries_unavailable` (EngCountriesUnavailableError).
+ */
+export async function fetchEngProjectsPage(): Promise<{
+  projects: EngProjectListItem[];
+  collectCountriesEnabled: boolean | null;
+}> {
   const data = await engApiFetch<EngProjectsResponse>('/eng/projects');
-  return data.projects ?? [];
+  const projects = data.projects ?? [];
+  const flag =
+    typeof data.collect_countries_enabled === 'boolean'
+      ? data.collect_countries_enabled
+      : projects.find((p) => typeof p.collect_countries_enabled === 'boolean')?.collect_countries_enabled;
+  return { projects, collectCountriesEnabled: typeof flag === 'boolean' ? flag : null };
 }
 
 /**
@@ -856,17 +945,56 @@ export async function fetchEngProjects(): Promise<EngProjectListItem[]> {
  * исследование (описание бизнеса и рамка ЦА — те же ключи brief, что правит
  * шаг «Brief»); шлётся только заполненное. Отказ «один аккаунт — один сайт»
  * приходит отказом гейта (EngPaidAccessError, код project_limit).
+ *
+ * `collect_countries` — страны сбора (план §1A), шлётся только непустым.
+ * Пока выбор стран выключен, роут отвечает 400 `countries_unavailable` —
+ * тогда бросаем EngCountriesUnavailableError: проект НЕ создан, экран
+ * повторяет создание без стран.
  */
 export async function createEngProject(input: {
   website_url: string;
   name?: string;
   business_override?: string;
   icp?: Partial<HeIcpFrame>;
+  collect_countries?: string[] | null;
 }): Promise<EngProjectCreateResponse> {
-  return engPaidApiFetch<EngProjectCreateResponse>('/eng/projects', {
+  const { res, body } = await engApiFetchRaw('/eng/projects', {
     method: 'POST',
     body: JSON.stringify(input),
   });
+  if (!res.ok) {
+    const paid = engPaidAccessErrorFrom(res, body);
+    if (paid) throw paid;
+    if (isEngCountriesUnavailable(res, body)) throw new EngCountriesUnavailableError();
+    throw new Error(engRawErrorText(res, body));
+  }
+  const out = (body ?? {}) as EngProjectCreateResponse;
+  if (typeof out.error === 'string') out.error = engErrorText(out.error);
+  return out;
+}
+
+/** Текст отказа, когда выбор стран выключен (400 `countries_unavailable`). */
+export const ENG_COUNTRIES_UNAVAILABLE_TEXT = 'Choosing countries is not available yet.';
+
+/** Создание проекта отказано: выбор стран сбора сейчас выключен (план §1A, флаг записи). */
+export class EngCountriesUnavailableError extends Error {
+  constructor() {
+    super(ENG_COUNTRIES_UNAVAILABLE_TEXT);
+    this.name = 'EngCountriesUnavailableError';
+  }
+}
+
+/**
+ * 400 «выбор стран выключен»: код приходит полем `code` или самим `error`
+ * (роут отдаёт машинный код, текст строит экран).
+ */
+function isEngCountriesUnavailable(res: Response, body: Record<string, unknown> | null): boolean {
+  return res.status === 400 && (body?.code === 'countries_unavailable' || body?.error === 'countries_unavailable');
+}
+
+/** Текст ошибки PATCH стран для экрана: машинный код отказа — своей фразой. */
+export function engCountriesErrorText(message: string): string {
+  return /countries_unavailable/.test(message) ? ENG_COUNTRIES_UNAVAILABLE_TEXT : message;
 }
 
 export async function fetchEngProjectDetail(projectId: string): Promise<EngProjectDetailResponse> {
@@ -888,6 +1016,11 @@ export interface EngBriefPatch {
   signature_override?: string;
   business_override?: string;
   icp?: Partial<HeIcpFrame> | null;
+  /**
+   * Страны сбора (план §1A): список значений каталога целиком; null или [] —
+   * снять ограничение. Карточка «Countries» шлёт только это поле.
+   */
+  collect_countries?: string[] | null;
 }
 
 export async function patchEngProject(
@@ -1635,8 +1768,24 @@ export async function fetchEngDashboard(): Promise<EngDashboardResponse> {
  */
 export interface EngBlockedAddress {
   id: string;
+  /** Как хранит список: адрес или '@домен' у строки компании. */
   email: string;
   created_at: string;
+  /** 'domain' — строка блокирует компанию целиком (план §1B); нет ключа — адрес. */
+  kind?: 'email' | 'domain';
+  /** Что показать: адрес или домен без '@'; нет ключа — `email`. */
+  value?: string;
+}
+
+/** Строка — домен компании (по `kind`, а у ответа старше — по '@' в начале). */
+export function engBlockedIsDomain(item: EngBlockedAddress): boolean {
+  return item.kind === 'domain' || (item.kind === undefined && item.email.startsWith('@'));
+}
+
+/** Текст строки списка: `value`, а без него — адрес / домен без '@'. */
+export function engBlockedValue(item: EngBlockedAddress): string {
+  if (typeof item.value === 'string' && item.value) return item.value;
+  return engBlockedIsDomain(item) ? item.email.replace(/^@/, '') : item.email;
 }
 
 /**
@@ -1668,6 +1817,13 @@ export interface EngBlockedListPage {
   failed_examples: string[];
   /** `failed` — нижняя граница (неудач больше, чем отдала сводка). */
   failed_at_least: boolean;
+  /**
+   * Строк-доменов во всём списке; null — сервер не прочитал счёт, нет ключа
+   * (сервер старше доменов) — 0.
+   */
+  domains_total: number | null;
+  /** Можно ли добавлять домены (выключатель HE_ENG_DNC_DOMAINS); нет ключа — нельзя. */
+  domains_enabled: boolean;
 }
 
 function dncCount(raw: unknown): number | null {
@@ -1693,6 +1849,8 @@ export async function fetchEngBlockedList(opts: { offset?: number; q?: string } 
     failed,
     failed_examples: failed ? dncExamples(page.failed_examples) : [],
     failed_at_least: failed !== null && page.failed_at_least === true,
+    domains_total: page.domains_total === undefined ? 0 : dncCount(page.domains_total),
+    domains_enabled: page.domains_enabled === true,
   };
 }
 
@@ -1848,6 +2006,75 @@ export async function addEngBlockedAddresses(text: string, opts: { replyId?: str
   }
   // Ответ-отказ — с машинным кодом (коды роута, DEMO_READONLY) или 4xx с
   // текстом. Всё прочее — исход неизвестен (см. EngBlockedAddOutcome).
+  const refused =
+    !res.ok &&
+    body !== null &&
+    (typeof body.code === 'string' || (res.status < 500 && typeof body.error === 'string'));
+  if (!refused) return { ok: false, error: null, code: null, reload: true };
+  const code = typeof body.code === 'string' ? body.code : null;
+  return {
+    ok: false,
+    error: engRawErrorText(res, body),
+    code,
+    reload: code !== null && BLOCKED_ADD_RELOAD_CODES.includes(code),
+  };
+}
+
+/**
+ * Итог добавления доменов компаний (POST /blocklist {kind:'domains'}, план §1B).
+ * Отказы нормализации — `invalid` (не домен), `personal` (почтовый сервис
+ * для частных лиц), `not_company` (публичный суффикс, конструктор сайтов,
+ * соцсеть); `subdomains` — добавлены как набраны, но это поддомены.
+ */
+export interface EngBlockedDomainsResult {
+  added: number;
+  already_listed: number;
+  invalid: EngBlockedRejected;
+  personal: EngBlockedRejected;
+  not_company: EngBlockedRejected;
+  subdomains: EngBlockedRejected;
+  /** Размер списка после добавления; null — не пришёл. */
+  total: number | null;
+}
+
+export type EngBlockedDomainsOutcome =
+  | { ok: true; result: EngBlockedDomainsResult }
+  | { ok: false; error: string; code: string | null; reload: boolean }
+  | { ok: false; error: null; code: null; reload: true };
+
+/** Отказ нормализации — объектом {count, examples} или голым числом (сервер вправе отдать и так). */
+function rejectedLooseOf(raw: unknown): EngBlockedRejected {
+  if (typeof raw === 'number') return { count: Number.isSafeInteger(raw) && raw > 0 ? raw : 0, examples: [] };
+  const r = rejectedOf(raw);
+  return { count: Math.max(r.count, 0), examples: r.examples.slice(0, 10) };
+}
+
+/**
+ * «Company domains» на странице Do not contact. Тот же роут и те же отказы,
+ * что у addEngBlockedAddresses; домены проверяет и нормализует сервер
+ * (blockedDomains.ts), экран печатает его итог. Отказы с кодом —
+ * `domains_unavailable` (выключатель погас) и `not_eng_market` — английским
+ * текстом роута, как прочие.
+ */
+export async function addEngBlockedDomains(text: string): Promise<EngBlockedDomainsOutcome> {
+  const { res, body } = await engApiFetchRaw('/blocklist', {
+    method: 'POST',
+    body: JSON.stringify({ text, kind: 'domains' }),
+  });
+  if (res.ok && body && typeof body.added === 'number') {
+    return {
+      ok: true,
+      result: {
+        added: body.added,
+        already_listed: typeof body.already_listed === 'number' ? body.already_listed : 0,
+        invalid: rejectedLooseOf(body.invalid),
+        personal: rejectedLooseOf(body.personal),
+        not_company: rejectedLooseOf(body.not_company),
+        subdomains: rejectedLooseOf(body.subdomains),
+        total: typeof body.total === 'number' ? body.total : null,
+      },
+    };
+  }
   const refused =
     !res.ok &&
     body !== null &&

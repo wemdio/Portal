@@ -105,19 +105,25 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       })),
       // Ручные ответы оператора — полноправная часть переписки: без них в ленте
       // не видно, что мы ответили (задача 4.1).
-      ...(manual ?? []).map((x) => ({
-        id: String(x.id),
-        direction: 'out' as const,
-        subject: x.subject,
-        body: x.body,
-        at: (x.sent_at ?? x.created_at) as string | null,
-        note: MANUAL_NOTES[String(x.status)]
+      ...(manual ?? []).map((x) => {
+        const status = (x.status === 'failed' && x.error ? `${MANUAL_NOTES.failed}: ${x.error}` : null)
+          ?? MANUAL_NOTES[String(x.status)]
           ?? (x.status === 'sent' && x.error ? x.error : null)
-          ?? (x.status === 'sent' ? null : `${x.status}${x.error ? `: ${x.error}` : ''}`),
-        fromEmail: null,
-        toEmail: x.to_email && x.to_email.toLowerCase() !== String(thread.recipient_email).toLowerCase() ? x.to_email : null,
-        ccEmails: Array.isArray(x.cc_emails) ? x.cc_emails : [],
-      })),
+          ?? (x.status === 'sent' ? null : `${x.status}${x.error ? `: ${x.error}` : ''}`);
+        return {
+          id: String(x.id),
+          direction: 'out' as const,
+          subject: x.subject,
+          body: x.body,
+          at: (x.sent_at ?? x.created_at) as string | null,
+          note: status,
+          fromEmail: null,
+          // Кому ушло, если не самому адресату («Кому»), и копия (в том числе передача
+          // лида клиенту) — отдельными полями: лента показывает их в шапке письма.
+          toEmail: x.to_email && x.to_email.toLowerCase() !== String(thread.recipient_email).toLowerCase() ? x.to_email : null,
+          ccEmails: Array.isArray(x.cc_emails) ? x.cc_emails : [],
+        };
+      }),
     ].sort((a, b) => new Date(a.at ?? 0).getTime() - new Date(b.at ?? 0).getTime());
 
     // «Кому»: адреса, которые адресат прислал в последнем ответе («пишите Екатерине»).

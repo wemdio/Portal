@@ -1,6 +1,8 @@
 import 'server-only';
 
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { chunkForInFilter } from './inFilter';
 import {
   normalizeRecipientEmail,
@@ -8,8 +10,15 @@ import {
   type ParsedRecipient,
   type RecipientInput,
 } from './recipientImport';
+import {
+  campaignStopListScope,
+  ensureCampaignStopListChecked,
+  loadSenderStopList,
+  matchSenderStopList,
+  stopListIsEmpty,
+} from './stopLists';
 import { applyVars, recipientVars } from './template';
-import type { CampaignSourceKind } from './types';
+import { SCHEDULED_START_CLAIM_MARK, type CampaignSourceKind } from './types';
 import { MAX_VARIANTS } from './variants';
 import { syncCampaignTagMailboxes } from './campaignTags';
 
@@ -190,6 +199,11 @@ export function projectIdOf(raw: unknown): string | null {
   return typeof raw === 'string' && UUID_RE.test(raw.trim()) ? raw.trim() : null;
 }
 
+/** Клиент кампании из тела запроса (пользователь кабинета): uuid или null. */
+export function clientUserIdOf(raw: unknown): string | null {
+  return typeof raw === 'string' && UUID_RE.test(raw.trim()) ? raw.trim() : null;
+}
+
 export interface CreateCampaignInput {
   name: string;
   mailboxIds: string[];
@@ -206,6 +220,8 @@ export interface CreateCampaignInput {
   folderId?: string | null;
   /** Проект портала, к которому относится кампания; необязательно. */
   projectId?: string | null;
+  /** Клиент кабинета, чей стоп-лист действует на получателей; необязательно. */
+  clientUserId?: string | null;
   sourceKind?: CampaignSourceKind;
   /** Запуск автоаутрича (parser_jobs.id), из которого зальются получатели. */
   sourceJobId?: string | null;
@@ -249,6 +265,7 @@ export async function createCampaign(input: CreateCampaignInput): Promise<{ id: 
       gap_jitter_seconds: input.gapJitterSeconds ?? 120,
       folder_id: input.folderId ?? null,
       project_id: projectIdOf(input.projectId),
+      client_user_id: clientUserIdOf(input.clientUserId),
       source_kind: input.sourceKind ?? 'manual',
       source_job_id: input.sourceJobId ?? null,
       created_by: input.createdBy,
@@ -292,6 +309,8 @@ export interface ImportRecipientsResult {
   skippedDuplicates: number;
   /** Адрес в стоп-листе. */
   skippedSuppressed: number;
+  /** Адрес или сайт компании в стоп-листе клиента или проекта кампании. */
+  skippedStopList: number;
   /** Адрес уже стоял в этой кампании: повторная заливка его не дублирует. */
   skippedExisting: number;
   /**
@@ -340,17 +359,22 @@ async function loadSuppressedEmails(emails: string[], campaignId: string): Promi
  * — иначе «перезалить базу» означало бы потерять историю по тем, кто уже
  * получил письмо и, может быть, ответил. Нет ни одной годной строки — база не
  * трогается вовсе (accepted = 0), что с этим делать, решает вызывающий.
+ *
+ * beforeWrite вызывается один раз, прямо перед первой записью в базу, и
+ * только если запись будет. Ошибка до него значит «ничего не записано» —
+ * заливке из Движка вертикалей это нужно, чтобы отпустить контакты, а не
+ * считать их неясными.
  */
 export async function importRecipients(
   campaignId: string,
   rows: RecipientInput[],
-  opts: { mode: 'append' | 'replace' } = { mode: 'append' },
+  opts: { mode: 'append' | 'replace'; beforeWrite?: () => Promise<void> } = { mode: 'append' },
 ): Promise<ImportRecipientsResult> {
   const db = requireDb();
 
   const { data: campaign } = await db
     .from('sender_campaigns')
-    .select('id, status')
+    .select('id, status, client_user_id, project_id')
     .eq('id', campaignId)
     .maybeSingle();
   if (!campaign) throw new SenderOpError('Кампания не найдена', 404);
@@ -398,6 +422,7 @@ export async function importRecipients(
     skippedEmptyLetter: parsed.rejected,
     skippedDuplicates: parsed.duplicates,
     skippedSuppressed: 0,
+    skippedStopList: 0,
     skippedExisting: 0,
     inCampaignRows: [],
   };
@@ -406,6 +431,38 @@ export async function importRecipients(
   // Стоп-лист — до любых записей: не прочитался он — замена базы не должна
   // успеть стереть старую.
   const suppressed = await loadSuppressedEmails(recipients.map((recipient) => recipient.email), campaignId);
+
+  // Стоп-листы клиента и проекта — так же до записей и так же строго: не
+  // прочитали — база не заливается, иначе письмо ушло бы тому, кому клиент
+  // запретил писать.
+  const stopped = new Set<string>();
+  try {
+    const stopList = await loadSenderStopList(supabaseInstantly, await campaignStopListScope(db, campaign));
+    if (stopList && !stopListIsEmpty(stopList)) {
+      for (const recipient of recipients) {
+        if (!suppressed.has(recipient.email) && matchSenderStopList(stopList, recipient)) stopped.add(recipient.email);
+      }
+    }
+  } catch (e) {
+    throw new SenderOpError(
+      `Не удалось сверить базу со стоп-листами клиента и проекта: ${e instanceof Error ? e.message : String(e)}`,
+      503,
+    );
+  }
+
+  const toInsert = recipients
+    .filter((recipient) => !suppressed.has(recipient.email) && !stopped.has(recipient.email))
+    .map((recipient) => ({
+      campaign_id: campaignId,
+      email: recipient.email,
+      name: recipient.name,
+      vars: recipient.vars,
+      // Все строки пачки с одним набором колонок: у ручной базы ключа нет.
+      group_key: recipient.groupKey ?? null,
+      status: 'active',
+      next_step_at: nextStepAt,
+    }));
+  if (replace || toInsert.length) await opts.beforeWrite?.();
 
   if (replace) {
     // mailbox_id проставляется ровно в тот момент, когда планировщик завёл
@@ -420,19 +477,6 @@ export async function importRecipients(
     if (wipeError) throw new SenderOpError(wipeError.message, 500);
   }
 
-  const toInsert = recipients
-    .filter((recipient) => !suppressed.has(recipient.email))
-    .map((recipient) => ({
-      campaign_id: campaignId,
-      email: recipient.email,
-      name: recipient.name,
-      vars: recipient.vars,
-      // Все строки пачки с одним набором колонок: у ручной базы ключа нет.
-      group_key: recipient.groupKey ?? null,
-      status: 'active',
-      next_step_at: nextStepAt,
-    }));
-
   for (let i = 0; i < toInsert.length; i += INSERT_CHUNK) {
     const chunk = toInsert.slice(i, i + INSERT_CHUNK);
     // ignoreDuplicates: адрес, который уже стоит в кампании, не трогаем, а в
@@ -445,7 +489,32 @@ export async function importRecipients(
     result.inserted += data?.length ?? 0;
   }
 
+  // Кампанию могли запустить, пока база заливалась: строки легли без очереди,
+  // а её ставит только запуск (startCampaign) — они не ушли бы никогда. Ставим
+  // их сами: «активен, ни ящика, ни шага, ни очереди» — это ровно такие строки.
+  if (!nextStepAt && toInsert.length) {
+    const { data: now, error: statusError } = await db
+      .from('sender_campaigns').select('status').eq('id', campaignId).maybeSingle();
+    if (statusError) throw new SenderOpError(statusError.message, 500);
+    if (now?.status === 'running') {
+      const nowIso = new Date().toISOString();
+      for (const part of chunkForInFilter(toInsert.map((row) => row.email))) {
+        const { error: queueError } = await db
+          .from('sender_recipients')
+          .update({ next_step_at: nowIso, updated_at: nowIso })
+          .eq('campaign_id', campaignId)
+          .in('email', part)
+          .eq('status', 'active')
+          .eq('last_step_sent', 0)
+          .is('mailbox_id', null)
+          .is('next_step_at', null);
+        if (queueError) throw new SenderOpError(queueError.message, 500);
+      }
+    }
+  }
+
   result.skippedSuppressed = suppressed.size;
+  result.skippedStopList = stopped.size;
   result.skippedExisting = toInsert.length - result.inserted;
   const inCampaign = new Set(toInsert.map((row) => row.email));
   rows.forEach((row, index) => {
@@ -599,13 +668,40 @@ async function assertStartable(campaignId: string): Promise<{ id: string; status
  * вернул бы в работу базу, которую оператор закрыл. Дата первого запуска при
  * продолжении после паузы не сдвигается.
  */
-export async function startCampaign(campaignId: string): Promise<void> {
+export async function startCampaign(
+  campaignId: string,
+  opts: {
+    /** База Instantly для сверки списков клиента и проекта; нет — нужна свежая сверка воркера. */
+    instantlyDb?: SupabaseClient | null;
+    /** Запуск по расписанию: кампания запускается, только если его тем временем не отменили и не перенесли. */
+    scheduledClaim?: boolean;
+  } = {},
+): Promise<void> {
   const db = requireDb();
   const nowIso = new Date().toISOString();
   const campaign = await assertStartable(campaignId);
 
   // Ящики, добавленные под привязанный тег, пока кампания стояла, догоняют пул.
   await syncCampaignTagMailboxes(campaignId).catch((e) => console.warn('[sender] tag sync on start failed:', e));
+  // Стоп-листы клиента и проекта — до постановки в очередь, на любом пути
+  // запуска (кнопка, автоаутрич, расписание): клиента или проект могли
+  // поставить уже после заливки. Не сверено — не запускаем.
+  try {
+    await ensureCampaignStopListChecked(db, opts.instantlyDb ?? null, campaignId);
+  } catch (e) {
+    throw new SenderOpError(
+      `Стоп-листы клиента и проекта не сверены — запуск отложен: ${e instanceof Error ? e.message : String(e)}`,
+      503,
+    );
+  }
+  // Сверка могла снять всех: кампанию без получателей не запускаем.
+  const { count: left, error: leftError } = await db
+    .from('sender_recipients')
+    .select('id', { count: 'exact', head: true })
+    .eq('campaign_id', campaignId)
+    .eq('status', 'active');
+  if (leftError) throw new SenderOpError(leftError.message, 500);
+  if (!left) throw new SenderOpError('В кампании нет получателей — всех закрыли стоп-листы клиента и проекта', 422);
 
   // Пауза отменяет запланированные письма, но строки остаются, а у очереди
   // есть уникальность (recipient_id, step_no). Без уборки повторный запуск
@@ -658,7 +754,7 @@ export async function startCampaign(campaignId: string): Promise<void> {
   // Смена статуса — одним условным обновлением: из двух одновременных
   // «Запустить» (или «Запустить» и «Завершить») проходит одно, второе видит,
   // что кампания уже не черновик и не на паузе.
-  const { data: switched, error } = await db
+  let switchQuery = db
     .from('sender_campaigns')
     // Запуск снимает и отложенный: кнопка «Запустить сразу» его отменяет.
     .update({
@@ -669,10 +765,27 @@ export async function startCampaign(campaignId: string): Promise<void> {
       scheduled_start_error: null,
     })
     .eq('id', campaignId)
-    .in('status', EDITABLE_CAMPAIGN_STATUSES)
-    .select('id');
+    .in('status', EDITABLE_CAMPAIGN_STATUSES);
+  // Отмена и перенос стирают отметку воркера — тогда не запускаем.
+  if (opts.scheduledClaim) switchQuery = switchQuery.eq('scheduled_start_error', SCHEDULED_START_CLAIM_MARK);
+  const { data: switched, error } = await switchQuery.select('id');
   if (error) throw new SenderOpError(error.message, 500);
   if (!switched?.length) throw new SenderOpError('Кампанию уже запустили или завершили — обновите экран', 409);
+
+  // База, долитая между постановкой в очередь выше и сменой статуса, легла
+  // без очереди, а заливка (importRecipients) ещё видела черновик. Ставим и
+  // её — только нетронутых: без ящика и без шага, снятых выше это не задевает.
+  const { error: lateError } = await db
+    .from('sender_recipients')
+    .update({ next_step_at: nowIso, updated_at: nowIso })
+    .eq('campaign_id', campaignId)
+    .eq('status', 'active')
+    .eq('last_step_sent', 0)
+    .is('mailbox_id', null)
+    .is('next_step_at', null);
+  if (lateError) {
+    throw new SenderOpError(`Кампания запущена, но часть базы не встала в очередь: ${lateError.message}. Нажмите «Пауза» и «Запустить» ещё раз`, 500);
+  }
 }
 
 /** Дальше этого отложить запуск нельзя: опечатка в годе не должна прятать кампанию на годы. */

@@ -542,7 +542,7 @@ if should_drain_baseconstructor_workers; then
   fi
 fi
 
-# Hypothesis Engine: one single-flight worker behind both the English client
+# Hypothesis Engine: the worker behind both the English client
 # cabinet (/client/eng) and the RU staff tool (/tools/hypothesis-engine).
 # Without this branch the deploy reached it only through force_rm_svc
 # (`docker rm -f`, SIGKILL): the stage in flight died mid-call, resetStuckJobs
@@ -585,7 +585,22 @@ fetch_running_he_jobs() {
     "${SUPABASE_URL}/rest/v1/he_jobs?status=eq.running&select=id" "${auth_headers[@]}"
 }
 
+# Two processes of the same worker since the lane split (HE_WORKER_LANE):
+# worker-hypothesis-engine takes every stage except verified ENG collections,
+# worker-hypothesis-engine-eng only those. One `stop` stops both in parallel,
+# so the drain is not twice as long; the wait is the larger StopTimeout of
+# the containers that exist now (the ENG lane's first deploy has none yet).
+he_services=()
+he_containers=()
 if should_drain_worker "worker-hypothesis-engine"; then
+  he_services+=("worker-hypothesis-engine")
+  he_containers+=("portal-worker-hypothesis-engine")
+fi
+if should_drain_worker "worker-hypothesis-engine-eng"; then
+  he_services+=("worker-hypothesis-engine-eng")
+  he_containers+=("portal-worker-hypothesis-engine-eng")
+fi
+if [ "${#he_services[@]}" -gt 0 ]; then
   if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
     if he_rows="$(fetch_running_he_jobs 2>/dev/null)"; then
       echo "[drain] he_jobs running before stop: $(printf '%s' "$he_rows" | count_json_rows)"
@@ -593,27 +608,31 @@ if should_drain_worker "worker-hypothesis-engine"; then
       echo "[drain] he_jobs running before stop: unknown (read failed or took over 15s)"
     fi
   fi
-  he_grace="$(timeout --kill-after=5s 15s docker inspect --format '{{.Config.StopTimeout}}' portal-worker-hypothesis-engine 2>/dev/null || true)"
-  case "$he_grace" in
-    '')
-      he_grace_note="unknown (no value from docker inspect within 15s); client caps sized for 300s"
-      he_grace=300
-      ;;
-    *[!0-9]*|???????*)
-      he_grace_note="unusable StopTimeout '${he_grace}'; client caps sized for 300s"
-      he_grace=300
-      ;;
-    *)
-      he_grace=$((10#$he_grace))
-      he_grace_note="${he_grace}s (container StopTimeout)"
-      ;;
-  esac
+  he_grace=""
+  for he_container in "${he_containers[@]}"; do
+    he_container_grace="$(timeout --kill-after=5s 15s docker inspect --format '{{.Config.StopTimeout}}' "$he_container" 2>/dev/null || true)"
+    case "$he_container_grace" in
+      ''|*[!0-9]*|???????*) ;;
+      *)
+        he_container_grace=$((10#$he_container_grace))
+        if [ -z "$he_grace" ] || [ "$he_container_grace" -gt "$he_grace" ]; then
+          he_grace="$he_container_grace"
+        fi
+        ;;
+    esac
+  done
+  if [ -z "$he_grace" ]; then
+    he_grace_note="unknown (no usable StopTimeout from docker inspect within 15s); client caps sized for 300s"
+    he_grace=300
+  else
+    he_grace_note="${he_grace}s (largest container StopTimeout)"
+  fi
   he_http_timeout=$((he_grace + 60))
-  echo "[drain] Gracefully stopping Hypothesis Engine (grace period: ${he_grace_note})..."
+  echo "[drain] Gracefully stopping Hypothesis Engine: ${he_services[*]} (grace period: ${he_grace_note})..."
   he_stop_code=0
   COMPOSE_HTTP_TIMEOUT="$he_http_timeout" DOCKER_CLIENT_TIMEOUT="$he_http_timeout" \
     timeout --kill-after=10s "$((he_grace + 90))s" \
-    docker compose --env-file .env -p portal -f docker-compose.prod.yml stop worker-hypothesis-engine \
+    docker compose --env-file .env -p portal -f docker-compose.prod.yml stop "${he_services[@]}" \
     || he_stop_code=$?
   if [ "$he_stop_code" -ne 0 ]; then
     echo "[drain] WARNING: Hypothesis Engine graceful stop failed (exit ${he_stop_code}); the deploy removes it by force as before"
@@ -623,7 +642,7 @@ if should_drain_worker "worker-hypothesis-engine"; then
       if he_rows="$(fetch_running_he_jobs 2>/dev/null)"; then
         he_left="$(printf '%s' "$he_rows" | count_json_rows)"
         if [ "$he_left" -gt 0 ]; then
-          echo "[drain] he_jobs still running after stop: ${he_left}; ids=$(printf '%s' "$he_rows" | extract_ids_csv) (re-queued on start by resetStuckJobs; a stage without a checkpoint runs again)"
+          echo "[drain] he_jobs still running after stop: ${he_left}; ids=$(printf '%s' "$he_rows" | extract_ids_csv) (re-queued on start by resetStuckJobs of their lane; a stage without a checkpoint runs again)"
         fi
       else
         echo "[drain] he_jobs after stop: unknown (read failed or took over 15s)"

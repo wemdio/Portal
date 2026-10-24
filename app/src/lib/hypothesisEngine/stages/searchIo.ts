@@ -20,6 +20,7 @@ import {
 import { serperGeoForMarket, type HeMarket } from '../market';
 import { isHeOperationTimeout } from '../operationDeadline';
 import { HE_US_SERPER_KEY_ENV, heUsProviderKey } from '../providerKeys';
+import { heEngBaseBudgetActive, rejectHeEngUnbudgetedProvider } from '../engBaseBudget';
 
 export type HeSearchResults = Array<{ title: string; link: string; snippet?: string }>;
 
@@ -108,6 +109,9 @@ export async function defaultSearch(
   signal?: AbortSignal,
 ): Promise<HeSearchResults> {
   signal?.throwIfAborted();
+  // Company collection uses local catalogues and public sites. Do not let an
+  // optional/new search path spend outside its base's durable budget.
+  if (heEngBaseBudgetActive()) rejectHeEngUnbudgetedProvider('serper');
   const geo = serperGeoForMarket(market);
   const engKey = heUsProviderKey(HE_US_SERPER_KEY_ENV);
   const outcome = await serperSearchOutcome(q, {

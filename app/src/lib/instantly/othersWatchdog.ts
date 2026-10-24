@@ -477,6 +477,44 @@ function normalizeBodyForMatch(s: string): string {
     .trim();
 }
 
+/** A shared job title/contact footer does not prove a quoted send. Keep real
+ * message text (including older quoted messages), but stop each message at its
+ * signature. A dated/forwarded header can start the next quoted message. This
+ * only narrows outbound evidence; the incoming reply itself stays untouched. */
+function bodyQuoteEvidenceLines(text: string): string[] {
+  const evidence: string[] = [];
+  let signature = false;
+  const lines = text.split('\n');
+  const plainLine = (raw: string): string => raw.replace(/^\s*(?:>\s*)+/, '').trim()
+    .replace(/^\*+|\*+$/g, '').trim().replace(/[^\S\r\n]+/g, ' ');
+  const isHeader = (line: string): boolean =>
+    /^(?:On\s+.+\s+wrote:|(?:From|От|От\s+кого):\s*.+@\S*.*|[-_]{2,}\s*(?:Original\s+Message|Forwarded\s+message|Пересылаемое\s+сообщение).*)$/iu.test(line) ||
+    /^.{1,180}\d{4}.{0,120}(?:написал(?:а)?|писал(?:\(а\)|а)?|пишет)\s*:$/iu.test(line) ||
+    /^На\s+\d{1,2}\s+[а-яё]{3,12}\s+.{1,160}(?:написал(?:а)?|писал(?:\(а\)|а)?|пишет)\s*:$/iu.test(line) ||
+    /^.{1,120}(?:написал(?:а)?|писал(?:\(а\)|а)?|пишет).{0,60}\d{4}[^\n]{0,100}:$/iu.test(line);
+  for (let index = 0; index < lines.length; index++) {
+    const raw = lines[index];
+    const plain = plainLine(raw);
+    const headerWidth = [1, 2, 3].find(width => {
+      const parts = lines.slice(index, index + width).map(plainLine);
+      return parts.length === width && parts.every(part => part.length > 0 && part.length <= 240) &&
+        isHeader(parts.join(' '));
+    });
+    if (headerWidth) {
+      signature = false;
+      index += headerWidth - 1;
+      continue;
+    }
+    if (/^(?:--|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:\s*[,!.:].*)?|(?:best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:\s*[,!.:].*)?)$/iu.test(plain)) {
+      signature = true;
+    }
+    // Preserve the original bytes for the existing match normalizer: this
+    // filter must only remove evidence, never create a newly normalized match.
+    if (!signature && plain) evidence.push(raw);
+  }
+  return evidence;
+}
+
 function matchReplyToCampaign(
   replySubject: string | undefined,
   replyBodyText: string,
@@ -513,9 +551,12 @@ function matchReplyToCampaign(
     // любая его строка ≥40 симв., процитированная в ответе.
     const sentBody = getBodyText(e.body);
     const sentBodyNorm = normalizeBodyForMatch(sentBody);
-    if (sentBodyNorm.length >= BODY_QUOTE_MIN) {
+    const sentLines = bodyQuoteEvidenceLines(sentBody);
+    if (sentBodyNorm.length >= BODY_QUOTE_MIN && sentLines.length > 0) {
+      // Keep the existing whole-body proof intact. Concatenating filtered
+      // fragments must not manufacture a new match absent from the real send.
       if (bodyNorm.includes(sentBodyNorm)) return e;
-      for (const line of sentBody.split('\n')) {
+      for (const line of sentLines) {
         const ln = normalizeBodyForMatch(line);
         if (ln.length >= BODY_QUOTE_MIN && bodyNorm.includes(ln)) return e;
       }

@@ -4,7 +4,7 @@ import { getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { loadContactDeliverySettings } from './contactDeliveryConfig';
 import { buildContactDeliveryPlan } from './contactDeliveryPlanner';
-import { buildContactSupplyRequests } from './contactSupplyPlanner';
+import { buildAllReadyContactSupplyRequests, buildContactSupplyRequests } from './contactSupplyPlanner';
 import { parseExactNonNegativeContactCount } from './contactDeliveryPreview';
 import { loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows, readContactDeliveryPages } from './contactDeliveryInventory';
 import { loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow } from './projectExclusions';
@@ -14,13 +14,14 @@ import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
 import { hasPendingSupplyNames } from './contactSupplyNameRecovery';
 import { isVeProviderBillingError } from './collectionErrors';
+import { VE_COLLECTION_BUDGET_CAP_REASON } from './collectionTarget';
 import { describePortalProjectTerm, loadPortalProjectTerm, localIsoDate } from './portalDeliveryTerm';
 
 const BUFFER_WORKDAYS = 2;
 export { buildContactSupplyRequests } from './contactSupplyPlanner';
 type SupplyStop = 'active' | 'exhausted' | 'limited' | 'error';
 type SupplyProgress = { status?: unknown; reason?: unknown; ready_rows?: unknown; stop_cause?: unknown };
-type SupplyOutcome = { status: SupplyStop; reason: string | null; stop_cause?: 'low_yield' };
+type SupplyOutcome = { status: SupplyStop; reason: string | null; stop_cause?: 'low_yield' | 'budget_cap' };
 export interface ContactSupplyPlanRow {
   id: string;
   project_id: string;
@@ -67,7 +68,9 @@ function sourceOutcome(progress: SupplyProgress | null | undefined): SupplyOutco
   if (progress?.status === 'target_reached') return { status: 'active', reason };
   if (progress?.status === 'exhausted' || progress?.status === 'limited' || progress?.status === 'error') {
     return { status: progress.status, reason,
-      ...(progress.status === 'limited' && progress.stop_cause === 'low_yield' ? { stop_cause: 'low_yield' as const } : {}) };
+      ...(progress.status === 'limited' && progress.stop_cause === 'low_yield' ? { stop_cause: 'low_yield' as const }
+        : progress.status === 'limited' && progress.stop_cause == null && reason === VE_COLLECTION_BUDGET_CAP_REASON
+          ? { stop_cause: 'budget_cap' as const } : {}) };
   }
   return { status: 'error', reason: 'Сбор не подтвердил полный результат и состояние источников' };
 }
@@ -85,8 +88,10 @@ export function confirmedAppendOutcome(source: SupplyOutcome, count: unknown, br
     throw new Error('Supply append result did not confirm an exact inserted count');
   }
   // A fresh batch may continue a broad sector after its ordinary batch cap,
-  // but must not erase an explicit economic stop and repurchase the same source.
-  if (broad && count > 0 && source.status === 'limited' && source.stop_cause !== 'low_yield') {
+  // Idle, dry widened slices and unconfirmed continuation also use "limited",
+  // including older checkpoints without stop_cause. Only a proven batch cap
+  // may open another batch; prior yield alone cannot justify repeating a source.
+  if (broad && count > 0 && source.status === 'limited' && source.stop_cause === 'budget_cap') {
     return { appendedCount: count, status: 'active' as const, reason: null };
   }
   return {
@@ -165,18 +170,22 @@ async function loadSupplyContext(portalDb: SupabaseClient, instantlyDb: Supabase
   const planContactsDone = contactsDone ?? inventory.observedFirstContacted;
   const committed = rows.filter((row) => ['accepted', 'attempting', 'uncertain'].includes(row.status)).length;
   const outstanding = Math.max(0, committed - Math.min(inventory.observedFirstContacted, planContactsDone));
+  const uploadAllReady = settings.uploadMode === 'all_ready';
   const plan = buildContactDeliveryPlan({
     now, timezone: settings.timezone, deadline, scheduleDays: settings.scheduleDays,
     contactsObligation: project.target_contacts, contactsDone: planContactsDone, dailyCapacity: settings.dailyCapacity,
     // Forecast demand independently of today's shortage, which this loop fills.
-    availableContacts: Math.max(0, project.target_contacts - planContactsDone), outstandingContacts: outstanding,
+    availableContacts: Math.max(0, project.target_contacts - planContactsDone),
+    // all_ready accounts for unsent stock per launch below. Subtracting it
+    // here too would underfill the last two-day buffer near the project goal.
+    outstandingContacts: uploadAllReady ? 0 : outstanding,
   });
   // The deadline can fall on this weekend, leaving no sending dates in the
   // original forecast. The approved launch still continues after the deadline:
   // prepare its next two workdays now, net of already committed contacts.
   // This changes only stock demand, never delivery dates or the stored deadline.
   const bufferTarget = plan.days.length === 0 && settings.scheduleDays.length > 0
-    ? Math.min(BUFFER_WORKDAYS * settings.dailyCapacity, Math.max(0, plan.remainingContacts - outstanding))
+    ? Math.min(BUFFER_WORKDAYS * settings.dailyCapacity, Math.max(0, plan.remainingContacts - (uploadAllReady ? 0 : outstanding)))
     : plan.days.slice(0, BUFFER_WORKDAYS).reduce((sum, day) => sum + day.quota, 0);
   const campaignItems = new Map(campaigns.map((campaign) => [campaign.id, campaign.item_id]));
   const readyCandidates = rows.filter(row => row.status === 'ready' || row.status === 'reserved');
@@ -184,13 +193,40 @@ async function loadSupplyContext(portalDb: SupabaseClient, instantlyDb: Supabase
     ? await createVeDeliveryIdentityResolver(portalDb, projectId)(readyCandidates) : readyCandidates.map(veDeliveryPolicyRow);
   const excludedRows = new Set(readyCandidates.filter((_, index) => policyRows[index]
     && matchVeProjectExclusion(policyRows[index], exclusions)).map(row => row.id));
-  const requests = buildContactSupplyRequests(bufferTarget, items.map((item) => ({
+  const availableReady = readyCandidates.filter(row => !blocked.has(row.email_normalized) && !excludedRows.has(row.id));
+  const itemStock = items.map((item) => ({
     id: item.id, weight: item.potential_pct,
-    ready: rows.filter((row) => activeCampaignRows.has(row.campaign_row_id)
-      && campaignItems.get(row.campaign_row_id) === item.id
-      && (row.status === 'ready' || row.status === 'reserved') && !blocked.has(row.email_normalized)
-      && !excludedRows.has(row.id)).length,
-  })));
+    ready: availableReady.filter((row) => activeCampaignRows.has(row.campaign_row_id)
+      && campaignItems.get(row.campaign_row_id) === item.id).length,
+  }));
+  let requests: Array<{ itemId: string; readyTarget: number }>;
+  if (uploadAllReady) {
+    const committedByCampaign = new Map<string, number>();
+    for (const row of rows) {
+      if (!['accepted', 'attempting', 'uncertain'].includes(row.status)) continue;
+      committedByCampaign.set(row.campaign_row_id, (committedByCampaign.get(row.campaign_row_id) ?? 0) + 1);
+    }
+    const outstandingByItem = new Map<string, number>();
+    let allOutstanding = 0;
+    for (const [campaignRowId, count] of committedByCampaign) {
+      const contacted = inventory.observedFirstContactedByCampaignRow[campaignRowId];
+      if (!Number.isSafeInteger(contacted) || contacted < 0) {
+        throw new Error('Supply inventory requires exact per-campaign first-contacted counts');
+      }
+      const pending = Math.max(0, count - contacted);
+      allOutstanding += pending;
+      const itemId = campaignItems.get(campaignRowId);
+      if (itemId) outstandingByItem.set(itemId, (outstandingByItem.get(itemId) ?? 0) + pending);
+    }
+    // Historical/released/paused launches still own their committed and saved
+    // stock. A period fact lagging campaign analytics may only reduce demand.
+    const headroom = Math.max(0, plan.remainingContacts - Math.max(outstanding, allOutstanding) - availableReady.length);
+    requests = buildAllReadyContactSupplyRequests(bufferTarget, itemStock.map(item => ({
+      ...item, outstanding: outstandingByItem.get(item.id) ?? 0,
+    })), headroom);
+  } else {
+    requests = buildContactSupplyRequests(bufferTarget, itemStock);
+  }
   return { requests, campaigns, blocked, existingEmails: new Set(rows.map((row) => row.email_normalized)),
     // Stock is prepared ahead of the next sending days, including weekends.
     // Only delivery reservation/upload is restricted to today's schedule.
@@ -236,7 +272,7 @@ export async function runProjectContactSupply(input: {
   const broadHypotheses = await readBroadHypothesisIds(portalDb, sendingPlans.map((plan) => plan.hypothesis_id));
   const batches = await readContactDeliveryPages<SupplyBatch>('contact supply batches', (from, to) => portalDb
     .from('ve_contact_supply_batches').select('id, plan_id, base_id, template_id, audit_id, status, appended_count, error', { count: 'exact' })
-    .in('plan_id', sendingPlans.map((plan) => plan.id)).order('created_at', { ascending: false }).order('id', { ascending: true }).range(from, to));
+    .in('plan_id', sendingPlans.map((plan) => plan.id)).order('created_at', { ascending: false }).order('id', { ascending: false }).range(from, to));
   let pendingWork = false;
   for (const plan of sendingPlans) {
     if (!context.campaigns.some((campaign) => campaign.item_id === plan.item_id)) continue;

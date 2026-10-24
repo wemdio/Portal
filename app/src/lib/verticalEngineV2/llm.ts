@@ -19,7 +19,9 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { withVeDeadline } from './operationDeadline';
 import { beginProviderUsage, getProviderUsageScope } from '@/lib/providerUsage';
 import { veLlmRateLimit } from './llmRateLimit';
-import { isVeProviderBillingError } from './collectionErrors';
+import { isVeProviderBillingError, isVeRequestyBillingError } from './collectionErrors';
+import { getVeRequestyApiKey, veRequestyKeyFingerprint } from './requestyBalance';
+import { VeRequestyBillingError } from './requestyBillingRecovery';
 
 const API_URL = 'https://router.requesty.ai/v1/chat/completions';
 
@@ -38,6 +40,10 @@ const MODEL_PRICES: Record<string, ModelPrices> = {
   'gpt-4o-mini': { in: 0.15, out: 0.60, cached: 0.075 },
   'openai/gpt-5-mini': { in: 0.25, out: 2.0, cached: 0.025 },
   'gpt-5-mini': { in: 0.25, out: 2.0, cached: 0.025 },
+  // Requesty /v1/models, 22.10.2026: the flex tier of the admission confirmation
+  // and V4.1 Flash on DeepSeek's own API (first pass of the relevance gate).
+  'openai/gpt-5-mini:flex': { in: 0.125, out: 1.0, cached: 0.0125 },
+  'deepseek/deepseek-v4.1-flash-1017': { in: 0.30, out: 1.20, cached: 0.006 },
   // Ресёрч/синтез (site_profile, hypotheses, evidence, clustering)
   // opus-5: прайс Requesty уточнить после первых прогонов, пока = opus-4-8
   'claude-opus-5':                  { in: 5.0, out: 25.0 },
@@ -75,14 +81,6 @@ const MODEL_PRICES: Record<string, ModelPrices> = {
   'anthropic/claude-haiku-4-5':     { in: 1.0, out: 5.0 },
 };
 
-function getApiKey(): string {
-  const key = process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY || process.env.OPENROUTER_BRIEF_API_KEY;
-  if (!key) {
-    throw new Error('OPENROUTER_HYPOTHESIS_ENGINE_API_KEY не задан (и нет fallback OPENROUTER_BRIEF_API_KEY)');
-  }
-  return key;
-}
-
 const nonnegative = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 
@@ -111,6 +109,28 @@ function providerUsage(response: RequestyResponse, requestedModel: string) {
 export type VeModelKind = 'research' | 'hypotheses' | 'chain' | 'bulk' | 'collection' | 'gate' | 'relevanceReview';
 
 export const VE_COLLECTION_MODEL = 'deepinfra/deepseek-v4-flash-0731';
+
+/** First pass of the relevance gate (descriptions and websites) for bases
+ * without a frozen audience or geography. On 286 labelled companies
+ * (22.10.2026) it passed 38–40% of fitting companies against 26–33% for
+ * VE_COLLECTION_MODEL at the same share of adjacent ones; with the unchanged
+ * gpt-5-mini confirmation the full path kept 31 of 100 fitting companies
+ * against 24.5. DeepInfra's copy of the model hung for an hour that night, so
+ * this is DeepSeek's own API, and a batch it fails goes back to the gate model.
+ * Opt-in by VE_RELEVANCE_MODEL. */
+export const VE_RELEVANCE_MODEL = 'deepseek/deepseek-v4.1-flash-1017';
+
+/** The configured first-pass model, or null for the legacy gate. Setting it to
+ * VE_COLLECTION_MODEL also restores the legacy gate (rollback without a deploy). */
+export function getVeRelevanceModel(): string | null {
+  const model = (process.env.VE_RELEVANCE_MODEL ?? '').trim();
+  return model && model !== VE_COLLECTION_MODEL ? model : null;
+}
+
+/** Established reviewer that confirms the cheap review's admissions. */
+export const VE_CONFIRM_MODEL = 'openai/gpt-5-mini';
+/** The same model on OpenAI's flex tier at half the price; VE_CONFIRM_MODEL takes over a failed call. */
+export const VE_CONFIRM_FLEX_MODEL = 'openai/gpt-5-mini:flex';
 
 // Генерация гипотез без своей настройки идёт на модели исследования.
 const VE_MODEL_DEFAULTS: Record<Exclude<VeModelKind, 'hypotheses'>, string> = {
@@ -147,18 +167,39 @@ export function getVeModel(kind: VeModelKind): string {
 /** This rollout keeps the evidence/admission contract. Reuse paid checkpoints
  * from the previous defaults; arbitrary model overrides remain isolated. */
 export function veCollectionCacheModel(kind: 'gate' | 'relevanceReview', model: string): string {
-  return model === VE_COLLECTION_MODEL
+  return model === VE_COLLECTION_MODEL || model === VE_RELEVANCE_MODEL
     ? kind === 'gate' ? 'openai/gpt-4o-mini' : 'openai/gpt-5-mini'
     : model;
 }
 
+/** OpenAI strict outputs require every object property in `required`. */
+function veStrictOutputCompatible(node: unknown): boolean {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return true;
+  const schema = node as Record<string, unknown>;
+  const children: unknown[] = [schema.items, schema.additionalProperties, schema.not];
+  if (schema.properties && typeof schema.properties === 'object') {
+    const required = Array.isArray(schema.required) ? schema.required : [];
+    if (Object.keys(schema.properties).some((key) => !required.includes(key))) return false;
+    children.push(...Object.values(schema.properties));
+  }
+  for (const key of ['anyOf', 'oneOf', 'allOf', 'prefixItems']) if (Array.isArray(schema[key])) children.push(...schema[key]);
+  for (const key of ['$defs', 'definitions']) if (schema[key] && typeof schema[key] === 'object') children.push(...Object.values(schema[key]));
+  return children.every(veStrictOutputCompatible);
+}
+
 /** Native output constraints verified in the Requesty collection-model pilot.
- * Other configured providers retain JSON mode plus the same local validation. */
+ * Other configured providers retain JSON mode plus the same local validation:
+ * DeepSeek's own API answers json_schema with HTTP 400 (22.10.2026). */
 export function veNativeJsonSchema(model: string, name: string, schema: z.ZodType) {
-  if (model !== VE_COLLECTION_MODEL && !/^(?:openai\/)?(?:gpt-4o-mini|gpt-5-mini)(?:-\d{4}-\d{2}-\d{2})?$/.test(model)) return undefined;
-  return { name, schema: z.toJSONSchema(schema, { io: 'input', override: ({ jsonSchema }) => {
+  if (model !== VE_COLLECTION_MODEL
+    && !/^(?:openai\/)?(?:gpt-4o-mini|gpt-5-mini)(?:-\d{4}-\d{2}-\d{2})?(?::flex)?$/.test(model)) return undefined;
+  const jsonSchema = z.toJSONSchema(schema, { io: 'input', override: ({ jsonSchema }) => {
     if (jsonSchema.type === 'object') jsonSchema.additionalProperties = false;
-  } }) };
+  } });
+  // OpenAI answers an optional property with HTTP 400, which stops the whole
+  // base as a configuration failure (22.10.2026). JSON mode still validates locally.
+  if (model !== VE_COLLECTION_MODEL && !veStrictOutputCompatible(jsonSchema)) return undefined;
+  return { name, schema: jsonSchema };
 }
 
 /* ─────────────────────── Базовые типы/вызов ─────────────────────── */
@@ -252,12 +293,23 @@ export function getLLMValidationDiagnostic(
 
 /** Per-job context: cancelling one project must not abort a parallel project. */
 export interface VeJobClaimIdentity { id: string; startedAt: string | null }
-const jobSignals = new AsyncLocalStorage<{ signal: AbortSignal; claim: Readonly<VeJobClaimIdentity> | null }>();
+const jobSignals = new AsyncLocalStorage<{ signal: AbortSignal; claim: Readonly<VeJobClaimIdentity> | null;
+  billingError?: VeRequestyBillingError }>();
 /** Compatibility for single-flight callers/tests; workers use the scoped API. */
 let activeJobSignal: AbortSignal | null = null;
 
 export function withVeActiveJobSignal<T>(signal: AbortSignal, work: () => Promise<T>, claim?: VeJobClaimIdentity): Promise<T> {
-  return jobSignals.run({ signal, claim: claim ? Object.freeze({ ...claim }) : null }, work);
+  return jobSignals.run({ signal, claim: claim ? Object.freeze({ ...claim }) : null }, async () => {
+    try { return await work(); }
+    catch (error) {
+      const billing = jobSignals.getStore()?.billingError;
+      // Some collection checkpoints preserve errors as text. Recover typed
+      // provenance only for the actual response observed in this invocation;
+      // a child parser's402 or stale checkpoint cannot adopt this key.
+      if (billing && isVeRequestyBillingError(error)) throw billing;
+      throw error;
+    }
+  });
 }
 
 /** Captured claim, never a new lease read from the mutable database row. */
@@ -336,6 +388,16 @@ function withJsonModeHint(messages: LLMMessage[]): LLMMessage[] {
 }
 
 /**
+ * V4.1 Flash thinks by default on DeepSeek, Together and Fireworks: 5–6 thousand
+ * reasoning tokens per relevance batch, and a 20-company answer ran out of
+ * max_tokens (22.10.2026). The prompts expect the direct answer; every host
+ * accepts reasoning_effort 'none' (DeepInfra already answers without thinking).
+ */
+function veReasoningOff(model: string): { reasoning_effort?: 'none' } {
+  return /deepseek-v4\.1-flash/.test(model) ? { reasoning_effort: 'none' } : {};
+}
+
+/**
  * Короткие повторы: 408 (таймаут апстрима), 425, 5xx.
  * Для 429 очередь сохраняет длительную паузу, освобождая воркер.
  * Остальные 4xx (ключ, схема, баланс) — постоянные.
@@ -380,7 +442,7 @@ async function rawCall(
     if (attempt > 0) await sleep(RAW_RETRY_BASE_MS * 2 ** (attempt - 1), signal);
     signal.throwIfAborted();
 
-    const apiKey = getApiKey();
+    const apiKey = getVeRequestyApiKey();
     const rateGeneration = veLlmRateLimit.beforeRequest(model);
     const metering = await beginProviderUsage('requesty', { requestedModel: model });
     const scope = getProviderUsageScope();
@@ -393,6 +455,7 @@ async function rawCall(
           model,
           messages: jsonMode ? withJsonModeHint(messages) : messages,
           max_tokens: maxTokens,
+          ...veReasoningOff(model),
           ...(opts?.responseFormat && !jsonMode ? { response_format: opts.responseFormat }
             : jsonMode ? { response_format: opts?.jsonSchema
               ? { type: 'json_schema', json_schema: { name: opts.jsonSchema.name, strict: true, schema: opts.jsonSchema.schema } }
@@ -448,7 +511,12 @@ async function rawCall(
     // A short in-call retry storm exhausts every base's budget. The worker
     // persists this wait and releases its slot, preserving paid checkpoints.
     if (rateLimit) throw rateLimit;
-    if (billing) throw err;
+    if (billing) {
+      const active = jobSignals.getStore();
+      const failure = new VeRequestyBillingError(err.message, veRequestyKeyFingerprint(apiKey));
+      if (active) active.billingError = failure;
+      throw failure;
+    }
     if (status < 500 && !RAW_RETRYABLE_STATUSES.has(status)) throw err;
     lastError = err;
   }

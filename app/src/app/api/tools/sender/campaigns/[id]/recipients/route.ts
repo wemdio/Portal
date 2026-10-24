@@ -187,6 +187,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       skippedEmptyLetter: result.skippedEmptyLetter,
       skippedDuplicates: result.skippedDuplicates,
       skippedSuppressed: result.skippedSuppressed,
+      skippedStopList: result.skippedStopList,
       // Обрез лимита виден человеку, а не молчит: «в файле 50 000, загружено 20 000».
       fileRows,
       truncated: fileRows > 20_000 ? 20_000 : null,

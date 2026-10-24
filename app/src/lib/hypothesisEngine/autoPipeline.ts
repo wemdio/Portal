@@ -95,7 +95,7 @@
  *      и перед самим доливом (stages/baseCollectRefill.ts, шаг 4c);
  *   3a-. СПИСОК DO NOT CONTACT ВЛАДЕЛЬЦА ЧИТАЕТСЯ? (после «кампании
  *      отправляют?», до потолка расхода, предполёта и денег): долив читает
- *      список владельца пресета (getBlockedEmailSet) на своём шаге 4 — уже
+ *      список владельца пресета (getBlockedContactSnapshot) на своём шаге 4 — уже
  *      после купленной сборки, — и список, который так не читается (больше
  *      BLOCKLIST_MAX_ENTRIES адресов; неполный или кривой снапшот; БД
  *      пресетов не отвечает), ронял ночь с потраченными деньгами, и так
@@ -214,7 +214,8 @@ import { resolveInstantlyAccountId, type InstantlyRequestOptions } from '@/lib/i
 import { CampaignStatus } from '@/lib/instantly/types';
 import { logAudit, logWarn } from '@/lib/loggerServer';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
-import { BLOCKLIST_MAX_ENTRIES, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
+import { BLOCKLIST_MAX_ENTRIES } from '@/lib/clientBlocklist/blockedContacts';
+import { getBlockedContactSnapshot } from '@/lib/clientBlocklist/blockedDomains';
 import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
 import { enqueueHeBaseCollect } from './baseCollectEnqueue';
 import { buildLaunchSequence, parseLaunchInfo, type HeTemplateLaunchInfo } from './launchHandoff';
@@ -2332,7 +2333,7 @@ const BLOCKLIST_HELD_ERROR =
 
 /**
  * Список Do not contact владельца пресета до покупки ночи (шаг 3a- «СПИСОК DO
- * NOT CONTACT» в шапке): тот же вызов getBlockedEmailSet, что у долива на его
+ * NOT CONTACT» в шапке): тот же вызов getBlockedContactSnapshot, что у долива на его
  * шаге 4, — бросил там, бросит и здесь. null — список читается, ночь можно
  * покупать; иначе — почему нет. `overCap` — точный счёт списка (head-счёт
  * client_blocked_contacts) больше BLOCKLIST_MAX_ENTRIES; счёт не прочитался —
@@ -2360,7 +2361,9 @@ export async function readHeRefillBlocklistHold(
     return { overCap: false, count: null, detail: `client_campaign_presets read: ${e instanceof Error ? e.message : String(e)}` };
   }
   try {
-    await getBlockedEmailSet(instantlyDb, ownerUserId);
+    // Снимок с доменными записями — тот же читатель, что у долива us на его
+    // шаге 4 (план 2026-10-16-eng-countries, §1B).
+    await getBlockedContactSnapshot(instantlyDb, ownerUserId);
     return null;
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);

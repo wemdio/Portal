@@ -12,7 +12,8 @@
 | Файл | Назначение |
 |---|---|
 | `polza-portal.ru.conf` | Основной портал. В боевой конфигурации проксирует `/auth\|rest\|storage\|realtime/v1/` → Kong на production-хосте :35480, остальное → portal app :3000. |
-| `outreachos.pro.conf` | Тот же app под white-label доменом, конфиг зеркальный. |
+| `www.outreachos.pro.conf` | Только `www.outreachos.pro`: 301 на `https://outreachos.pro` со своим сертификатом. Сам outreachos.pro (лендинг) живёт на 92.246.76.92 (Caddy). Прежний vhost `outreachos.pro` (white-label копия портала) выключен 2026-10-21. |
+| `outreachos.xyz.conf` | Лендинг outreachos.xyz (статический, RU/EN) и 301 с `www.outreachos.xyz`. |
 | `50x.html` | Страница ошибки 502/503/504. На сервере живёт в `/var/www/html/50x.html` (и в `/home/Portal/prod/`). |
 
 `polzaagency.ru` (лендинг → :3344) не трекаем.

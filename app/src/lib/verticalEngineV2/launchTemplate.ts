@@ -672,7 +672,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       if (!portalProject) return { status: 404, body: { error: 'Проект Portal не найден' } };
       const term = describePortalProjectTerm(portalProject, periods, { bound: planOwners.includes(base.project_id) });
       if (!term.ok) return conflict(term.code, term.error);
-      const manualFact = await findManualFactIssue(instantlyDb, portalProject);
+      const manualFact = await findManualFactIssue(instantlyDb, portalProject, { portalDb });
       if (manualFact) return conflict(manualFact.code, manualFact.error);
     } catch (error) {
       await logError(`${eventPrefix}.portal_project_term_failed`, error, { userId, templateId, portalProjectId });
@@ -901,7 +901,9 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     let groupMutationAttempted = false;
     try {
       const payload = buildCampaignPayloadFromPreset({
-        preset: { ...preset, ...VE_CAMPAIGN_SENDING_SETTINGS },
+        preset: { ...preset, ...VE_CAMPAIGN_SENDING_SETTINGS,
+          ...(deliverySettings.uploadMode === 'all_ready' ? { daily_max_leads: VE_CAMPAIGN_SENDING_SETTINGS.daily_limit } : {}),
+        },
         sequence: { name: campaignName, steps: sequence.steps },
       });
       await heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId });

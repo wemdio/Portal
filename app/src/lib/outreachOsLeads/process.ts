@@ -209,7 +209,7 @@ function dealLine(row: { status: string; action: string | null; lead_url: string
 async function deliverMessages(db: SupabaseClient, tg: LeadTelegramConfig, log: Log): Promise<number> {
   const { data, error } = await db
     .from('outreachos_lead_pushes')
-    .select('id, status, action, lead_url, amo_lead_name, error_message, tg_html, tg_attempts, lead_email, next_attempt_at')
+    .select('id, kind, status, action, lead_url, amo_lead_name, error_message, tg_html, tg_attempts, lead_email, next_attempt_at')
     .in('status', ['sent', 'failed'])
     .is('tg_sent_at', null)
     .lt('tg_attempts', MAX_TG_ATTEMPTS)
@@ -217,7 +217,7 @@ async function deliverMessages(db: SupabaseClient, tg: LeadTelegramConfig, log: 
     .limit(TG_BATCH);
   if (error) throw new Error(`outreachos_lead_pushes tg: ${error.message}`);
   const rows = (data ?? []) as Array<{
-    id: string; status: string; action: string | null; lead_url: string | null; amo_lead_name: string | null;
+    id: string; kind: Kind; status: string; action: string | null; lead_url: string | null; amo_lead_name: string | null;
     error_message: string | null; tg_html: string; tg_attempts: number; lead_email: string; next_attempt_at: string;
   }>;
 
@@ -227,7 +227,13 @@ async function deliverMessages(db: SupabaseClient, tg: LeadTelegramConfig, log: 
     if (row.tg_attempts > 0 && Date.parse(row.next_attempt_at) > Date.now()) continue;
     let messageId: number;
     try {
-      messageId = await sendLeadMessage(tg, `${row.tg_html}\n\n${dealLine(row)}`);
+      // CRM persists action before adding the note, so retries keep the same
+      // meaning. Relabel only the General copy; registration and CRM notes stay intact.
+      const body = row.kind === 'reply' && row.action === 'note_added'
+        ? row.tg_html.replace(/^📨 <b>Новый лид OutreachOS<\/b>/u,
+          '📨 <b>Новый ответ существующего лида OutreachOS</b>')
+        : row.tg_html;
+      messageId = await sendLeadMessage(tg, `${body}\n\n${dealLine(row)}`);
     } catch (err) {
       const attempts = row.tg_attempts + 1;
       const minutes = TG_RETRY_MIN[Math.min(attempts - 1, TG_RETRY_MIN.length - 1)];

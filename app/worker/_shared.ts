@@ -104,12 +104,30 @@ export async function pollLoop(opts: {
   shouldStop: () => boolean;
   pollOnce: () => Promise<boolean>;
   realtimeTables?: string[];
+  /**
+   * Opt-in: ms until the earliest known job becomes due (null — none known).
+   * Caps the wait, so a job that re-queued itself for a few seconds is not
+   * stretched to the fallback poll. Workers without it keep the old waits.
+   */
+  nextDueInMs?: () => Promise<number | null>;
+  /** Opt-in: receives a function that ends the current wait, or skips the next one. */
+  registerWake?: (wake: () => void) => void;
 }) {
-  const { log, pollIntervalMs, shouldStop, pollOnce, realtimeTables } = opts;
+  const { log, pollIntervalMs, shouldStop, pollOnce, realtimeTables, nextDueInMs, registerWake } = opts;
   const effectiveFallback = Math.max(pollIntervalMs, FALLBACK_POLL_MS);
 
   let channel: RealtimeChannel | null = null;
   let currentWaiter: ReturnType<typeof createWaiter> | null = null;
+  // A wake that arrives while pollOnce runs must not be lost to the next wait.
+  let wakeRequested = false;
+  registerWake?.(() => {
+    if (currentWaiter) currentWaiter.wake();
+    else wakeRequested = true;
+  });
+  const capped = async (waitMs: number): Promise<number> => {
+    const dueIn = await nextDueInMs!().catch(() => null);
+    return dueIn === null ? waitMs : Math.min(waitMs, dueIn);
+  };
 
   if (supabaseAdmin && realtimeTables?.length) {
     const channelName = `worker_jobs_${realtimeTables.join('_')}`;
@@ -145,12 +163,18 @@ export async function pollLoop(opts: {
     try {
       const found = await pollOnce();
       if (!found) {
+        const baseWaitMs = channel ? effectiveFallback : pollIntervalMs;
+        const waitMs = nextDueInMs ? await capped(baseWaitMs) : baseWaitMs;
+        if (wakeRequested) {
+          wakeRequested = false;
+          continue;
+        }
         if (channel) {
-          currentWaiter = createWaiter(effectiveFallback);
+          currentWaiter = createWaiter(waitMs);
           await currentWaiter.promise;
           currentWaiter = null;
         } else {
-          await sleep(pollIntervalMs);
+          await sleep(waitMs);
         }
       }
     } catch (err) {

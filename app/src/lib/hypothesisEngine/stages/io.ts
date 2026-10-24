@@ -16,8 +16,8 @@
  * отмены типом — HeSiteUnreachableError. Это факт о сайте клиента, и стадия
  * решает по нему не так, как по транзиенту: см. класс ниже.
  *
- * Маршрут чтения (волна 7): у рынка 'us' свой порядок групп прокси и свой
- * Accept-Language — см. ENG_WEBSITE_ROUTE. Рынок 'ru' читает сайт ровно теми
+ * Маршрут чтения (волна 7, прямая попытка с 23.10.2026): у рынка 'us' свой
+ * порядок маршрутов и свой Accept-Language — см. ENG_WEBSITE_ROUTE. Рынок 'ru' читает сайт ровно теми
  * же запросом и маршрутом, что и до этой правки; общий парсер
  * (lib/enrich/websiteParser.ts) держит русские значения дефолтами.
  *
@@ -71,6 +71,8 @@ export interface HeFetchedPage {
   url: string;
   /** Текст страницы, ≤3000 символов; пустой — HTML есть, текста нет. */
   text: string;
+  companyEvidenceLinks?: Array<{ url: string; kind: 'legal' | 'about' | 'contact' | 'locations' | 'services'; priority?: number; label?: string }>;
+  companyEvidenceTextTruncated?: boolean;
 }
 export type HeFetchPageFn = (url: string) => Promise<HeFetchedPage | null>;
 
@@ -318,8 +320,18 @@ function asSiteUnreachable(
  * приоритетной (российской) группы прокси, а запрос уходит с русским
  * Accept-Language. Для сайта из США это неверно дважды — русский exit-узел
  * чаще режут и медленнее ходит, а по языку сайт может отдать другую страницу
- * или редирект. Переворачиваем порядок групп и просим английскую страницу;
- * российская группа остаётся ВТОРОЙ попыткой, ни один маршрут не потерян.
+ * или редирект. Просим английскую страницу и читаем 'direct-first': первая
+ * попытка напрямую (сервер в Нью-Йорке — тот же маршрут, которым EN-джоба
+ * конструктора ищет почты), повтор — нода вне российской группы.
+ *
+ * До 23.10.2026 здесь был 'non-priority-first' (HK/EU-нода, затем RU) без
+ * прямой попытки. Замер на боевом воркере по двум сборам страховщиков: 105
+ * сайтов, которые проверка компаний не прочитала, и 40 прочитанных. Напрямую
+ * открылись 39 из 40 прочитанных (медиана 1,25 с против 1,94 с через HK/EU,
+ * RU — 9 из 40) и 15 непрочитанных, которые обе группы прокси получали 403,
+ * обрывом или таймаутом. Остальные непрочитанные не открываются ни одним
+ * маршрутом: домен не существует, сервер молчит, сертификат неверен или
+ * сайт отказывает любому роботу.
  *
  * Рынок 'ru' не передаёт ничего: и заголовок, и порядок там ровно те же, что
  * были до этой правки. Строка языка совпадает с EN_ACCEPT_LANGUAGE почтового
@@ -338,7 +350,7 @@ const ENG_WEBSITE_ROUTE: {
   acceptLanguage: string;
   layoutAware: true;
 } = {
-  routeOrder: 'non-priority-first',
+  routeOrder: 'direct-first',
   acceptLanguage: 'en-US,en',
   layoutAware: true,
 };
@@ -539,6 +551,7 @@ export async function defaultFetchPage(
   url: string,
   parent?: AbortSignal,
   market: HeMarket = 'ru',
+  options?: { companyEvidence?: boolean; companyEvidenceTerms?: string[] },
 ): Promise<HeFetchedPage | null> {
   const normalized = normalizeUrl(url);
   return withHeDeadline('website page', WEBSITE_PAGE_TIMEOUT_MS, parent, async (signal) => {
@@ -548,9 +561,12 @@ export async function defaultFetchPage(
       page = await fetchSinglePage(normalized, {
         timeout: WEBSITE_FETCH_TIMEOUT_MS,
         signal,
-        guard: heFetchGuard(market),
+        guard: { ...heFetchGuard(market), ...(market === 'us' && options?.companyEvidence === true ? { preferHttpsRedirects: true } : {}) },
         maxBytes: HE_PAGE_MAX_BYTES,
         ...(market === 'us' ? ENG_WEBSITE_ROUTE : {}),
+        ...(options?.companyEvidence === true ? { companyEvidence: true } : {}),
+        ...(market === 'us' && options?.companyEvidence === true && options.companyEvidenceTerms
+          ? { companyEvidenceTerms: options.companyEvidenceTerms } : {}),
       });
     } catch (e) {
       throw isWebsiteNoHtmlError(e) ? asSiteUnreachable(e, 'no_html', normalized, signal, market) : e;
@@ -591,14 +607,14 @@ export function resolveFetchText(ctx: HeStageContext): HeFetchTextFn {
  * стадии) отвечает и здесь — его текст считается текстом запрошенного адреса,
  * статуса у него нет, поэтому null он не даёт.
  */
-export function resolveFetchPage(ctx: HeStageContext): HeFetchPageFn {
+export function resolveFetchPage(ctx: HeStageContext, options?: { companyEvidence?: boolean; companyEvidenceTerms?: string[] }): HeFetchPageFn {
   const parent = heStageSignal(ctx);
   const market = ctx.market;
   const custom = ctx.fetchText;
   return (url) =>
     (custom
       ? withHeDeadline('website page', WEBSITE_PAGE_TIMEOUT_MS, parent, async () => ({ url, text: await custom(url) }))
-      : defaultFetchPage(url, parent, market)
+      : defaultFetchPage(url, parent, market, options)
     ).finally(() => ctx.onActivity?.());
 }
 

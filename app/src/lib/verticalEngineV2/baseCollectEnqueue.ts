@@ -26,11 +26,16 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { collectionRoundLimit, createCollectionTarget, type VeCollectionMode } from './collectionTarget';
 import { canResumePartialPreview, getVeCollectionContinuation, grantVeResumeRoundBudget, needsVeControlledAudienceRefresh, openNextVeCollectionRound, previewRecoveryKind, type VeCollectionContinuation } from './collectionRecovery';
+import { prepareVeGeographyRepairContinuation } from './collectionGeographyRepair';
 import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { resumeVeSavedEmailRecovery } from './savedEmailRecovery';
 import { isVeResumableDirectoryError } from './collectionErrors';
-import { compactVeRelevanceReserve } from './relevanceReserve';
-import { readVeSourceCostPolicy } from './sourceAudience';
+import { compactVeRelevanceReserve, readVeRelevanceReserve } from './relevanceReserve';
+import { veAudienceReviewHold } from './audienceReviewHold';
+import { readVeSourceCostPolicy, withVeRetailRefreshMarket } from './sourceAudience';
+import { addVeKnownWebsiteSource, needsVeKnownWebsiteContinuation } from './knownWebsiteDirectory';
+import { applyVeRestaurantSourceContinuation, needsVeRestaurantSourceContinuation } from './restaurantSourcePolicy';
+import { veCollectionGeographyFromBrief, type VeCollectionGeography } from './collectionGeography';
 
 export interface VeBaseCollectInput {
   verticalId: string;
@@ -149,22 +154,57 @@ async function resumeFailedPreview(
     } };
   }
   const continuation = getVeCollectionContinuation(saved, currentHypothesis);
+  const refreshKnownWebsites = input.resumeBaseId === saved.id && continuation.code === 'source_update'
+    && continuation.action === 'resume_collection' && needsVeKnownWebsiteContinuation(saved, currentHypothesis);
+  const refreshRestaurant = input.resumeBaseId === saved.id && continuation.code === 'source_update'
+    && continuation.action === 'resume_collection' && needsVeRestaurantSourceContinuation(saved, currentHypothesis);
   const refreshAudience = input.resumeBaseId === saved.id && continuation.code === 'source_update'
     && continuation.action === 'resume_collection' && needsVeControlledAudienceRefresh(saved, currentHypothesis);
   const pendingAudienceRefresh = saved.collect_info?.audience_scope_refresh_requested === true;
+  const refreshGeography = saved.status === 'analyzed' && saved.collect_info?.geography_repair !== undefined;
   if (pendingAudienceRefresh) {
     try {
       if (readVeSourceCostPolicy(saved.collect_info.cost_policy)?.website_discovery !== 'existing_only') throw new Error('Missing source refresh cost policy');
     } catch { return { ok: false, message: 'Сохранённое обновление источников требует проверки условий расходов.' }; }
   }
-  const sourceRefresh = refreshAudience || pendingAudienceRefresh;
+  const sourceRefresh = refreshGeography || refreshAudience || pendingAudienceRefresh || refreshKnownWebsites || refreshRestaurant
+    || saved.collect_info?.known_website_source?.continuation_only === true || !!saved.collect_info?.restaurant_source_refresh;
   const info = { ...saved.collect_info,
-    ...(currentHypothesis && (refreshAudience || (!pendingAudienceRefresh && /^B2B\s+SaaS\b/i.test(String(currentHypothesis.title ?? '')))) ? { hypotheses: [currentHypothesis] } : {}),
+    ...(saved.collect_info?.geography_repair === undefined && currentHypothesis && (refreshAudience || (!pendingAudienceRefresh && /^B2B\s+SaaS\b/i.test(String(currentHypothesis.title ?? '')))) ? { hypotheses: [currentHypothesis] } : {}),
     ...(previewRecoveryKind(saved) === 'validation' && !sourceRefresh ? { validation_retry: true } : {}),
     ...(saved.status === 'analyzed' && !sourceRefresh ? { validation_retry: true, relevance_review_requested: true } : {}),
     ...(refreshAudience ? { audience_scope_refresh_requested: true,
       cost_policy: { version: 1, website_discovery: 'existing_only' } } : {}),
   };
+  if (refreshGeography) {
+    try {
+      const prepared = prepareVeGeographyRepairContinuation(info);
+      if (!prepared.can_continue) return { ok: true, created: false, base: saved, continuation };
+      Object.assign(info, prepared.collect_info);
+      // Object.assign does not remove the closed constructor; it must never
+      // be imported into the new round a second time.
+      delete info.construct;
+    } catch { return { ok: false, message: 'Сохранённые условия исправления базы требуют проверки.' }; }
+  }
+  if (refreshRestaurant) {
+    applyVeRestaurantSourceContinuation(info, currentHypothesis!, veAudienceReviewHold(readVeRelevanceReserve(info.relevance_reserve)));
+  }
+  if (refreshKnownWebsites) {
+    if (!addVeKnownWebsiteSource(info)) return { ok: false, message: 'Состояние источников изменилось. Обновите страницу.' };
+    info.known_website_source.continuation_only = true;
+    info.known_website_source.held_review_companies = veAudienceReviewHold(readVeRelevanceReserve(info.relevance_reserve));
+    // Keep all old receipts/rows, but the completed constructor cannot be
+    // imported a second time as the new round's result.
+    delete info.construct;
+    if (info.search_policy) { info.search_policy = { ...info.search_policy }; delete info.search_policy.construct_rows; }
+  }
+  if (saved.status === 'failed' && (info.known_website_source?.continuation_only || info.restaurant_source_refresh)
+    && info.target_checkpoint?.completed_round === info.target_progress?.round) {
+    // The bounded round already saved its observations. Retry only its saved
+    // validation, using the old-reserve hold, not another discovery round.
+    info.validation_retry = true;
+    info.relevance_review_requested = true;
+  }
   // Continuing acquisition is not permission to repeat completed SMTP checks.
   // Clear inconclusive results only when this failed preparation actually
   // stopped on email recovery; conclusive verdicts and dispatched children
@@ -188,7 +228,7 @@ async function resumeFailedPreview(
   }
   info.target_progress = { ...info.target_progress, status: 'collecting' };
   delete info.target_progress.reason;
-  if (refreshAudience) {
+  if (refreshAudience || refreshKnownWebsites || refreshRestaurant) {
     // A closed source round advances once; its saved spending envelope and
     // low-yield history do not grow just because the source plan was fixed.
     info.target_progress.round += 1;
@@ -228,7 +268,12 @@ async function resumeFailedPreview(
     });
   }
   // «Продолжить подготовку» этой базы — новый бюджет раундов.
-  if (input.resumeBaseId === saved.id && !sourceRefresh) grantVeResumeRoundBudget(info);
+  if (input.resumeBaseId === saved.id && !sourceRefresh) {
+    // Only an explicit later continuation grants a new envelope. Automatic
+    // billing recovery itself never calls this path or clears its receipt.
+    delete info.preview_billing_resume;
+    grantVeResumeRoundBudget(info);
+  }
   if (info.preview_pipeline?.version === 1) {
     info.preview_pipeline = { ...info.preview_pipeline, revision: info.preview_pipeline.revision + 1 };
     delete info.preview_pipeline.error;
@@ -298,11 +343,14 @@ export async function enqueueVeBaseCollect(
     const ids = hypothesisIds as string[];
     const { data: hypRows, error: hypErr } = await supabase
       .from('ve_hypotheses')
-      .select('id, title, description, origin, status, broad')
+      .select('id, title, description, origin, status, broad, audience_scope')
       .eq('project_id', projectId).eq('vertical_id', verticalId)
       .in('id', ids);
     if (hypErr) return { ok: false, message: hypErr.message };
-    for (const h of hypRows ?? []) currentHypotheses.set(String(h.id), h);
+    for (const h of hypRows ?? []) {
+      try { currentHypotheses.set(String(h.id), input.resumeBaseId ? await withVeRetailRefreshMarket(supabase, projectId, h) : h); }
+      catch (error) { return { ok: false, message: error instanceof Error ? error.message : 'Collection audience market read failed' }; }
+    }
     hypothesisTitle = Object.fromEntries(
       (hypRows ?? []).map((h) => [String(h.id), String(h.title ?? '').trim() || String(h.id)]),
     );
@@ -314,6 +362,9 @@ export async function enqueueVeBaseCollect(
 
   const created: Array<Record<string, unknown>> = [];
   const existing: Array<Record<string, unknown>> = [];
+  // Read lazily after reuse/recovery checks. A retry owns its saved audience;
+  // only a genuinely new preview freezes the current project geography.
+  let collectionGeography: VeCollectionGeography | undefined;
 
   // A new preview starts with the project's "addresses per company" limit. A
   // failed read (or a database without the column) means no limit, and the
@@ -496,6 +547,21 @@ export async function enqueueVeBaseCollect(
         if (!resumed.created && resumed.continuation && !resumed.continuation.available) return resumed;
         (resumed.created ? created : existing).push(resumed.base);
         continue;
+      }
+    }
+
+    if (input.collectionMode === 'preview' && !refill) {
+      try {
+        if (!collectionGeography) {
+          const { data: project, error: projectError } = await supabase.from('ve_projects')
+            .select('brief').eq('id', projectId).maybeSingle();
+          if (projectError || !project) return { ok: false,
+            message: `Не удалось сохранить географию базы: ${projectError?.message ?? 'проект не найден'}` };
+          collectionGeography = veCollectionGeographyFromBrief(project.brief);
+        }
+        collectInfo.collection_geography = { ...collectionGeography };
+      } catch (error) {
+        return { ok: false, message: `Не удалось сохранить географию базы: ${error instanceof Error ? error.message : 'ошибка чтения брифа'}` };
       }
     }
 

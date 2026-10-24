@@ -130,6 +130,8 @@ export type VeCompanyTypeKind =
 
 export interface VeProject {
   id: string;
+  /** Uploading ready inventory is independent of the collection/send forecast. */
+  contact_upload_mode?: 'daily' | 'all_ready';
   created_by: string | null;
   name: string;
   website_url: string;

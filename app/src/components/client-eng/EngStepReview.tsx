@@ -30,7 +30,7 @@ import {
 import { EngSpinner } from './ui';
 import { engPlaceholderText } from './engText';
 
-/** Компактные колонки превью; остальные поля строки — в title строки таблицы. */
+/** Только клиентские колонки: служебные поля не попадают и в подсказки. */
 const PREVIEW_COLUMNS = ['company', 'website', 'email'] as const;
 const PREVIEW_LIMIT = 100;
 
@@ -61,8 +61,7 @@ export function BasePreview({ base }: { base: EngBaseSummary }) {
     }
   };
 
-  // Только компактные колонки, реально присутствующие в базе; email-статус —
-  // служебное поле строки (_email_status), в columns его нет.
+  // Только компактные колонки, реально присутствующие в базе.
   const columns = (base.columns ?? []).filter((c) => (PREVIEW_COLUMNS as readonly string[]).includes(c));
 
   return (
@@ -93,39 +92,32 @@ export function BasePreview({ base }: { base: EngBaseSummary }) {
                     {c}
                   </th>
                 ))}
-                <th className="px-3 py-2 font-semibold">email status</th>
               </tr>
             </thead>
             <tbody>
               {preview.rows.map((row, i) => (
                 <tr
                   key={i}
-                  title={JSON.stringify(row).slice(0, 600)}
                   style={{ borderTop: '1px solid var(--cp-divider)' }}
                 >
-                  {columns.map((c) => (
-                    <td key={c} className="px-3 py-1.5 truncate max-w-[220px]" style={{ color: 'var(--cp-paper)' }}>
-                      {typeof row[c] === 'string' || typeof row[c] === 'number' ? String(row[c]) : ''}
-                    </td>
-                  ))}
-                  <td
-                    className="px-3 py-1.5 ds-mono"
-                    style={{
-                      color:
-                        row._email_status === 'ok'
-                          ? 'var(--cp-green)'
-                          : row._email_status
-                            ? 'var(--cp-amber)'
-                            : 'var(--cp-text-l)',
-                    }}
-                  >
-                    {typeof row._email_status === 'string' ? row._email_status : ''}
-                  </td>
+                  {columns.map((c) => {
+                    const value = typeof row[c] === 'string' || typeof row[c] === 'number' ? String(row[c]) : '';
+                    return (
+                      <td
+                        key={c}
+                        title={value}
+                        className="px-3 py-1.5 truncate max-w-[220px]"
+                        style={{ color: 'var(--cp-paper)' }}
+                      >
+                        {value}
+                      </td>
+                    );
+                  })}
                 </tr>
               ))}
               {preview.rows.length === 0 && (
                 <tr style={{ borderTop: '1px solid var(--cp-divider)' }}>
-                  <td className="px-3 py-2" colSpan={columns.length + 1} style={{ color: 'var(--cp-text-l)' }}>
+                  <td className="px-3 py-2" colSpan={Math.max(1, columns.length)} style={{ color: 'var(--cp-text-l)' }}>
                     No contacts collected yet.
                   </td>
                 </tr>
@@ -154,8 +146,103 @@ const HOUR_OPTIONS: string[] = Array.from(
 
 export interface SendingWindowConfig {
   value: EngSendingWindow;
+  /**
+   * Пункты выпадашки поясов — `timezone_options ?? timezones` ответа (план
+   * §1C): полный список с группами, когда сервер его отдаёт, иначе прежние 8.
+   * Из него же подпись пояса в сводке (sendingWindowSummary).
+   */
   timezones: EngSendingWindowTimezoneOption[];
   weekdays: EngSendingWindowWeekdayOption[];
+}
+
+/**
+ * Пункты выпадашки из ответа GET: полный список (`timezone_options`), если он
+ * непустой, иначе прежние 8 (`timezones`). Подбор по поясу браузера — только
+ * по `timezones` (EngStepLaunch, browserTimezoneIn), не отсюда.
+ */
+export function engTimezoneOptionsOf(res: {
+  timezones?: EngSendingWindowTimezoneOption[];
+  timezone_options?: EngSendingWindowTimezoneOption[];
+}): EngSendingWindowTimezoneOption[] {
+  if (Array.isArray(res.timezone_options) && res.timezone_options.length > 0) return res.timezone_options;
+  return Array.isArray(res.timezones) ? res.timezones : [];
+}
+
+/** Смещение пояса от UTC в минутах на момент `at`; null — пояс не читается. */
+export function tzOffsetMinutes(timeZone: string, at: Date): number | null {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).formatToParts(at);
+    const get = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+    const asUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour') % 24, get('minute'));
+    return Number.isFinite(asUtc) ? Math.round((asUtc - at.getTime()) / 60_000) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 60 → «UTC+1», -210 → «UTC-3:30», 0 → «UTC+0» (как подписи списка сервера). */
+function utcOffsetText(minutes: number): string {
+  const abs = Math.abs(minutes);
+  const mm = abs % 60;
+  return `UTC${minutes < 0 ? '-' : '+'}${Math.floor(abs / 60)}${mm ? `:${String(mm).padStart(2, '0')}` : ''}`;
+}
+
+/**
+ * «UTC+1, UTC+2 in summer» / «UTC+3» по Intl браузера (январь и июль; летнее —
+ * большее из двух, так верно и для южного полушария); null — пояс браузер не
+ * знает.
+ */
+function utcOffsetsText(timeZone: string): string | null {
+  const year = new Date().getUTCFullYear();
+  const jan = tzOffsetMinutes(timeZone, new Date(Date.UTC(year, 0, 15, 12)));
+  const jul = tzOffsetMinutes(timeZone, new Date(Date.UTC(year, 6, 15, 12)));
+  if (jan === null || jul === null) return null;
+  if (jan === jul) return utcOffsetText(jan);
+  return `${utcOffsetText(Math.min(jan, jul))}, ${utcOffsetText(Math.max(jan, jul))} in summer`;
+}
+
+/**
+ * Подпись пояса, которого нет среди пунктов сервера, — вместо голого
+ * идентификатора: сохранённое окно, выставленное не из кабинета, или пояс,
+ * подсказанный странами проекта, пока полный список выключен (EngStepLaunch).
+ * Подсказанный — «Suggested for your countries (UTC+1, UTC+2 in summer)»: город
+ * из идентификатора тут сбил бы с толку (Arctic/Longyearbyen, Africa/Ceuta —
+ * канонические id рассыльщика для Берлина и Парижа). Прочие — город из
+ * последнего сегмента id и смещения; у Etc/GMT±N — только смещения (знак в
+ * имени обратный).
+ */
+export function engTimezoneFallbackLabel(timeZone: string, opts: { suggested?: boolean } = {}): string {
+  const offsets = utcOffsetsText(timeZone);
+  if (opts.suggested) return offsets ? `Suggested for your countries (${offsets})` : 'Suggested for your countries';
+  if (timeZone.startsWith('Etc/')) return offsets ?? timeZone;
+  const city = (timeZone.split('/').pop() ?? '').replace(/_/g, ' ') || timeZone;
+  return offsets ? `${city} (${offsets})` : city;
+}
+
+/**
+ * Пункты подряд с одной группой — один `<optgroup>`; пункт без группы (прежние
+ * 8, сохранённый пояс вне списка) — сам по себе. Группы не сортируем и не
+ * сливаем: порядок задаёт сервер.
+ */
+function groupTimezoneOptions(
+  options: readonly EngSendingWindowTimezoneOption[],
+): Array<{ group: string | null; options: EngSendingWindowTimezoneOption[] }> {
+  const out: Array<{ group: string | null; options: EngSendingWindowTimezoneOption[] }> = [];
+  for (const o of options) {
+    const group = typeof o.group === 'string' && o.group ? o.group : null;
+    const last = out[out.length - 1];
+    if (last && group !== null && last.group === group) last.options.push(o);
+    else out.push({ group, options: [o] });
+  }
+  return out;
 }
 
 /**
@@ -187,10 +274,11 @@ function useSendingWindow(templateId: string | undefined) {
         if (cancelled) return;
         const initial = res.schedule ?? res.default;
         setMixed(res.mixed === true);
-        if (initial && res.timezones && res.timezones.length > 0 && res.weekdays && res.weekdays.length > 0) {
+        const timezones = engTimezoneOptionsOf(res);
+        if (initial && timezones.length > 0 && res.weekdays && res.weekdays.length > 0) {
           setConfig({
             value: { ...initial, days: [...initial.days] },
-            timezones: res.timezones,
+            timezones,
             weekdays: res.weekdays,
           });
         }
@@ -228,7 +316,8 @@ function shortHour(hhmm: string): string {
  */
 export function sendingWindowSummary(config: SendingWindowConfig): string {
   const tz =
-    config.timezones.find((o) => o.value === config.value.timezone)?.label ?? config.value.timezone;
+    config.timezones.find((o) => o.value === config.value.timezone)?.label ??
+    engTimezoneFallbackLabel(config.value.timezone);
   const order = config.weekdays.map((d) => d.value);
   const picked = config.weekdays.filter((d) => config.value.days.includes(d.value));
   if (picked.length === 0) return `No weekdays selected — nothing would be sent · ${tz}`;
@@ -245,23 +334,26 @@ export function SendingWindowEditor({
   config,
   onChange,
   disabled,
+  hint,
 }: {
   config: SendingWindowConfig;
   onChange: (next: EngSendingWindow) => void;
   disabled?: boolean;
+  /** Подсказка под выпадашкой поясов (шаг 3: страны проекта в разных поясах). */
+  hint?: string;
 }) {
   const { value, timezones, weekdays } = config;
   // Сохранённое значение может не совпасть со списком (окно выставили не из
   // кабинета: получас вместо целого часа, пояс шире нашей выборки). Тогда
   // дописываем его пунктом — иначе select нарисует первый вариант, а в
   // состоянии останется другой, и клиент увидел бы не то, что стоит у
-  // рассыльщика.
+  // рассыльщика. Дописанный пункт — без группы, отдельно от <optgroup>.
   const hourOptions = HOUR_OPTIONS.includes(value.from) && HOUR_OPTIONS.includes(value.to)
     ? HOUR_OPTIONS
     : [...new Set([...HOUR_OPTIONS, value.from, value.to])].sort();
   const timezoneOptions = timezones.some((o) => o.value === value.timezone)
     ? timezones
-    : [...timezones, { value: value.timezone, label: value.timezone }];
+    : [...timezones, { value: value.timezone, label: engTimezoneFallbackLabel(value.timezone) }];
   const toggleDay = (day: number) => {
     const next = value.days.includes(day)
       ? value.days.filter((d) => d !== day)
@@ -277,8 +369,10 @@ export function SendingWindowEditor({
       <p className="mt-1 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
         Emails go out only inside these hours, in this timezone, on these days.
       </p>
+      {/* Пояс — на всю строку: подписи полного списка длинные («Amsterdam,
+          Berlin, … (UTC+1, UTC+2 in summer)»), в трети строки они резались. */}
       <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
-        <label className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+        <label className="text-[10px] sm:col-span-3" style={{ color: 'var(--cp-text-l)' }}>
           Timezone
           <select
             value={value.timezone}
@@ -286,12 +380,29 @@ export function SendingWindowEditor({
             onChange={(e) => onChange({ ...value, timezone: e.target.value })}
             className="ds-input mt-1 w-full text-xs"
           >
-            {timezoneOptions.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
+            {groupTimezoneOptions(timezoneOptions).flatMap((segment) =>
+              segment.group === null
+                ? segment.options.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))
+                : [
+                    <optgroup key={`${segment.group}:${segment.options[0].value}`} label={segment.group}>
+                      {segment.options.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </optgroup>,
+                  ],
+            )}
           </select>
+          {hint && (
+            <span className="mt-1 block text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+              {hint}
+            </span>
+          )}
         </label>
         <label className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
           Start

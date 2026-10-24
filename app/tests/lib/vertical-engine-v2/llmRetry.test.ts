@@ -32,7 +32,7 @@ import { callLLMText, callLLMWithSchema, getVeModel, setVeActiveJobSignal, withV
 import { defaultFetchText, resolveFetchText, resolveSearch } from '@/lib/verticalEngineV2/stages/io';
 import type { VeStageContext } from '@/lib/verticalEngineV2/stages/shared';
 import { isRetryableStageError, maxAttemptsFor } from '@/lib/verticalEngineV2/jobRetry';
-import { getVeCollectionFailure, isVeTransientCatalogError } from '@/lib/verticalEngineV2/collectionErrors';
+import { getVeCollectionFailure, isVeRequestyBillingError, isVeTransientCatalogError } from '@/lib/verticalEngineV2/collectionErrors';
 import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
 import type { VeRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import { createVeJobShutdown } from '@/lib/verticalEngineV2/workerLiveness';
@@ -45,6 +45,8 @@ import { cleanVeCompanyNames } from '@/lib/verticalEngineV2/companyNameCleanup';
 import { createVeLlmRateLimit, veLlmRateLimit, veRetryAfterMs, VeLlmRateLimitError } from '@/lib/verticalEngineV2/llmRateLimit';
 import { planVeRelevanceRetry } from '@/lib/verticalEngineV2/relevanceRetry';
 import { retryRunAfter } from '@/lib/verticalEngineV2/jobRetry';
+import { getVeRequestyApiKey, readVeRequestyBalance, veRequestyKeyFingerprint } from '@/lib/verticalEngineV2/requestyBalance';
+import { VeRequestyBillingError } from '@/lib/verticalEngineV2/requestyBillingRecovery';
 
 const schema = z.object({ ok: z.boolean() });
 
@@ -70,6 +72,7 @@ describe('llm rawCall retry', () => {
 
   beforeEach(() => {
     process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY = 'test-key';
+    delete process.env.VE_REQUESTY_MANAGEMENT_API_KEY;
     process.env.VE_MODEL_GATE = 'openai/gpt-4o-mini';
     process.env.VE_MODEL_RELEVANCE_REVIEW = 'openai/gpt-5-mini';
     delete process.env.VE_LLM_TIMEOUT_MS;
@@ -360,6 +363,43 @@ describe('llm rawCall retry', () => {
     expect(getVeCollectionFailure(noFunds).kind).toBe('billing');
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
+    // Checkpoint stages normalize provider details before throwing. Only a
+    // real same-invocation billing response may supply their key provenance.
+    for (const normalized of ['Requesty 402: insufficient balance',
+      'Requesty 402: insufficient balance (company name cleanup)']) {
+      fetchMock.mockClear();
+      const wrapped = await withVeActiveJobSignal(new AbortController().signal, async () => {
+        await callLLMWithSchema([{ role: 'user', content: 'json' }], schema, { model: 'billing-model' })
+          .catch(() => undefined);
+        throw new Error(normalized);
+      }).catch((cause: unknown) => cause);
+      expect(wrapped).toBeInstanceOf(VeRequestyBillingError);
+      expect(wrapped).toMatchObject({ keyFingerprint: veRequestyKeyFingerprint('test-key') });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(isVeRequestyBillingError(normalized)).toBe(true);
+    }
+    expect(isVeRequestyBillingError('Serper 402: insufficient credits')).toBe(false);
+    for (const stale of ['Requesty 402: insufficient balance', 'Serper 402: insufficient credits',
+      'Child constructor failed: Requesty 402: insufficient balance']) {
+      fetchMock.mockClear();
+      const original = new Error(stale);
+      const isolated = await withVeActiveJobSignal(new AbortController().signal, async () => { throw original; })
+        .catch((cause: unknown) => cause);
+      expect(isolated).toBe(original);
+      expect(isolated).not.toBeInstanceOf(VeRequestyBillingError);
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+    for (const unrelated of ['permission denied saving checkpoint', 'Serper 402: insufficient credits']) {
+      const original = new Error(unrelated);
+      const isolated = await withVeActiveJobSignal(new AbortController().signal, async () => {
+        await callLLMWithSchema([{ role: 'user', content: 'json' }], schema, { model: 'billing-model' })
+          .catch(() => undefined);
+        throw original;
+      }).catch((cause: unknown) => cause);
+      expect(isolated).toBe(original);
+      expect(isolated).not.toBeInstanceOf(VeRequestyBillingError);
+    }
+
     fetchMock.mockClear();
     const rows = Array.from({ length: 102 }, (_, i) => ({
       company: `Company ${Math.floor(i / 2)}`, email: `contact${i}@example.org`,
@@ -414,6 +454,180 @@ describe('llm rawCall retry', () => {
     expect(completed.decisions.get(0)?.status).toBe('relevant');
     expect(fetchMock.mock.calls.map((call) => JSON.parse(call[1].body).model))
       .toEqual([VE_COLLECTION_MODEL, VE_COLLECTION_MODEL, VE_COLLECTION_MODEL, 'openai/gpt-5-mini']);
+
+    // The free probe must preserve the failed inference credential's identity
+    // and budget, even when a separate key reads its organization's balance.
+    const probeKey = 'test-requesty-probe-secret';
+    const keyInfo = { id: 'test-key-id', monthly_spend: '12.50', monthly_limit: '20.00',
+      permissions: { manage: 'read', completions: 'write' } };
+    const probeResponse = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+      new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers });
+    const probeFetch = jest.fn(async (url: string) => probeResponse(url.endsWith('/org')
+      ? { balance: '49.73', name: 'private organization' } : keyInfo));
+    const probe = (fetchImpl: typeof fetch = probeFetch as unknown as typeof fetch, signal?: AbortSignal) =>
+      readVeRequestyBalance({ apiKey: probeKey, fetchImpl, signal });
+    const funded = await probe();
+    expect(funded).toMatchObject({ status: 'usable', balanceUsd: 49.73, monthlySpendUsd: 12.5,
+      monthlyLimitUsd: 20, availableCreditUsd: 7.5,
+      creditSignal: { balanceUsd: 49.73, monthlySpendUsd: 12.5, monthlyLimitUsd: 20 } });
+    expect(funded.keyFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(funded.keyFingerprint).toBe(veRequestyKeyFingerprint(probeKey));
+    expect(funded.keyFingerprint).not.toBe(veRequestyKeyFingerprint('another-key'));
+    expect(JSON.stringify(funded)).not.toMatch(/probe-secret|private organization|test-key-id/);
+    expect(probeFetch.mock.calls.map(([url]) => url)).toEqual([
+      'https://api-v2.requesty.ai/v1/manage/org', 'https://api-v2.requesty.ai/v1/manage/apikey/self',
+    ]);
+    for (const [, init] of probeFetch.mock.calls as unknown as Array<[string, RequestInit]>) {
+      expect(init).toMatchObject({ method: 'GET', redirect: 'error', cache: 'no-store',
+        headers: { Authorization: `Bearer ${probeKey}`, Accept: 'application/json' } });
+      expect(init.body).toBeUndefined();
+    }
+    const managementKey = 'test-management-secret';
+    const splitProbe = (fetchImpl: typeof fetch, signal?: AbortSignal) =>
+      readVeRequestyBalance({ apiKey: probeKey, managementApiKey: managementKey, fetchImpl, signal });
+    const splitFetch = jest.fn(async (url: string, init?: RequestInit) => {
+      const authorization = (init?.headers as Record<string, string>).Authorization;
+      expect(authorization).toBe(`Bearer ${url.endsWith('/self') ? probeKey : managementKey}`);
+      expect(init).toMatchObject({ method: 'GET', redirect: 'error', cache: 'no-store' });
+      expect(init?.body).toBeUndefined();
+      return probeResponse(url.endsWith('/org') ? { balance: '49.73' }
+        : url.endsWith('/self') ? { ...keyInfo, permissions: { manage: 'none', completions: 'write' } }
+          // This lookup proves membership only; limits still come from /self.
+          : { id: keyInfo.id, monthly_spend: 0, monthly_limit: 0 });
+    });
+    expect(await splitProbe(splitFetch as typeof fetch)).toEqual(funded);
+    expect(splitFetch.mock.calls.map(([url]) => url)).toEqual([
+      'https://api-v2.requesty.ai/v1/manage/org', 'https://api-v2.requesty.ai/v1/manage/apikey/self',
+      'https://api-v2.requesty.ai/v1/manage/apikey/test-key-id',
+    ]);
+    const forbiddenManagement = jest.fn(async (url: string) => probeResponse(
+      url.endsWith('/org') ? {} : keyInfo, url.endsWith('/org') ? 403 : 200));
+    expect(await splitProbe(forbiddenManagement as typeof fetch)).toMatchObject({
+      status: 'unavailable', reason: 'management_forbidden', keyFingerprint: funded.keyFingerprint,
+    });
+    expect(forbiddenManagement).toHaveBeenCalledTimes(2);
+    for (const membership of [{ status: 403 }, { status: 404 }, { id: 'another-key' }, {}]) {
+      const read = jest.fn(async (url: string) => probeResponse(url.endsWith('/org') ? { balance: 50 }
+        : url.endsWith('/self') ? keyInfo : membership, url.endsWith('/test-key-id') && 'status' in membership
+          ? membership.status : 200));
+      const result = await splitProbe(read as typeof fetch);
+      expect(result.status).toBe('unavailable');
+      expect(result.keyFingerprint).toBe(funded.keyFingerprint);
+      expect(JSON.stringify(result)).not.toMatch(/management-secret|probe-secret|test-key-id/);
+    }
+    for (const [patch, expected] of [
+      [{ monthly_spend: 20 }, { status: 'blocked', reason: 'key_limit_reached' }],
+      [{ permissions: { manage: 'none', completions: 'none' } }, { status: 'blocked', reason: 'completions_forbidden' }],
+      [{ group: { id: 'group' } }, { status: 'unavailable', reason: 'group_budget_unknown' }],
+      [{ id: '../org' }, { status: 'unavailable', reason: 'invalid_response' }],
+      [{ id: 'self' }, { status: 'unavailable', reason: 'invalid_response' }],
+    ] as const) {
+      const read = jest.fn(async (url: string) => probeResponse(url.endsWith('/org') ? { balance: 50 }
+        : url.endsWith('/self') ? { ...keyInfo, ...patch } : { id: keyInfo.id }));
+      expect(await splitProbe(read as typeof fetch)).toMatchObject(expected);
+    }
+    const previousManagementKey = process.env.VE_REQUESTY_MANAGEMENT_API_KEY;
+    try {
+      process.env.VE_REQUESTY_MANAGEMENT_API_KEY = managementKey;
+      expect(await probe(splitFetch as typeof fetch)).toEqual(funded);
+      const noRequest = jest.fn();
+      process.env.VE_REQUESTY_MANAGEMENT_API_KEY = ' invalid-management-key ';
+      expect(await probe(noRequest)).toMatchObject({ status: 'unavailable', reason: 'invalid_management_key' });
+      expect(noRequest).not.toHaveBeenCalled();
+    } finally {
+      if (previousManagementKey === undefined) delete process.env.VE_REQUESTY_MANAGEMENT_API_KEY;
+      else process.env.VE_REQUESTY_MANAGEMENT_API_KEY = previousManagementKey;
+    }
+    for (const abort of [false, true]) {
+      const parent = new AbortController();
+      const read = jest.fn(async (url: string) => {
+        if (url.endsWith('/org')) return probeResponse({ balance: 50 });
+        if (url.endsWith('/self')) return probeResponse(keyInfo);
+        return new Promise<Response>(() => undefined);
+      });
+      const pending = splitProbe(read as typeof fetch, parent.signal);
+      await jest.advanceTimersByTimeAsync(0);
+      expect(read).toHaveBeenCalledTimes(3);
+      if (abort) parent.abort();
+      else await jest.advanceTimersByTimeAsync(8000);
+      expect(await pending).toMatchObject({ status: 'unavailable', reason: abort ? 'aborted' : 'timeout' });
+      expect(jest.getTimerCount()).toBe(0);
+    }
+    for (const [orgPatch, keyPatch, expected] of [
+      [{ balance: 0 }, {}, { status: 'blocked', reason: 'insufficient_balance' }],
+      [{}, { monthly_spend: 20 }, { status: 'blocked', reason: 'key_limit_reached' }],
+      [{}, { monthly_limit: 0 }, { status: 'usable', availableCreditUsd: 49.73 }],
+      [{}, { monthly_spend: 0 }, { status: 'usable', availableCreditUsd: 20 }],
+      [{}, { permissions: { manage: 'none', completions: 'write' } }, { status: 'usable' }],
+      [{}, { permissions: { manage: 'read', completions: 'read' } }, { status: 'blocked', reason: 'completions_forbidden' }],
+      [{}, { group: { id: 'group' } }, { status: 'unavailable', reason: 'group_budget_unknown' }],
+      [{}, { permissions: { manage: 'read', completions: ['write'] } }, { status: 'unavailable', reason: 'invalid_response' }],
+    ] as const) {
+      const read = jest.fn(async (url: string) => probeResponse(url.endsWith('/org')
+        ? { balance: '49.73', ...orgPatch } : { ...keyInfo, ...keyPatch }));
+      expect(await probe(read as unknown as typeof fetch)).toMatchObject(expected);
+      expect(read).toHaveBeenCalledTimes(2);
+    }
+    for (const bad of [undefined, null, '', ' ', false, true, '-1', 'Infinity', 'NaN', '0x10', '1e9', '2 dollars']) {
+      for (const field of ['balance', 'monthly_spend', 'monthly_limit']) {
+        const read = jest.fn(async (url: string) => probeResponse(url.endsWith('/org')
+          ? { balance: field === 'balance' ? bad : 49.73 }
+          : { ...keyInfo, ...(field !== 'balance' ? { [field]: bad } : {}) }));
+        expect(await probe(read as unknown as typeof fetch)).toMatchObject({ status: 'unavailable', reason: 'invalid_response' });
+      }
+    }
+    for (const [status, reason] of [[401, 'authentication_failed'], [403, 'management_forbidden'],
+      [402, 'http_error'], [429, 'rate_limited'], [503, 'provider_unavailable']] as const) {
+      const read = jest.fn(async (url: string) => url.endsWith('/org')
+        ? probeResponse(`private upstream text ${probeKey}`, status) : probeResponse(keyInfo));
+      const result = await probe(read as unknown as typeof fetch);
+      expect(result).toEqual({ status: 'unavailable', reason, keyFingerprint: funded.keyFingerprint });
+      expect(read).toHaveBeenCalledTimes(2);
+    }
+    for (const malformed of [probeResponse('not JSON'), probeResponse([]),
+      probeResponse({}, 200, { 'content-length': '32769' }), probeResponse('x'.repeat(32769))]) {
+      const read = jest.fn(async (url: string) => url.endsWith('/org') ? malformed : probeResponse(keyInfo));
+      expect(await probe(read as unknown as typeof fetch)).toMatchObject({ status: 'unavailable' });
+    }
+    const failedNetwork = jest.fn().mockRejectedValue(new Error(`secret upstream request ${probeKey}`));
+    expect(await probe(failedNetwork)).toEqual({ status: 'unavailable', reason: 'network_error', keyFingerprint: funded.keyFingerprint });
+
+    // Both stalled headers and a stalled body are bounded by one total timeout,
+    // including injected fetch implementations that ignore AbortSignal.
+    const hangingHeaders = jest.fn(() => new Promise<Response>(() => undefined));
+    const headerCheck = probe(hangingHeaders);
+    await jest.advanceTimersByTimeAsync(8000);
+    expect(await headerCheck).toMatchObject({ status: 'unavailable', reason: 'timeout' });
+    const cancelBody = jest.fn();
+    const hangingBody = jest.fn(async (url: string) => url.endsWith('/org')
+      ? new Response(new ReadableStream({ cancel: cancelBody })) : probeResponse(keyInfo));
+    const bodyCheck = probe(hangingBody as unknown as typeof fetch);
+    await jest.advanceTimersByTimeAsync(8000);
+    expect(await bodyCheck).toMatchObject({ status: 'unavailable', reason: 'timeout' });
+    expect(cancelBody).toHaveBeenCalledTimes(1);
+    const abortProbe = new AbortController();
+    const cancelled = probe(hangingHeaders, abortProbe.signal);
+    abortProbe.abort(new Error(`private cancellation ${probeKey}`));
+    expect(await cancelled).toMatchObject({ status: 'unavailable', reason: 'aborted' });
+    hangingHeaders.mockClear();
+    expect(await probe(hangingHeaders, abortProbe.signal)).toMatchObject({ status: 'unavailable', reason: 'aborted' });
+    expect(hangingHeaders).not.toHaveBeenCalled();
+    expect(jest.getTimerCount()).toBe(0);
+
+    process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY = 'primary-key';
+    process.env.OPENROUTER_BRIEF_API_KEY = 'fallback-key';
+    expect(getVeRequestyApiKey()).toBe('primary-key');
+    delete process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY;
+    expect(getVeRequestyApiKey()).toBe('fallback-key');
+    delete process.env.OPENROUTER_BRIEF_API_KEY;
+    expect(getVeRequestyApiKey).toThrow(/OPENROUTER_HYPOTHESIS_ENGINE_API_KEY/);
+    expect(await readVeRequestyBalance({ fetchImpl: hangingHeaders })).toEqual({
+      status: 'unavailable', reason: 'missing_api_key', keyFingerprint: null,
+    });
+    for (const apiKey of ['', ' secret ', 'secret\nheader']) {
+      expect(await readVeRequestyBalance({ apiKey, fetchImpl: hangingHeaders })).toMatchObject({ status: 'unavailable', reason: 'invalid_api_key' });
+    }
+    expect(hangingHeaders).not.toHaveBeenCalled();
   });
 
   it('profiles an unavailable website from saved business facts, without swallowing cancellation or inventing a source', async () => {

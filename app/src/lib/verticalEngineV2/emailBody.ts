@@ -42,9 +42,17 @@ export function veEmailBodyHasInvalidLinks(value: string): boolean {
 }
 
 export function veEmailBodyDocument(value: string): JSONContent {
-  return { type: 'doc', content: value.split('\n').map(line => ({ type: 'paragraph', content: splitVeEmailBody(line).map(part => ({
-    type: 'text', text: part.text, ...(part.href ? { marks: [{ type: 'link', attrs: { href: part.href } }] } : {}),
-  })) })) };
+  // Keep the existing plain-text wire format exact: a blank line separates
+  // paragraphs, while a single newline stays a line break within a paragraph.
+  // Empty chunks and leading/trailing breaks are intentional user content.
+  return { type: 'doc', content: value.split('\n\n').map(paragraph => ({
+    type: 'paragraph', content: paragraph.split('\n').flatMap((line, index) => [
+      ...(index ? [{ type: 'hardBreak' }] : []),
+      ...splitVeEmailBody(line).map(part => ({ type: 'text', text: part.text,
+        ...(part.href ? { marks: [{ type: 'link', attrs: { href: part.href } }] } : {}),
+      })),
+    ]),
+  })) };
 }
 
 export function veEmailBodyText(doc: JSONContent): string {
@@ -62,5 +70,5 @@ export function veEmailBodyText(doc: JSONContent): string {
     // visibly instead of silently deleting the user's characters.
     return /[\]\r\n]/.test(text) ? `${text} (${url})` : `[${text}](${url})`;
   };
-  return (doc.content ?? []).map(inline).join('\n');
+  return (doc.content ?? []).map(inline).join('\n\n');
 }

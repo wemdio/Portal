@@ -23,11 +23,13 @@
  *   TA_SCORING_JEV_USERS=<uuid>,<uuid>             только задачи этих пользователей;
  *   TA_SCORING_JEV_CUT=6.5                         ожидаемый балл Jev, который считается «7»;
  *   TA_SCORING_JEV_MODEL=typesafe/jev-1.13.0       порог откалиброван на этом релизе;
- *   TA_SCORING_JEV_MIN_LETTERS=40                  меньше описательного текста — DeepSeek.
+ *   TA_SCORING_JEV_MIN_LETTERS=40                  меньше описательного текста — DeepSeek;
+ *   TA_SCORING_JEV_MIN_CONFIDENCE=0.5              неуверенный ответ Jev — DeepSeek.
  * Строки почти без фактов (одни адрес, сайт, телефон) Jev не получает: по ним он
  * ставит «мало данных», а DeepSeek угадывает компанию по домену и бренду. Любой
  * сбой (сеть, HTTP-ошибка, обрезанный или нечитаемый ответ, нет ответа по
- * компании) — эти компании тоже оценивает прежний путь DeepSeek.
+ * компании) — эти компании тоже оценивает прежний путь DeepSeek. Так же
+ * поступаем с неуверенным ответом Jev (taJevMinConfidence).
  */
 
 const REQUESTY_URL = 'https://router.requesty.ai/v1/chat/completions';
@@ -78,9 +80,28 @@ export function taJevEnabled(surface: TaScoringSurface, userId?: string | null):
 export const taJevModel = (): string => (process.env.TA_SCORING_JEV_MODEL ?? '').trim() || TA_JEV_DEFAULT_MODEL;
 
 /** Порог держим строго между соседними опорными точками калибровки (5,5 и 7,5). */
+const envNumber = (name: string): number => {
+  const raw = (process.env[name] ?? '').trim();
+  return raw ? Number(raw) : Number.NaN;
+};
+
 export function taJevCut(): number {
-  const raw = Number(process.env.TA_SCORING_JEV_CUT);
+  const raw = envNumber('TA_SCORING_JEV_CUT');
   return Number.isFinite(raw) && raw > 5.5 && raw < 7.5 ? raw : 6.5;
+}
+
+/**
+ * Неуверенный ответ Jev отдаём DeepSeek: если ни один уровень шкалы не набрал
+ * этой доли, Jev «размазывает» вероятности — так он отвечает, когда о компании
+ * известны только название и рубрика, и специалист получает 2–4 и шаблон
+ * вместо причины, а лучшие кандидаты не доходят до 7. 19.10.2026: на
+ * размеченной базе девелоперов при 0,5 в DeepSeek уходят 10% компаний, а верных
+ * решений становится 92,7% (только Jev — 91,5%, только DeepSeek — 90,3%); на
+ * таблице «Работы с базами» с названием и рубрикой — 84% строк. 0 — выключено.
+ */
+export function taJevMinConfidence(): number {
+  const raw = envNumber('TA_SCORING_JEV_MIN_CONFIDENCE');
+  return Number.isFinite(raw) && raw >= 0 && raw <= 0.95 ? raw : 0.5;
 }
 
 /**
@@ -143,7 +164,7 @@ const LETTER = /\p{L}/gu;
  * 0 — отдавать Jev все строки.
  */
 export function taJevMinLetters(): number {
-  const raw = Number(process.env.TA_SCORING_JEV_MIN_LETTERS);
+  const raw = envNumber('TA_SCORING_JEV_MIN_LETTERS');
   return Number.isFinite(raw) && raw >= 0 && raw <= 500 ? Math.floor(raw) : 40;
 }
 
@@ -220,16 +241,28 @@ export function taJevReason(probabilities: Record<TaJevTier, number>, score: num
   return reason;
 }
 
-/** Компании без читаемого распределения в ответе пропускаются — их оценит DeepSeek. */
-export function readTaJevAnswers(content: string, companies: TaJevCompany[], cut = taJevCut()): Map<string, TaJevVerdict> {
+export interface TaJevAnswers {
+  verdicts: Map<string, TaJevVerdict>;
+  /** Ответ есть, но ни один уровень не набрал minConfidence: компанию оценит DeepSeek. */
+  uncertain: Set<string>;
+}
+
+/** Компании без читаемого или уверенного ответа пропускаются — их оценит DeepSeek. */
+export function readTaJevAnswers(
+  content: string,
+  companies: TaJevCompany[],
+  cut = taJevCut(),
+  minConfidence = taJevMinConfidence(),
+): TaJevAnswers {
   const verdicts = new Map<string, TaJevVerdict>();
+  const uncertain = new Set<string>();
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
   } catch {
-    return verdicts;
+    return { verdicts, uncertain };
   }
-  if (!parsed || typeof parsed !== 'object') return verdicts;
+  if (!parsed || typeof parsed !== 'object') return { verdicts, uncertain };
   companies.forEach((company, index) => {
     const answer = (parsed as Record<string, unknown>)[`c${index + 1}_tier`];
     const raw = answer && typeof answer === 'object' ? (answer as { probabilities?: unknown }).probabilities : undefined;
@@ -244,16 +277,22 @@ export function readTaJevAnswers(content: string, companies: TaJevCompany[], cut
     }
     if (total < 0.5) return;
     for (const tier of TIERS) probabilities[tier] /= total;
+    if (Math.max(...TIERS.map((tier) => probabilities[tier])) < minConfidence) {
+      uncertain.add(company.key);
+      return;
+    }
     const expected = TIERS.reduce((sum, tier) => sum + TIER_MIDPOINT[tier] * probabilities[tier], 0);
     const score = calibrateTaJevScore(expected, cut);
     const thinFacts = Object.values(taJevFacts(company.data)).join(' ').length < 200;
     verdicts.set(company.key, { expected, score, reason: taJevReason(probabilities, score, thinFacts) });
   });
-  return verdicts;
+  return { verdicts, uncertain };
 }
 
 export interface TaJevCallResult {
   verdicts: Map<string, TaJevVerdict>;
+  /** Сколько компаний Jev оценил неуверенно — они уходят в DeepSeek, это не сбой. */
+  uncertain: number;
   /** Есть, когда хотя бы одна компания осталась без оценки по вине запроса. */
   error?: string;
   status?: number;
@@ -274,6 +313,7 @@ export async function scoreTaWithJev(options: {
   companies: TaJevCompany[];
   title: string;
   cut?: number;
+  minConfidence?: number;
   model?: string;
   fetchImpl?: typeof fetch;
 }): Promise<TaJevCallResult> {
@@ -318,7 +358,7 @@ export async function scoreTaWithJev(options: {
         try {
           json = JSON.parse(await res.text());
         } catch {
-          return { verdicts: new Map(), error: 'Jev вернул нечитаемый ответ', status, attempts, durationMs: Date.now() - started, promptTokens: 0, costUsd: 0 };
+          return { verdicts: new Map(), uncertain: 0, error: 'Jev вернул нечитаемый ответ', status, attempts, durationMs: Date.now() - started, promptTokens: 0, costUsd: 0 };
         }
         const choice = json?.choices?.[0];
         const model = json?.model;
@@ -332,13 +372,16 @@ export async function scoreTaWithJev(options: {
         };
         // Обрезанный ответ не читаем: половина пачки по чужим вероятностям хуже, чем DeepSeek.
         if (choice?.finish_reason === 'length') {
-          return { ...done, verdicts: new Map(), error: 'Ответ Jev обрезан по лимиту токенов' };
+          return { ...done, verdicts: new Map(), uncertain: 0, error: 'Ответ Jev обрезан по лимиту токенов' };
         }
         const content = choice?.message?.content;
-        const verdicts = readTaJevAnswers(typeof content === 'string' ? content : '', options.companies, options.cut);
-        return verdicts.size === options.companies.length
-          ? { ...done, verdicts }
-          : { ...done, verdicts, error: `Jev не оценил ${options.companies.length - verdicts.size} из ${options.companies.length} компаний` };
+        const { verdicts, uncertain } = readTaJevAnswers(
+          typeof content === 'string' ? content : '', options.companies, options.cut, options.minConfidence,
+        );
+        const missing = options.companies.length - verdicts.size - uncertain.size;
+        return missing === 0
+          ? { ...done, verdicts, uncertain: uncertain.size }
+          : { ...done, verdicts, uncertain: uncertain.size, error: `Jev не оценил ${missing} из ${options.companies.length} компаний` };
       }
       const text = await res.text().catch(() => '');
       error = `Jev ответил HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ''}`;
@@ -356,7 +399,7 @@ export async function scoreTaWithJev(options: {
     }
     if (attempt + 1 < MAX_HTTP_ATTEMPTS) await sleep(retryDelayMs);
   }
-  return { verdicts: new Map(), error, status, attempts, durationMs: Date.now() - started, promptTokens: 0, costUsd: 0 };
+  return { verdicts: new Map(), uncertain: 0, error, status, attempts, durationMs: Date.now() - started, promptTokens: 0, costUsd: 0 };
 }
 
 /**
@@ -375,7 +418,8 @@ export class TaJevBreaker {
 
   /** Возвращает true, если именно этот результат выключил Jev. */
   record(result: TaJevCallResult): boolean {
-    if (result.verdicts.size > 0) {
+    // Неуверенный ответ — рабочий Jev, а не сбой.
+    if (result.verdicts.size > 0 || result.uncertain > 0) {
       this.failures = 0;
       return false;
     }

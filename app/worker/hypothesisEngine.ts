@@ -80,7 +80,12 @@ import fs from 'node:fs';
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, sleep, startWorkerHeartbeat } from './_shared';
 import { supabaseAdminFetchWithRetry } from '@/lib/supabaseAdmin';
 import { runHeStage } from '@/lib/hypothesisEngine/stages';
-import { getHeActiveJobSignal, heLlmFailureOf, heLlmMaxAttemptMs, isHeLlmTimeout, setHeActiveJob } from '@/lib/hypothesisEngine/llm';
+import { getHeActiveJobSignal, heLlmFailureOf, heLlmMaxAttemptMs, isHeLlmTimeout, setHeActiveJob, withHeActiveJobScope } from '@/lib/hypothesisEngine/llm';
+import { HE_ENG_COLLECTION_CONCURRENCY, selectHeEngCollectionCandidate } from '@/lib/hypothesisEngine/engCollectionQueue';
+import type { HeEngCollectionScope } from '@/lib/hypothesisEngine/engCollectionQueue';
+import { readHeEngCollectionScope } from '@/lib/hypothesisEngine/engCollectionScope';
+import { heWorkerLaneTakes, readHeWorkerLane } from '@/lib/hypothesisEngine/heWorkerLane';
+import { withHeEngProjectUsageLock } from '@/lib/hypothesisEngine/engProjectUsage';
 import type { HeLlmSpend } from '@/lib/hypothesisEngine/llm';
 // Клиент БД СТАДИЙ: срок на заголовки И на паузу между кусками тела, обрыв по
 // сигналу джобы. Отдельный от `db` сознательно — см. комментарий у stageDb ниже.
@@ -146,6 +151,8 @@ import { createHeEngDncRemovalTicker } from '@/lib/hypothesisEngine/engDncRemova
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 
 const WORKER_ID = `hypothesis-engine-${process.pid}`;
+/** Which jobs this process takes; unset = all, the original single process (heWorkerLane.ts). */
+const WORKER_LANE = readHeWorkerLane();
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
 const MAX_ATTEMPTS = 3;
 /** Как часто воркер проверяет строку активной джобы на отмену пользователем. */
@@ -456,7 +463,38 @@ const stageDb = createHeStageSupabase({
   jobSignal: getHeActiveJobSignal,
   fetchImpl: supabaseAdminFetchWithRetry,
 });
-const shouldStop = setupGracefulShutdown(log);
+const shutdownRequested = setupGracefulShutdown(log);
+let engCollectionStopping = false;
+const shouldStop = () => shutdownRequested() || engCollectionStopping;
+
+// One HE process, two ordinary ENG collection slots. Legacy stages and refills
+// remain exclusive. A slot covers the entire job, including cost/failure writes.
+type HeActiveCollection = HeEngCollectionScope & { task: Promise<void>; abort?: AbortController };
+const activeCollections = new Map<string, HeActiveCollection>();
+const engUsageProjects = new Set<string>();
+
+/**
+ * Полоса ENG-сборов будится к сроку, а не к запасному опросу. Тик сборки
+ * встаёт в очередь сам (requeueSelf) с паузой 1–15 с, а realtime будит воркер
+ * в момент записи — когда run_after ещё впереди. Без срока следующий опрос
+ * был через 30 с (FALLBACK_POLL_MS в _shared.ts), и каждая пауза в 1 с
+ * становилась паузой до 30 с: по логам сбора 22.10.2026 ожидание заняло
+ * 44 из 132 минут. Полоса serial (RU и остальные стадии) — как раньше.
+ */
+const ENG_LANE_WAKES = WORKER_LANE === 'eng_collections';
+let wakeEngLane: (() => void) | null = null;
+
+/** Через сколько мс наступит ближайший run_after ожидающей сборки; null — такой нет. */
+async function nextEngCollectionDueInMs(): Promise<number | null> {
+  const now = Date.now();
+  const { data, error } = await db.from('he_jobs').select('run_after')
+    .eq('status', 'pending').eq('stage', 'base_collect').gt('run_after', new Date(now).toISOString())
+    .order('run_after', { ascending: true }).limit(1).maybeSingle();
+  if (error || !data) return null;
+  const at = Date.parse(String((data as { run_after?: unknown }).run_after));
+  // Строго после срока: claimJob сравнивает run_after с часами этого же процесса.
+  return Number.isFinite(at) ? Math.max(250, at - now + 100) : null;
+}
 
 /**
  * Свой провайдерский ключ движка (C3). До сих пор V1 и V2 читали ОДНУ
@@ -1744,6 +1782,19 @@ async function resetStuckJobs() {
     );
     rows = rows.filter((row) => !strandedJobs.has(row.id));
   }
+  // Split lanes: the other process may be running its rows right now. Re-queue
+  // only this lane's; an unclassifiable row stays for its owner's restart.
+  if (WORKER_LANE !== 'all') {
+    const own: HeJob[] = [];
+    for (const row of rows) {
+      try {
+        if (heWorkerLaneTakes(WORKER_LANE, await readHeEngCollectionScope(db, row))) own.push(row);
+      } catch (e) {
+        log('error', `Stuck job ${row.id} (${row.stage}) left running: its lane is unknown (${e instanceof Error ? e.message : String(e)})`);
+      }
+    }
+    rows = own;
+  }
   if (!rows.length) return;
   log('info', `Resetting ${rows.length} stuck running jobs to pending`);
   for (const row of rows) {
@@ -1769,52 +1820,86 @@ async function resetStuckJobs() {
   }
 }
 
-async function claimJob(): Promise<HeJob | null> {
-  const { data: pending, error: pendingErr } = await db
-    .from('he_jobs')
-    .select('*')
-    .eq('status', 'pending')
-    // Отложенные джобы (self-requeue base_collect ставит run_after в будущее)
-    // не клеймим раньше времени — иначе ожидание дочерних парсеров
-    // превращается в hot spin по БД.
-    .lte('run_after', new Date().toISOString())
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-  // Отказ чтения раньше выглядел пустой очередью и не оставлял следа вовсе.
-  // Поведение то же (следующий тик поллера повторит), но причина видна.
-  if (pendingErr) log('error', `Pending he_jobs could not be read: ${pendingErr.message}`);
-  if (!pending) return null;
-
-  // attempts здесь НЕ инкрементируем: attempts — счётчик фейлов (failJob),
-  // а не клеймов. Self-requeue base_collect переводит джобу в pending десятки
-  // раз подряд — инкремент на клейме сжигал все попытки за секунды ожидания.
-  //
-  // started_at, который ставит клейм, — ТОКЕН ПРОГОНА: done- и fail-записи
-  // воркера (deliverDoneRow, writeJobFailure) пишут только поверх 'running' с
-  // этим же started_at.
-  const { data: claimed, error: claimErr } = await db
-    .from('he_jobs')
-    .update({
-      status: 'running',
-      started_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', (pending as HeJob).id)
-    .eq('status', 'pending')
-    .select('*')
-    .maybeSingle();
-  // Клейм мог лечь без ответа: строка тогда 'running' без процесса и ждёт
-  // resetStuckJobs (рестарт) — платного повтора это не даёт, но без строки в
-  // логе такая джоба выглядела бы просто «не взятой».
-  if (claimErr) {
-    log('error', `Job ${(pending as HeJob).id} (${(pending as HeJob).stage}) claim update rejected: ${claimErr.message}`);
+/**
+ * Split lanes only: the other HE process may be running this project's other
+ * kind of work. A project never ran a collection beside an exclusive stage in
+ * the single process, and its usage write is serialized only in-process
+ * (engProjectUsage.ts). An unread state counts as busy until the next poll.
+ */
+async function projectBusyInOtherLane(job: HeJob): Promise<boolean> {
+  const { data, error } = await db.from('he_jobs').select('id')
+    .eq('project_id', job.project_id).eq('status', 'running').limit(50);
+  if (error) {
+    log('error', `Running he_jobs of project ${job.project_id} could not be read: ${error.message}`);
+    return true;
   }
-  return (claimed as HeJob | null) ?? null;
+  return (data ?? []).some((row) => row.id !== job.id && !activeCollections.has(row.id));
+}
+
+async function claimJob(): Promise<{ job: HeJob; scope: HeEngCollectionScope } | null> {
+  const active = [...activeCollections.values()];
+  if (active.length >= HE_ENG_COLLECTION_CONCURRENCY) return null;
+  const blockedProjects = new Set([...strandedJobs.values()].map((entry) => entry.job.project_id));
+  // Page past active/self-requeued rows and blocked verticals. An older serial
+  // job is a barrier: drain ENG work before running that job alone.
+  const pageSize = 50;
+  for (let offset = 0; !shouldStop(); offset += pageSize) {
+    const { data, error } = await db.from('he_jobs').select('*')
+      .eq('status', 'pending').lte('run_after', new Date().toISOString())
+      .order('created_at', { ascending: true }).order('id', { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (error) {
+      log('error', `Pending he_jobs could not be read: ${error.message}`);
+      return null;
+    }
+    const rows = (data ?? []) as HeJob[];
+    for (const pending of rows) {
+      if (shouldStop()) return null;
+      if (activeCollections.has(pending.id) || blockedProjects.has(pending.project_id)) continue;
+      let scope: HeEngCollectionScope;
+      try {
+        scope = await readHeEngCollectionScope(db, pending);
+      } catch (error) {
+        // Unknown ownership is not permission to run beside another client.
+        log('error', `Job ${pending.id} collection scope unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        // A split lane cannot tell whose job this is; the next poll reads it again.
+        if (WORKER_LANE !== 'all') continue;
+        if (active.length > 0) return null;
+        // Preserve the old exclusive path at idle. Its owner/budget guards
+        // decide the job's outcome; a broken scope read must not wedge RU too.
+        scope = { id: pending.id, project_id: pending.project_id, baseId: null, verticalId: null, parallelEligible: false };
+      }
+      // The other process's job is not a barrier here: it does not wait on this lane.
+      if (!heWorkerLaneTakes(WORKER_LANE, scope)) continue;
+      if (!selectHeEngCollectionCandidate([scope], active, { blockedProjectIds: blockedProjects })) {
+        if (!scope.parallelEligible) return null;
+        continue;
+      }
+      if (WORKER_LANE !== 'all' && await projectBusyInOtherLane(pending)) continue;
+      if (shouldStop()) return null;
+      const at = new Date().toISOString();
+      // Do not increment attempts: base_collect legitimately yields many times.
+      // started_at is the run token used by all completion/failure CAS writes.
+      const { data: claimed, error: claimError } = await db.from('he_jobs')
+        .update({ status: 'running', started_at: at, updated_at: at })
+        .eq('id', pending.id).eq('status', 'pending').eq('updated_at', pending.updated_at)
+        .select('*').maybeSingle();
+      if (claimError) {
+        log('error', `Job ${pending.id} (${pending.stage}) claim update rejected: ${claimError.message}`);
+        return null;
+      }
+      if (!claimed) continue;
+      if (scope.parallelEligible) engUsageProjects.add(pending.project_id);
+      return { job: claimed as HeJob, scope };
+    }
+    if (rows.length < pageSize) return null;
+  }
+  return null;
 }
 
 /**
- * Добавить расход стадии на проект (read-modify-write, воркер один на проект).
+ * Добавить расход стадии на проект. Параллельные ENG-сборки одного проекта
+ * сериализуют этот короткий read-modify-write; legacy работает как прежде.
  * Клиент приходит параметром: на участке после стадии он со сроком
  * (withPostStageDeadline), иначе запись расхода могла бы висеть без сторожа.
  *
@@ -1830,6 +1915,16 @@ async function accumulateProjectUsage(
   costUsd: number,
 ): Promise<boolean> {
   if (!tokensUsed && !costUsd) return true;
+  const write = () => writeProjectUsage(client, projectId, tokensUsed, costUsd);
+  return engUsageProjects.has(projectId) ? withHeEngProjectUsageLock(projectId, write) : write();
+}
+
+async function writeProjectUsage(
+  client: HeWorkerDb,
+  projectId: string,
+  tokensUsed: number,
+  costUsd: number,
+): Promise<boolean> {
   const { data: project, error: readErr } = await client
     .from('he_projects')
     .select('tokens_used, cost_usd')
@@ -2068,6 +2163,8 @@ async function handleJob(job: HeJob) {
   // LLM-вызове, отмена сработает по завершении: статус 'cancelled' ниже не
   // даёт записать done и дочейнить следующую стадию.
   const abort = new AbortController();
+  const collection = activeCollections.get(job.id);
+  if (collection) collection.abort = abort;
   // Сторож простоя стадии: окно от последней активности, дальше abort (его
   // видит текущий запрос к модели) и, если стадия не ответила, выход процесса.
   const idleMs = stageIdleTimeoutMs();
@@ -2095,6 +2192,23 @@ async function handleJob(job: HeJob) {
         + `last activity: ${lastActivity}; active resources: ${summarizeActiveResources()}`,
     ),
     onUnresponsive: (waitedMs) => {
+      if (collection) {
+        // A hung ENG slot must not immediately kill another paid collection.
+        // Stop admission, interrupt peers and let their checkpoints/cost/failure
+        // writes finish before the existing process-restart recovery takes over.
+        if (engCollectionStopping) return;
+        engCollectionStopping = true;
+        const peers = [...activeCollections.values()].filter((entry) => entry.id !== job.id);
+        for (const peer of peers) {
+          peer.abort?.abort(new HeJobInterruptionError('he_jobs restart: another ENG collection ignored abort', 'restart'));
+        }
+        log('error', `Job ${job.id} ignored abort for ${waitedMs}ms; draining ${peers.length} ENG peer(s) before restart`);
+        void Promise.race([
+          Promise.allSettled(peers.map((entry) => entry.task)),
+          new Promise<void>((resolve) => setTimeout(resolve, 2 * POST_STAGE_DEADLINE_MS + STAGE_ABORT_GRACE_MS)),
+        ]).then(() => process.exit(1));
+        return;
+      }
       log(
         'error',
         `Job ${job.id} (${job.stage}) ignored abort for ${waitedMs}ms — exiting; `
@@ -3679,10 +3793,22 @@ const heEngDncRemoval = createHeEngDncRemovalTicker({
   shouldStop,
 });
 
+async function runClaimedJob(job: HeJob): Promise<void> {
+  if (strandedJobs.has(job.id)) forgetStrandedJob(job.id);
+  try {
+    await handleJob(job);
+  } catch (err) {
+    if (!(await failJob(job, err))) markJobStranded(job, 'fail write did not land', { failure: err });
+  }
+}
+
 async function pollOnce(): Promise<boolean> {
   // Брошенные строки закрываем ДО клейма: пока такая строка висит в 'running',
   // её проект стоит, а воркер один на всех.
-  await collectStrandedJobs();
+  if (activeCollections.size === 0) await collectStrandedJobs();
+  // Do not keep refilling slots indefinitely while a paid result waits for
+  // recovery. Drain the current pair, then run the single recovery sweep.
+  if (activeCollections.size > 0 && strandedJobs.size > 0) return false;
   // SIGTERM, пришедший во время прохода сборщика (он ходит в БД, при лежащей
   // БД — подолгу), новой платной стадии уже не открывает: pollLoop проверяет
   // флаг только между тиками, и без этой строки остановка при деплое
@@ -3694,36 +3820,52 @@ async function pollOnce(): Promise<boolean> {
   // до конца, и эта джоба исполняется как текущая.
   if (shouldStop()) return false;
   // Заблокированные ENG-аккаунты — между джобами (см. heEngBlockSweep).
-  await heEngBlockSweep.maybeRun();
-  // «Do not contact» — снятие с идущих кампаний клиента (см. heEngDncRemoval).
-  await heEngDncRemoval.maybeRun();
-  // Автозапуск ENG — между джобами, до клейма (см. maybeRunHeEngAutoLaunch).
-  // Запуск был — true: pollLoop сразу зайдёт снова и возьмёт джобу.
-  if (await maybeRunHeEngAutoLaunch()) return true;
+  // Полоса только ENG-сборов служебных проходов не делает: их ведёт процесс
+  // остальных стадий, один на сервер.
+  if (activeCollections.size === 0 && WORKER_LANE !== 'eng_collections') {
+    await heEngBlockSweep.maybeRun();
+    // «Do not contact» — снятие с идущих кампаний клиента (см. heEngDncRemoval).
+    await heEngDncRemoval.maybeRun();
+    // Автозапуск ENG — только без активных сборок, как раньше между стадиями.
+    if (await maybeRunHeEngAutoLaunch()) return true;
+  }
   if (shouldStop()) return false;
-  const job = await claimJob();
-  if (!job) return false;
+  const claimed = await claimJob();
+  if (!claimed) return false;
   // Клейм прошёл только поверх 'pending' — значит брошенная запись по этой
   // строке устарела (сборщик, прочитай он статус в этом тике, вычеркнул бы её
   // сам). Иначе её прежний результат (например {waiting} тика base_collect)
   // позже доставился бы поверх НОВОГО прогона.
-  if (strandedJobs.has(job.id)) forgetStrandedJob(job.id);
-  try {
-    await handleJob(job);
-  } catch (err) {
-    // Запись отказа не легла (БД лежит дольше её повторов или истёк срок
-    // участка) — строка осталась 'running'. Раньше её не подбирал никто до
-    // рестарта, а рестарт закрывал её бесплатным прерыванием: оплаченная
-    // стадия, чей результат уже отвергнут (HeJobResultWriteError), или
-    // терминальный отказ провайдера исполнялись заново. Сборщик допишет ТОТ ЖЕ
-    // отказ, как только БД ответит.
-    if (!(await failJob(job, err))) markJobStranded(job, 'fail write did not land', { failure: err });
+  const { job, scope } = claimed;
+  if (!scope.parallelEligible) {
+    await runClaimedJob(job);
+    return true;
   }
+  // Register synchronously before executing the stage: a self-requeued row
+  // cannot be reclaimed while its prior finalization is still in progress.
+  const task = Promise.resolve().then(() => withHeActiveJobScope(() => runClaimedJob(job)))
+    .catch((error) => {
+      markJobStranded(job, 'parallel collection handler failed', { failure: error });
+      log('error', `ENG collection ${job.id} left for recovery: ${error instanceof Error ? error.message : String(error)}`);
+    })
+    .finally(() => {
+      activeCollections.delete(job.id);
+      // Слот свободен, а только что вставшая в очередь сборка могла быть уже
+      // к сроку, пока её прогон дописывал итог: опрос — сейчас, не через 30 с.
+      wakeEngLane?.();
+    });
+  activeCollections.set(job.id, { ...scope, task });
+  log('info', `ENG collection ${job.id} admitted (${activeCollections.size}/${HE_ENG_COLLECTION_CONCURRENCY} slots)`);
   return true;
 }
 
 async function main() {
   log('info', 'Hypothesis Engine worker starting…');
+  log('info', WORKER_LANE === 'all'
+    ? `ENG collection concurrency: ${HE_ENG_COLLECTION_CONCURRENCY}; one HE process; all other stages exclusive`
+    : WORKER_LANE === 'eng_collections'
+      ? `Lane eng_collections: only verified ENG collections, ${HE_ENG_COLLECTION_CONCURRENCY} slots`
+      : 'Lane serial: every stage except verified ENG collections, one at a time');
 
   const heartbeat = startWorkerHeartbeat(HEARTBEAT_PATH);
   log('info', `Heartbeat ticker started → ${HEARTBEAT_PATH} (every 30s)`);
@@ -3767,7 +3909,14 @@ async function main() {
       shouldStop,
       pollOnce,
       realtimeTables: ['he_jobs'],
+      ...(ENG_LANE_WAKES ? {
+        nextDueInMs: nextEngCollectionDueInMs,
+        registerWake: (wake: () => void) => { wakeEngLane = wake; },
+      } : {}),
     });
+    // SIGTERM stops admission, not already-paid work. Wait for every running
+    // collection's stage and finalization before the final recovery sweep.
+    await Promise.allSettled([...activeCollections.values()].map((entry) => entry.task));
     // Последний проход сборщика перед остановкой: список переживает
     // `docker restart`, но не пересоздание контейнера при деплое. Не дольше
     // минуты: при лежащей БД чтение статуса через `db` может висеть минутами,

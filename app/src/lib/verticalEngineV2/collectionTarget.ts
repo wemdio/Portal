@@ -1,5 +1,7 @@
 import { isVeTransientProviderError } from './collectionErrors';
 
+export const VE_COLLECTION_BUDGET_CAP_REASON = 'Достигнут защитный предел кандидатов или раундов; цель ещё не набрана';
+
 /** Validated-recipient targets are distinct from candidate/cost safety caps. */
 export const VE_PREVIEW_READY_TARGET = 500;
 /** Small first cohort publishes checked contacts before the full preview. */
@@ -268,7 +270,7 @@ export function finishCollectionRound(
   if (result.exhausted) return { ...next, status: 'exhausted', reason: 'Источники выбранного плана исчерпаны' };
   // Холостой раунд бюджет раундов не расходует (см. VE_COLLECTION_ROUND_BUDGET).
   if (next.candidates_processed >= next.max_candidates || (!result.idle && next.round >= next.max_rounds)) {
-    return { ...next, status: 'limited', reason: 'Достигнут защитный предел кандидатов или раундов; цель ещё не набрана' };
+    return { ...next, status: 'limited', reason: VE_COLLECTION_BUDGET_CAP_REASON };
   }
   if (!result.canContinue) {
     return { ...next, status: 'limited', reason: 'Нет подтверждённого продолжения источников; исчерпание рынка не доказано' };

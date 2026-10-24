@@ -13,8 +13,13 @@ services:
       - transcribe-worker
     env_file:
       - .env
+    # Только loopback: снаружи портал доступен через nginx (proxy_pass http://127.0.0.1:3000
+    # во всех vhost), там же X-Real-IP = $remote_addr. С "3000:3000" порт был открыт в интернет
+    # (Docker публикует мимо ufw), и прямой запрос на :3000 сам задавал X-Real-IP — обход
+    # лимитов /api/demo-lead и /api/signup. Контейнеры ходят на portal:3000 по сети compose.
+    # Правка этого файла = полный деплой; на сервере после неё нужен --force-recreate portal.
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     # 24.10.2026: docker.sock больше не монтируется — с ним любая дыра в Next.js
     # давала root на хосте, а код, которому он был нужен (lib/adminBots/docker.ts),
     # нигде не используется. Вместе с ним убран group_add группы docker.
@@ -803,6 +808,8 @@ services:
   worker-hypothesis-engine:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-hypothesis-engine
+    volumes:
+      - he-eng-companies-house:/var/lib/portal-eng-companies-house
     env_file:
       - .env
     environment:
@@ -824,6 +831,9 @@ services:
       - SERPER_API_KEY=${SERPER_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=hypothesis-engine
+      # Полоса этого процесса: все стадии, кроме проверенных ENG-сборов — их
+      # берёт worker-hypothesis-engine-eng ниже (lib/hypothesisEngine/heWorkerLane.ts).
+      - HE_WORKER_LANE=serial
       # Потолок V8 old space — 75% лимита контейнера (deploy ниже), та же
       # ступень, на которую VE2 перешёл после OOM 15.09.2026
       # (docs/incidents/2026-09-15-ve2-resume-oom-and-parallel-projects.md):
@@ -883,6 +893,53 @@ services:
     networks:
       - portal-network
 
+  worker-hypothesis-engine-eng:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-hypothesis-engine-eng
+    volumes:
+      - he-eng-companies-house:/var/lib/portal-eng-companies-house
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - OPENROUTER_HYPOTHESIS_ENGINE_API_KEY=${OPENROUTER_HYPOTHESIS_ENGINE_API_KEY}
+      - OPENROUTER_BRIEF_API_KEY=${OPENROUTER_BRIEF_API_KEY}
+      - HE_MODEL_RESEARCH=openai/gpt-5.5
+      - HE_MODEL_CHAIN=google/gemini-3.1-pro-preview
+      - HE_MODEL_BULK=openai/gpt-5.5
+      - SERPER_API_KEY=${SERPER_API_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_KIND=hypothesis-engine
+      # Только проверенные ENG-сборы клиентов (два слота). Раньше они стояли в
+      # одной очереди с исследованиями RU-инструмента и ждали их часами; каждый
+      # процесс при старте возвращает в очередь только строки своей полосы.
+      - HE_WORKER_LANE=eng_collections
+      # Потолок кучи и лимит памяти — как у worker-hypothesis-engine выше.
+      - NODE_OPTIONS=--max-old-space-size=1536
+    # Дренаж при деплое — та же ветка drain-worker.sh, что у worker-hypothesis-engine.
+    stop_grace_period: 5m
+    labels:
+      - autoheal=true
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/hypothesis-engine-worker-heartbeat && test $$(( $$(date +%s) - $$(cat /tmp/hypothesis-engine-worker-heartbeat | cut -c1-10) )) -lt 300 || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+          # 23.10.2026: 0,5 → 1 ядро. После ускорения проверки компаний (8 сайтов
+          # одновременно, до 4 запросов к моделям) тик упирался в лимит 0,5 ядра
+          # (docker stats ~50% из 50%); на сервере 32 ядра, средняя загрузка ~4,5.
+          cpus: '1.0'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   worker-vertical-engine-v2:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-vertical-engine-v2
@@ -899,6 +956,9 @@ services:
       - VE_MODEL_CHAIN=google/gemini-3.1-pro-preview
       - VE_MODEL_BULK=openai/gpt-5.5
       - VE_MODEL_COLLECTION=${VE_MODEL_COLLECTION:-deepinfra/deepseek-v4-flash-0731}
+      # First pass of the relevance gate (0731 repeats a batch it fails) + gpt-5-mini flex confirmation,
+      # for bases without geography or a frozen audience. Set to the collection model to restore the legacy gate.
+      - VE_RELEVANCE_MODEL=${VE_RELEVANCE_MODEL:-deepseek/deepseek-v4.1-flash-1017}
       - SERPER_API_KEY=${SERPER_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=vertical-engine-v2
@@ -1964,8 +2024,36 @@ services:
     networks:
       - portal-network
 
+  # Ежемесячное обновление лицензий ФНС для сбора VE2 (companies_directory_licences).
+  # Раз в 6 часов сверяет новейший файл реестра МСП на nalog.gov.ru со снимком в
+  # таблице; новый файл (выходит 10-го) читает потоком и заменяет снимок одной
+  # транзакцией. Итог и сбои — в канал health-check бота. Подключение к БД —
+  # DATABASE_URL из .env. См. app/worker/fnsLicencesCron.ts.
+  worker-fns-licences:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-fns-licences
+    command: ["node", "/app/workers/fnsLicencesCron.js"]
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN}
+      - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
+      - FNS_LICENCES_TICK_MS=${FNS_LICENCES_TICK_MS:-21600000}
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+          pids: 256
+    restart: unless-stopped
+    networks:
+      - portal-network
+
 volumes:
   telegram-bot-api-data:
+  he-eng-companies-house:
 
 networks:
   portal-network:

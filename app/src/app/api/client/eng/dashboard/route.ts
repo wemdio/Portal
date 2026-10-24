@@ -126,11 +126,12 @@ function withSafeCampaignName(template: Record<string, unknown>): Record<string,
 }
 
 /**
- * `collect_info` базы на этом маршруте — ТРИ ключа, выбранные JSON-путями, а не
+ * `collect_info` базы на этом маршруте — ключи, выбранные JSON-путями, а не
  * колонка целиком. Дашборд читает из неё ровно их: `refill` (долив, а не база
  * вертикали — isHeRefillBaseRow через toClientEngBase), `stats` (счётчики задач
  * и `companies_total`) и `construct` (этап 'construct' и счётчики адресов,
- * deriveEngVerticalStage). Всё остальное — план, `tasks[]` с предмерж-харвестом
+ * deriveEngVerticalStage), а также компактный прогресс проверки компаний.
+ * Всё остальное — план, `tasks[]` с предмерж-харвестом
  * (до 10 МБ у идущей сборки), мемо гейта — БД больше не пересылает на каждом
  * 15-секундном полле, а не режет уже после пересылки.
  *
@@ -138,14 +139,15 @@ function withSafeCampaignName(template: Record<string, unknown>): Record<string,
  * загрузка, сборка до плана) — `collect_info` null, как у базы без колонки.
  */
 const BASE_COLLECT_INFO_SELECT =
-  'ci_refill:collect_info->refill, ci_stats:collect_info->stats, ci_construct:collect_info->construct';
+  'ci_refill:collect_info->refill, ci_stats:collect_info->stats, ci_construct:collect_info->construct, ci_qualification:collect_info->eng_company_qualification_progress';
 
 function withBaseCollectInfo(row: Record<string, unknown>): Record<string, unknown> {
-  const { ci_refill: refill, ci_stats: stats, ci_construct: construct, ...rest } = row;
+  const { ci_refill: refill, ci_stats: stats, ci_construct: construct, ci_qualification: qualification, ...rest } = row;
   const info: Record<string, unknown> = {};
   if (refill != null) info.refill = refill;
   if (stats != null) info.stats = stats;
   if (construct != null) info.construct = construct;
+  if (qualification != null) info.eng_company_qualification_progress = qualification;
   return { ...rest, collect_info: Object.keys(info).length > 0 ? info : null };
 }
 

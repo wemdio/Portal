@@ -30,6 +30,7 @@ import type {
 } from '../api';
 import { HE, Spinner } from '../design';
 import { Badge, OperatorText, StatusBox, type BadgeTone } from '../ui';
+import { LetterBodyEditor } from '../LetterBodyEditor';
 
 const LANG_OPTIONS: Array<{ value: VeChainLanguage; label: string }> = [
   { value: 'ru', label: 'RU' },
@@ -594,6 +595,7 @@ export function Step3Content(props: {
                 return (
                   <li key={idx}>
                     <ChainLetterEditor
+                      chainId={chain.id}
                       letterIndex={idx}
                       letter={letter}
                       baseDays={cumulativeWaitDays(letters, idx - 1)}
@@ -958,6 +960,7 @@ function TimingRow({ index, value, valid, fromFirst, onChange }: {
  * формы по versionKey (без useEffect), репорт dirty наверх в ref родителя.
  */
 function ChainLetterEditor({
+  chainId,
   letterIndex,
   letter,
   baseDays,
@@ -966,6 +969,7 @@ function ChainLetterEditor({
   onCancel,
   onDirtyChange,
 }: {
+  chainId: string;
   letterIndex: number;
   letter: VeChainLetterDto;
   /** Сумма wait_days писем ДО этого — для подписи «через N дней от старта». */
@@ -1022,18 +1026,20 @@ function ChainLetterEditor({
           className={HE.input}
         />
       </label>
-      <label className="mt-3 block">
+      <div className="mt-3">
         <span className={`mb-1 block ${HE.eyebrow}`}>Текст письма</span>
-        <textarea
+        <LetterBodyEditor
           value={body}
-          onChange={(e) => {
-            setBody(e.target.value);
+          label={`Текст письма ${letterIndex + 1}`}
+          disabled={saving}
+          campaign={chainId}
+          content={`letter_${letterIndex + 1}_a`}
+          onChange={(nextBody) => {
+            setBody(nextBody);
             markDirty();
           }}
-          rows={Math.min(20, Math.max(8, body.split('\n').length + 1))}
-          className={`${HE.input} leading-relaxed`}
         />
-      </label>
+      </div>
       <div className="mt-3 flex items-center justify-end gap-2">
         <button type="button" onClick={onCancel} disabled={saving} className={HE.btnGhost}>
           Отмена

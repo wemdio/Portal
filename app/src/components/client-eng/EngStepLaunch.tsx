@@ -4,16 +4,19 @@
  * Шаг 3 «Launch» клиентского ENG-кабинета — ОДНА кнопка и дальше прогресс.
  *
  * До нажатия: какие рынки запускаются («Change» — на шаг 2), часы отправки
- * (редактор SendingWindowEditor; пояс браузера, если он есть в списке
- * сервера, иначе дефолт сервера), что произойдёт дальше и строка про доступ к
- * отправке (GET /api/client/eng/projects/[id]/launch). «Launch» —
+ * (редактор SendingWindowEditor; пункты — `timezone_options ?? timezones`
+ * ответа, план §1C; стартовый пояс — сохранённый с «Launch», иначе
+ * `suggested_timezone` по странам сбора проекта, иначе пояс браузера среди
+ * прежних 8 `timezones`, иначе дефолт сервера), что произойдёт дальше и строка
+ * про доступ к отправке (GET /api/client/eng/projects/[id]/launch). Страны
+ * проекта без США и без подсказки пояса — строка «выберите пояс сами». «Launch» —
  * POST .../launch {schedule}: записывает желание «запускай сам» и ставит
- * работу тем же реконсилером, что прежняя кнопка автопилота (письма → сборка →
- * анализ → итоговые письма), а готовый рынок запускает автозапуск воркера тем
+ * работу тем же реконсилером, что прежняя кнопка автопилота (сборка →
+ * анализ → письма), а готовый рынок запускает автозапуск воркера тем
  * же путём, что кнопка «Launch now» (runHeEngTemplateLaunch: все гейты).
  *
- * После нажатия: по каждому рынку — строка прогресса (Letters · Contacts ·
- * Checked · Final letters · Sending), одна строка состояния и кнопки, которые
+ * После нажатия: по каждому рынку — строка прогресса (Contacts · Checked ·
+ * Letters · Sending), одна строка состояния и кнопки, которые
  * это состояние требует: «Launch now», «Rewrite letters», «Collect again»,
  * «Resume daily top-up», ссылка Support. У запущенного рынка — блок отправки
  * S2 (статус, отправлено/ответы, Pause / Resume / Start the rest), «Sending
@@ -28,7 +31,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Check, CircleDashed, Mail, Pencil, Rocket, RotateCcw, Wand2, X } from 'lucide-react';
+import { ArrowLeft, Check, CircleDashed, Mail, Rocket, RotateCcw, Wand2, X } from 'lucide-react';
 import type { HeHypothesis, HeTemplate, HeVertical } from '@/lib/hypothesisEngine/types';
 import { heLaunchIsIncomplete, parseLaunchInfo } from '@/lib/hypothesisEngine/launchHandoff';
 // Тот же предикат «кнопка поставит анализ заново», что у Command Center
@@ -45,6 +48,7 @@ import {
   EngPaidAccessError,
   collectEngBase,
   engLaunchRunDays,
+  engCollectCountriesOf,
   engSendingAccessOf,
   engTemplateNeedsRewrite,
   fetchEngProjectLaunch,
@@ -63,7 +67,6 @@ import {
   type EngSendingAccessState,
   type EngSendingWindow,
   type EngSendingWindowTimezoneOption,
-  type HeChainDto,
   type HeJobSummary,
 } from './api-client';
 import {
@@ -71,7 +74,6 @@ import {
   ENG_SENDING_OFF_EN,
   engAutopilotHoldText,
   engBaseStopSendingOffText,
-  engChainDraftText,
   engEarlierBaseStopText,
   engLaunchSendingText,
   engLettersBrandInputText,
@@ -82,6 +84,7 @@ import {
 } from './engText';
 import { EngPaidAccessNotice, EngResendLinkControls, EngSupportText } from './EngPaidAccess';
 import { EngSendingBlock } from './EngSending';
+import { EngCollectionTargetSummary, engCollectionTargetView } from './EngCollectionTarget';
 import { heProjectAwaitsDescription } from './clientFailureText';
 import {
   AutopilotDecisions,
@@ -92,20 +95,26 @@ import {
   ownAutoBaseState,
   stopTextOffersRestart,
 } from './EngStepBases';
-import { ChainEditor } from './EngStepLetters';
 import {
   BasePreview,
   FinalLetters,
   LaunchedSendingWindow,
   SendingWindowEditor,
+  engTimezoneFallbackLabel,
+  engTimezoneOptionsOf,
   isSendingWindowUsable,
   sendingWindowSummary,
+  tzOffsetMinutes,
   type FinalLettersState,
   type SendingWindowConfig,
 } from './EngStepReview';
 import { EngRefillPauseNote } from './EngStepVerticals';
 import { EngBadge, EngCard, EngEyebrow, EngSpinner, engBaseAnalysisStopped, fmtDate } from './ui';
 import type { EngDetail } from './EngProjectWizard';
+import { ENG_COUNTRY_US } from '@/lib/hypothesisEngine/engCountries';
+
+/** Страны проекта в разных поясах, и сервер пояс не подсказал (план §1C). */
+const MULTI_ZONE_HINT = 'Your countries are in different time zones. Choose the time zone your emails should follow.';
 
 /**
  * Через сколько готовый рынок, который автозапуск ещё не взял, получает «Starting
@@ -132,31 +141,14 @@ const AUTO_RETRY_LAUNCH_NOW_CODES: ReadonlySet<string> = new Set(['server_error'
 
 /* ── Пояс браузера в списке сервера ── */
 
-/** Смещение пояса от UTC в минутах на момент `at`; null — пояс не читается. */
-function tzOffsetMinutes(timeZone: string, at: Date): number | null {
-  try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone,
-      hourCycle: 'h23',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    }).formatToParts(at);
-    const get = (type: string) => Number(parts.find((p) => p.type === type)?.value);
-    const asUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour') % 24, get('minute'));
-    return Number.isFinite(asUtc) ? Math.round((asUtc - at.getTime()) / 60_000) : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
- * Пояс браузера клиента — если он есть в списке сервера: тот же идентификатор
- * или пояс списка с теми же часами и зимой, и летом (America/New_York →
- * America/Detroit). Не нашёлся — null, и редактор открывается с дефолтом
- * сервера.
+ * Пояс браузера клиента — если он есть в списке: тот же идентификатор или пояс
+ * списка с теми же часами и зимой, и летом (America/New_York →
+ * America/Detroit). Список — только прежние 8 `timezones` ответа, НЕ полный
+ * `timezone_options` (план §1C): подбор по браузеру остаётся прежним, а
+ * европейские часы клиент выбирает сам или их подсказывают страны проекта
+ * (`suggested_timezone`). Не нашёлся — null, и редактор открывается с
+ * дефолтом сервера.
  */
 function browserTimezoneIn(options: readonly EngSendingWindowTimezoneOption[]): string | null {
   let own = '';
@@ -236,7 +228,7 @@ function launchHeaderText(s: {
     : 'Automatic sending is not available right now, so when a market is ready, press «Launch now» on it to start sending.';
   if (s.requested && s.available !== false) {
     const on = `Automatic launch is on${s.requestedAt ? ` since ${fmtDate(s.requestedAt)}` : ''}`;
-    return s.blocked ? `${on}.` : `${on}: each market starts sending by itself once its final letters are ready.`;
+    return s.blocked ? `${on}.` : `${on}: each market starts sending by itself once its letters are ready.`;
   }
   if (s.requested) return notAvailable;
   if (s.cancelledAt) {
@@ -248,7 +240,7 @@ function launchHeaderText(s: {
   if (s.available === false) return notAvailable;
   return s.blocked
     ? 'Automatic launch is not on for this project.'
-    : 'Automatic launch is not on for this project. Press «Launch» to turn it on — each market then starts sending by itself once its final letters are ready.';
+    : 'Automatic launch is not on for this project. Press «Launch» to turn it on — each market then starts sending by itself once its letters are ready.';
 }
 
 /**
@@ -295,10 +287,9 @@ function launchUnavailableTail(sendingAccess: EngSendingAccessState | undefined)
 /** Итог «Launch» проекта одной-двумя фразами. */
 function launchResultText(res: EngProjectLaunchResponse): { text: string; held: boolean } {
   const parts: string[] = [];
-  if (res.chains_enqueued) parts.push(`letters for ${plural(res.chains_enqueued, 'market', 'markets')}`);
   if (res.collects_enqueued) parts.push(`collecting contacts for ${plural(res.collects_enqueued, 'market', 'markets')}`);
   if (res.analyses_requeued) parts.push(`checking contacts for ${plural(res.analyses_requeued, 'market', 'markets')}`);
-  if (res.templates_enqueued) parts.push(`final letters for ${plural(res.templates_enqueued, 'market', 'markets')}`);
+  if (res.templates_enqueued) parts.push(`letters for ${plural(res.templates_enqueued, 'market', 'markets')}`);
   const again = res.collect_again_verticals ?? 0;
   const againNote =
     again === 0
@@ -347,8 +338,8 @@ function launchResultText(res: EngProjectLaunchResponse): { text: string; held: 
   const tail =
     res.auto_launch === 'on'
       ? res.sending_access === 'not_enabled'
-        ? ' Each market starts sending by itself once its final letters are ready and our team has finished the one-time check of your account. We’ll email you when sending starts, or if something stops and needs you.'
-        : ' Each market starts sending by itself once its final letters are ready. We’ll email you when sending starts, or if something stops and needs you.'
+        ? ' Each market starts sending by itself once its letters are ready and our team has finished the one-time check of your account. We’ll email you when sending starts, or if something stops and needs you.'
+        : ' Each market starts sending by itself once its letters are ready. We’ll email you when sending starts, or if something stops and needs you.'
       : launchUnavailableTail(res.sending_access);
   return {
     text: `${head}${againNote}${tail}`,
@@ -392,8 +383,8 @@ function launchMoreResultText(
   const head = `Started ${plural(started.length, 'more market', 'more markets')}: ${namesList(started)}.`;
   const auto = res.auto_launch === 'on';
   const how = auto
-    ? ' We write their letters, find and check contacts and start sending by ourselves, the same way as your other markets.'
-    : ' We write their letters, find and check contacts and write their final letters by ourselves.';
+    ? ' We find and check contacts, then write their letters and start sending by ourselves, the same way as your other markets.'
+    : ' We find and check contacts, then write their letters.';
   const tail = !auto
     ? launchUnavailableTail(res.sending_access)
     : res.sending_access === 'not_enabled'
@@ -411,15 +402,6 @@ type DotState = 'done' | 'current' | 'waiting' | 'stopped';
 interface MarketView {
   vertical: HeVertical;
   selected: boolean;
-  chain: HeChainDto | undefined;
-  chainJob: boolean;
-  /** Последняя джоба писем рынка упала или отменена, а готовых писем нет. */
-  chainStopped: boolean;
-  /**
-   * Тормоз цепочек рынка исчерпан (`chain_exhausted` деталки): «Launch» новую
-   * цепочку не поставит — карточка зовёт в Support. Только при `chainStopped`.
-   */
-  chainExhausted: boolean;
   ownBases: EngBaseSummary[];
   /** База, по которой идёт или идёт запуск: база шаблона, иначе последняя своя авто-база. */
   base: EngBaseSummary | null;
@@ -471,30 +453,14 @@ export function engRetiredTemplateOf<T extends { status?: unknown; created_at?: 
   return newest !== undefined && newest.status === 'failed' ? newest : undefined;
 }
 
-/**
- * Рынки с исчерпанным тормозом цепочек — серверный ключ деталки
- * `chain_exhausted` (api/client/eng/projects/[id] → autopilotReconcile
- * .readHeChainExhaustedVerticals: засчитанные прогоны цепочки рынка дошли до
- * порога, «Launch» его пропустит). Капнутого списка `jobs` для этого мало —
- * считает сервер. Ключа нет (сбой чтения, старый сервер) — пусто, и карточка
- * говорит по-прежнему. Поля нет в типе api-client — читаем осторожно.
- */
-function chainExhaustedIdsOf(detail: EngDetail): ReadonlySet<string> {
-  const raw = (detail as { chain_exhausted?: unknown }).chain_exhausted;
-  return new Set(Array.isArray(raw) ? raw.filter((v): v is string => typeof v === 'string') : []);
-}
-
 function buildMarketView(detail: EngDetail, vertical: HeVertical, selected: boolean): MarketView {
   const jobs = (detail.jobs ?? []) as HeJobSummary[];
-  const chains = (detail.chains ?? []) as HeChainDto[];
   const bases = (detail.bases ?? []) as EngBaseSummary[];
   const ownBases = bases.filter((b) => b.vertical_id === vertical.id);
   const baseIds = new Set(ownBases.map((b) => b.id));
   const templates = ((detail.templates ?? []) as HeTemplate[]).filter((t) => t.vertical_id === vertical.id);
   const template = marketTemplate(templates);
   const launch = template ? parseLaunchInfo((template as { launch_info?: unknown }).launch_info) : null;
-  const latestChainJob = jobs.find((j) => j.stage === 'chain' && payloadOf(j).vertical_id === vertical.id);
-  const chain = chains.find((c) => c.vertical_id === vertical.id && c.status === 'ready');
   const templateJob = jobs.some((j) => {
     if (j.stage !== 'template' || !isLive(j)) return false;
     const p = payloadOf(j);
@@ -507,16 +473,9 @@ function buildMarketView(detail: EngDetail, vertical: HeVertical, selected: bool
   const row = template
     ? ((detail.auto_launch?.markets ?? []).find((m) => m.template_id === template.id) ?? null)
     : null;
-  const chainJob = latestChainJob !== undefined && isLive(latestChainJob);
-  const chainStopped =
-    !chain && latestChainJob !== undefined && (latestChainJob.status === 'failed' || latestChainJob.status === 'cancelled');
   return {
     vertical,
     selected,
-    chain,
-    chainJob,
-    chainStopped,
-    chainExhausted: chainStopped && !chainJob && chainExhaustedIdsOf(detail).has(vertical.id),
     ownBases,
     base,
     template,
@@ -527,13 +486,12 @@ function buildMarketView(detail: EngDetail, vertical: HeVertical, selected: bool
   };
 }
 
-/** Пять точек прогресса рынка. */
+/** Сбор, проверка, единственное написание писем и отправка. */
 function marketDots(view: MarketView): Array<{ label: string; state: DotState }> {
   const { base, template, launch, row } = view;
   const construct = base?.collect_info?.construct;
   const constructStarted = construct !== undefined && construct !== null;
   const analysisStopped = base ? engBaseAnalysisStopped(base) : false;
-  const letters: DotState = view.chain || template ? 'done' : view.chainJob ? 'current' : view.chainStopped ? 'stopped' : 'waiting';
   const contacts: DotState =
     template || base?.status === 'analyzing' || base?.status === 'analyzed' || (base?.status === 'collecting' && constructStarted)
       ? 'done'
@@ -550,7 +508,7 @@ function marketDots(view: MarketView): Array<{ label: string; state: DotState }>
         : (base?.status === 'collecting' && constructStarted) || base?.status === 'analyzing'
           ? 'current'
           : 'waiting';
-  const finalLetters: DotState = template ? 'done' : view.templateJob ? 'current' : view.retired ? 'stopped' : 'waiting';
+  const letters: DotState = template ? 'done' : view.templateJob ? 'current' : view.retired ? 'stopped' : 'waiting';
   const sending: DotState = launch
     ? heLaunchIsIncomplete(launch)
       ? 'current'
@@ -561,10 +519,9 @@ function marketDots(view: MarketView): Array<{ label: string; state: DotState }>
         ? 'stopped'
         : 'waiting';
   return [
-    { label: 'Letters', state: letters },
     { label: 'Contacts', state: contacts },
     { label: 'Checked', state: checked },
-    { label: 'Final letters', state: finalLetters },
+    { label: 'Letters', state: letters },
     { label: 'Sending', state: sending },
   ];
 }
@@ -946,7 +903,7 @@ function retiredLine(
    */
   brandInputs: ReturnType<typeof engLettersBrandInputs> = [],
 ): MarketLine {
-  const head = 'New final letters for this market were not written, so nothing was sent from it.';
+  const head = 'New letters for this market were not written, so nothing was sent from it.';
   if (tries && 'left' in tries && tries.left <= 0) {
     return {
       text: `${head} All ${tries.max} letter-writing tries for this audience are used — message Support to get new letters.`,
@@ -997,14 +954,14 @@ const SPEND_PAUSED_NEXT = 'Work on this project is paused on our side; our team 
 
 /**
  * Остановку стадии рынка чинит только команда (EngTeamFixStop деталки,
- * engDashboard.ts): письма ('letters'), проверка контактов ('check' — только
+ * engDashboard.ts): проверка контактов ('check' — только
  * когда «Launch» её заново ставит, иначе карточка и так зовёт в Support),
  * итоговые письма ('final_letters') или новые письма «Rewrite letters»
  * ('rewrite'). Кнопка до починки упрётся в тот же отказ, поэтому карточка
  * зовёт сначала в Support, как письмо об этой остановке. Решает ТЕКУЩАЯ
  * остановка карточки: идущая работа, готовые письма или другая база — не она.
  */
-export type EngMarketTeamFix = 'letters' | 'check' | 'final_letters' | 'rewrite';
+export type EngMarketTeamFix = 'check' | 'final_letters' | 'rewrite';
 
 function marketTeamFixOf(view: MarketView, detail: EngDetail): EngMarketTeamFix | null {
   const stops = detail.team_fix_stops;
@@ -1029,9 +986,6 @@ function marketTeamFixOf(view: MarketView, detail: EngDetail): EngMarketTeamFix 
       return requeues ? 'check' : null;
     }
     return null;
-  }
-  if (view.chainStopped && !view.chainJob) {
-    return engTeamFixStopOf(stops, 'chain', view.vertical.id) ? 'letters' : null;
   }
   return null;
 }
@@ -1087,7 +1041,6 @@ function launchNowAccessLine(
 function preparingLine(
   view: MarketView,
   ctx: {
-    autopilotOn: boolean;
     researched: boolean;
     spendPaused: boolean;
     teamFix: EngMarketTeamFix | null;
@@ -1115,7 +1068,7 @@ function preparingLine(
     ctx.brandInputs.length > 0 && !ctx.spendPaused
       ? { text: engLettersBrandInputText(ctx.brandInputs, ctx.launchBlocked ? 'none' : 'launch'), tone: 'amber', actions: [] }
       : null;
-  if (view.templateJob) return { text: 'Writing the final letters…', tone: 'muted', spinner: true, actions: [] };
+  if (view.templateJob) return { text: 'Writing the letters…', tone: 'muted', spinner: true, actions: [] };
   if (base) {
     // Идущую сборку описывает её собственный прогресс (CollectProgress).
     if (base.status === 'collecting') return null;
@@ -1123,6 +1076,16 @@ function preparingLine(
       return { text: 'Checking the contacts…', tone: 'muted', spinner: true, actions: [] };
     }
     if (base.status === 'analyzed') {
+      const collectionTarget = engCollectionTargetView(base);
+      if (collectionTarget?.shortfall) {
+        return {
+          text: base.row_count > 0
+            ? 'The collection ended below its target. Review the saved contacts before writing letters.'
+            : 'The collection ended below its target. No contacts are ready in the first batch.',
+          tone: 'amber',
+          actions: [],
+        };
+      }
       if (base.row_count <= 0) {
         return {
           text: 'The latest collection came back with no contacts, so there is nothing to send from it. Message Support.',
@@ -1139,12 +1102,12 @@ function preparingLine(
       }
       return {
         text: ctx.spendPaused
-          ? `The contacts are ready, and the final letters have not been written yet. ${SPEND_PAUSED_NEXT}`
+          ? `The contacts are ready, and the letters have not been written yet. ${SPEND_PAUSED_NEXT}`
           : ctx.teamFix === 'final_letters'
-            ? `The contacts are ready, and writing the final letters stopped. ${teamFixNext}`
+            ? `The contacts are ready, and writing the letters stopped. ${teamFixNext}`
             : ctx.launchBlocked
-              ? 'The contacts are ready, and the final letters have not been written yet.'
-              : 'The contacts are ready, and the final letters have not been written yet. If nothing is running on this project, press «Launch» above to move it on; if that does not help, message Support.',
+              ? 'The contacts are ready, and the letters have not been written yet.'
+              : 'The contacts are ready, and the letters have not been written yet. If nothing is running on this project, press «Launch» above to move it on; if that does not help, message Support.',
         tone: ctx.teamFix === 'final_letters' && !ctx.spendPaused ? 'amber' : 'muted',
         actions: [],
       };
@@ -1152,61 +1115,15 @@ function preparingLine(
     // 'failed' и остановленный анализ — своими ветками карточки (с кнопками).
     return null;
   }
-  if (view.chainJob) return { text: 'Writing the letters…', tone: 'muted', spinner: true, actions: [] };
-  if (view.chainStopped) {
-    // Тормоз цепочек рынка исчерпан (серверный `chain_exhausted`): «Launch»
-    // новую цепочку не поставит — ни сразу, ни после правки брифа или починки
-    // командой (реконсилер: 'chain_exhausted'). Звать к нему — обещать повтор,
-    // которого не будет; путь один — Support.
-    if (view.chainExhausted) {
-      return {
-        text: 'Writing the letters stopped before it finished. Message Support to have the letters looked at.',
-        tone: 'amber',
-        actions: [],
-      };
-    }
-    if (brandInputLine && ctx.teamFix !== 'letters') return brandInputLine;
-    return {
-      text: ctx.spendPaused
-        ? `Writing the letters stopped before it finished. ${SPEND_PAUSED_NEXT}`
-        : ctx.teamFix === 'letters'
-          ? `Writing the letters stopped before it finished. ${teamFixNext}`
-          : ctx.launchBlocked
-            ? 'Writing the letters stopped before it finished.'
-            : 'Writing the letters stopped before it finished. Press «Launch» above to try again; if it stops again, message Support.',
-      tone: 'amber',
-      actions: [],
-    };
-  }
-  if (view.chain) {
-    if (ctx.spendPaused) return { text: `The letters are written. ${SPEND_PAUSED_NEXT}`, tone: 'muted', actions: [] };
-    // Автопилот ставит сборку сам сразу после писем, но общий потолок расхода
-    // ENG пропускает этот шаг без паузы (spendCeiling.ts) — тогда двигает его
-    // только «Launch»; фраза зовёт к нему, если ничего не идёт (как у готовых
-    // контактов ниже).
-    return ctx.autopilotOn
-      ? {
-          text: ctx.launchBlocked
-            ? 'The letters are written; collecting contacts comes next.'
-            : 'The letters are written; collecting contacts comes next. If nothing is running on this project, press «Launch» above to move it on.',
-          tone: 'muted',
-          actions: [],
-        }
-      : ctx.launchBlocked
-        ? { text: 'The letters are written.', tone: 'muted', actions: [] }
-        : { text: 'The letters are written. Press «Launch» above to collect contacts for this market.', tone: 'muted', actions: [] };
-  }
   if (view.selected && ctx.researched) {
-    // Наш бренд в поле брифа: «Launch» письма этого рынка не поставит, пока
-    // поле не поправлено (реконсилер, причина 'brand_input') — фраза называет поле.
-    if (brandInputLine) return brandInputLine;
+    // Старые черновики и их ошибки не мешают начать сбор базы.
     return ctx.spendPaused
-      ? { text: `Not started yet. ${SPEND_PAUSED_NEXT}`, tone: 'muted', actions: [] }
+      ? { text: `Contact collection has not started yet. ${SPEND_PAUSED_NEXT}`, tone: 'muted', actions: [] }
       : ctx.launchBlocked
-        ? { text: 'Not started yet.', tone: 'muted', actions: [] }
+        ? { text: 'Contact collection has not started yet.', tone: 'muted', actions: [] }
         : ctx.moreLabel
-        ? { text: `Not started yet — press «${ctx.moreLabel}» above to start it.`, tone: 'muted', actions: [] }
-        : { text: 'Not started yet — press «Launch» above to start it.', tone: 'muted', actions: [] };
+        ? { text: `Contact collection has not started yet — press «${ctx.moreLabel}» above to start it.`, tone: 'muted', actions: [] }
+        : { text: 'Contact collection has not started yet — press «Launch» above to start it.', tone: 'muted', actions: [] };
   }
   return null;
 }
@@ -1245,7 +1162,6 @@ function MarketCard({
   const [notes, setNotes] = useState<string[]>([]);
   const [refusal, setRefusal] = useState<EngPaidAccessError | null>(null);
   const [showLetters, setShowLetters] = useState(false);
-  const [showDraft, setShowDraft] = useState(false);
   /**
    * Попытки писем аудитории снятого шаблона (GET …/rewrite — тот же бюджет,
    * что решает POST). null — ещё не прочитаны; error — не прочитались (кнопка
@@ -1409,14 +1325,13 @@ function MarketCard({
     line =
       detail.project.autopilot_hold?.code === 'spend_paused'
         ? {
-            text: `New final letters for this market were not written, so nothing was sent from it. ${SPEND_PAUSED_NEXT}`,
+            text: `New letters for this market were not written, so nothing was sent from it. ${SPEND_PAUSED_NEXT}`,
             tone: 'amber',
             actions: [],
           }
         : retiredLine(retiredTries, teamFix === 'rewrite', launchBlocked, brandInputs);
   } else {
     line = preparingLine(view, {
-      autopilotOn: detail.project.autopilot === true,
       researched,
       spendPaused: detail.project.autopilot_hold?.code === 'spend_paused',
       teamFix,
@@ -1535,8 +1450,8 @@ function MarketCard({
       // письма ждут «Launch now» на этой карточке.
       setNotes([
         autoOn
-          ? 'We are writing new final letters for this market. It starts sending by itself when they are ready and pass the check.'
-          : 'We are writing new final letters for this market. When they are ready, press «Launch now» on this market to start sending.',
+          ? 'We are writing new letters for this market. It starts sending by itself when they are ready and pass the check.'
+          : 'We are writing new letters for this market. When they are ready, press «Launch now» on this market to start sending.',
       ]);
     } catch (e) {
       if (e instanceof EngPaidAccessError) setRefusal(e);
@@ -1637,6 +1552,7 @@ function MarketCard({
       )}
 
       {base && base.status === 'collecting' && <CollectProgress base={base} />}
+      {base && base.status !== 'collecting' && <EngCollectionTargetSummary base={base} />}
       {/* Объём «к отправке» — до запуска рынка, в том числе у готовых
           итоговых писем, которые ждут автозапуска или «Launch now»; после
           запуска строка выше печатает факт (`leads_count`). */}
@@ -1690,17 +1606,6 @@ function MarketCard({
             {showLetters ? 'Hide letters' : 'Preview letters'}
           </button>
         )}
-        {view.chain && !template && (
-          <button
-            type="button"
-            onClick={() => setShowDraft((v) => !v)}
-            aria-expanded={showDraft}
-            className="ds-btn-secondary inline-flex items-center gap-1.5 text-xs"
-          >
-            <Pencil className="h-3 w-3" />
-            {showDraft ? 'Hide draft letters' : 'Edit draft letters'}
-          </button>
-        )}
       </div>
 
       {actions.has('resend') && (
@@ -1727,9 +1632,6 @@ function MarketCard({
       {launch && <EngRefillPauseNote vertical={vertical} onChanged={onChanged} />}
 
       {showLetters && template && finalState && <FinalLetters template={template} state={finalState} />}
-      {showDraft && view.chain && !template && (
-        <ChainEditor chain={view.chain} draftNote={engChainDraftText(false, 'letters')} onSaved={onChanged} />
-      )}
       {base && (base.status === 'analyzed' || base.status === 'analyzing') && <BasePreview base={base} />}
     </EngCard>
   );
@@ -1799,19 +1701,50 @@ export function EngStepLaunch({
     };
   }, [projectId]);
 
+  // Прежние 8 — только для подбора по браузеру; в выпадашке — полный список, если он пришёл.
   const timezones = useMemo(() => (info && Array.isArray(info.timezones) ? info.timezones : []), [info]);
+  /**
+   * Пояс по странам проекта. Сервер отдаёт его под тем же выключателем, что и
+   * полный список (HE_ENG_TIMEZONES_ALL), и отправляет в нём (launchSchedule,
+   * источник 'suggested'), когда клиент пояс не выбрал, — значит, и редактор
+   * обязан открыться на нём. Если пояса среди пунктов всё же нет, дописываем
+   * его в конец пунктом с понятной подписью (смещения из Intl, а не название
+   * из идентификатора: Arctic/Longyearbyen стоит здесь за Амстердам и Берлин).
+   */
+  const suggestedTz =
+    info && typeof info.suggested_timezone === 'string' && info.suggested_timezone ? info.suggested_timezone : null;
+  const timezoneOptions = useMemo(() => {
+    const list = info ? engTimezoneOptionsOf(info) : [];
+    if (!suggestedTz || list.length === 0 || list.some((o) => o.value === suggestedTz)) return list;
+    return [...list, { value: suggestedTz, label: engTimezoneFallbackLabel(suggestedTz, { suggested: true }) }];
+  }, [info, suggestedTz]);
   const weekdays = useMemo(() => (info && Array.isArray(info.weekdays) ? info.weekdays : []), [info]);
-  /** Часы, с которых открывается редактор: сохранённые с «Launch», иначе дефолт сервера в поясе браузера. */
+  /**
+   * Часы, с которых открывается редактор: сохранённые с «Launch»; иначе дефолт
+   * сервера в поясе по странам проекта (`suggested_timezone`), иначе в поясе
+   * браузера среди прежних 8, иначе как есть.
+   */
   const baseWindow = useMemo<EngSendingWindow | null>(() => {
     if (!info) return null;
     if (info.schedule) return { ...info.schedule, days: [...info.schedule.days] };
     if (!info.default) return null;
-    const browserTz = browserTimezoneIn(timezones);
-    return { ...info.default, days: [...info.default.days], ...(browserTz ? { timezone: browserTz } : {}) };
-  }, [info, timezones]);
+    const startTz = suggestedTz ?? browserTimezoneIn(timezones);
+    return { ...info.default, days: [...info.default.days], ...(startTz ? { timezone: startTz } : {}) };
+  }, [info, timezones, suggestedTz]);
   const windowValue = windowDraft ?? baseWindow;
   const windowConfig: SendingWindowConfig | null =
-    windowValue && timezones.length > 0 && weekdays.length > 0 ? { value: windowValue, timezones, weekdays } : null;
+    windowValue && timezoneOptions.length > 0 && weekdays.length > 0
+      ? { value: windowValue, timezones: timezoneOptions, weekdays }
+      : null;
+  // Страны сбора без США, и сервер общий пояс не подсказал — просим выбрать.
+  // Только при полном списке поясов: без него сервер подсказку не считает
+  // вовсе, и фраза «страны в разных поясах» могла бы оказаться неправдой.
+  const projectCountries = engCollectCountriesOf(detail.project.brief).countries;
+  const fullTimezoneList = Array.isArray(info?.timezone_options) && (info?.timezone_options?.length ?? 0) > 0;
+  const tzHint =
+    info && fullTimezoneList && projectCountries.length > 0 && !projectCountries.includes(ENG_COUNTRY_US) && !suggestedTz
+      ? MULTI_ZONE_HINT
+      : undefined;
   const windowUsable = isSendingWindowUsable(windowConfig);
 
   const auto = detail.auto_launch ?? null;
@@ -2023,12 +1956,21 @@ export function EngStepLaunch({
           </span>
         )}
       </div>
+      {/* Подсказка про пояса стран — и у свёрнутой сводки: иначе клиент с
+          европейским списком запустил бы рынок по часам Детройта, не открыв
+          редактор. В открытом редакторе она стоит под выпадашкой поясов. */}
+      {tzHint && windowConfig && !editingWindow && (
+        <span className="text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+          {tzHint}
+        </span>
+      )}
       {editingWindow && windowConfig && (
         <>
           <SendingWindowEditor
             config={windowConfig}
             onChange={setWindowDraft}
             disabled={launching || savingWindow}
+            hint={tzHint}
           />
           {mode === 'intent' && (
             <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -2099,14 +2041,13 @@ export function EngStepLaunch({
                   {/* При выключенной отправке аккаунта «Launch now» на
                       карточках нет (launchNowAccessLine) — не зовём. */}
                   {access?.blocks
-                    ? 'We write the letters, find and check contacts and write the final letters by ourselves. Automatic sending is not available right now.'
-                    : 'We write the letters, find and check contacts and write the final letters by ourselves. Automatic sending is not available right now, so when a market is ready, press «Launch now» on it to start sending.'}
+                    ? 'We find and check contacts, then write the letters. Automatic sending is not available right now.'
+                    : 'We find and check contacts, then write the letters. Automatic sending is not available right now, so when a market is ready, press «Launch now» on it to start sending.'}
                 </span>
               ) : (
                 <>
                   <span>
-                    We write the letters, find and check contacts, write the final letters and start sending by
-                    ourselves.
+                    We find and check contacts, then write the letters and start sending by ourselves.
                     {typeof prepareHours === 'number' && prepareHours > 0
                       ? ` Getting a market ready to send usually takes ${prepareTimeText(prepareHours)} (based on recent projects).`
                       : ''}
@@ -2115,7 +2056,7 @@ export function EngStepLaunch({
                 </>
               )}
               <span style={{ color: 'var(--cp-text-l)' }}>
-                Each market&apos;s final letters show up under «Preview letters» as soon as they are written.
+                Each market&apos;s letters show up under «Preview letters» as soon as they are written.
               </span>
             </div>
           </>

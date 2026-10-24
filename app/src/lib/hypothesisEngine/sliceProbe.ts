@@ -19,6 +19,7 @@
  * не тем людям — цена пренебрежимая.
  */
 
+import { rethrowHeEngBaseBudgetError } from './engBaseBudget';
 import { z } from 'zod';
 import { callLLMWithSchema, getHeModel, type LLMMessage } from './llm';
 import { companyPartOfSummaryEn } from './relevanceGate';
@@ -178,6 +179,7 @@ export async function probeSliceRelevance(input: {
       costUsd: llm.costUsd,
     };
   } catch (e) {
+    rethrowHeEngBaseBudgetError(e);
     log?.(`[sliceProbe] проба не состоялась: ${e instanceof Error ? e.message : String(e)}`);
     return empty;
   }

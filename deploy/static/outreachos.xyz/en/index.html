@@ -26,6 +26,105 @@
   <!-- Превью ссылки в мессенджерах берётся с этой страницы. В русские чаты давать /ru/ (или /?lang=ru),
        не голый домен: бот Telegram ходит без Accept-Language и cookie и получит английскую версию.
        После публикации обновить кэш превью /, /en/ и /ru/ через @webpagebot в Telegram. -->
+  <!-- Структурированные данные для поисковиков и ИИ-агентов: только текст этой страницы, без цен и контактов. Меняются ВМЕСТЕ с hero, блоком #pilot и FAQ ниже — иначе разметка будет спорить со страницей. -->
+  <script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "Organization",
+   "@id": "https://polzaagency.com/#organization",
+   "name": "Polza Agency",
+   "url": "https://polzaagency.com"
+  },
+  {
+   "@type": "WebSite",
+   "@id": "https://outreachos.xyz/#website",
+   "url": "https://outreachos.xyz/",
+   "name": "OutreachOS",
+   "inLanguage": [
+    "en",
+    "ru"
+   ],
+   "publisher": {
+    "@id": "https://polzaagency.com/#organization"
+   }
+  },
+  {
+   "@type": "Service",
+   "@id": "https://outreachos.xyz/en/#service",
+   "name": "OutreachOS",
+   "serviceType": "Niche-built B2B outbound",
+   "brand": {
+    "@type": "Brand",
+    "name": "OutreachOS"
+   },
+   "provider": {
+    "@id": "https://polzaagency.com/#organization"
+   },
+   "url": "https://outreachos.xyz/en/",
+   "description": "AI studies your product and drafts 10 ICP hypotheses. Our experts review them, check 20 market sources for relevant companies and signals, then test before scaling. For selected niches, we agree on a monthly lead target and guarantee it upfront.",
+   "offers": {
+    "@type": "Offer",
+    "name": "Check my niche and lead target",
+    "url": "https://outreachos.xyz/en/#pilot",
+    "description": "We'll review your offer, the audience you want, and whether the available sources can reach enough qualified companies to set a realistic monthly target."
+   }
+  },
+  {
+   "@type": [
+    "WebPage",
+    "FAQPage"
+   ],
+   "@id": "https://outreachos.xyz/en/#webpage",
+   "url": "https://outreachos.xyz/en/",
+   "name": "OutreachOS — Find your next B2B growth channel",
+   "description": "Find the right B2B audience, test your positioning, and launch thoughtful outbound with OutreachOS and Polza Agency.",
+   "inLanguage": "en",
+   "isPartOf": {
+    "@id": "https://outreachos.xyz/#website"
+   },
+   "about": {
+    "@id": "https://outreachos.xyz/en/#service"
+   },
+   "mainEntity": [
+    {
+     "@type": "Question",
+     "name": "Is this a self-serve SaaS product?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Not yet. OutreachOS supports the research and campaign workflow, while Polza's team helps configure and review the first tests. We are automating more of the process over time."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Does AI write and send everything automatically?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "AI helps research companies and prepare tailored drafts. A human reviews the approach, and the team currently helps configure and activate campaigns."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Do you guarantee a number of leads?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "For selected niches, yes. We first confirm the audience, geography, lead definition, and reachable volume, then agree the monthly target before launch. We don't apply one generic guarantee to every market."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Who is behind OutreachOS?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "OutreachOS is built by the team at Polza Agency, drawing on four years of B2B client work in lead generation and outreach."
+     }
+    }
+   ]
+  }
+ ]
+}
+  </script>
   <style>
     :root {
       --paper: #ffffff;
@@ -199,6 +298,12 @@
     .field input:focus, .field textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px #285b4520; }
     .contact .button { width: 100%; cursor: pointer; }
     .form-message { display: none; margin: 13px 0 0 !important; color: var(--green) !important; font-weight: 650; }
+    /* Возврат после отправки формы мимо скрипта: /api/demo-lead отвечает 303 на #sent.
+       Без JS «спасибо» показывает CSS (content), а не текст в разметке: агент, читающий
+       страницу как текст, не должен видеть «заявка получена» до отправки. Со скриптом
+       тот же текст кладёт блок #sent в конце страницы, и :empty гасит CSS-копию. */
+    #sent:target, #sent.is-shown { display: block; }
+    #sent:target:empty::after { content: "Thanks — we've got your request and will get back to you shortly."; }
     footer { padding: 25px 0 32px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
     .footer-inner { display: flex; justify-content: space-between; gap: 20px; }
     .footer-inner strong { color: var(--ink); }
@@ -370,8 +475,31 @@
     }
     @media (max-width: 359px) { .brand span:nth-child(2) { display: none; } }
   </style>
+  <!-- Яндекс Метрика outreachos.xyz — счётчик 113695034 (отдельный от outreachos.pro, 110060586).
+       Код — как его выдаёт Метрика, с двумя отличиями: без ecommerce:"dataLayer" (магазина нет)
+       и webvisor:false — на английской странице запись сессий выключена (посетители из ЕС).
+       Поля формы помечены class="ym-disable-keys": Вебвизор не записывает, что в них вводят
+       (почта — персональные данные; правила Метрики требуют закрывать такие поля).
+       Заявка с формы отправляется в цель «pilot_request» (ym reachGoal в скрипте формы, только
+       после ответа 2xx); цель заводят в Метрике: Цели → Добавить цель → «Целевое событие» →
+       «совпадает» → pilot_request. Задним числом цели не считаются. -->
+  <!-- Yandex.Metrika counter -->
+  <script type="text/javascript">
+      (function(m,e,t,r,i,k,a){
+          m[i]=m[i]||function(){(m[i].a=m[i].a||[]).push(arguments)};
+          m[i].l=1*new Date();
+          for (var j = 0; j < document.scripts.length; j++) {if (document.scripts[j].src === r) { return; }}
+          k=e.createElement(t),a=e.getElementsByTagName(t)[0],k.async=1,k.src=r,a.parentNode.insertBefore(k,a)
+      })(window, document,'script','https://mc.yandex.ru/metrika/tag.js?id=113695034', 'ym');
+
+      ym(113695034, 'init', {ssr:true, webvisor:false, clickmap:true, referrer: document.referrer, url: location.href, accurateTrackBounce:true, trackLinks:true});
+  </script>
+  <!-- /Yandex.Metrika counter -->
 </head>
 <body>
+  <!-- Пиксель Метрики для браузеров без JS — в начале body, не в head: <div> внутри
+       <noscript> в head ломает разбор head, когда скрипты выключены. -->
+  <noscript><div><img src="https://mc.yandex.ru/watch/113695034" style="position:absolute; left:-9999px;" alt="" /></div></noscript>
   <header class="shell topbar">
     <a class="brand" href="#top" aria-label="Polza OutreachOS home"><span class="brand-mark">Π</span><span>POLZA</span><span>OutreachOS</span></a>
     <nav class="nav" aria-label="Main navigation">
@@ -530,12 +658,15 @@
       <div class="contact">
         <h3 id="contact-title">Tell us what you're selling.</h3>
         <p>Share your website and we'll start with the audience question.</p>
-        <form id="pilotForm">
-          <div class="field"><label for="website">Company website</label><input id="website" name="website" type="url" required maxlength="200" placeholder="https://company.com"></div>
-          <div class="field"><label for="email">Work email</label><input id="email" name="email" type="email" autocomplete="email" required maxlength="320" placeholder="you@company.com"></div>
-          <div class="field"><label for="goal">What do you sell? <span style="font-weight:400">(optional)</span></label><textarea id="goal" name="goal" maxlength="2000" placeholder="One sentence is enough"></textarea></div>
+        <form id="pilotForm" action="https://app.outreachos.xyz/api/demo-lead" method="post">
+          <input type="hidden" name="source" value="eng_pilot">
+          <input type="hidden" name="lang" value="en">
+          <div class="field"><label for="website">Company website</label><input id="website" class="ym-disable-keys" name="website" type="url" required maxlength="200" placeholder="https://company.com"></div>
+          <div class="field"><label for="email">Work email</label><input id="email" class="ym-disable-keys" name="email" type="email" autocomplete="email" required maxlength="320" pattern="[^\s@]+@[^\s@]+\.[^\s@]+" title="you@company.com" placeholder="you@company.com"></div>
+          <div class="field"><label for="goal">What do you sell? <span style="font-weight:400">(optional)</span></label><textarea id="goal" class="ym-disable-keys" name="goal" maxlength="2000" placeholder="One sentence is enough"></textarea></div>
           <button class="button" type="submit">Check my niche and target <span aria-hidden="true">↗</span></button>
           <p class="form-message" id="formMessage" role="status"></p>
+          <p class="form-message" id="sent" role="status"></p>
         </form>
       </div>
     </section>
@@ -724,8 +855,12 @@
     })();
 
     // Заявка уходит в общий приём лидов портала (POST /api/demo-lead на app.outreachos.xyz):
-    // строка в demo_leads + сообщение команде в Telegram. Запрос no-cors (без preflight,
-    // ответ непрозрачный), поэтому ошибку видно только при сбое сети.
+    // строка в demo_leads + сообщение команде в Telegram. Запрос mode 'cors' без preflight
+    // (форма в x-www-form-urlencoded); /api/demo-lead отдаёт этой странице
+    // Access-Control-Allow-Origin, поэтому ответ читается: «спасибо» — только при 2xx, а 400,
+    // 429, 5xx (например, во время деплоя) и сбой сети показывают ошибку и снова включают
+    // кнопку. Иначе человек или его агент решил бы, что заявка ушла. pattern у почты совпадает
+    // с проверкой сервера (EMAIL_RE): адрес без точки в домене браузер не пропустит.
     document.getElementById('pilotForm').addEventListener('submit', function (event) {
       event.preventDefault();
       if (!this.reportValidity()) return;
@@ -746,8 +881,14 @@
         if (attribution[k]) body.set(k, attribution[k]);
       });
       button.disabled = true;
-      fetch('https://app.outreachos.xyz/api/demo-lead', { method: 'POST', mode: 'no-cors', body: body })
-        .then(function () {
+      // Прежний итог (ошибка прошлой попытки) не висит на экране, пока идёт новая отправка.
+      message.textContent = '';
+      message.style.display = 'none';
+      fetch('https://app.outreachos.xyz/api/demo-lead', { method: 'POST', mode: 'cors', body: body })
+        .then(function (response) {
+          if (!response.ok) throw new Error('HTTP ' + response.status);
+          // Цель Метрики «pilot_request»: только когда сервер принял заявку (2xx).
+          if (typeof window.ym === 'function') window.ym(113695034, 'reachGoal', 'pilot_request');
           message.textContent = "Thanks — we've got your request and will get back to you shortly.";
           message.style.display = 'block';
           button.textContent = 'Request sent';
@@ -758,6 +899,22 @@
           button.disabled = false;
         });
     });
+
+    // Возврат после отправки формы мимо скрипта: /api/demo-lead отвечает 303 на эту страницу
+    // с #sent. Без JS «спасибо» показывает CSS (#sent:target). Здесь — случай, когда скрипт
+    // работает, а форму отправили мимо него (агент вызвал form.submit()): кладём тот же текст
+    // в #sent, чтобы его было видно и в тексте страницы, и убираем #sent из адреса, чтобы
+    // обновление страницы или скопированная ссылка не показывали его снова.
+    if (location.hash === '#sent') {
+      var sentMessage = document.getElementById('sent');
+      sentMessage.textContent = "Thanks — we've got your request and will get back to you shortly.";
+      sentMessage.classList.add('is-shown');
+      // Заявку, отправленную мимо скрипта, сервер уже принял (303 только после приёма).
+      if (typeof window.ym === 'function') window.ym(113695034, 'reachGoal', 'pilot_request');
+      try { history.replaceState(history.state, '', location.pathname + location.search); } catch (e) { /* #sent остаётся в адресе */ }
+      var contactTitle = document.getElementById('contact-title');
+      if (contactTitle) contactTitle.scrollIntoView();
+    }
 
     // Переключатель языка — обычная ссылка на /ru/ (работает и без JS). Скрипт дописывает к ней
     // текущие query (utm_* и прочее) и якорь, а по клику запоминает выбор в cookie oos_lang

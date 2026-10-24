@@ -244,7 +244,9 @@ export function buildCampaignPayloadFromPreset(
     daily_limit: preset.daily_limit,
     daily_max_leads: preset.daily_max_leads,
     email_gap: preset.email_gap_minutes,
-    open_tracking: behaviorOverride?.open_tracking ?? preset.open_tracking,
+    // Tracking is managed by the admin preset. Legacy drafts may still send
+    // a hidden open_tracking value; it must not override the current preset.
+    open_tracking: preset.open_tracking,
     link_tracking: preset.link_tracking,
     stop_on_reply: behaviorOverride?.stop_on_reply ?? preset.stop_on_reply,
     // text_only is CONDITIONAL on whether the body has a hidden link:

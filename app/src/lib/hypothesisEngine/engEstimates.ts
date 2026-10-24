@@ -10,10 +10,10 @@
  *    за HE_ENG_ESTIMATE_WINDOW_DAYS дней. Начало — ПОСЛЕДНИЙ site_profile до
  *    этого конца: повтор research («Try again», повтор с удалением) начинается
  *    заново с site_profile, и мерить надо прогон, который дошёл;
- *  - prepare — часы от ПЕРВОЙ цепочки писем рынка (chain-джоба, payload
+ *  - prepare — часы от первого запуска рынка (база; у старых запусков chain-джоба, payload
  *    vertical_id) до его ПЕРВОГО шаблона (итоговых писем) по последним
  *    HE_ENG_ESTIMATE_SAMPLES рынкам за то же окно. Это путь, который проходит
- *    «Launch»: письма → сборка → проверка → итоговые письма; сам запуск
+ *    «Launch»: сборка → проверка → анализ → итоговые письма; сам запуск
  *    кампании после шаблона — минуты.
  *
  * Сэмплов меньше HE_ENG_ESTIMATE_MIN_SAMPLES или чтение упало — null, и экран
@@ -157,28 +157,38 @@ async function measurePrepareHours(
   cutoffIso: string,
 ): Promise<number | null> {
   if (projectIds.length === 0) return null;
-  const { data: chainRows, error: chainErr } = await db
-    .from('he_jobs')
-    .select('payload, created_at')
-    .in('project_id', projectIds as string[])
-    .eq('stage', 'chain')
-    .gte('created_at', cutoffIso)
-    .limit(ROWS_LIMIT);
-  if (chainErr) throw new Error(`he_jobs chain read: ${chainErr.message}`);
+  const [chainResult, baseResult] = await Promise.all([
+    db.from('he_jobs').select('payload, created_at')
+      .in('project_id', projectIds as string[]).eq('stage', 'chain')
+      .gte('created_at', cutoffIso).limit(ROWS_LIMIT),
+    db.from('he_bases').select('vertical_id, created_at, filename')
+      .in('project_id', projectIds as string[]).eq('source', 'auto')
+      .gte('created_at', cutoffIso).limit(ROWS_LIMIT),
+  ]);
+  if (chainResult.error) throw new Error(`he_jobs chain read: ${chainResult.error.message}`);
+  if (baseResult.error) throw new Error(`he_bases prepare read: ${baseResult.error.message}`);
 
-  /** vertical → постановка его первой цепочки писем. */
-  const chainStart = new Map<string, number>();
-  for (const row of (chainRows ?? []) as Row[]) {
-    const verticalId = payloadVerticalId(row.payload);
-    const t = ms(row.created_at);
-    if (!verticalId || t === null) continue;
-    if (t < (chainStart.get(verticalId) ?? Number.POSITIVE_INFINITY)) chainStart.set(verticalId, t);
+  // First collection starts new ENG runs; a legacy chain can have started
+  // an older run earlier. Nightly refill bases do not start a new market.
+  const prepareStart = new Map<string, number>();
+  const starts = [
+    ...((chainResult.data ?? []) as Row[]).map((row) => ({
+      verticalId: payloadVerticalId(row.payload), createdAt: row.created_at,
+    })),
+    ...((baseResult.data ?? []) as Row[])
+      .filter((row) => !str(row.filename).startsWith('auto-refill'))
+      .map((row) => ({ verticalId: str(row.vertical_id), createdAt: row.created_at })),
+  ];
+  for (const row of starts) {
+    const t = ms(row.createdAt);
+    if (!row.verticalId || t === null) continue;
+    if (t < (prepareStart.get(row.verticalId) ?? Number.POSITIVE_INFINITY)) prepareStart.set(row.verticalId, t);
   }
-  if (chainStart.size < HE_ENG_ESTIMATE_MIN_SAMPLES) return null;
+  if (prepareStart.size < HE_ENG_ESTIMATE_MIN_SAMPLES) return null;
 
-  /** vertical → его первый шаблон не раньше первой цепочки. */
+  /** vertical → его первый шаблон не раньше начала подготовки. */
   const templateAt = new Map<string, number>();
-  for (const part of chunks([...chainStart.keys()], IN_CHUNK)) {
+  for (const part of chunks([...prepareStart.keys()], IN_CHUNK)) {
     const { data, error } = await db
       .from('he_templates')
       .select('vertical_id, created_at')
@@ -189,7 +199,7 @@ async function measurePrepareHours(
     for (const row of (data ?? []) as Row[]) {
       const verticalId = str(row.vertical_id);
       const t = ms(row.created_at);
-      const start = chainStart.get(verticalId);
+      const start = prepareStart.get(verticalId);
       if (!verticalId || t === null || start === undefined || t < start) continue;
       if (t < (templateAt.get(verticalId) ?? Number.POSITIVE_INFINITY)) templateAt.set(verticalId, t);
     }
@@ -198,7 +208,7 @@ async function measurePrepareHours(
   const hours = [...templateAt.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, HE_ENG_ESTIMATE_SAMPLES)
-    .map(([verticalId, end]) => (end - (chainStart.get(verticalId) as number)) / 3_600_000);
+    .map(([verticalId, end]) => (end - (prepareStart.get(verticalId) as number)) / 3_600_000);
   const median = heEngMedian(hours);
   return median === null ? null : Math.max(0.5, Math.round(median * 2) / 2);
 }

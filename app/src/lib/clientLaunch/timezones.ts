@@ -27,7 +27,7 @@
  * upstream docs for traceability. If Instantly extends/changes the list,
  * sync this constant.
  */
-const INSTANTLY_VALID_TIMEZONES: readonly string[] = [
+export const INSTANTLY_VALID_TIMEZONES: readonly string[] = [
   'Etc/GMT+12', 'Etc/GMT+11', 'Etc/GMT+10',
   'America/Anchorage', 'America/Dawson', 'America/Creston', 'America/Chihuahua',
   'America/Boise', 'America/Belize', 'America/Chicago', 'America/Bahia_Banderas',

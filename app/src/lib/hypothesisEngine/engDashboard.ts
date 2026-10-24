@@ -27,6 +27,7 @@ import type { HeEngAutoLaunchCode, HeEngAutoLaunchState } from './engAutoLaunch'
 import { HE_RESEARCH_NEEDS_DESCRIPTION_CODE, HE_TEAM_ON_IT_SHORT_EN } from '@/components/client-eng/clientFailureText';
 // Порог списка Do not contact — фразе ленты о пропущенной ночи (шаг 3a- autoPipeline.ts).
 import { BLOCKLIST_MAX_ENTRIES } from '@/lib/clientBlocklist/blockedContacts';
+import { engCompanyQualificationSummary } from './engCollectionProgress';
 
 /* ─────────────────────────── Время (UTC) ─────────────────────────── */
 
@@ -460,7 +461,7 @@ export interface EngDashAnalysisStopped {
 export type EngDashAttentionInfo = EngDashAttention | EngDashAnalysisStopped;
 
 /**
- * Пять точек прогресса карточки: research → letters → base → template →
+ * Пять точек прогресса карточки: research → collected → checked → letters →
  * sending. Пятая — «кампания отправляет»: этап её не ставит (из сущностей
  * движка это не выводится), её ставит роут дашборда по сводке отправки
  * (`sending.state === 'sending'`).
@@ -800,8 +801,7 @@ export function engDashReadyTemplateId(templates: Array<Record<string, unknown>>
  *    останавливает, а чинится только самая свежая из осиротевших (живость
  *    соседей отсюда не видна — при соседях ответ false);
  *  - у вертикали нет своей авто-базы в 'collecting' или 'analyzed' — любая из
- *    них ремонт останавливает;
- *  - у вертикали есть готовая цепочка — без неё кнопка ставит цепочку.
+ *    них ремонт останавливает. Черновик писем для ENG больше не нужен.
  * Выбор вертикали (accepted-гипотеза), статус проекта ('researched' — иначе
  * кнопки нет) и паузу по потолку расхода (`spendPaused`) проверяет
  * вызывающий. Колонки базы не проверяются: строки и колонки пишет одна и та
@@ -810,7 +810,7 @@ export function engDashReadyTemplateId(templates: Array<Record<string, unknown>>
 export function engAnalysisRequeues(
   base: Record<string, unknown>,
   verticalBases: ReadonlyArray<Record<string, unknown>>,
-  chains: ReadonlyArray<Record<string, unknown>>,
+  _chains: ReadonlyArray<Record<string, unknown>>,
 ): boolean {
   const ownAuto = verticalBases.filter((b) => b.refill !== true && asStr(b.source) === 'auto');
   const ownAutoAnalyzing = ownAuto.filter((b) => asStr(b.status) === 'analyzing');
@@ -820,8 +820,7 @@ export function engAnalysisRequeues(
     asNum(base.row_count) > 0 &&
     ownAutoAnalyzing.length === 1 &&
     asStr(ownAutoAnalyzing[0].id) === baseId &&
-    !ownAuto.some((b) => asStr(b.status) === 'collecting' || asStr(b.status) === 'analyzed') &&
-    chains.some((c) => asStr(c.status) === 'ready')
+    !ownAuto.some((b) => asStr(b.status) === 'collecting' || asStr(b.status) === 'analyzed')
   );
 }
 
@@ -906,15 +905,15 @@ function attentionDetail(attention: EngDashAttentionInfo): string {
 }
 
 /**
- * Этап вертикали из сущностей (порядок конвейера: research → letters →
- * base (collecting → construct → analyzing) → template → launched; дальше
+ * Этап вертикали из сущностей (порядок конвейера: research →
+ * base (collecting → construct → analyzing) → letters → launched; дальше
  * ежедневный refill — отдельным блоком дашборда). Приоритет: запущенное
  * всегда сверху; активная работа базы (collecting/construct/analyzing)
  * важнее «статичного» analyzed — ре-collect той же вертикали честно
  * показывает прогресс, а не вчерашний финиш. Когда пути вперёд нет вовсе (ни
  * запуска, ни шаблона, ни идущей базы, ни своей базы со строками) —
- * 'attention' по терминальному состоянию (engDashAttentionOf), а не «letters
- * ready — collect a base», которое читалось как бесконечная работа. Перед
+ * 'attention' по терминальному состоянию (engDashAttentionOf), а не ожидание
+ * следующего шага, которое читалось как бесконечная работа. Перед
  * этим — 'not_selected': невыбранную вертикаль без запуска, шаблона и идущей
  * работы автопилот не двигает, и ни «next: …», ни «needs attention» про неё
  * неправда.
@@ -924,8 +923,8 @@ function attentionDetail(attention: EngDashAttentionInfo): string {
  * 'analyzing' (у вертикали идёт другая джоба, проект в research или последняя
  * своя база — другая).
  */
-export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStageInfo {
-  const { projectStatus, chains, bases, templates, activeJobs } = input;
+function deriveEngVerticalStageInfo(input: EngDashVerticalSlice): EngDashStageInfo {
+  const { projectStatus, bases, templates, activeJobs } = input;
 
   const launched = latestLaunchedTemplate(templates);
   const readyTemplate = latestReadyUnlaunched(templates);
@@ -941,7 +940,7 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
   const usableAnalyzedBase = latest(
     bases.filter((b) => b.refill !== true && asStr(b.status) === 'analyzed' && asNum(b.row_count) > 0),
   );
-  const hasReadyChain = chains.some((c) => asStr(c.status) === 'ready');
+  const hasCollectedBase = bases.some((b) => b.refill !== true && (asStr(b.status) === 'analyzing' || asStr(b.status) === 'analyzed'));
 
   // База-«паспорт» вертикали: из которой собран запущенный/готовый шаблон,
   // иначе свежая своя analyzed со строками, иначе свежая analyzed, иначе
@@ -994,8 +993,8 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
             ? 'ready — sending is turned off for your account; message Support'
             : input.accountAccess === 'not_enabled'
               ? 'ready — sending can start after a one-time check of your account'
-              : 'template ready — launch it on step 3')),
-      dots: [true, true, true, false, false],
+              : 'letters ready — launch it on step 3')),
+      dots: [true, true, true, true, false],
       mainBase,
       launch: null,
       lettersNeedRewrite: rewrite,
@@ -1014,19 +1013,30 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
   if (analyzingBase) return analyzingStage;
   if (collectingBase) {
     const info = collectInfo(collectingBase);
+    const qualification = engCompanyQualificationSummary(info);
+    if (qualification) {
+      return {
+        stage: 'construct',
+        stageDetail: qualification.note ?? `Checking companies and countries: ${qualification.checked.toLocaleString('en-US')} of ${qualification.total.toLocaleString('en-US')} checked`,
+        dots: [true, true, false, false, false],
+        mainBase,
+        launch: null,
+        lettersNeedRewrite: false,
+        attention: null,
+      };
+    }
     const construct =
       info.construct && typeof info.construct === 'object'
         ? (info.construct as Record<string, unknown>)
         : null;
     if (construct && asStr(construct.status) === 'dispatched') {
       const emails = asNum(construct.emails_found);
-      const valid = asNum(construct.valid_count);
       return {
         stage: 'construct',
         // Имя шага — как у строки карты пайплайна («Email enrichment»), а не
         // внутреннее «constructor».
         stageDetail:
-          emails > 0 ? `email enrichment: ${valid}/${emails} valid` : 'email enrichment: finding emails…',
+          emails > 0 ? `email enrichment: ${emails} addresses found` : 'email enrichment: finding emails…',
         dots: [true, true, false, false, false],
         mainBase,
         launch: null,
@@ -1041,7 +1051,7 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
     return {
       stage: 'collecting',
       stageDetail: total > 0 ? `collecting: task ${done}/${total}` : 'collecting: starting…',
-      dots: [true, true, false, false, false],
+      dots: [true, false, false, false, false],
       mainBase,
       launch: null,
       lettersNeedRewrite: false,
@@ -1083,7 +1093,7 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
             : projectStatus === 'draft'
               ? 'not selected — research is not running on this project; step 1 says what to do'
               : 'not selected',
-      dots: [true, hasReadyChain, usableAnalyzedBase !== null, false, false],
+      dots: [true, hasCollectedBase, usableAnalyzedBase !== null, false, false],
       mainBase,
       launch: null,
       lettersNeedRewrite: false,
@@ -1136,15 +1146,18 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       engTeamFixStopOf(input.teamFixStops, 'template', analyzedId) !== null &&
       !templates.some((t) => asStr(t.base_id) === analyzedId) &&
       !activeJobs.some((j) => asStr(j.stage) === 'template' && payloadStr(j.payload, 'base_id') === analyzedId);
+    const writingLetters = activeJobs.some((j) => asStr(j.stage) === 'template' && payloadStr(j.payload, 'base_id') === analyzedId);
     return {
-      stage: 'analyzed',
+      stage: writingLetters ? 'letters' : 'analyzed',
       // «rows», а не «companies»: см. mainBase в EngDashStageInfo. Слово взято
       // у шага 3 мастера (EngStepBases.SendVolume: «… rows with a verified
       // email», превью: «… rows»), чтобы у одного и
       // того же числа в кабинете было одно имя.
-      stageDetail: teamFix
-        ? `base analyzed: ${asNum(usableAnalyzedBase.row_count)} rows — final letters stopped by a problem on our side`
-        : `base analyzed: ${asNum(usableAnalyzedBase.row_count)} rows`,
+      stageDetail: writingLetters
+        ? 'writing letters for the checked contacts…'
+        : teamFix
+          ? `base analyzed: ${asNum(usableAnalyzedBase.row_count)} rows — letter writing stopped by a problem on our side`
+          : `base analyzed: ${asNum(usableAnalyzedBase.row_count)} rows`,
       dots: [true, true, true, false, false],
       mainBase,
       launch: null,
@@ -1158,7 +1171,7 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
     return {
       stage: 'attention',
       stageDetail: attentionDetail(attention),
-      dots: [attention.reason !== 'project_failed', hasReadyChain, false, false, false],
+      dots: [attention.reason !== 'project_failed', hasCollectedBase, false, false, false],
       mainBase,
       launch: null,
       lettersNeedRewrite: false,
@@ -1183,29 +1196,6 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       attention: null,
     };
   }
-  if (hasReadyChain) {
-    // Сбор контактов после писем ставит только автопилот (autopilotNext.ts);
-    // выключен — сбор начнёт «Launch» шага 3 (реконсилер включает автопилот).
-    // Пауза по потолку расхода: сбор не поставят ни автопилот, ни «Launch».
-    return {
-      stage: 'letters',
-      stageDetail:
-        input.spendPaused === true
-          ? 'letters ready — on hold, paused on our side'
-          : input.autopilot === true
-            ? 'letters ready — next: collecting contacts'
-            : input.autopilot === false
-              ? input.accountAccess === 'revoked'
-                ? 'letters ready — sending is turned off for your account; message Support'
-                : 'letters ready — press «Launch» on step 3 to collect contacts'
-              : 'letters ready — step 3 «Launch» shows what comes next',
-      dots: [true, true, false, false, false],
-      mainBase,
-      launch: null,
-      lettersNeedRewrite: false,
-      attention: null,
-    };
-  }
   if (projectStatus === 'researching') {
     return {
       stage: 'research',
@@ -1217,39 +1207,36 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       attention: null,
     };
   }
-  const chainJobActive = activeJobs.some((j) => asStr(j.stage) === 'chain');
-  // Письма рынка остановил отказ, который чинит команда (последняя
-  // закончившаяся цепочка рынка упала так, а новая не идёт).
-  const chainTeamFix =
-    !chainJobActive &&
-    input.liveWorkUnknown !== true &&
-    engTeamFixStopOf(input.teamFixStops, 'chain', input.verticalId) !== null;
   return {
-    stage: 'letters',
-    // Без «generate a chain»: такой кнопки у клиента нет — письма пишет
-    // автопилот после «Launch» шага 3. Под паузой потолка расхода «Launch»
-    // письма не поставит (реконсилер встаёт на потолке) — к нему не зовём,
-    // как у готовых писем выше; поле `teamFix` остаётся данными. При
-    // выключенной отправке аккаунта ('revoked') «Launch» выключена — тоже не
-    // зовём.
-    stageDetail: chainJobActive
-      ? 'writing letters…'
-      : input.spendPaused === true
-        ? 'no letters yet — on hold, paused on our side'
-        : chainTeamFix
-          ? input.accountAccess === 'revoked'
-            ? 'writing the letters stopped — a problem on our side; message Support'
-            : 'writing the letters stopped — a problem on our side; message Support, then «Launch» on step 3'
-          : input.accountAccess === 'revoked'
-            ? 'no letters yet — sending is turned off for your account; message Support'
-            : 'no letters yet — written after «Launch» on step 3',
+    stage: 'collecting',
+    // ENG starts with the base. Legacy chains and their failures do not hold it.
+    stageDetail:
+      input.spendPaused === true
+        ? 'contact collection has not started — on hold, paused on our side'
+        : input.accountAccess === 'revoked'
+          ? 'contact collection has not started — sending is turned off for your account; message Support'
+          : input.autopilot === true
+            ? 'contact collection is next — step 3 «Launch» shows progress'
+            : 'contact collection has not started — press «Launch» on step 3',
     dots: [true, false, false, false, false],
     mainBase,
     launch: null,
     lettersNeedRewrite: false,
-    ...(chainTeamFix ? { teamFix: 'letters' as const } : {}),
     attention: null,
   };
+}
+
+/** Keep a partial company-check outcome visible after the accepted base advances. */
+export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStageInfo {
+  const stage = deriveEngVerticalStageInfo(input);
+  if (!['analyzing', 'analyzed', 'letters', 'template', 'launched', 'launch_unfinished'].includes(stage.stage)) return stage;
+  const base = stage.stage === 'analyzing'
+    ? latest(input.bases.filter((row) => asStr(row.status) === 'analyzing' && !input.stalledAnalysis?.has(asStr(row.id))))
+    : stage.mainBase;
+  const note = base ? engCompanyQualificationSummary(collectInfo(base))?.note : undefined;
+  return note && stage.stageDetail !== note
+    ? { ...stage, stageDetail: `${stage.stageDetail}. ${note}` }
+    : stage;
 }
 
 /* ─────────────────────────── Лента событий ─────────────────────────── */
@@ -1548,7 +1535,7 @@ export function buildEngDashboardEvents(input: {
                 type: 'refill_empty',
                 text: withVertical(
                   `daily top-up skipped — your Do not contact list held more than ${BLOCKLIST_MAX_ENTRIES.toLocaleString('en-US')} ` +
-                    'addresses, so no one could be checked against it; remove addresses on the Do not contact page',
+                    'entries, so no one could be checked against it; remove entries on the Do not contact page',
                   vname,
                 ),
                 at,

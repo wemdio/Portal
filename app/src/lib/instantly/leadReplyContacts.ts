@@ -110,10 +110,13 @@ function companyWebsite(raw: string): string | null {
 function websitesInLine(line: string): string[] {
   // A mail client can render "first.last <mailto:first.last@host> @host".
   // The display label must not be interpreted as a company website.
-  line = line.replace(/[^\s<>]+\s*<mailto:[^>]+>\s*(?:@[^\s<>]+)?/giu, '')
+  // Begin each cleanup at a token boundary. Retrying a greedy token match at
+  // every byte of a long (possibly truncated) inline image is quadratic.
+  // Keep the entire body and any real contact following that token intact.
+  line = line.replace(/(?<![^\s<>])[^\s<>]+\s*<mailto:[^>]+>\s*(?:@[^\s<>]+)?/giu, '')
     .replace(/mailto:[^\s<>]+/giu, '')
-    .replace(/[^\s<>]+\s+@[^\s<>]+/gu, '')
-    .replace(/[^\s<>]+@[^\s<>]+/gu, '');
+    .replace(/(?<![^\s<>])[^\s<>]+\s+@[^\s<>]+/gu, '')
+    .replace(/(?<![^\s<>])[^\s<>]+@[^\s<>]+/gu, '');
   return [...line.matchAll(URL_CANDIDATE)]
     .filter((match) => line[match.index + match[0].length] !== '@')
     // Copied logos sometimes mix Latin and Cyrillic lookalikes in a domain
@@ -157,7 +160,18 @@ function htmlText(html: string): string {
       return;
     }
     const visible = node.text().trim();
-    const tel = /^tel:/i.test(href) ? href.replace(/^tel:/i, '').split(/[;?]/)[0] : null;
+    let tel: string | null = null;
+    if (/^tel:/i.test(href)) {
+      try {
+        const decoded = decodeURIComponent(href.replace(/^tel:/i, '').split(/[;?]/)[0]).trim()
+          .replace(/(?<=\d)[\u2010-\u2015\u2212](?=\d)/gu, '-');
+        const phones = leadPhoneCandidates(decoded);
+        // Never turn encoded line breaks/prose into signature fields.
+        if (phones.length === 1 && phones[0].start === 0 && phones[0].end === decoded.length &&
+          !/[\r\n]/u.test(decoded)) tel = decoded;
+      }
+      catch { /* Malformed optional href: keep the visible label only. */ }
+    }
     const site = /^https?:\/\//i.test(href) ? companyWebsite(href) : null;
     const target = tel ? `tel: ${tel}` : site;
     if (target && !visible.includes(target)) node.text(`${visible} ${target}`);
@@ -172,6 +186,18 @@ function htmlText(html: string): string {
 }
 
 function phoneInLine(line: string, signature: boolean): string | null {
+  // Providers copy telephone hrefs beside their visible label, sometimes as
+  // <+7%20926%20393-42-69>. Decode only a bracketed, phone-shaped target;
+  // otherwise the encoded tail becomes a bogus second local phone. Do not
+  // decode arbitrary URLs, whose digits must remain excluded below.
+  line = line.replace(/([<\[])(\+?(?:\d|%(?:20|2b|28|29|2d)|[ ().-]){3,80})([>\]])/giu,
+    (raw, open: string, target: string, close: string) => {
+      if (!target.includes('%') || (open === '<' ? close !== '>' : close !== ']')) return raw;
+      const decoded = decodeURIComponent(target).trim();
+      const phones = leadPhoneCandidates(decoded);
+      return phones.length === 1 && phones[0].start === 0 && phones[0].end === decoded.length
+        ? `${open}${decoded}${close}` : '';
+    }).replace(/(?<=\d)[\u2010-\u2015\u2212](?=\d)/gu, '-');
   // "Наш номер в реестре ..." is an identifier, not an invitation to call.
   const registry = /(?:^|\s)номер\s+(?:в\s+)?реестр(?:е|а|ов[а-яё]*)?(?=\s|[.:,;!?]|$)/iu.exec(line);
   const nextPhoneLabel = registry
@@ -181,6 +207,13 @@ function phoneInLine(line: string, signature: boolean): string | null {
   const framed = PHONE_LABEL.test(line);
   const phones: string[] = [];
   const candidates = leadPhoneCandidates(line);
+  // An unlabelled contact row may contain several full numbers. Removing
+  // just one leaves the other number looking like prose and rejects both.
+  let contactRowResidue = line;
+  for (const phone of [...candidates].reverse()) {
+    contactRowResidue = contactRowResidue.slice(0, phone.start) + contactRowResidue.slice(phone.end);
+  }
+  const onlyPhoneRow = candidates.length > 1 && /^[\s,;|/()<>.\[\]-]*$/u.test(contactRowResidue);
   for (const { value, digits, start, end } of candidates) {
     if (registry && start >= registry.index && start < nextPhoneLabel) continue;
     const before = line.slice(0, start);
@@ -199,7 +232,7 @@ function phoneInLine(line: string, signature: boolean): string | null {
     const contactName = (line.slice(0, start) + line.slice(end))
       .replace(/\S+@\S+/gu, '').replace(/\([^)]*(?:\)|$)/gu, '')
       .replace(/[:;,|/<>.]/gu, ' ').trim();
-    if (!signature && !framed && residue && !isPersonName(residue) && !signatureNameInLine(contactName)) continue;
+    if (!signature && !framed && !onlyPhoneRow && residue && !isPersonName(residue) && !signatureNameInLine(contactName)) continue;
     phones.push(value);
   }
   return joinLeadPhones(phones);
@@ -363,12 +396,35 @@ function introducedLeadName(body: string[]): string | null {
 function replyLeadName(body: string[], signature: string[]): string | null {
   const contactCards = body.map((line) => /^(\p{Lu}[\p{L}’'-]+(?:\s+\p{Lu}[\p{L}’'-]+){1,2})\s+[^\s<>]+@[^\s<>]+(?:\s+\[[^\]]+\])?\s*$/u.exec(line)?.[1])
     .filter((value): value is string => Boolean(value && signatureNameInLine(value)));
+  // A personal call invitation can end with an unmarked name: "Свяжитесь
+  // со мной по тф <phone>, пожалуйста. Имя Фамилия" or three separate lines
+  // "Давайте созвонимся. / <phone> / Имя". Require this first-person framing,
+  // a validated phone and a terminal name; do not mine third-party referrals
+  // or arbitrary standalone names. History has already been removed.
+  const ownPhoneInvitation = /^(?:пожалуйста[,!]?\s+)?(?:свяжитесь\s+со\s+мной|(?:позвоните|перезвоните|наберите)\s+мне)(?:\s+(?:по|на))?(?:\s+(?:тф|тел(?:ефону)?\.?|номер(?:у)?))?\s*[:—-]?\s*$/iu;
+  // An unmarked quote can still say "со мной" on behalf of a colleague.
+  // Apply this veto only to the two new call-card forms, not existing names.
+  const reportedCall = /(?:переда[юе]|пересылаю|цитирую|цитата|дословно|написал[аи]?|пишет|сказал[аи]?|ответил[аи]?|попросил[аи]?|текст\s+(?:ответа|письма)|(?:его|е[её])\s+ответ)[^\n]{0,120}:\s*(?:\n|$)/iu;
   for (const [index, line] of body.entries()) {
     // A labelled contact card, not a greeting or an arbitrary name in prose.
     if (signatureNameInLine(line) && isRoleTitle(body[index - 1] ?? '') &&
       phoneInLine(body[index + 1] ?? '', false)) contactCards.push(signatureNameInLine(line)!);
     for (const phone of leadPhoneCandidates(line)) {
       const before = line.slice(0, phone.start).trim();
+      const ownCallContext = !signature.length && !reportedCall.test(body.slice(0, index).join('\n'));
+      if (ownCallContext && index === body.length - 1 && ownPhoneInvitation.test(before) && phoneInLine(line, false)) {
+        const tail = line.slice(phone.end).replace(/^[\s,;.!]+/u, '')
+          .replace(/^пожалуйста(?:[\s,;.!]+|$)/iu, '');
+        const ownName = signatureNameInLine(tail);
+        if (ownName) contactCards.push(ownName);
+      }
+      if (ownCallContext && index === body.length - 2 && !before && !line.slice(phone.end).trim() &&
+        phoneInLine(line, false) &&
+        (/^(?:давайте\s+)?созвонимся[.!:]?$/iu.test(body[index - 1] ?? '') ||
+          ownPhoneInvitation.test(body[index - 1] ?? ''))) {
+        const ownName = signatureNameInLine(body[index + 1]);
+        if (ownName) contactCards.push(ownName);
+      }
       const after = line.slice(phone.end).trim().split(/\.\s+(?=[А-ЯЁA-Z])/u)[0];
       const leading = before.replace(/\s+(?:тел(?:ефон)?\.?)\s*:?$/iu, '').trim();
       const name = (!after && signatureNameInLine(leading)) ||

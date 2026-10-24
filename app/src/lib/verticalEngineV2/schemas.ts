@@ -10,6 +10,7 @@
  */
 
 import { z } from 'zod';
+import { LICENCE_GROUP_CODES } from '@/lib/companiesDirectory/licences';
 import { VE_BROAD_HYPOTHESES_MAX, veBroadTitleKey } from './broadHypotheses';
 import { VePriorityNicheResultSchema, vePriorityNicheKey } from './priorityNiches';
 import { VeAudienceScopeSchema, veAudienceScopeKey } from './audienceScope';
@@ -431,6 +432,16 @@ const VeOkvedCodeSchema = z.string().regex(/^\d{2}(\.\d{1,2})?$/);
 /** Код региона РФ — ровно две цифры («77», «78», «50»). */
 const VeRegionCodeSchema = z.string().regex(/^\d{2}$/);
 
+/** Группы лицензий. Пустой список и null — как отсутствие фильтра; пустое поле из объекта
+ * вырезается (см. VeDirectoryFiltersSchema), чтобы ключ стратегии (veSourceStrategyKey)
+ * старых задач не менялся. Неизвестный код — ошибка: молча отброшенная лицензия
+ * превратила бы задачу в срез всего реестра, а ошибка вернёт план модели на исправление. */
+const VeLicenceGroupsSchema = z.preprocess((value) => {
+  if (value === null) return undefined;
+  if (!Array.isArray(value)) return value;
+  return value.length ? [...new Set(value)] : undefined;
+}, z.array(z.enum(LICENCE_GROUP_CODES)).optional());
+
 /** Дата в формате YYYY-MM-DD. */
 const VeDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
@@ -438,6 +449,7 @@ export const VeDirectoryFiltersSchema = z
   .object({
     okvedCodes: z.array(VeOkvedCodeSchema).optional(),
     regionCodes: z.array(VeRegionCodeSchema).optional(),
+    licenceGroups: VeLicenceGroupsSchema,
     revenueFrom: z.number().optional(),
     revenueTo: z.number().optional(),
     employeesFrom: z.number().optional(),
@@ -446,11 +458,21 @@ export const VeDirectoryFiltersSchema = z
     includeIp: z.boolean().optional(),
   })
   // Пустой {} — нефильтрованный срез реестра на весь лимит сбора: запрещаем.
-  .refine((f) => Object.values(f).some((v) => v !== undefined), 'укажи хотя бы один фильтр');
+  .refine((f) => Object.values(f).some((v) => v !== undefined), 'укажи хотя бы один фильтр')
+  // includeIp и hasEmail сами срез не сужают: без ОКВЭД, лицензии, региона или порога
+  // размера задача читала бы весь реестр.
+  .refine((f) => Boolean(f.okvedCodes?.length || f.licenceGroups?.length || f.regionCodes?.length
+    || [f.revenueFrom, f.revenueTo, f.employeesFrom, f.employeesTo].some((v) => typeof v === 'number')),
+  'укажи ОКВЭД, лицензию, регион или порог размера: без них срез — весь реестр')
+  .transform((f) => {
+    if (f.licenceGroups !== undefined) return f;
+    const { licenceGroups: _empty, ...rest } = f;
+    return rest;
+  });
 
 export const VeHhQuerySchema = z.object({
   text: z.string().min(1).max(300),
-  area: z.string().optional(),
+  area: z.union([z.string(), z.array(z.string().min(1)).min(1).max(100)]).optional(),
   date_from: VeDateSchema.optional(),
   date_to: VeDateSchema.optional(),
 });

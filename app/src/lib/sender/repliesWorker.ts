@@ -1,5 +1,6 @@
 import 'server-only';
 
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { fetchNewReplies, type ReplyMailboxRow } from '@/lib/byoMailbox/imap';
 import { authForMailbox } from './mailboxAuth';
@@ -219,44 +220,94 @@ function describeImapFailure(e: unknown): string {
   return `IMAP: ${text.slice(0, 400)}`;
 }
 
-/** Один проход опроса входящих. true — если что-то новое нашли. */
-export async function processSenderReplies(opts: { egressIp: string; log?: Log }): Promise<boolean> {
-  if (!supabaseAdmin) return false;
-  const db = supabaseAdmin;
-  const log: Log = opts.log ?? (() => {});
+/** Сколько адресов ящиков читать за запрос: PostgREST отдаёт не больше 1000 строк. */
+const OWN_EMAILS_PAGE = 1000;
 
-  const { data: mailboxRows } = await db
+/**
+ * Кого опрашивать в этот проход. С 24.10.2026 — только работающие ящики (пул
+ * кампании, недавние отправки, закреплённые лиды) не чаще minGapSeconds, а
+ * остальные раз в сутки: из 901 ящика на «Рассылку» работали 59, а круг по всем
+ * шёл до получаса (миграция 20261024_0010). Без функции в базе (почтовый хост
+ * обновился раньше портала) — как раньше, все ящики адреса по очереди.
+ */
+async function mailboxesToPoll(db: SupabaseClient, egressIp: string, minGapSeconds: number, log: Log): Promise<MailboxRow[]> {
+  const { data, error } = await db.rpc('sender_reply_poll_mailboxes', {
+    p_egress_ip: egressIp,
+    p_limit: MAILBOXES_PER_PASS,
+    p_min_gap_seconds: minGapSeconds,
+  });
+  if (!error) return (data ?? []) as MailboxRow[];
+  if (!/sender_reply_poll_mailboxes|PGRST202|42883/.test(`${error.code ?? ''} ${error.message}`)) {
+    log('warn', `Ящики для опроса входящих не выбраны: ${error.message}`);
+    return [];
+  }
+  const { data: rows } = await db
     .from('sender_mailboxes')
     .select('*')
     .eq('status', 'verified')
     .eq('enabled', true)
     // IMAP-вход — такой же вход в ящик, как отправка: только со своего адреса.
-    .eq('egress_ip', opts.egressIp)
+    .eq('egress_ip', egressIp)
     .not('imap_host', 'is', null)
     .order('imap_checked_at', { ascending: true, nullsFirst: true })
     .limit(MAILBOXES_PER_PASS);
+  return (rows ?? []) as MailboxRow[];
+}
 
-  const mailboxes = (mailboxRows ?? []) as MailboxRow[];
+/** Адреса всех наших ящиков — постранично: их больше тысячи, а запрос без страниц обрезался на ней. */
+async function loadOwnEmails(db: SupabaseClient): Promise<Set<string>> {
+  const emails = new Set<string>();
+  for (let from = 0; ; from += OWN_EMAILS_PAGE) {
+    const { data, error } = await db
+      .from('sender_mailboxes')
+      .select('email')
+      .order('id')
+      .range(from, from + OWN_EMAILS_PAGE - 1);
+    if (error) throw new Error(`адреса своих ящиков не прочитаны: ${error.message}`);
+    for (const row of data ?? []) emails.add(String(row.email).toLowerCase());
+    if (!data || data.length < OWN_EMAILS_PAGE) return emails;
+  }
+}
+
+/**
+ * Один проход опроса входящих. true — если что-то новое нашли. Идёт фоном,
+ * параллельно отправке: shouldContinue сверяется между ящиками, чтобы
+ * остановка воркера не ждала весь проход.
+ */
+export async function processSenderReplies(opts: {
+  egressIp: string;
+  log?: Log;
+  minGapSeconds?: number;
+  shouldContinue?: () => boolean;
+}): Promise<boolean> {
+  if (!supabaseAdmin) return false;
+  const db = supabaseAdmin;
+  const log: Log = opts.log ?? (() => {});
+
+  const mailboxes = await mailboxesToPoll(db, opts.egressIp, opts.minGapSeconds ?? 300, log);
   if (!mailboxes.length) return false;
 
   // Прогревочная переписка ходит между нашими же ящиками: такие входящие
   // помечаются 'warmup' и не считаются ответами, иначе reply rate захлёбывается
   // шумом (на старте прода было 453 «ответа» при 7 отправленных письмах).
-  const { data: ownRows } = await db.from('sender_mailboxes').select('email');
-  const ownEmails = new Set((ownRows ?? []).map((row) => String(row.email).toLowerCase()));
+  const ownEmails = await loadOwnEmails(db);
 
   let found = false;
 
   for (const mailbox of mailboxes) {
+    if (opts.shouldContinue && !opts.shouldContinue()) break;
     const nowIso = new Date().toISOString();
     try {
       const auth = await authForMailbox(mailbox);
       if (!auth.ok) {
         log('warn', `Ящик ${mailbox.email}: ${auth.error}`);
+        // Опрос идёт параллельно отправке: ящик, который она только что
+        // уронила, держит её причину — её не затираем.
         await db
           .from('sender_mailboxes')
           .update({ imap_checked_at: nowIso, last_error: auth.error })
-          .eq('id', mailbox.id);
+          .eq('id', mailbox.id)
+          .eq('status', 'verified');
         continue;
       }
 
@@ -317,6 +368,16 @@ export async function processSenderReplies(opts: { egressIp: string; log?: Log }
             },
             { onConflict: 'mailbox_id,uid', ignoreDuplicates: true },
           );
+          // Адресаты ответа — для «ответить всем» при передаче лида. Отдельной
+          // записью и без проверки ошибки: почтовый хост может обновиться
+          // раньше, чем в базе появятся колонки, а ответ терять нельзя.
+          if (kind === 'human' && (reply.toEmails.length || reply.ccEmails.length)) {
+            await db
+              .from('sender_replies')
+              .update({ to_emails: reply.toEmails, cc_emails: reply.ccEmails })
+              .eq('mailbox_id', mailbox.id)
+              .eq('uid', reply.uid);
+          }
 
           if (kind !== 'warmup') {
             await applyReply({
@@ -343,21 +404,28 @@ export async function processSenderReplies(opts: { egressIp: string; log?: Log }
           imap_last_uid: result.newLastUid,
           imap_uidvalidity: result.uidValidity,
           imap_checked_at: nowIso,
-          // Опрос прошёл — значит, прошлая жалоба на почту ящика больше не
-          // правда. Без этого одна секундная заминка на стороне провайдера
-          // оставалась на экране навсегда: ящик работает и шлёт письма, а под
-          // адресом всё висит ошибка чтения входящих. Опрашиваются только
-          // проверенные ящики, и здесь может лежать только IMAP-заметка —
-          // отказ SMTP переводит ящик в «Ошибка», и сюда он уже не попадает.
-          last_error: null,
         })
         .eq('id', mailbox.id);
+      // Опрос прошёл — значит, прошлая жалоба на почту ящика больше не
+      // правда. Без этого одна секундная заминка на стороне провайдера
+      // оставалась на экране навсегда: ящик работает и шлёт письма, а под
+      // адресом всё висит ошибка чтения входящих. Только у подтверждённого:
+      // опрос идёт параллельно отправке, и ящик, который она только что
+      // уронила, держит её причину.
+      if (mailbox.last_error) {
+        await db
+          .from('sender_mailboxes')
+          .update({ last_error: null })
+          .eq('id', mailbox.id)
+          .eq('status', 'verified');
+      }
     } catch (e) {
       log('warn', `Не удалось прочитать входящие ${mailbox.email}: ${e instanceof Error ? e.message : String(e)}`);
       await db
         .from('sender_mailboxes')
         .update({ imap_checked_at: nowIso, last_error: describeImapFailure(e) })
-        .eq('id', mailbox.id);
+        .eq('id', mailbox.id)
+        .eq('status', 'verified');
     }
   }
 

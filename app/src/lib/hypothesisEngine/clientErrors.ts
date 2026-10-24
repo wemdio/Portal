@@ -133,10 +133,20 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   const message = errorMessage(error);
   if (!message.trim()) return 'unknown';
 
+  if (/ENG base budget:\s*budget_exhausted\b/i.test(message)) return 'base_budget_limit';
+  if (/ENG base budget:/i.test(message)) return 'base_budget_unavailable';
+
   const teamFixable = heTeamFixableFailureOf(message);
   if (teamFixable) return teamFixable;
   if (/\b(?:Requesty|Serper|OpenRouter)\s*(?:HTTP\s*)?[:(]?\s*(?:429|5\d\d)\b/i.test(message)) return 'provider';
   if (/\bSerper transient:/i.test(message)) return 'provider';
+
+  // A qualification stop is not a source/audience mismatch or an invitation to repay it.
+  if (/Company qualification stopped at its spending limit\./i.test(message)) return 'qualification_limit';
+  if (/Company qualification (?:could not verify the model response|has no saved response for a previous model request|stopped because the model service could not complete the request)\./i.test(message) ||
+      /ENG company qualification: (?:unsupported_model|invalid_budget|missing_budget_history|invalid_model_input);/i.test(message)) {
+    return 'qualification_incomplete';
+  }
 
   // Осознанные остановки сборки — СРАЗУ после правил провайдера, выше тарифных
   // и всех остальных. Оба якоря пишет только наш код (stages/baseCollect.ts:
@@ -158,6 +168,7 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   // «не покрывается каталогом» в этом тексте НЕ встречается: про такую базу он
   // неправда — компании могли принадлежать вертикали.
   if (/не подходит под гипотезы вертикали/i.test(message)) return 'hypothesis_mismatch';
+  if (/Company qualification: no companies with verified fit for the selected hypotheses and target countries\./i.test(message)) return 'company_unverified';
   if (/не покрывается каталогом/i.test(message)) return 'audience_mismatch';
 
   // Тарифные отказы (ClientLaunchError из clientLaunch/appendLeads) доезжают
@@ -219,6 +230,19 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   // строка уходила в 'unknown' — «технический сбой» и «Try again», которым
   // этот отказ не лечится, вместо просьбы об описании.
   if (message.includes(HE_SITE_THIN_NEEDS_BUSINESS_ANCHOR)) return 'website_thin';
+
+  // Список Do not contact клиента и список стран проекта на сборке
+  // (stages/baseCollect.ts; план docs/handoff/2026-10-16-eng-countries, §1A/§1B).
+  // ВЫШЕ `segment_exhausted`, `timeout`, `already_collected` и `source`: все
+  // четыре текста начинаются с «Авто-сборка не дала строк» либо несут хвост
+  // чужого сбоя (сообщение чтения списка), и общие правила сказали бы клиенту
+  // «запустите ещё раз» там, где помогает только правка списка. Порядок между
+  // ними: нечитаемый список — сбой у нас (internal), раньше «сверх лимита» и
+  // «все в списке»; «нет источника для стран» — последним.
+  if (/Список Do not contact клиента не прочитан/i.test(message)) return 'internal';
+  if (/Список Do not contact клиента больше/i.test(message)) return 'do_not_contact_over_cap';
+  if (/в списке Do not contact клиента/i.test(message)) return 'do_not_contact';
+  if (/нет источника для стран проекта/i.test(message)) return 'countries_uncovered';
 
   if (/Сегмент исчерпан|не осталось новых/i.test(message)) return 'segment_exhausted';
 

@@ -37,6 +37,8 @@ interface ManualRow {
   attempts: number;
   cc_emails?: string[];
   agency_handoff_id?: string | null;
+  /** Передача лида клиенту (lib/sender/clientHandoff): клиент в копии, повтора нет. */
+  handoff?: Record<string, unknown> | null;
   created_at?: string;
 }
 
@@ -85,6 +87,23 @@ export async function processManualMessages(opts: { egressIp: string; log?: Log;
       if (blocked) {
         await db.from('sender_manual_messages').update({ status: 'failed',
           error: 'Автопередача отменена: проверьте настройки, состояние переписки и ручные ответы', updated_at: nowIso }).eq('id', message.id);
+        continue;
+      }
+    }
+    if (message.handoff) {
+      // Между передачей и отправкой адрес могли закрыть: отписка, отбой, стоп-лист.
+      const [recipient, globalStop, campaignStop] = await Promise.all([
+        db.from('sender_recipients').select('status').eq('id', message.recipient_id!).maybeSingle(),
+        db.from('sender_suppressions').select('email').eq('email', message.to_email).limit(1),
+        db.from('sender_campaign_suppressions').select('email')
+          .eq('campaign_id', message.campaign_id!).eq('email', message.to_email).neq('reason', 'mailbox_lost').limit(1),
+      ]);
+      const closed = recipient.error || globalStop.error || campaignStop.error || !recipient.data ||
+        ['unsubscribed', 'bounced'].includes(String(recipient.data.status)) ||
+        globalStop.data?.length || campaignStop.data?.length;
+      if (closed) {
+        await db.from('sender_manual_messages').update({ status: 'failed',
+          error: 'Передача отменена: адрес отписался, в отбое или в стоп-листе', updated_at: nowIso }).eq('id', message.id);
         continue;
       }
     }
@@ -141,18 +160,40 @@ export async function processManualMessages(opts: { egressIp: string; log?: Log;
       continue;
     }
 
+    // Передача принята частично (письмо приняли, адрес в копии отклонён):
+    // письмо ушло. Считаем ушедшим с предупреждением в ленте — иначе лид не
+    // попал бы в кабинет клиента, а повторная передача прислала бы письмо
+    // второй раз.
+    if (message.handoff && result.code === 'partial_accept') {
+      await db.from('sender_manual_messages')
+        .update({ status: 'sent', sent_at: new Date().toISOString(), attempts,
+          error: `Ушло не всем: ${result.error ?? 'часть адресов отклонена'}`, updated_at: nowIso })
+        .eq('id', message.id);
+      sent += 1;
+      log('warn', `Передача ${message.to_email} принята частично: ${result.error ?? result.code}`);
+      continue;
+    }
+
     // Ручной ответ ретраим мягко: оставляем в 'sending' — stale-ветка claim
     // подберёт его через 10 минут (это и есть задержка ретрая), вечного цикла
-    // нет из-за потолка попыток.
-    if (!message.agency_handoff_id && attempts < MAX_ATTEMPTS && result.code !== 'recipient_rejected' && result.code !== 'rejected') {
+    // нет из-за потолка попыток. Обрыв посреди диалога (inflight_drop) и
+    // частичный приём (partial_accept): письмо могло уже дойти, повтор
+    // прислал бы лиду дубль.
+    // Передачу не повторяем сами: оператор видит ошибку и передаёт заново.
+    if (!message.agency_handoff_id && !message.handoff && attempts < MAX_ATTEMPTS && result.code !== 'recipient_rejected'
+      && result.code !== 'rejected' && result.code !== 'inflight_drop' && result.code !== 'partial_accept') {
       await db.from('sender_manual_messages')
         .update({ attempts, error: result.error ?? null })
         .eq('id', message.id);
       continue;
     }
 
+    // Обрыв передачи: исход неизвестен — оператору нужно знать, что письмо могло уйти.
+    const failure = message.handoff && result.code === 'inflight_drop'
+      ? `Исход неизвестен: соединение оборвалось (${result.error ?? 'обрыв'}). Письмо могло уйти — передавайте заново, только если лид и клиент его не получили`
+      : result.error ?? result.code ?? 'send_failed';
     await db.from('sender_manual_messages')
-      .update({ status: 'failed', attempts, error: result.error ?? result.code ?? 'send_failed', updated_at: nowIso })
+      .update({ status: 'failed', attempts, error: failure, updated_at: nowIso })
       .eq('id', message.id);
     log('warn', `Ручной ответ ${message.to_email} не ушёл (${result.code})`);
   }

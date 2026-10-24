@@ -14,11 +14,16 @@ import { veCanWidenPlan } from './planWidening';
 import { isVeRenewableSourceTask, reopenVeSourceTask } from './sourceRenewal';
 import { validVeAdaptiveCollection, veAdaptiveSourceDeferred, veAdaptiveSourceDry, veSourceStrategyKey, type VeAdaptiveCollection } from './adaptiveCollection';
 import type { VeCollectTask } from './prompts/sourcePlan';
+import { needsVeKnownWebsiteContinuation } from './knownWebsiteDirectory';
+import { needsVeRestaurantSourceContinuation } from './restaurantSourcePolicy';
+import { readVeGeographyRepair } from './collectionGeographyRepair';
+import type { VeCollectInfo } from './stages/baseCollect';
 import type { VeStaffingCorrectionScope } from './staffingCorrection';
 import { relevanceHash } from './relevanceCheckpoint';
 import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAllowed, type VeNicheSourceProfile } from './nicheSourcePolicy';
 import { isVeAudienceScopeEnabled } from './audienceScope';
-import { needsLegacyFintechAudienceRefresh, readVeCollectionAudienceSnapshot, veAudienceNicheProfile, veSourceDiscoveryIsExistingOnly, type VeSourceAudienceHypothesis } from './sourceAudience';
+import { veAutomaticAudienceReviewRows } from './audienceReviewHold';
+import { needsLegacyFintechAudienceRefresh, needsLegacyRetailAudienceRefresh, readVeCollectionAudienceSnapshot, veAudienceNicheProfile, veSourceDiscoveryIsExistingOnly, type VeSourceAudienceHypothesis } from './sourceAudience';
 
 export interface VeCollectionContinuation {
   available: boolean;
@@ -41,12 +46,13 @@ const unavailable = (code: VeCollectionContinuation['code'], reason: string): Ve
  * The enqueue caller additionally requires an exact explicit resume and CAS. */
 export function needsVeControlledAudienceRefresh(base: Record<string, unknown>, currentHypothesis?: Record<string, unknown> | null): boolean {
   const info = record(base.collect_info);
-  if (!info || base.status !== 'analyzed' || base.source !== 'auto'
-    || !isVeAudienceScopeEnabled(typeof base.project_id === 'string' ? base.project_id : null)
+  if (!info || info.geography_repair !== undefined || base.status !== 'analyzed' || base.source !== 'auto'
     || !currentHypothesis || currentHypothesis.id !== base.hypothesis_id || currentHypothesis.status === 'rejected') return false;
   const saved = records(info.hypotheses);
   if (saved.length !== 1 || saved[0].id !== base.hypothesis_id) return false;
-  return needsLegacyFintechAudienceRefresh({ ...info, hypotheses: [currentHypothesis as unknown as VeSourceAudienceHypothesis] });
+  const candidate = { ...info, hypotheses: [currentHypothesis as unknown as VeSourceAudienceHypothesis] };
+  return (currentHypothesis.collection_market === 'ru' && needsLegacyRetailAudienceRefresh(candidate))
+    || (isVeAudienceScopeEnabled(typeof base.project_id === 'string' ? base.project_id : null) && needsLegacyFintechAudienceRefresh(candidate));
 }
 
 /** Detect the same quiescent, one-way correction as the collector, without
@@ -124,11 +130,45 @@ export function getVeCollectionContinuation(base: Record<string, unknown>, curre
     return unavailable('invalid_checkpoint', 'Сохранённый этап не готов к продолжению. Требуется проверка состояния базы.');
   }
   const tasks = records(info.tasks);
+  // An operator repair is a one-off source correction, never a grant of more
+  // work when someone later presses the ordinary Continue button.
+  if (info.geography_repair !== undefined) {
+    try { readVeGeographyRepair(info as VeCollectInfo); }
+    catch { return unavailable('invalid_checkpoint', 'Сохранённые условия исправления базы требуют проверки.'); }
+    if (target.stop_cause === 'low_yield') return unavailable('low_yield', 'Сохранена остановка по низкому выходу контактов. Исправление географии не снимает ограничение расходов.');
+    if (!(Number(target.candidates_processed) < Number(target.max_candidates)))
+      return unavailable('candidate_limit', 'Сохранённый предел кандидатов достигнут. Проверенные контакты сохранены.');
+    if (!(Number(target.round) < Number(target.max_rounds)))
+      return unavailable('round_limit', 'Сохранённый предел раундов достигнут. Проверенные контакты сохранены.');
+    const policy = record(info.adaptive_collection) as VeAdaptiveCollection | null;
+    const live = tasks.some((state) => {
+      const task = record(state.task) as VeCollectTask | null;
+      return !!task && !(policy && (veAdaptiveSourceDeferred(policy, veSourceStrategyKey(task))
+        || veAdaptiveSourceDry(policy.completed, veSourceStrategyKey(task))))
+        && (state.status === 'pending' || isVeRenewableSourceTask(state));
+    });
+    return live ? available('sources_available', 'Продолжение исправленных источников в оставшемся лимите.', 'resume_collection')
+      : unavailable('sources_exhausted', 'Исправленные источники обработаны. Проверенные контакты сохранены.');
+  }
   // Drain admitted work before applying caps or economic source holds.
   if (info.company_name_recovery || record(info.saved_email_recovery)?.batch
     || (record(info.construct)?.status === 'dispatched' && record(info.construct)?.bc_job_id)
     || records(record(info.preview_pipeline)?.batches).length
     || tasks.some((task) => task.status === 'dispatched')) return available('saved_work', 'Осталось завершить обработку уже найденных компаний.');
+  // Source-only correction precedes optional reviews of the old reserve. Its
+  // own predicate requires BOTH original budgets and a quiescent free slot.
+  if (needsVeKnownWebsiteContinuation(base, currentHypothesis)) {
+    return available('source_update', 'Доступна проверка официальных сайтов платформ в пределах сохранённого бюджета.', 'resume_collection');
+  }
+  if (needsVeRestaurantSourceContinuation(base, currentHypothesis)) {
+    return available('source_update', 'Доступен готовый каталог профильных заведений в пределах сохранённого бюджета.', 'resume_collection');
+  }
+  if (info.restaurant_source_refresh) {
+    return unavailable('sources_exhausted', 'Доступное продолжение по каталогу завершено. Проверенные контакты сохранены.');
+  }
+  if (record(info.known_website_source)?.continuation_only === true) {
+    return unavailable('sources_exhausted', 'Проверка доступных официальных сайтов завершена. Проверенные контакты сохранены.');
+  }
   const reserve = readVeRelevanceReserve(info.relevance_reserve);
   // The specialist raised the "addresses per company" limit. The addresses the
   // previous one held back are validated and waiting in the reserve, but only a
@@ -137,12 +177,29 @@ export function getVeCollectionContinuation(base: Record<string, unknown>, curre
   const appliedLimit = normalizeVeMaxEmailsPerCompany((base as { contact_cap_applied?: unknown }).contact_cap_applied);
   if (appliedLimit !== null && (limit === null || limit > appliedLimit)
     && reserve.some((row) => row[VE_COMPANY_CAP_FIELD])) return available('contact_limit_changed', 'Можно вернуть проверенные адреса из резерва с новым лимитом на компанию.');
+  // An audited source correction must not first buy reviews under the old
+  // audience. In-flight children were handled above; untouched reserve rows
+  // are held when the explicit refresh is persisted by the worker.
+  if (currentHypothesis && needsLegacyRetailAudienceRefresh({ ...info,
+    hypotheses: [currentHypothesis as unknown as VeSourceAudienceHypothesis] })
+    && needsVeControlledAudienceRefresh(base, currentHypothesis)) {
+    if (!(Number(target.candidates_processed) < Number(target.max_candidates))) {
+      return unavailable('candidate_limit', 'Сохранённый бюджет кандидатов исчерпан. Готовые контакты сохранены.');
+    }
+    if (Number(target.round) >= Math.min(VE_COLLECTION_ROUND_CEILING, veCollectionMaxRounds(target.max_rounds))) {
+      return unavailable('round_limit', 'Сохранённый бюджет сбора исчерпан. Обновление источников само не увеличивает его; готовые контакты сохранены.');
+    }
+    if (info.adaptive_collection && !validVeAdaptiveCollection(info.adaptive_collection as VeAdaptiveCollection)) {
+      return unavailable('invalid_checkpoint', 'Сохранённый план сбора требует проверки. Готовые контакты сохранены.');
+    }
+    return available('source_update', 'Доступен обновлённый подбор источников в пределах сохранённого бюджета.', 'resume_collection');
+  }
   // Reuse current eligibility rules: completed uncertain checks do not become
   // an unlimited paid loop merely because fewer than 500 contacts were found.
   // With the calibrated triage enabled, saved uncertainty it has not read yet is
   // resumable work as well: one cheap pass per company, no sources or search.
   try {
-    if (hasPendingVeSavedEmailRecovery(reserve, info.saved_email_recovery)) return available('saved_work', 'Можно завершить проверку сохранённых адресов.');
+    if (hasPendingVeSavedEmailRecovery(veAutomaticAudienceReviewRows(reserve, record(info.audience_source_refresh)?.held_review_companies), info.saved_email_recovery)) return available('saved_work', 'Можно завершить проверку сохранённых адресов.');
   } catch {
     return unavailable('invalid_checkpoint', 'Сохранённые результаты проверки адресов требуют проверки.');
   }
@@ -150,7 +207,8 @@ export function getVeCollectionContinuation(base: Record<string, unknown>, curre
   const scope = veSavedRelevanceScope(info.audience_snapshot || currentHypothesis === undefined
     ? info : { hypotheses: currentHypothesis ? [currentHypothesis] : [] }, base.hypothesis_id);
   const batch = buildVeRelevanceReviewBatch({ ...scope,
-    reserve, ready: [], source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
+    reserve: veAutomaticAudienceReviewRows(reserve, record(info.audience_source_refresh)?.held_review_companies),
+    ready: [], source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
     allowPaidSearch: !existingOnly, triage });
   if (batch.rows.length && record(info.relevance_review_progress)?.signature !== relevanceHash(veSavedReviewSignature(batch.rows, { ...scope, triage, source: batch.evidenceRows }))) {
     return available('saved_work', 'Можно уточнить соответствие уже найденных компаний.');
@@ -212,6 +270,7 @@ export function canResumePartialPreview(base: Record<string, unknown>, currentHy
  * раундов тоже начинается заново.
  */
 export function grantVeResumeRoundBudget(info: Record<string, unknown>): void {
+  if (info.geography_repair !== undefined) { readVeGeographyRepair(info as VeCollectInfo); return; }
   const progress = info.target_progress as VeCollectionTargetProgress | undefined;
   if (!progress || typeof progress !== 'object' || !Number.isSafeInteger(progress.round) || progress.round < 1) return;
   const next: VeCollectionTargetProgress = { ...progress, max_rounds: Math.max(veCollectionMaxRounds(progress.max_rounds),
@@ -322,6 +381,10 @@ export function openNextVeCollectionRound(info: Record<string, unknown>): boolea
   // единицу лишь когда флагов нет). Сдвинув номер такой базе, мы отобрали бы у
   // неё конструктор и залипли бы ровно той ошибкой, ради которой всё это.
   if (info.validation_retry || info.company_name_recovery || info.relevance_review_requested) return false;
+  if (info.geography_repair !== undefined) {
+    const repair = readVeGeographyRepair(info as VeCollectInfo)!;
+    if (progress.round >= repair.budget.max_rounds || progress.candidates_processed >= repair.budget.max_candidates) return false;
+  }
   const next: VeCollectionTargetProgress = { ...progress, round: progress.round + 1, status: 'collecting' };
   delete next.reason;
   info.target_progress = next;

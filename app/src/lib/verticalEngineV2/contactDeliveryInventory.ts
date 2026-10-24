@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { CampaignStatus } from '@/lib/instantly/types';
 import { getCampaign, getCampaignAnalyticsOverview } from '@/lib/instantly/client';
+import { transportOf, type VeLaunchTransport } from './senderTransport/transport';
 
 const PAGE_SIZE = 500;
 const ID_BATCH_SIZE = 100;
@@ -77,6 +78,30 @@ async function readMissingCampaignCount(campaignId: string, accountId: unknown):
 }
 
 /**
+ * Первые письма кампаний «Рассылки» — живой счёт по основной базе
+ * (sender_campaign_first_contacted: получатели с last_step_sent >= 1, как
+ * «взято в работу» автоотчёта). Нет строки — кампании нет: счёта нет, как у
+ * Instantly без аналитики.
+ */
+async function readSenderFirstContacted(portalDb: SupabaseClient, campaignIds: string[]): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  for (let offset = 0; offset < campaignIds.length; offset += ID_BATCH_SIZE) {
+    const ids = campaignIds.slice(offset, offset + ID_BATCH_SIZE);
+    const { data, error } = await portalDb.rpc('sender_campaign_first_contacted', { p_campaign_ids: ids });
+    if (error) throw new Error(`sender first-contacted read failed: ${error.message}`);
+    if (!Array.isArray(data)) throw new ContactDeliveryAnalyticsUnavailableError();
+    for (const row of data as { campaign_id?: unknown; first_contacted?: unknown }[]) {
+      const id = String(row.campaign_id ?? '');
+      const contacts = exactContactCount(row.first_contacted);
+      if (!ids.includes(id) || counts.has(id) || contacts === null) throw new ContactDeliveryAnalyticsUnavailableError();
+      counts.set(id, contacts);
+    }
+    if (ids.some((id) => !counts.has(id))) throw new ContactDeliveryAnalyticsUnavailableError();
+  }
+  return counts;
+}
+
+/**
  * All campaign history matters when distinguishing delivered-but-not-contacted
  * supply from the Portal period's fulfillment fact. A released bundle must not
  * disappear from that calculation. Missing analytics require a scoped provider
@@ -93,12 +118,15 @@ export async function loadVeContactDeliveryCampaignInventory(
   activeCampaignIds: string[];
   activeCampaignRowIds: string[];
   observedFirstContacted: number;
+  observedFirstContactedByCampaignRow: Record<string, number>;
+  /** Куда идёт каждая кампания запуска; кампании «Рассылки» Instantly не читаются. */
+  campaignTransports: Record<string, VeLaunchTransport>;
 }> {
-  const items = await readContactDeliveryPages<{ id: string; status: string; instantly_account_id?: string }>(
+  const items = await readContactDeliveryPages<{ id: string; status: string; instantly_account_id?: string; transport?: unknown }>(
     'delivery queue inventory',
     (from, to) => portalDb
       .from('ve_launch_queue_items')
-      .select('id, status, instantly_account_id', { count: 'exact' })
+      .select('id, status, instantly_account_id, transport', { count: 'exact' })
       .eq('project_id', veProjectId)
       .order('id', { ascending: true })
       .range(from, to),
@@ -115,7 +143,10 @@ export async function loadVeContactDeliveryCampaignInventory(
   const initialEmptyCampaignIds = new Set<string>();
   const childIds = new Set<string>();
   const campaignAccounts = new Map<string, string | undefined>();
+  const campaignRowIds = new Map<string, string>();
   const itemAccounts = new Map(items.map(item => [item.id, item.instantly_account_id]));
+  const itemTransports = new Map(items.map(item => [item.id, transportOf(item.transport)]));
+  const campaignTransports = new Map<string, VeLaunchTransport>();
   for (let offset = 0; offset < itemIds.length; offset += ID_BATCH_SIZE) {
     const ids = itemIds.slice(offset, offset + ID_BATCH_SIZE);
     const campaigns = await readContactDeliveryPages<{
@@ -140,7 +171,9 @@ export async function loadVeContactDeliveryCampaignInventory(
       childIds.add(campaign.id);
       if (allIds.has(campaign.campaign_id)) throw new Error('delivery campaign identity belongs to multiple launch rows');
       allIds.add(campaign.campaign_id);
+      campaignRowIds.set(campaign.campaign_id, campaign.id);
       campaignAccounts.set(campaign.campaign_id, itemAccounts.get(campaign.item_id));
+      campaignTransports.set(campaign.campaign_id, itemTransports.get(campaign.item_id) ?? 'instantly');
       if (campaign.leads_count === 0 && campaign.activated_at === null &&
         (campaign.remote_status === CampaignStatus.Draft || campaign.remote_status === CampaignStatus.Paused) &&
         typeof campaign.status_observed_at === 'string' && Number.isFinite(Date.parse(campaign.status_observed_at))) {
@@ -158,10 +191,13 @@ export async function loadVeContactDeliveryCampaignInventory(
   }
 
   const allCampaignIds = [...allIds].sort();
+  const instantlyCampaignIds = allCampaignIds.filter((id) => campaignTransports.get(id) !== 'sender');
+  const senderCampaignIds = allCampaignIds.filter((id) => campaignTransports.get(id) === 'sender');
   let observedFirstContacted = 0;
+  const observedFirstContactedByCampaignRow: Record<string, number> = {};
   const observedIds = new Set<string>();
-  for (let offset = 0; offset < allCampaignIds.length; offset += ID_BATCH_SIZE) {
-    const ids = allCampaignIds.slice(offset, offset + ID_BATCH_SIZE);
+  for (let offset = 0; offset < instantlyCampaignIds.length; offset += ID_BATCH_SIZE) {
+    const ids = instantlyCampaignIds.slice(offset, offset + ID_BATCH_SIZE);
     const catalog = await readContactDeliveryPages<{
       id: string; new_leads_contacted_count: unknown; analytics_synced_at: unknown;
     }>(
@@ -189,18 +225,31 @@ export async function loadVeContactDeliveryCampaignInventory(
         throw new Error('delivery catalog has invalid or duplicate campaign identities');
       }
       observedIds.add(campaign.id);
+      observedFirstContactedByCampaignRow[campaignRowIds.get(campaign.id)!] = contacts;
       observedFirstContacted += contacts;
       if (!Number.isSafeInteger(observedFirstContacted)) {
         throw new Error('delivery first-contacted total exceeds the safe integer range');
       }
     }
     for (const id of ids.filter(id => !observedIds.has(id))) {
-      observedFirstContacted += await readMissingCampaignCount(id, campaignAccounts.get(id));
+      const contacts = await readMissingCampaignCount(id, campaignAccounts.get(id));
+      observedFirstContactedByCampaignRow[campaignRowIds.get(id)!] = contacts;
+      observedFirstContacted += contacts;
       if (!Number.isSafeInteger(observedFirstContacted)) throw new Error('delivery first-contacted total exceeds the safe integer range');
       observedIds.add(id);
     }
   }
-  return { allCampaignIds, activeCampaignIds: [...activeIds].sort(), activeCampaignRowIds: [...activeCampaignRowIds], observedFirstContacted };
+  if (senderCampaignIds.length > 0) {
+    const senderCounts = await readSenderFirstContacted(portalDb, senderCampaignIds);
+    for (const id of senderCampaignIds) {
+      const contacts = senderCounts.get(id)!;
+      observedFirstContactedByCampaignRow[campaignRowIds.get(id)!] = contacts;
+      observedFirstContacted += contacts;
+      if (!Number.isSafeInteger(observedFirstContacted)) throw new Error('delivery first-contacted total exceeds the safe integer range');
+    }
+  }
+  return { allCampaignIds, activeCampaignIds: [...activeIds].sort(), activeCampaignRowIds: [...activeCampaignRowIds],
+    observedFirstContacted, observedFirstContactedByCampaignRow, campaignTransports: Object.fromEntries(campaignTransports) };
 }
 
 export type ContactDeliveryInventoryRow = {

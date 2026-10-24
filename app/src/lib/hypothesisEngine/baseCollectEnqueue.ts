@@ -41,6 +41,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { normalizeHeMarket } from './market';
 import { readHeProjectCancelMarker } from './projectCancelMarker';
+import { readHeEngBaseFirst } from './engBaseFirst';
+import { createHeEngCollectionTarget, createHeEngCollectionPool } from './engCollectionTarget';
 
 /*
  * ───────────── «До N адресов одной компании» (he_*) ─────────────
@@ -205,18 +207,56 @@ export async function enqueueHeBaseCollect(
   // значение доказывает, что колонка в базе есть, и insert не упадёт на
   // неизвестном поле.
   let contactCap: number | null = null;
+  let budgetOwner: { market?: unknown; created_by?: unknown } | null = null;
   try {
     const { data: projectRow, error: projectErr } = await supabase
       .from('he_projects')
-      .select('max_emails_per_company')
+      .select('max_emails_per_company, market, created_by')
       .eq('id', projectId)
       .maybeSingle();
     if (!projectErr) {
+      budgetOwner = projectRow;
       contactCap = normalizeHeMaxEmailsPerCompany(
         (projectRow as { max_emails_per_company?: unknown } | null)?.max_emails_per_company,
       );
     }
   } catch { /* значения нет → дефолт движка */ }
+
+  // The optional contact-cap column may be unavailable on an older schema.
+  // Ownership is mandatory for budget enrolment: do not create a doomed,
+  // unmarked ENG base when the first read failed.
+  if (!budgetOwner) {
+    try {
+      const { data, error } = await supabase.from('he_projects')
+        .select('market, created_by').eq('id', projectId).maybeSingle();
+      if (error || !data) return { ok: false, message: 'ENG base budget: unavailable' };
+      budgetOwner = data;
+    } catch {
+      return { ok: false, message: 'ENG base budget: unavailable' };
+    }
+  }
+
+  // Only the new ENG enqueue path can enrol a fresh base. Old workers cannot
+  // initialise a zero ledger after doing unrecorded work during deployment.
+  if (budgetOwner?.market === 'us') {
+    try {
+      if (await readHeEngBaseFirst(supabase, budgetOwner)) {
+        collectInfo.eng_base_budget_version = 1;
+        // Opt in only NEW manual client bases. Existing paid runs, staff and
+        // campaign refill keep their exact historical execution contract.
+        if (!refill) {
+          collectInfo.eng_collection_target = createHeEngCollectionTarget();
+          collectInfo.eng_collection_work = { version: 1, round: 1, batch_size: 100,
+            active_source_key: null, seen_companies: [], history: [] };
+          collectInfo.eng_collection_pool = createHeEngCollectionPool({
+            maxEmailsPerCompany: contactCap ?? HE_MAX_EMAILS_PER_COMPANY_DEFAULT,
+          });
+        }
+      }
+    } catch {
+      return { ok: false, message: 'ENG base budget: unavailable' };
+    }
+  }
 
   const { data: base, error: baseInsertErr } = await supabase
     .from('he_bases')

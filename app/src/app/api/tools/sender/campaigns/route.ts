@@ -30,6 +30,8 @@ interface CreateBody {
   gapJitterSeconds?: number;
   /** Проект портала; null или нет поля — без проекта. */
   projectId?: string | null;
+  /** Клиент кабинета, чей стоп-лист действует на базу; null или нет поля — без клиента. */
+  clientUserId?: string | null;
   /** Автосохранение недописанной формы: проверки откладываются до запуска. */
   draft?: boolean;
 }
@@ -179,6 +181,7 @@ export async function POST(req: NextRequest) {
         gapSeconds: body.gapSeconds,
         gapJitterSeconds: body.gapJitterSeconds,
         projectId: body.projectId ?? null,
+        clientUserId: body.clientUserId ?? null,
         // Форма сохраняет недописанный черновик сама — его проверять по полной
         // нельзя: ни писем, ни ящиков там может ещё не быть.
         partial: body.draft === true,

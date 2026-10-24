@@ -16,6 +16,11 @@ import { VE_RELEVANCE_TRIAGE_VERSION } from '@/lib/verticalEngineV2/relevanceTri
 import { newVeAdaptiveCollection } from '@/lib/verticalEngineV2/adaptiveCollection';
 import { checkVeContinuationRequest } from '@/lib/verticalEngineV2/preparationRequest';
 import { getVeCollectionContinuation } from '@/lib/verticalEngineV2/collectionRecovery';
+import { addVeKnownWebsiteSource, canAddVeKnownWebsiteSource, VE_KNOWN_WEBSITE_CATALOG } from '@/lib/verticalEngineV2/knownWebsiteDirectory';
+import type { VeCollectInfo } from '@/lib/verticalEngineV2/stages/baseCollect';
+import { VeSourcePlanSchema } from '@/lib/verticalEngineV2/schemas';
+import { needsVeRestaurantSourceContinuation, normalizeVeRestaurantSourcePlan } from '@/lib/verticalEngineV2/restaurantSourcePolicy';
+import { veAutomaticAudienceReviewRows } from '@/lib/verticalEngineV2/audienceReviewHold';
 
 let mockRouteDb = createMockSupabase();
 jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mockRouteDb; } }));
@@ -39,6 +44,252 @@ const input = {
 };
 
 describe('VE2 base collection enqueue recovery', () => {
+  it('freezes project geography only for new previews and preserves it across brief edits and orphan repair', async () => {
+    for (const required of ['Москва и МО', 'Казань', 'Germany and France', null]) {
+      const brief = required ? { client_brief: { icp: { geo: required } } } : {};
+      const hypotheses = ['geo-1', 'geo-2'].map((id) => ({ id, title: id, project_id: input.projectId, vertical_id: input.verticalId }));
+      const db = createMockSupabase({ tables: { ve_projects: [{ id: input.projectId, brief }], ve_hypotheses: hypotheses } });
+      const args = { ...input, hypothesisIds: hypotheses.map((h) => h.id), collectionMode: 'preview' as const };
+      await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, args)).resolves.toMatchObject({ ok: true, created: true });
+      expect(db.getRows('ve_bases')).toHaveLength(2);
+      for (const base of db.getRows('ve_bases')) expect(base.collect_info).toMatchObject({
+        collection_geography: { version: 1, required },
+      });
+      expect(db.selects.filter((read) => read.table === 've_projects')).toHaveLength(1);
+
+      await db.from('ve_projects').update({ brief: { client_brief: { icp: { geo: 'Другой регион' } } } }).eq('id', input.projectId);
+      await db.from('ve_jobs').delete(); // The same saved audience must survive an orphan repair too.
+      await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, args)).resolves.toMatchObject({ ok: true, created: false });
+      expect(db.getRows('ve_bases')).toHaveLength(2);
+      expect(db.getRows('ve_jobs')).toHaveLength(2);
+      for (const base of db.getRows('ve_bases')) expect(base.collect_info).toMatchObject({
+        collection_geography: { version: 1, required },
+      });
+      expect(db.selects.filter((read) => read.table === 've_projects')).toHaveLength(1);
+    }
+
+    const legacy = createMockSupabase({ tables: { ve_bases: [{ id: 'legacy-preview', project_id: input.projectId,
+      vertical_id: input.verticalId, hypothesis_id: 'legacy-h', source: 'auto', status: 'collecting',
+      collect_info: { collection_mode: 'preview', hypothesis_id: 'legacy-h', limit: 100 } }] },
+      errorTables: { ve_projects: 'Project unavailable' } });
+    await expect(enqueueVeBaseCollect(legacy as unknown as SupabaseClient, {
+      ...input, collectionMode: 'preview', hypothesisIds: ['legacy-h'],
+    })).resolves.toMatchObject({ ok: true, created: false });
+    expect(legacy.getRows('ve_bases')[0].collect_info).not.toHaveProperty('collection_geography');
+    expect(legacy.selects.some((read) => read.table === 've_projects')).toBe(false);
+
+    for (const failure of ['missing', 'read-error', 'malformed-geo'] as const) {
+      const unavailable = createMockSupabase({
+        ...(failure === 'read-error' ? { errorTables: { ve_projects: 'Project read failed' } } : {}),
+        ...(failure === 'malformed-geo' ? { tables: {
+          ve_projects: [{ id: input.projectId, brief: { client_brief: { icp: { geo: 77 } } } }],
+        } } : {}),
+      });
+      await expect(enqueueVeBaseCollect(unavailable as unknown as SupabaseClient, {
+        ...input, collectionMode: 'preview', hypothesisIds: ['new-h'],
+      })).resolves.toMatchObject({ ok: false });
+      expect(unavailable.getRows('ve_bases')).toHaveLength(0);
+      expect(unavailable.getRows('ve_jobs')).toHaveLength(0);
+    }
+  });
+
+  it('replaces an empty completed hiring slot with a bounded restaurant catalogue without reviewing the old reserve', async () => {
+    const h = { id: 'restaurant', project_id: input.projectId, vertical_id: input.verticalId, status: 'proposed',
+      origin: 'generated' as const, broad: false, title: 'Сетевые ресторанные альянсы и гастромаркеты',
+      description: 'Ресторанные холдинги, сети концептуальных кафе и фудмоллы. Необходимость привлекать трафик гостей в непиковые часы и презентовать сезонные меню.' };
+    const registry = { source: 'companies_directory' as const, rationale: 'Реестр', directory_filters: { okvedCodes: ['56.10', '56.30'] } };
+    const hh = { source: 'hh_live' as const, rationale: 'ЛПР', hh_query: { area: '113', text: 'директор по маркетингу (ресторан OR кафе)', date_from: '2025-07-01', date_to: '2026-07-01' } };
+    const plan = { tasks: [registry, hh, { ...hh, hh_query: { ...hh.hh_query, text: 'управляющий (сеть OR сетевой) ресторан' } }] };
+    const original = JSON.stringify(plan);
+    const fixed = normalizeVeRestaurantSourcePlan(plan, { market: 'ru', hypotheses: [h] });
+    expect(fixed.changed).toBe(true);
+    expect(fixed.plan.tasks).toHaveLength(3);
+    expect(fixed.plan.tasks[1]).toMatchObject({ source: 'yandex_maps', maps_query: { queries: ['Рестораны', 'Кафе', 'Фудмоллы'], geo: 'Россия' } });
+    expect(JSON.stringify(plan)).toBe(original);
+    expect(normalizeVeRestaurantSourcePlan(fixed.plan, { market: 'ru', hypotheses: [h] }).changed).toBe(false);
+    const target = { mode: 'preview' as const, status: 'limited' as const, round: 10, max_rounds: 104,
+      candidates_processed: 103, max_candidates: 10000, ready_rows: 0, ready_target: 500, idle_streak: 5 };
+    const oldRows = Array.from({ length: 127 }, (_, i) => ({ company: `Old ${i}`, website: `old${i}.test`, email: `a@old${i}.test`, _relevance_unchecked: true }));
+    const info: VeCollectInfo = { collection_mode: 'preview', hypotheses: [h], plan,
+      target_progress: target, target_checkpoint: { completed_round: 10, seen_rows: [], processed_rows: 138 },
+      tasks: plan.tasks.map((task, i) => ({ source: task.source, task, status: 'done', rows: i === 0 ? 77 : 0,
+        child_job_id: i ? `finished-hh-${i}` : null, ...(i === 0 ? { exhausted: true, directory_cursors: { original: 77 } } : {}), harvest: [] })),
+      construct: { status: 'done', bc_job_id: 'finished-constructor' }, adaptive_collection: newVeAdaptiveCollection(),
+      relevance_reserve: { version: 1, rows: oldRows } };
+    const base = { id: 'restaurant-base', project_id: input.projectId, vertical_id: input.verticalId, hypothesis_id: h.id,
+      source: 'auto', status: 'analyzed', row_count: 0, data: [], collect_info: info, updated_at: '2026-10-21T12:44:00Z' };
+    const current = { ...h, collection_market: 'ru' };
+    expect(getVeCollectionContinuation(base, current)).toMatchObject({ available: true, code: 'source_update', action: 'resume_collection' });
+    for (const altered of [ { ...current, origin: 'manual' }, { ...current, collection_market: 'us' },
+      { ...current, title: 'Ресторанные сети и отели' }, { ...current, description: 'Ресторанные холдинги. Только в Омске.' },
+      { ...current, description: 'Ресторанные сети, нанимающие директора.' }, { ...current, description: 'Ресторанные холдинги.' },
+      { ...current, audience_scope: { version: 1, kind: 'segment', any_of: ['Ресторанные сети'], required: ['Найм'], excluded: [] } },
+    ]) expect(needsVeRestaurantSourceContinuation(base, altered)).toBe(false);
+    for (const alter of [
+      (copy: VeCollectInfo) => { copy.tasks![1].status = 'dispatched'; },
+      (copy: VeCollectInfo) => { copy.tasks![1].rows = 1; },
+      (copy: VeCollectInfo) => { copy.tasks![1].task.hh_query!.area = '2'; },
+      (copy: VeCollectInfo) => { copy.target_progress!.max_rounds = 10; },
+      (copy: VeCollectInfo) => { copy.target_progress!.candidates_processed = 10000; },
+      (copy: VeCollectInfo) => { copy.target_checkpoint!.completed_round = 9; },
+      (copy: VeCollectInfo) => { copy.validation_retry = true; },
+      (copy: VeCollectInfo) => { copy.collection_mode = 'supply'; },
+    ]) { const copy = structuredClone(info); alter(copy); expect(needsVeRestaurantSourceContinuation({ ...base, collect_info: copy }, current)).toBe(false); }
+    for (const mode of ['explicit', 'routine', 'launched'] as const) {
+      const before = structuredClone(info);
+      const db = createMockSupabase({ tables: { ve_hypotheses: [h], ve_projects: [{ id: input.projectId, market: 'ru' }],
+        ve_bases: [structuredClone(base)], ve_jobs: [], ve_templates: mode === 'launched' ? [{ id: 'live', base_id: base.id, launch_info: { campaign_id: 'live' } }] : [] } });
+      const args = { ...input, hypothesisIds: [h.id], collectionMode: 'preview' as const, ...(mode === 'routine' ? {} : { resumeBaseId: base.id }) };
+      await enqueueVeBaseCollect(db as unknown as SupabaseClient, args);
+      const stored = db.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+      if (mode !== 'explicit') { expect(stored.restaurant_source_refresh).toBeUndefined(); continue; }
+      expect(stored.restaurant_source_refresh).toMatchObject({ version: 1, previous_task: before.tasks![1], previous_construct: before.construct });
+      expect(stored.tasks).toHaveLength(3);
+      expect(stored.tasks![0]).toEqual(before.tasks![0]); expect(stored.tasks![2]).toEqual(before.tasks![2]);
+      expect(stored.target_progress).toEqual({ ...target, round: 11, status: 'collecting' });
+      expect(stored.relevance_reserve).toEqual(before.relevance_reserve);
+      expect(veAutomaticAudienceReviewRows(oldRows, stored.restaurant_source_refresh!.held_review_companies)).toEqual([]);
+      expect(stored.cost_policy).toEqual({ version: 1, website_discovery: 'existing_only' });
+      expect(stored.adaptive_collection?.replan_attempts).toBe(before.adaptive_collection?.replan_attempts);
+      expect(stored.adaptive_collection?.widenings).toBe(before.adaptive_collection?.widenings);
+      expect(stored).not.toHaveProperty('construct'); expect(stored).not.toHaveProperty('validation_retry'); expect(stored).not.toHaveProperty('relevance_review_requested');
+      await enqueueVeBaseCollect(db as unknown as SupabaseClient, args);
+      expect(db.getRows('ve_jobs')).toHaveLength(1);
+      expect(needsVeRestaurantSourceContinuation({ ...base, collect_info: stored }, current)).toBe(false);
+    }
+  });
+  it('refreshes audited retail previews before optional old reserve work without changing paid receipts or limits', async () => {
+    // The bounded official-site correction shares the explicit source-only
+    // lifecycle; it cannot reopen the old reserve or buy another HH scrape.
+    for (const mode of ['explicit', 'routine', 'round-limit', 'candidate-limit', 'geo', 'geo-rf', 'required', 'studio', 'supply', 'launched', 'bad-checkpoint', 'live-cursor'] as const) {
+      const adult = { id: 'adult', project_id: input.projectId, vertical_id: input.verticalId, status: 'proposed',
+        title: mode === 'studio' ? 'Вебкам студии' : 'Платформы веб-моделей и взрослого контента',
+        description: mode === 'geo' ? 'Платформы, зарегистрированные в России.' : mode === 'geo-rf' ? 'Платформы в РФ.' : 'Стриминговые платформы для взрослых и фан-сообщества 18+.',
+        ...(mode === 'required' ? { audience_scope: { version: 1 as const, kind: 'segment' as const,
+          any_of: ['Платформы взрослого контента'], required: ['Собственный офис'], excluded: [] } } : {}) };
+      const weak = { source: 'companies_directory' as const, rationale: 'Old exhausted slice', directory_filters: { okvedCodes: ['63'] } };
+      const paid = { source: 'hh_live' as const, rationale: 'Paid before', hh_query: { text: 'платежи' } };
+      const target = { mode: 'preview' as const, status: 'limited' as const, round: mode === 'round-limit' ? 175 : 75,
+        max_rounds: 175, ready_rows: 0, ready_target: 500, candidates_processed: mode === 'candidate-limit' ? 10000 : 5237,
+        max_candidates: 10000, first_round_candidates: 100 };
+      const info: VeCollectInfo = { collection_mode: mode === 'supply' ? 'supply' : 'preview', hypotheses: [adult],
+        niche_source_profile: 'adult_platform', target_progress: target,
+        target_checkpoint: { completed_round: target.round - Number(mode === 'bad-checkpoint'), seen_rows: [], processed_rows: 5237 },
+        plan: { tasks: [weak, paid] }, tasks: [
+          { source: weak.source, task: weak, status: mode === 'live-cursor' ? 'pending' : 'done', rows: 0, child_job_id: null,
+            exhausted: mode !== 'live-cursor', directory_cursors: { old: 900 } },
+          { source: paid.source, task: paid, status: 'done', rows: 1974, child_job_id: 'paid-hh' }],
+        adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, widenings: 2 },
+        construct: { status: 'done', bc_job_id: 'paid-constructor' },
+        relevance_reserve: { version: 1, rows: [{ company: 'Old unrelated', website: 'old.test', email: 'old@old.test', _relevance_unchecked: true }] },
+      };
+      const base = { id: 'adult-base', project_id: input.projectId, vertical_id: input.verticalId, hypothesis_id: adult.id,
+        source: 'auto', status: 'analyzed', row_count: 0, data: [], collect_info: info, updated_at: '2026-10-11T00:00:00Z' };
+      const before = structuredClone(info);
+      const db = createMockSupabase({ tables: { ve_hypotheses: [adult], ve_bases: [base], ve_jobs: [],
+        ve_templates: mode === 'launched' ? [{ id: 'live', base_id: base.id, launch_info: { campaign_id: 'live' } }] : [] } });
+      const args = { ...input, hypothesisIds: [adult.id], collectionMode: 'preview' as const,
+        ...(mode === 'routine' ? {} : { resumeBaseId: base.id }) };
+      await enqueueVeBaseCollect(db as unknown as SupabaseClient, args);
+      const stored = db.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+      if (mode === 'explicit') {
+        expect(stored.known_website_source).toMatchObject({ catalog: VE_KNOWN_WEBSITE_CATALOG, continuation_only: true,
+          previous_task: before.tasks![0], previous_construct: before.construct });
+        expect(stored.tasks).toHaveLength(2);
+        expect(stored.tasks![1]).toEqual(before.tasks![1]);
+        expect(stored.target_progress).toMatchObject({ ...target, round: 76, status: 'collecting' });
+        expect(stored.relevance_reserve).toEqual(before.relevance_reserve);
+        expect(stored.adaptive_collection).toEqual(before.adaptive_collection);
+        expect(stored).not.toHaveProperty('validation_retry');
+        expect(stored).not.toHaveProperty('relevance_review_requested');
+        expect(stored).not.toHaveProperty('construct');
+        await enqueueVeBaseCollect(db as unknown as SupabaseClient, args);
+        expect(db.getRows('ve_jobs')).toHaveLength(1);
+        expect(addVeKnownWebsiteSource(stored)).toBe(false);
+        expect(VeSourcePlanSchema.safeParse(stored.plan).success).toBe(false);
+        const fresh = structuredClone(before);
+        fresh.target_progress = { ...target, round: 1, candidates_processed: 0 };
+        delete fresh.target_checkpoint; delete fresh.construct;
+        fresh.tasks = Array.from({ length: 4 }, () => ({ source: weak.source, task: weak, status: 'pending' as const, child_job_id: null, rows: 0 }));
+        fresh.plan = { tasks: fresh.tasks.map(state => state.task) };
+        expect(addVeKnownWebsiteSource(fresh)).toBe(true);
+        expect(fresh.tasks).toHaveLength(4);
+        expect(fresh.known_website_source?.previous_task).toMatchObject({ status: 'pending' });
+        expect(fresh.known_website_source?.continuation_only).toBeUndefined();
+        expect(addVeKnownWebsiteSource(fresh)).toBe(false);
+      } else expect(stored).not.toHaveProperty('known_website_source');
+      if (['round-limit', 'candidate-limit', 'geo', 'geo-rf', 'required', 'studio', 'supply', 'live-cursor'].includes(mode)) {
+        expect(canAddVeKnownWebsiteSource(before)).toBe(false);
+      }
+    }
+    const oldFlag = process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
+    process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = '';
+    try {
+      for (const mode of ['explicit', 'old-reserve', 'routine', 'manual', 'typed', 'us', 'launched', 'ongoing', 'child', 'round-limit'] as const) {
+        const hypothesis = { id: 'retail-materials', project_id: input.projectId, vertical_id: input.verticalId,
+          title: 'Производители строительно-отделочных материалов',
+          description: 'Заводы сухих смесей, напольных покрытий, плитки и ЛКМ с собственным шоурумом и интернет-магазином. Потеря прямых частных заказов при передаче их сторонним дилерам.',
+          broad: false, origin: mode === 'manual' ? 'manual' : 'generated', status: 'approved',
+          ...(mode === 'typed' ? { audience_scope: { version: 1, kind: 'segment', any_of: ['Производители стройматериалов'],
+            required: ['Собственный шоурум'], excluded: [] } } : {}) };
+        const progress = { mode: 'preview', status: 'limited', round: mode === 'round-limit' ? 100 : 49, max_rounds: 100,
+          ready_rows: 27, ready_target: 500, candidates_processed: 3151, max_candidates: 10000, idle_streak: 1 };
+        const task = { source: 'companies_directory', directory_filters: { okvedCodes: ['28.29'] }, rationale: 'Old generator plan' };
+        const ready = [{ company: 'Saved producer', email: 'ready@example.test', _email_status: 'ok' }];
+        const info = { collection_mode: 'preview', hypotheses: [hypothesis], target_progress: progress,
+          target_checkpoint: { completed_round: progress.round, seen_rows: [{ company: 'Seen producer', email: 'seen@example.test' }], processed_rows: 3151 },
+          plan: { tasks: [task] }, tasks: [{ source: task.source, task, status: 'done', exhausted: true,
+            child_job_id: 'paid-directory-child', directory_cursors: { old: 400 } }],
+          source_contact_recovery: { version: 1, checked: { paid: { website: 'https://saved.test' } } },
+          adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, widenings: 1 },
+          saved_email_recovery: { version: 1, attempt_id: 'automatic:saved-retail', checked: { receipt: 'ok' }, automatic_checked: { receipt: 'ok' } },
+          ...(mode === 'old-reserve' ? { relevance_reserve: { version: 1, rows: [
+            { company: 'Old pending producer', email: 'pending@example.test', _email_status: 'unknown', _relevance_unchecked: true },
+          ] } } : {}),
+          ...(mode === 'child' ? { preview_pipeline: { version: 1, batches: [{ id: 'already-paid-child', bc_job_id: 'paid-constructor' }] } } : {}),
+        };
+        const base = { id: 'saved-retail', project_id: input.projectId, vertical_id: input.verticalId,
+          hypothesis_id: hypothesis.id, source: 'auto', status: 'analyzed', row_count: 29, data: ready,
+          updated_at: '2026-10-15T20:06:33Z', collection_continuation_revision: 4, collect_info: info };
+        const db = createMockSupabase({ tables: { ve_hypotheses: [hypothesis], ve_bases: [base],
+          ve_projects: [{ id: input.projectId, market: mode === 'us' ? 'us' : 'ru' }],
+          ve_jobs: mode === 'ongoing' ? [{ id: 'current-job', project_id: input.projectId, stage: 'base_collect', status: 'running', payload: { base_id: base.id } }] : [],
+          ve_templates: mode === 'launched' ? [{ id: 'live', base_id: base.id, launch_info: { campaign_id: 'live' } }] : [],
+        } });
+        const expectedRefresh = mode === 'explicit' || mode === 'old-reserve';
+        if (expectedRefresh) expect(getVeCollectionContinuation(base, { ...hypothesis, collection_market: 'ru' })).toMatchObject({ available: true, code: 'source_update' });
+        if (mode === 'child') expect(getVeCollectionContinuation(base, hypothesis)).toMatchObject({ available: true, code: 'saved_work' });
+        if (mode === 'round-limit') expect(getVeCollectionContinuation(base, { ...hypothesis, collection_market: 'ru' })).toMatchObject({ available: false, code: 'round_limit' });
+        const args = { ...input, hypothesisIds: [hypothesis.id], collectionMode: 'preview' as const,
+          ...(mode === 'routine' ? {} : { resumeBaseId: base.id }) };
+        await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, args)).resolves.toMatchObject({ ok: true });
+        const saved = db.getRows('ve_bases')[0];
+        expect(saved).toMatchObject({ row_count: 29, data: ready });
+        if (expectedRefresh) {
+          expect(saved.collect_info).toMatchObject({ audience_scope_refresh_requested: true,
+            cost_policy: { version: 1, website_discovery: 'existing_only' },
+            target_progress: { ...progress, status: 'collecting', round: 50 },
+            target_checkpoint: info.target_checkpoint, tasks: info.tasks,
+            source_contact_recovery: info.source_contact_recovery,
+            saved_email_recovery: info.saved_email_recovery, adaptive_collection: info.adaptive_collection,
+          });
+          expect(saved.collect_info).not.toHaveProperty('validation_retry');
+          expect(saved.collect_info).not.toHaveProperty('relevance_review_requested');
+          if (mode === 'old-reserve') expect(saved.collect_info).toMatchObject({ relevance_reserve: info.relevance_reserve });
+          await enqueueVeBaseCollect(db as unknown as SupabaseClient, args);
+          expect(db.getRows('ve_jobs')).toHaveLength(1);
+        } else {
+          expect(saved.collect_info).not.toHaveProperty('audience_scope_refresh_requested');
+          if (['routine', 'launched', 'round-limit'].includes(mode)) expect(db.getRows('ve_jobs')).toHaveLength(0);
+          if (mode === 'ongoing') expect(db.getRows('ve_jobs')).toHaveLength(1);
+        }
+      }
+    } finally {
+      if (oldFlag === undefined) delete process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
+      else process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = oldFlag;
+    }
+  });
+
   it('applies a controlled source refresh only to an explicit unlaunched preview without growing its budget', async () => {
     const oldFlag = process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
     try {
@@ -119,6 +370,7 @@ describe('VE2 base collection enqueue recovery', () => {
       tasks: [{ source: 'directory', rows: 25, harvest: [{ email: 'raw@example.com' }] }],
     };
     mockRouteDb = createMockSupabase({ tables: {
+      ve_projects: [{ id: input.projectId, brief: {} }],
       ve_verticals: [{ id: input.verticalId, project_id: input.projectId, name: input.verticalName }],
       ve_hypotheses: ['hypothesis-1', 'hypothesis-2'].map((id) => ({ id, title: id,
         project_id: input.projectId, vertical_id: input.verticalId })),
@@ -146,6 +398,7 @@ describe('VE2 base collection enqueue recovery', () => {
   it('continues with the remaining hypotheses when one selected base already exists', async () => {
     const db = createMockSupabase({
       tables: {
+        ve_projects: [{ id: input.projectId, brief: {} }],
         ve_hypotheses: [
           { id: 'hypothesis-1', title: 'Первая', project_id: input.projectId, vertical_id: input.verticalId },
           { id: 'hypothesis-2', title: 'Вторая', project_id: input.projectId, vertical_id: input.verticalId },
@@ -266,6 +519,10 @@ describe('VE2 base collection enqueue recovery', () => {
       const target = { mode: 'preview', status: 'limited', ready_rows: readyRows.length, ready_target: 500,
         candidates_processed: 17, round: 1, max_rounds: 100, max_candidates: 10000, first_round_candidates: 100 };
       const partialInfo = { collection_mode: 'preview', target_progress: target,
+        // A later explicit continuation may allocate its normal round budget;
+        // the automatic billing receipt only constrains the original recovery.
+        preview_billing_resume: { version: 1, job_id: 'old-billing-job', blocked_at: '2026-10-19T00:00:00Z',
+          resumed_at: '2026-10-20T00:00:00Z', max_rounds: 100, max_candidates: 10000 },
         target_checkpoint: { completed_round: 1, seen_rows: readyRows, processed_rows: 17 },
         relevance_reserve: { version: 1, rows: [{ company: 'Plant', website: 'plant.test', email: 'info@plant.test',
           _email_status: 'ok', _ve_relevance: { status: 'needs_review', review_attempts: 1,
@@ -328,7 +585,8 @@ describe('VE2 base collection enqueue recovery', () => {
           payload: { base_id: 'saved-partial', hypothesis_id: 'h1', collection_mode: 'preview' } });
         expect(partialDb.getRows('ve_bases')[0]).toMatchObject({ status: 'collecting',
           collect_info: { relevance_review_requested: true, validation_retry: true,
-            target_progress: { ready_rows: readyRows.length, candidates_processed: 17, round: 1 } } });
+            target_progress: { ready_rows: readyRows.length, candidates_processed: 17, round: 1, max_rounds: 101, max_candidates: 10000 } } });
+        expect(partialDb.getRows('ve_bases')[0].collect_info).not.toHaveProperty('preview_billing_resume');
         if (staffing) expect(partialDb.getRows('ve_bases')[0]).toMatchObject({ row_count: readyRows.length, data: readyRows,
           collect_info: { hypotheses: [currentHypothesis], source_contact_recovery: sourceReceipts, tasks: savedTasks,
             target_checkpoint: partialInfo.target_checkpoint, relevance_reserve: partialInfo.relevance_reserve,
@@ -338,6 +596,7 @@ describe('VE2 base collection enqueue recovery', () => {
         expect(partialDb.getRows('ve_jobs')).toHaveLength(1);
       } else {
         expect(partialDb.getRows('ve_bases')[0].status).toBe('analyzed');
+        expect(partialDb.getRows('ve_bases')[0].collect_info).toHaveProperty('preview_billing_resume', partialInfo.preview_billing_resume);
         if (mode === 'manual') expect(partialDb.getRows('ve_bases')[0]).toMatchObject({
           data: readyRows, collect_info: partialInfo, updated_at: '2026-10-14T00:00:00Z' });
       }
@@ -651,16 +910,34 @@ describe('VE2 base collection enqueue recovery', () => {
     // иначе воркер годами «поднимал бы ноль» и никто бы не заметил.
     const resumeCalls: Array<Record<string, unknown>> = [];
     const resumeDb = createMockSupabase({ rpcHandlers: {
+      ve_auto_resume_queue_persistence_failures: () => ({ data: 2 }),
       ve_auto_resume_transient_preparations: (params: Record<string, unknown>) => { resumeCalls.push(params); return { data: 3 }; },
     } });
-    await expect(autoResumeVeTransientPreparations(resumeDb as unknown as SupabaseClient)).resolves.toEqual({ resumed: 3 });
+    await expect(autoResumeVeTransientPreparations(resumeDb as unknown as SupabaseClient)).resolves.toEqual({ resumed: 5 });
     expect(resumeCalls).toEqual([{ p_limit: 10 }]);
     const brokenDb = createMockSupabase({ rpcHandlers: {
+      ve_auto_resume_queue_persistence_failures: () => ({ data: 0 }),
       ve_auto_resume_transient_preparations: () => ({ data: null, error: { message: 'rpc down' } }),
     } });
     await expect(autoResumeVeTransientPreparations(brokenDb as unknown as SupabaseClient)).rejects.toThrow('rpc down');
-    const oddDb = createMockSupabase({ rpcHandlers: { ve_auto_resume_transient_preparations: () => ({ data: null }) } });
+    const oddDb = createMockSupabase({ rpcHandlers: { ve_auto_resume_transient_preparations: () => ({ data: null }),
+      ve_auto_resume_queue_persistence_failures: () => ({ data: null }) } });
     await expect(autoResumeVeTransientPreparations(oddDb as unknown as SupabaseClient)).resolves.toEqual({ resumed: 0 });
+    for (const code of ['PGRST202', '42883', '42501']) {
+      const fallback = jest.fn(() => ({ data: 3 }));
+      const rollingDb = createMockSupabase({ rpcHandlers: {
+        ve_auto_resume_queue_persistence_failures: () => ({ data: null, error: { code, message: 'queue recovery unavailable' } }),
+        ve_auto_resume_transient_preparations: fallback,
+      } });
+      const resume = autoResumeVeTransientPreparations(rollingDb as unknown as SupabaseClient);
+      if (code === '42501') {
+        await expect(resume).rejects.toThrow('queue recovery unavailable');
+        expect(fallback).not.toHaveBeenCalled();
+      } else {
+        await expect(resume).resolves.toEqual({ resumed: 3 });
+        expect(fallback).toHaveBeenCalledTimes(1);
+      }
+    }
   });
 
   it('repairs an orphan collecting base that has no active worker job', async () => {
@@ -804,6 +1081,68 @@ describe('VE2 base collection enqueue recovery', () => {
         claims = 0;
         await runVeOutreachPreparations(resumedDb as unknown as SupabaseClient);
         expect(resumedDb.getRows('ve_jobs').filter((row) => row.status === 'pending')).toHaveLength(1);
+      }
+    }
+
+    // A coordinator DB response is not the paid worker's outcome. Keep the
+    // same request across a gateway blip; real worker failures remain terminal.
+    for (const mode of ['save-response', 'save-rejected', 'release-response', 'queue-response', 'read-rejected', 'permission', 'lease', 'failed-worker'] as const) {
+      const gateway = 'An invalid response was received from the upstream server';
+      let claims = 0;
+      let saves = 0;
+      const save = jest.fn((_params: Record<string, unknown>) => {
+        saves++;
+        if (saves === (mode === 'release-response' ? 2 : 1)) {
+          if (mode === 'save-rejected') throw new TypeError('fetch failed');
+          if (mode === 'save-response' || mode === 'release-response') return { data: null, error: { message: gateway } };
+          if (mode === 'permission') return { data: null, error: { message: 'permission denied for function ve_save_outreach_preparation' } };
+          if (mode === 'lease') return { data: false };
+        }
+        return { data: true };
+      });
+      const preparation = { project_id: input.projectId, hypothesis_id: 'h1', base_id: 'live-base',
+        template_id: null, status: 'collecting', language: 'ru', claim_token: 'lease' };
+      const runningDb = createMockSupabase({ tables: {
+        ve_hypotheses: [{ id: 'h1', project_id: input.projectId, vertical_id: input.verticalId, status: 'approved' }],
+        ve_bases: [{ id: 'live-base', project_id: input.projectId, hypothesis_id: 'h1', source: 'auto',
+          status: mode === 'queue-response' ? 'analyzed' : 'collecting', row_count: 32, collection_mode: 'preview' }],
+        ve_jobs: [{ id: 'live-job', project_id: input.projectId, stage: 'base_collect',
+          status: mode === 'failed-worker' ? 'failed' : mode === 'queue-response' ? 'done' : 'running',
+          error: mode === 'failed-worker' ? gateway : null, payload: { base_id: 'live-base' } }],
+        ve_templates: [],
+      }, rpcHandlers: {
+        ve_claim_outreach_preparation: () => ({ data: claims++ === 0 ? [preparation] : [] }),
+        ve_save_outreach_preparation: save,
+        ve_enqueue_outreach_preparation_job: () => ({ data: null, error: { message: gateway } }),
+      } });
+      const originalRows = structuredClone({ bases: runningDb.getRows('ve_bases'), jobs: runningDb.getRows('ve_jobs') });
+      if (mode === 'read-rejected') {
+        const from = runningDb.from.bind(runningDb);
+        jest.spyOn(runningDb, 'from').mockImplementation((table) => {
+          const query = from(table);
+          if (table === 've_jobs') jest.spyOn(query, 'maybeSingle').mockRejectedValueOnce(new TypeError('fetch failed'));
+          return query;
+        });
+      }
+      await runVeOutreachPreparations(runningDb as unknown as SupabaseClient);
+      if (mode === 'lease') expect(save).toHaveBeenCalledTimes(1);
+      else expect(save).toHaveBeenLastCalledWith(expect.objectContaining({
+        p_status: mode === 'permission' || mode === 'failed-worker' ? 'error' : 'collecting',
+        p_base_id: 'live-base', p_release: true,
+      }), expect.anything());
+      expect(runningDb.getRows('ve_bases')).toEqual(originalRows.bases);
+      expect(runningDb.getRows('ve_jobs')).toEqual(originalRows.jobs);
+      expect(runningDb.inserts).toHaveLength(0);
+      if (mode !== 'queue-response') expect(runningDb.rpcCalls.some((call) => call.fn === 've_enqueue_outreach_preparation_job')).toBe(false);
+      if (mode === 'save-response' || mode === 'save-rejected' || mode === 'release-response') {
+        // A later healthy poll observes the existing worker, without another
+        // base/job or an implicit collection retry permission.
+        claims = 0;
+        await runVeOutreachPreparations(runningDb as unknown as SupabaseClient);
+        expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ p_status: 'collecting', p_error: null }), expect.anything());
+        expect(save.mock.calls.some(([params]) => params.p_status === 'error' || params.p_status === 'pending')).toBe(false);
+        expect(runningDb.getRows('ve_jobs')).toEqual(originalRows.jobs);
+        expect(runningDb.inserts).toHaveLength(0);
       }
     }
 

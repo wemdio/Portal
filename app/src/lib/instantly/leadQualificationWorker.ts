@@ -46,7 +46,7 @@ import type { Email, Lead } from './types';
 import { resolveLeadContactMetadata } from './leadContactMetadata';
 import { loadCachedLeadContacts } from './cachedLeadContacts';
 import { senderDisplayLeadName } from './leadReplyContacts';
-import { resolveEffectiveReplyOwner } from './replyOwnershipResolver';
+import { resolveEffectiveReplyOwner, resolveOriginalCompanyContactEmail } from './replyOwnershipResolver';
 import { resolveSentHandoffClientEcho } from './clientEchoOwner';
 import { resolveInstantlyAccountId } from './accounts';
 import { enqueueOutreachOsReplyLead, OUTREACHOS_CLIENT_USER_ID } from '@/lib/outreachOsLeads/process';
@@ -111,6 +111,74 @@ export const OWNERSHIP_REVIEW_REASON_PREFIX =
 export const TRANSIENT_RETRY_REASON_PREFIX =
   'Автоматическая повторная квалификация:';
 const TRANSIENT_OTHERS_RETRY_TAG = '[others]';
+const MAILBOX_CONFLICT_SNAPSHOT_KEY = '_portal_mailbox_conflict_v1';
+
+interface ReplyMailboxConflict {
+  email_id: string;
+  lead_email: string;
+  provider_campaign_id: string;
+  mailbox: string;
+  outbound_mailboxes: string[];
+}
+
+function replySnapshotWithMailboxConflict(reply: Email, conflict?: ReplyMailboxConflict): Email | null {
+  const snapshot = captureQualificationReplySnapshot(reply);
+  // Metadata lives beside the opaque snapshot (also for gzip storage), never
+  // inside the provider email or the classifier input.
+  return snapshot && conflict ? { ...snapshot, [MAILBOX_CONFLICT_SNAPSHOT_KEY]: conflict } : snapshot;
+}
+
+function savedReplyMailboxConflict(row: {
+  instantly_email_id?: string | null;
+  lead_email?: string | null;
+  campaign_id?: string | null;
+  ai_reason?: string | null;
+  reply_recovery_snapshot?: unknown;
+}, snapshot: Email | null): ReplyMailboxConflict | undefined {
+  const normalize = (value: unknown) => typeof value === 'string' ? value.trim().toLowerCase() : '';
+  const stored = row.reply_recovery_snapshot && typeof row.reply_recovery_snapshot === 'object'
+    ? row.reply_recovery_snapshot as Record<string, unknown> : {};
+  const address = (value: unknown) => /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/.test(normalize(value));
+  const validate = (value: unknown): ReplyMailboxConflict | undefined => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`${OWNERSHIP_DEFER_ERROR_PREFIX}: mailbox conflict checkpoint is invalid`);
+    }
+    const conflict = value as ReplyMailboxConflict;
+    if (typeof conflict.email_id !== 'string' || !conflict.email_id.trim() || !address(conflict.lead_email)) {
+      throw new Error(`${OWNERSHIP_DEFER_ERROR_PREFIX}: mailbox conflict checkpoint identity is invalid`);
+    }
+    if (!address(conflict.mailbox) || typeof conflict.provider_campaign_id !== 'string' ||
+        !conflict.provider_campaign_id.trim() || !Array.isArray(conflict.outbound_mailboxes) ||
+        !conflict.outbound_mailboxes.length || conflict.outbound_mailboxes.length > 1_000 ||
+        conflict.outbound_mailboxes.some(mailbox => !address(mailbox) || normalize(mailbox) === normalize(conflict.mailbox))) {
+      throw new Error(`${OWNERSHIP_DEFER_ERROR_PREFIX}: mailbox conflict checkpoint is invalid`);
+    }
+    // A structurally valid checkpoint for another source cannot fence this
+    // inbound. Invalid metadata stays fail-closed, even without a usable body.
+    if (conflict.email_id !== row.instantly_email_id || normalize(conflict.lead_email) !== normalize(row.lead_email)) {
+      return undefined;
+    }
+    return conflict;
+  };
+  if (Object.hasOwn(stored, MAILBOX_CONFLICT_SNAPSHOT_KEY)) {
+    return validate(stored[MAILBOX_CONFLICT_SNAPSHOT_KEY]);
+  }
+  if (!snapshot || snapshot.id !== row.instantly_email_id ||
+      normalize(snapshot.from_address_email) !== normalize(row.lead_email)) return undefined;
+  // Compatibility only for this worker's exact old cross-client diagnostic,
+  // scoped to the same saved email, provider campaign and receiving mailbox.
+  // Broad ownership failure kinds / arbitrary AI text are not conflict proof.
+  const prefix = `${OWNERSHIP_REVIEW_REASON_PREFIX} `;
+  const reason = row.ai_reason?.startsWith(prefix) ? row.ai_reason.slice(prefix.length) : '';
+  const legacy = /^(?:\[legacy-semantic\] )?Письмо пришло в ящик ([^,\s]+), а в треде использовались (.+)\. Ожидается автоматическое восстановление исходного проекта\.$/u.exec(reason);
+  if (!legacy || row.campaign_id !== snapshot.campaign_id ||
+      normalize(legacy[1]) !== normalize(snapshot.eaccount)) return undefined;
+  return validate({
+    email_id: snapshot.id, lead_email: snapshot.from_address_email,
+    provider_campaign_id: snapshot.campaign_id, mailbox: normalize(legacy[1]),
+    outbound_mailboxes: legacy[2].split(', ').map(normalize),
+  });
+}
 
 // Drain different eligible rows frequently, but do not retry one failing row
 // every tick. The old shared 15-minute clock limited all projects to 20/h.
@@ -1494,6 +1562,8 @@ export async function qualifyOneReply(
     ownershipEvidenceMode?: 'recovery';
     ownershipEvidencePriority?: 'fresh' | 'recovery';
     onOwnershipEvidenceProgress?: () => void;
+    /** Prior observed mailbox mismatch, scoped to this exact saved inbound. */
+    mailboxConflict?: ReplyMailboxConflict;
   },
 ): Promise<void> {
   // Includes webhook/Others/direct entry points, not just the intake poller.
@@ -1621,6 +1691,7 @@ export async function qualifyOneReply(
     evidenceMode: opts?.ownershipEvidenceMode,
     evidencePriority: opts?.ownershipEvidencePriority,
     onEvidenceProgress: opts?.onOwnershipEvidenceProgress,
+    requireIndependentProof: Boolean(opts?.mailboxConflict),
   });
   if (ownership.status === 'defer') {
     // Throw into the existing bounded retry machinery. A normal return would
@@ -1639,7 +1710,7 @@ export async function qualifyOneReply(
       db,
       {
         campaign_id: providerCampaignId,
-        reply_recovery_snapshot: captureQualificationReplySnapshot(reply),
+        reply_recovery_snapshot: replySnapshotWithMailboxConflict(reply, opts?.mailboxConflict),
         campaign_name: await resolveCampaignName(providerCampaignId, accountId),
         lead_email: leadEmail,
         thread_id: reply.thread_id,
@@ -1696,7 +1767,7 @@ export async function qualifyOneReply(
         qualified_project_owner_proven: true,
         // Preserve the provider input, not our derived campaign. Otherwise a
         // retry loses the original conversation and reinforces a wrong owner.
-        reply_recovery_snapshot: captureQualificationReplySnapshot(reply),
+        reply_recovery_snapshot: replySnapshotWithMailboxConflict(reply, opts?.mailboxConflict),
       }
     : {};
 
@@ -1776,7 +1847,9 @@ export async function qualifyOneReply(
         db,
         {
           campaign_id: campaignId,
-          ...qualificationOwnerSnapshot,
+          // Recipient/ownership guards have not proved this inbound's owner.
+          // Do not freeze a guessed project on a pending row.
+          reply_recovery_snapshot: replySnapshotWithMailboxConflict(reply, opts?.mailboxConflict),
           campaign_name: await resolveCampaignName(campaignId, accountId),
           lead_email: leadEmail,
           thread_id: reply.thread_id,
@@ -1841,7 +1914,11 @@ export async function qualifyOneReply(
         db,
         {
           campaign_id: campaignId,
-          ...qualificationOwnerSnapshot,
+          reply_recovery_snapshot: replySnapshotWithMailboxConflict(reply, {
+            email_id: reply.id!, lead_email: leadEmail,
+            provider_campaign_id: providerCampaignId, mailbox: ourMailbox,
+            outbound_mailboxes: [...outboundMailboxes],
+          }),
           campaign_name: await resolveCampaignName(campaignId, accountId),
           lead_email: leadEmail,
           thread_id: reply.thread_id,
@@ -1993,13 +2070,44 @@ export async function qualifyOneReply(
   // The loaded base also lives in payload/custom_variables. Reply fallback
   // retains the responder's signature, never quoted outbound contact details.
   // Phone/site belong to the board, not instantly_lead_qualifications.
-  const { leadName, companyName, phone: leadPhone, website: leadWebsite } = resolveLeadContactMetadata({
+  const metadataInput = {
     leads: leadMetadata,
     cachedLeads,
     leadEmail,
     campaignId,
     replyBody: (result.threadContext?.replyEmail ?? effectiveReply).body,
-  });
+  };
+  let contactMetadata = resolveLeadContactMetadata(metadataInput);
+  if ((customMatch || result.isLead) && (!contactMetadata.companyName || !contactMetadata.website) &&
+      (!result.threadContext || result.threadContext.replyEmail.id === reply.id)) {
+    const originalEmail = resolveOriginalCompanyContactEmail(reply, ctx, campaignId);
+    if (originalEmail) {
+      // Optional company-only lookup. Never replace the actual responder's
+      // address/name/phone or fail qualification when enrichment is unavailable.
+      let originalLeads: Lead[] = [];
+      try {
+        originalLeads = await loadCachedLeadContacts(db, campaignId, originalEmail);
+      } catch (error) {
+        workerLog('warn', 'Original lead company cache unavailable; using API', error);
+      }
+      try {
+        const fromCache = resolveLeadContactMetadata({ ...metadataInput,
+          originalCompanyContact: { email: originalEmail, leads: originalLeads } });
+        contactMetadata = fromCache;
+        if (!fromCache.companyName || !fromCache.website) {
+          const fetched = await instantly.getLeadsByEmail({ email: originalEmail, campaign_id: campaignId },
+            { accountId, consumer: 'qualification_company', retryRateLimits: false,
+              timeoutMs: 10_000, timeoutIncludesBody: true });
+          originalLeads = [...(Array.isArray(fetched) ? fetched : []), ...originalLeads];
+        }
+        contactMetadata = resolveLeadContactMetadata({ ...metadataInput,
+          originalCompanyContact: { email: originalEmail, leads: originalLeads } });
+      } catch (error) {
+        workerLog('warn', 'Original lead company metadata unavailable', error);
+      }
+    }
+  }
+  const { leadName, companyName, phone: leadPhone, website: leadWebsite } = contactMetadata;
 
   const replyText = result.threadContext
     ? getBodyText(result.threadContext.replyEmail.body)
@@ -2328,7 +2436,7 @@ export async function refreshMissingRecoverySources(
   try {
     for (let offset = 0; offset < ids.length && checked < 10; offset += 50) {
       const { data, error } = await db.from('instantly_lead_qualifications')
-        .select('id, instantly_email_id, campaign_id, lead_email, updated_at')
+        .select('id, instantly_email_id, campaign_id, lead_email, updated_at, ai_reason, reply_recovery_snapshot')
         .is('queue_archived_at', null)
         .eq('status', 'pending').eq('recovery_use_snapshot', true)
         .eq('recovery_failure_kind', 'source_missing')
@@ -2349,9 +2457,12 @@ export async function refreshMissingRecoverySources(
         });
         if (!snapshot || snapshot.id !== row.instantly_email_id ||
           snapshot.from_address_email?.trim().toLowerCase() !== row.lead_email?.trim().toLowerCase()) continue;
+        const conflict = savedReplyMailboxConflict(row, qualificationReplySnapshot(row) ??
+          qualificationReplySnapshot({ ...row, reply_recovery_snapshot: snapshot }));
         if (await qualificationRecoveryDisposition(db, row.id, Date.now()) !== 'ready') continue;
         const { data: saved, error: saveError } = await db.from('instantly_lead_qualifications')
-          .update({ reply_recovery_snapshot: snapshot, recovery_next_at: null,
+          .update({ reply_recovery_snapshot: conflict
+            ? { ...snapshot, [MAILBOX_CONFLICT_SNAPSHOT_KEY]: conflict } : snapshot, recovery_next_at: null,
             recovery_failure_kind: null, recovery_failure_count: 0,
           })
           .eq('id', row.id).eq('status', 'pending').eq('updated_at', row.updated_at)
@@ -2816,6 +2927,7 @@ export async function reprocessOwnershipReviewRows(
         ? 'legacy_semantic' : 'technical');
 
     try {
+      let mailboxConflict: ReplyMailboxConflict | undefined;
       // Recovery already has durable retries. Do not spend another 28 seconds
       // retrying a 429 inside getEmail before yielding to fresh replies.
       const readSnapshot = async () => {
@@ -2827,6 +2939,7 @@ export async function reprocessOwnershipReviewRows(
           throw new Error('recovery source checkpoint unavailable');
         }
         const snapshot = qualificationReplySnapshot(data);
+        mailboxConflict = savedReplyMailboxConflict({ ...raw, ...data }, snapshot);
         return snapshot?.id === emailId ? snapshot : null;
       };
       const storedSnapshot = await readSnapshot();
@@ -2860,10 +2973,15 @@ export async function reprocessOwnershipReviewRows(
       if (!fullEmail?.id || fullEmail.id !== emailId) {
         throw new Error(`provider email mismatch for ${emailId}`);
       }
-      const sourceSnapshot = captureQualificationReplySnapshot(fullEmail);
+      const sourceSnapshot = replySnapshotWithMailboxConflict(fullEmail, mailboxConflict);
+      // Older rows may have only the exact guard diagnostic, without a usable
+      // stored source. A newly fetched source must match that same identity.
+      mailboxConflict ??= savedReplyMailboxConflict({ ...raw, reply_recovery_snapshot: sourceSnapshot },
+        qualificationReplySnapshot({ ...raw, reply_recovery_snapshot: sourceSnapshot }));
       if (sourceSnapshot && !raw.recovery_use_snapshot) {
         const { data: saved, error: saveError } = await db.from('instantly_lead_qualifications')
-          .update({ reply_recovery_snapshot: sourceSnapshot })
+          .update({ reply_recovery_snapshot: mailboxConflict
+            ? { ...sourceSnapshot, [MAILBOX_CONFLICT_SNAPSHOT_KEY]: mailboxConflict } : sourceSnapshot })
           .is('queue_archived_at', null)
           .eq('id', raw.id).eq('status', 'processing').eq('updated_at', nowIso)
           .select('id').maybeSingle();
@@ -2941,6 +3059,7 @@ export async function reprocessOwnershipReviewRows(
           ownershipEvidenceMode: 'recovery',
           ownershipEvidencePriority: 'recovery',
           onOwnershipEvidenceProgress: () => { evidenceProgress = true; },
+          mailboxConflict,
           skipClientReplyNotification: raw.ai_reason?.includes(LEGACY_SEMANTIC_RETRY_TAG) === true,
         },
       );

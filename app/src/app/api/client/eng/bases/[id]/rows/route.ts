@@ -4,7 +4,11 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { isValidUuid } from '@/lib/apiValidation';
-import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
+import {
+  filterBlockedContacts,
+  getBlockedContactSnapshot,
+  type BlockedContactSnapshot,
+} from '@/lib/clientBlocklist/blockedDomains';
 import { logWarn } from '@/lib/loggerServer';
 import { loadClientHeBase, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import {
@@ -13,6 +17,7 @@ import {
 } from '@/lib/hypothesisEngine/clientEngProjection';
 import {
   HE_LAUNCH_MAX_LEADS,
+  findCompanyKeyColumns,
   findEmailColumn,
   heConstructContactCap,
   heLaunchEmailVerdict,
@@ -20,6 +25,7 @@ import {
   selectLeadsWithinLaunchCap,
 } from '@/lib/hypothesisEngine/launchHandoff';
 import { projectMarket } from '@/lib/hypothesisEngine/market';
+import { selectHeEngEmailRows } from '@/lib/hypothesisEngine/engEmailPolicy';
 import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -56,7 +62,7 @@ interface EngReadyToSend {
   unusable: number;
   /** Повтор адреса, который уже посчитан. */
   repeated: number;
-  /** В «Do not contact» клиента. */
+  /** В «Do not contact» клиента: адрес или домен компании (адреса или сайта). */
   blocked: number;
   /** Сверх потолка одного запуска (`limit`). */
   over_limit: number;
@@ -73,8 +79,9 @@ interface EngReadyToSend {
  *     «проверенные» они не входят;
  *  2. mapBaseRowsToLeads с колонкой адреса ядра (findEmailColumn по всем
  *     строкам): не один адрес в ячейке — `unusable`, повтор — `repeated`;
- *  3. чёрный список клиента (getBlockedEmailSet + filterBlockedLeads) —
- *     `blocked`, список передаёт вызывающий;
+ *  3. чёрный список клиента (getBlockedContactSnapshot + filterBlockedContacts:
+ *     адреса и домены, сайт строки — колонкой findCompanyKeyColumns, как у
+ *     ядра) — `blocked`, снимок передаёт вызывающий;
  *  4. потолок запуска (selectLeadsWithinLaunchCap, HE_LAUNCH_MAX_LEADS) —
  *     `over_limit`.
  * Отказы ядра, которые снимают запуск целиком (база собрана до разноса
@@ -87,7 +94,7 @@ function countReadyToSend(input: {
   rows: Array<Record<string, unknown>>;
   columns: string[];
   isAutoBase: boolean;
-  blocked: ReadonlySet<string>;
+  blocked: BlockedContactSnapshot;
 }): EngReadyToSend {
   const { rows, columns, isAutoBase } = input;
   const emailColumn = findEmailColumn(columns, rows);
@@ -97,7 +104,7 @@ function countReadyToSend(input: {
   const passed: Array<Record<string, unknown>> = [];
   for (const row of rows) {
     if (!emailColumn || String(row[emailColumn] ?? '').trim() === '') continue;
-    const verdict = heLaunchEmailVerdict(row._email_status);
+    const verdict = heLaunchEmailVerdict(row._email_status, { allowCatchAll: true });
     if (verdict === 'missing') continue;
     checked += 1;
     if (isAutoBase && row._low_relevance === true) {
@@ -108,15 +115,20 @@ function countReadyToSend(input: {
       passed.push(row);
     }
   }
-  const mapped = mapBaseRowsToLeads({ rows: passed, columns, emailColumn });
+  const ordered = selectHeEngEmailRows(passed);
+  const mapped = mapBaseRowsToLeads({ rows: ordered, columns, emailColumn });
   const unusable = mapped.multiAddressRows + mapped.malformedEmailRows;
   const repeated = passed.length - unusable - mapped.leads.length;
-  const filtered = filterBlockedLeads(mapped.leads, input.blocked);
-  const allowed = new Set(filtered.kept.map((l) => l.email));
-  const keptRowIndices = mapped.leadRowIndices.filter((_, i) => allowed.has(mapped.leads[i].email));
+  const websiteColumn = findCompanyKeyColumns(columns).website;
+  const filtered = filterBlockedContacts(mapped.leads, input.blocked, (_lead, i) =>
+    websiteColumn ? ordered[mapped.leadRowIndices[i]]?.[websiteColumn] : null,
+  );
+  // `kept` — те же объекты лидов: строки восстанавливаются по ссылке.
+  const allowed = new Set<object>(filtered.kept);
+  const keptRowIndices = mapped.leadRowIndices.filter((_, i) => allowed.has(mapped.leads[i]));
   const toSend =
     filtered.kept.length > HE_LAUNCH_MAX_LEADS
-      ? selectLeadsWithinLaunchCap({ rows: passed, columns, leadRowIndices: keptRowIndices, limit: HE_LAUNCH_MAX_LEADS })
+      ? selectLeadsWithinLaunchCap({ rows: ordered, columns, leadRowIndices: keptRowIndices, limit: HE_LAUNCH_MAX_LEADS, allowCatchAll: true })
           .keptLeadPositions.length
       : filtered.kept.length;
   return {
@@ -194,7 +206,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       rows.some((r) => heLaunchEmailVerdict(r._email_status) !== 'missing');
     if (!legacy && supabaseInstantly) {
       try {
-        const blocked = await getBlockedEmailSet(supabaseInstantly, result.auth.userId);
+        const blocked = await getBlockedContactSnapshot(supabaseInstantly, result.auth.userId);
         ready = countReadyToSend({
           rows,
           columns,
@@ -213,15 +225,17 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
   // Строки базы принадлежат клиенту, но в них есть и наше: провенанс источника
   // (`source_detail` — код поставщика, русские подписи, поисковый запрос плана)
-  // и служебные пометки `_*`. Превью печатает строку ЦЕЛИКОМ в title каждой
-  // <tr> (EngStepReview.tsx:102), так что режем на сервере, а не на экране.
+  // и служебные пометки `_*`. Они остаются на сервере, включая статусы почт.
   // Проецируем только отданную страницу: сама `data` — до 50k строк.
+  // Existing bases can still contain diagnostic/rejected rows. Only checked
+  // deliverable contacts belong in the client preview, before pagination.
+  const clientRows = selectHeEngEmailRows(rows);
   return NextResponse.json({
     columns: toClientEngBaseColumns(columns),
-    rows: rows.slice(offset, offset + limit).map(toClientEngBaseDataRow),
-    total: rows.length,
+    rows: clientRows.slice(offset, offset + limit).map(toClientEngBaseDataRow),
+    total: clientRows.length,
     status: (base as { status?: string }).status,
-    row_count: (base as { row_count?: number }).row_count ?? rows.length,
+    row_count: clientRows.length,
     ...(wantReady ? { ready } : {}),
   });
 }

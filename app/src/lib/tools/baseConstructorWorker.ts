@@ -33,6 +33,7 @@ import {
   WEBSITE_EMAIL_PREFERENCE_COL,
 } from './baseConstructorCheckpoint';
 import { extractEmail, extractEmails, findColumnIndex } from './dfybUtils';
+import { normalizeConstructorRows } from './baseConstructorData';
 import { parseFoundEmailOrigin, shouldTrackFoundEmailOrigin } from './foundEmailOrigin';
 import { uploadExportArtifact } from './csvExportArtifact';
 import { taJevEnabled } from '@/lib/taScoringJev';
@@ -41,10 +42,17 @@ import {
   createBaseConstructorMetrics,
   mergeBaseConstructorStats,
 } from './baseConstructorMetrics';
+import {
+  sanitizeEngContactDiagnostics,
+  type EngContactCollectionDiagnostics,
+} from './engContactDiagnostics';
+import { ENG_BASE_BUDGET_FREE_STEPS } from './engConstructorSteps';
 
 const admin = supabaseAdmin!;
 
 interface StepConfig {
+  /** Server-created ENG child job: do not run paid steps outside its parent ledger. */
+  he_eng_base_budget?: { base_id: string; project_id: string };
   brief?: string;
   prompt?: string;
   personalization?: { concurrency?: number };
@@ -70,6 +78,8 @@ interface StepConfig {
     max_pages?: number;
     site_timeout_ms?: number;
     reuse_website_description?: boolean;
+    /** Explicit ENG client opt-in; locale alone must not change legacy callers. */
+    contact_page_strategy?: 'eng_contact_first';
     /** Opt-in website refresh; other callers keep the existing additive merge. */
     merge_mode?: 'all' | 'prefer_found' | 'prefer_found_validated';
   };
@@ -112,6 +122,8 @@ interface StepConfig {
   onCheckpoint?: (data: string[][]) => Promise<void>;
   onTaScoringStats?: (stats: TaScoringStats) => void;
   onTaScoringTelemetry?: (stats: TaScoringTelemetry) => void;
+  initialContactDiagnostics?: EngContactCollectionDiagnostics;
+  onContactDiagnostics?: (stats: EngContactCollectionDiagnostics) => Promise<void>;
 }
 
 export interface TaScoringStats {
@@ -511,6 +523,9 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
       maxPages: cfg.find_emails?.max_pages,
       siteTimeoutMs: cfg.find_emails?.site_timeout_ms,
       reuseWebsiteDescription: cfg.find_emails?.reuse_website_description === true,
+      contactPageStrategy: cfg.locale === 'en' ? cfg.find_emails?.contact_page_strategy : undefined,
+      initialContactDiagnostics: cfg.initialContactDiagnostics,
+      onContactDiagnostics: cfg.onContactDiagnostics,
       // Локаль джобы (job.locale): 'en' → «Found Email», EN-блок-лист
       // хостов, Accept-Language 'en-US,en' и EN-пути первыми в скрапере.
       locale: cfg.locale,
@@ -526,6 +541,9 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
       // resume после redeploy перезапускает весь validate с нуля.
       onCheckpoint: cfg.onCheckpoint,
       locale: cfg.locale,
+      contactPageStrategy: cfg.locale === 'en' ? cfg.find_emails?.contact_page_strategy : undefined,
+      initialContactDiagnostics: cfg.initialContactDiagnostics,
+      onContactDiagnostics: cfg.onContactDiagnostics,
     }),
   cap_emails_per_company: (data, prog, _cancel, cfg) =>
     stepCapEmailsPerCompany(data, prog, {
@@ -536,7 +554,11 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
     }),
   check_sites: (data, prog, cancel) => stepSiteCheck(data, prog, cancel),
   enrich_descriptions: (data, prog, cancel, cfg) =>
-    stepEnrich(data, prog, cancel, cfg.onCheckpoint, { locale: cfg.locale }),
+    stepEnrich(data, prog, cancel, cfg.onCheckpoint, {
+      locale: cfg.locale,
+      ...(cfg.locale === 'en' && cfg.find_emails?.contact_page_strategy === 'eng_contact_first'
+        ? { preserveEngWebsiteEvidence: true } : {}),
+    }),
   ta_scoring: (data, prog, cancel, cfg) =>
     stepTAScore(data, cfg.brief || '', prog, cancel, {
       jev: cfg.taScoringJev === true,
@@ -779,11 +801,26 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
 
     const selectedSteps: StepKey[] = job.selected_steps || [];
     const stepConfig: StepConfig = job.step_config || {};
+    if (stepConfig.he_eng_base_budget) {
+      if (selectedSteps.some((step) => !ENG_BASE_BUDGET_FREE_STEPS.has(step))) {
+        throw new Error('ENG base budget: unbudgeted_constructor_step');
+      }
+    }
     // Локаль джобы (миграция добавила base_constructor_jobs.locale NOT NULL
     // DEFAULT 'ru'; до деплоя миграции колонки может не быть — читаем с
     // fallback'ом). 'en' включает ENG-локаль конструктора: EN-алиасы
     // заголовков, английские служебные колонки, EN-блок-листы в шагах.
     const locale = normalizeConstructorLocale(job.locale);
+    const engContactDiagnosticsEnabled =
+      locale === 'en' && stepConfig.find_emails?.contact_page_strategy === 'eng_contact_first';
+    // These writes all replace result_stats. Serialize the opted-in ENG path
+    // so a delayed progress/checkpoint cannot erase a newer loss diagnostic.
+    let engContactWriteTail = Promise.resolve();
+    const persistInOrder = (write: () => Promise<void>): Promise<void> => {
+      if (!engContactDiagnosticsEnabled) return write();
+      engContactWriteTail = engContactWriteTail.then(write);
+      return engContactWriteTail;
+    };
 
     if (selectedSteps.length === 0) throw new Error('Не выбрано ни одного шага');
 
@@ -847,12 +884,9 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
       );
     }
 
-    // JSON-задачи (включая старые checkpoint'ы) могут содержать числа/null,
-    // хотя шаги работают со строками: trim/match вызываются и на теле базы.
-    // Нормализуем до маппинга и любого шага, сохраняя 0 и исходный текст.
-    const inputRows: unknown[][] = job.data || [];
-    const textRows = inputRows.map((row) => row.map((cell) => String(cell ?? '')));
-    let data: string[][] = applyColumnMapping(textRows, stepConfig.column_mapping, locale);
+    let data: string[][] = applyColumnMapping(
+      normalizeConstructorRows(job.data || []), stepConfig.column_mapping, locale,
+    );
     // EN-локаль: после явного маппинга нормализуем оставшиеся известные
     // английские заголовки (Company Name/Organization/URL/E-Mail/…) к
     // каноническим именам — шаги найдут свои колонки, экспорт будет на
@@ -876,6 +910,10 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
      * checkpoint/result опаснее, чем явно завершить job с ошибкой.
      */
     async function persistData(label: string, payload: string[][]): Promise<void> {
+      await persistInOrder(() => persistDataNow(label, payload));
+    }
+
+    async function persistDataNow(label: string, payload: string[][]): Promise<void> {
       const sanitized = sanitizeRowsForJsonb(payload);
       const headerCols = sanitized[0]?.length ?? 0;
       const rows = Math.max(0, sanitized.length - 1);
@@ -996,7 +1034,8 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
             step_index: i + 1, step_key: stepKey, updated_at: new Date().toISOString(),
           } });
         }
-        await updateJobProgress(jobId, i, stepKey, lastReportedProgress, runToken, metrics!.snapshot());
+        await persistInOrder(() =>
+          updateJobProgress(jobId, i, stepKey, lastReportedProgress, runToken, metrics!.snapshot()));
       };
       await progressFn(0);
 
@@ -1019,6 +1058,28 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
         // spread'а: шаги получают 'en' даже если юзерский step_config
         // что-то туда записал.
         locale,
+        // Never trust callbacks/state from persisted step_config. Only an
+        // explicit ENG strategy receives aggregate contact diagnostics.
+        initialContactDiagnostics: engContactDiagnosticsEnabled
+          ? sanitizeEngContactDiagnostics(metrics.snapshot().eng_contact_diagnostics)
+          : undefined,
+        onContactDiagnostics: engContactDiagnosticsEnabled &&
+          (stepKey === 'find_emails' || stepKey === 'validate_emails')
+          ? async (snapshot) => {
+              const diagnostics = sanitizeEngContactDiagnostics(snapshot);
+              if (!diagnostics) throw new Error('Invalid ENG contact diagnostics');
+              await persistInOrder(async () => {
+                metrics!.merge({ eng_contact_diagnostics: diagnostics });
+                const { error } = await updateJobWithRetry(
+                  jobId,
+                  { result_stats: metrics!.snapshot() },
+                  `contactDiagnostics:${stepKey}`,
+                  { runToken, neqStatus: 'cancelled' },
+                );
+                if (error) throw new Error(`Failed to persist ENG contact diagnostics: ${error.message}`);
+              });
+            }
+          : undefined,
         ...(stepsNeedingCheckpoint.has(stepKey)
           ? {
               onCheckpoint: async (checkpointData) => {

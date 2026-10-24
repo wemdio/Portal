@@ -1,9 +1,11 @@
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
 import iconv from 'iconv-lite';
+import { getDomain } from 'tldts';
 import { buildAboutCandidates, DEFAULT_MAX_ABOUT_CANDIDATES } from '@/lib/enrich/aboutCandidates';
 import { normalizeUrl } from '@/lib/enrich/urlUtils';
 import { extractEmailsFromHtml } from '@/lib/enrich/emailExtractor';
+import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import type { Browser } from 'playwright';
 
 const FETCH_TIMEOUT_MS = 8_000;
@@ -18,7 +20,7 @@ const MIN_MAIN_TEXT_TO_SKIP_ABOUT = Number(
   process.env.WEBSITE_ENRICHMENT_MIN_MAIN_TEXT_TO_SKIP_ABOUT ?? '220',
 );
 
-import { getNonPriorityProxyDispatcher, getProxyDispatcher, getProxyGroups } from '@/lib/enrich/proxyPool';
+import { getNonPriorityProxyDispatcher, getProxyDispatcher } from '@/lib/enrich/proxyPool';
 
 type Dispatcher = import('undici').Dispatcher;
 
@@ -89,18 +91,19 @@ const EXTRACT_TEXT_LABELS: Record<WebsiteTextLanguage, { about: string; home: st
 export const WEBSITE_NO_TEXT_STUB_EN = EXTRACT_TEXT_LABELS.en.noText;
 
 /**
- * Порядок групп прокси в лестнице попыток fetchHtmlWithRetry.
+ * Порядок маршрутов в лестнице попыток fetchHtmlWithRetry.
  *
  *  - 'priority-first' — ДЕФОЛТ и сегодняшний маршрут всех вызывающих:
  *    приоритетная (российская) группа на первой попытке, fallback на повторе.
  *    Трогать его нельзя: инцидент 28.07.2026 — 9 из 12 нод общего пула HK/EU,
  *    .ru-сайты отдавали им 403/геоблок, success rate ИНН-парсера 27%
  *    (подробности в proxyPool.ts).
- *  - 'non-priority-first' — обратный порядок для англоязычных сайтов: сначала
- *    нода ВНЕ приоритетной группы, RU-группа остаётся вторым шансом. Включается
- *    только из английского кабинета (hypothesisEngine/stages/io.ts, market 'us').
+ *  - 'direct-first' — для англоязычных сайтов: первая попытка напрямую с
+ *    нашего сервера (американский адрес), повтор — нода ВНЕ приоритетной
+ *    группы; RU-группа не участвует. Включается только из английского кабинета
+ *    (hypothesisEngine/stages/io.ts, market 'us').
  */
-export type WebsiteFetchRouteOrder = 'priority-first' | 'non-priority-first';
+export type WebsiteFetchRouteOrder = 'priority-first' | 'direct-first';
 
 const ABOUT_PATHS = [
   '/about',
@@ -1018,6 +1021,8 @@ export interface WebsiteFetchGuard {
   checkUrl: (url: URL) => Promise<void>;
   maxRedirects: number;
   allowHttpDowngrade: boolean;
+  /** ENG evidence opt-in: keep an advertised HTTP redirect on HTTPS; never send HTTP. */
+  preferHttpsRedirects?: boolean;
   /** Прямой маршрут (прокси не выбран) идёт через этот диспетчер. */
   directDispatcher?: Dispatcher;
 }
@@ -1155,7 +1160,12 @@ export async function fetchFollowingGuarded(
       throw new WebsiteAddressRefusedError(`редирект на схему ${next.protocol}`);
     }
     if (!guard.allowHttpDowngrade && current.protocol === 'https:' && next.protocol === 'http:') {
-      throw new WebsiteAddressRefusedError(`редирект https → http (${next.host})`);
+      if (!guard.preferHttpsRedirects) {
+        throw new WebsiteAddressRefusedError(`редирект https → http (${next.host})`);
+      }
+      // Same advertised destination, HTTPS only. The next iteration applies
+      // the unchanged address/DNS/port guard before any connection is made.
+      next.protocol = 'https:';
     }
     current = next;
   }
@@ -1278,71 +1288,6 @@ async function fetchHtml(url: string, options?: FetchHtmlOptions): Promise<{ htm
   return outcome.kind === 'html' ? { html: outcome.html, status: outcome.status } : null;
 }
 
-/**
- * Перевёрнутая лестница ('non-priority-first') без «другой» ноды — СТРОКА В ЛОГ.
- *
- * Что происходит без неё. Первая попытка тогда идёт обычным выбором пула с
- * preferPriority=false (proxyPool.pickProxyUrl): нода из списка
- * YANDEXMAPS_PROXY_URLS или legacy PROXY_URLS, где перечислены и RU-ноды; если
- * этот список пуст — RU-группа; если живой ноды не нашлось — напрямую. Вторая
- * попытка — RU-группа. То есть лестница схлопывается почти в сегодняшний
- * маршрут, а вызывающий об этом не узнаёт: результат выглядит как обычное
- * чтение сайта. Причин две, и строка их различает, потому что лечатся они
- * по-разному:
- *  - группы вне приоритетной НЕТ (в YANDEXMAPS_PROXY_URLS нет ни одной ноды,
- *    которой нет в YANDEXMAPS_PROXY_URLS_PRIORITY) — это конфигурация, и
- *    правка порядка на этом хосте не делает ничего;
- *  - группа есть, но все её ноды сейчас выбыли (proxyPool, «Выбывание нод»)
- *    или агент ноды не создался — это состояние, оно проходит само.
- *
- * Не чаще раза в ROUTE_FALLBACK_WARN_EVERY_MS на процесс, с числом
- * схлопнувшихся запросов с прошлой такой строки: один сайт — это до десятка
- * запросов цепочки fetchAndExtract, и строка на каждый утопила бы лог. Счётчик
- * живёт в памяти процесса и обнуляется рестартом — это строка лога, а не учёт.
- * Никогда не бросает: диагностика не имеет права сорвать чтение сайта (в том
- * числе там, где пул подменён и getProxyGroups нет).
- */
-const ROUTE_FALLBACK_WARN_EVERY_MS = 10 * 60_000;
-let routeFallbackWarnedAt = 0;
-let routeFallbackSuppressed = 0;
-
-function warnNonPriorityRouteMissing(url: string): void {
-  try {
-    const now = Date.now();
-    if (now - routeFallbackWarnedAt < ROUTE_FALLBACK_WARN_EVERY_MS) {
-      routeFallbackSuppressed += 1;
-      return;
-    }
-    const suppressed = routeFallbackSuppressed;
-    routeFallbackWarnedAt = now;
-    routeFallbackSuppressed = 0;
-    let reason = 'нет живой ноды вне приоритетной группы';
-    try {
-      const { priority, fallback } = getProxyGroups();
-      reason = fallback.some((u) => !priority.includes(u))
-        ? 'все ноды вне приоритетной группы сейчас выбыли или их агент не создался'
-        : 'группы вне приоритетной нет: в YANDEXMAPS_PROXY_URLS нет нод сверх YANDEXMAPS_PROXY_URLS_PRIORITY';
-    } catch {
-      // Пул недоступен или подменён — причина остаётся общей.
-    }
-    let host = url;
-    try {
-      host = new URL(url).hostname;
-    } catch {
-      // Невалидный адрес — печатаем как есть.
-    }
-    console.warn(
-      `[fetchHtml] порядок non-priority-first не выполнен (${host}): ${reason}. ` +
-        'Первая попытка идёт обычным выбором пула (YANDEXMAPS_PROXY_URLS, при пустом списке — RU-группа, ' +
-        'без живой ноды — напрямую), то есть почти прежним маршрутом' +
-        (suppressed > 0 ? `; с прошлой такой строки — ещё ${suppressed} запросов` : '') +
-        '. Следующая такая строка — не раньше чем через 10 мин.',
-    );
-  } catch {
-    // Строка лога не должна сорвать запрос.
-  }
-}
-
 type FetchHtmlWithRetryOptions = {
   timeout?: number;
   signal?: AbortSignal;
@@ -1355,7 +1300,7 @@ type FetchHtmlWithRetryOptions = {
   preferPriority?: boolean;
   /** Заголовок Accept-Language; не передан — русский DEFAULT_ACCEPT_LANGUAGE. */
   acceptLanguage?: string;
-  /** Порядок групп прокси; не передан — 'priority-first', сегодняшняя лестница. */
+  /** Порядок маршрутов; не передан — 'priority-first', сегодняшняя лестница. */
   routeOrder?: WebsiteFetchRouteOrder;
   /** Защита чтения (WebsiteFetchGuard); не передана — redirect: 'follow'. */
   guard?: WebsiteFetchGuard;
@@ -1379,33 +1324,31 @@ async function fetchHtmlOutcomeWithRetry(
   retryable: (outcome: HtmlFetchOutcome) => boolean,
 ): Promise<HtmlFetchOutcome> {
   const retries = Math.max(0, Math.floor(options?.retries ?? FETCH_RETRIES));
-  const nonPriorityFirst = options?.routeOrder === 'non-priority-first';
+  // Явный preferPriority вызывающего сильнее порядка: он и был, и остаётся
+  // способом прибить все попытки к одной группе.
+  const directFirst = options?.routeOrder === 'direct-first' && options?.preferPriority === undefined;
   let outcome: HtmlFetchOutcome = { kind: 'failed' };
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     // Первая попытка — приоритетный пул (RU). Retry — уходим в fallback:
     // если RU-прокси упал/дал 403 на .ru-сайте, второй раз через тот же
     // RU-прокси обычно ничего не даст; шанс через HK/EU выше нуля.
     //
-    // 'non-priority-first' переворачивает лестницу для англоязычного сайта:
-    // первой идёт нода вне приоритетной группы, RU становится вторым шансом —
-    // ни один маршрут не теряется, меняется только порядок. Явный
-    // preferPriority вызывающего сильнее порядка: он и был, и остаётся
-    // способом прибить все попытки к одной группе.
-    const preferPriority =
-      options?.preferPriority ?? (nonPriorityFirst ? attempt > 0 : attempt === 0);
-    // Строго «не RU» умеет только pickNonPriorityProxyUrl: preferPriority=false
-    // берёт YANDEXMAPS_PROXY_URLS, где приоритетные ноды тоже перечислены.
-    // Такой группы нет (пусто или совпадает с приоритетной) — остаёмся на
-    // обычном выборе, то есть почти на сегодняшнем маршруте, и говорим это
-    // строкой в лог (warnNonPriorityRouteMissing): молча схлопнувшаяся
-    // лестница неотличима от работающей.
-    const wantsOtherNode = nonPriorityFirst && attempt === 0 && options?.preferPriority === undefined;
-    const otherNode = wantsOtherNode ? await getNonPriorityProxyDispatcher() : undefined;
-    if (wantsOtherNode && !otherNode) warnNonPriorityRouteMissing(url);
+    // 'direct-first' (англоязычный сайт): первая попытка напрямую — сервер
+    // стоит в Нью-Йорке; повтор — нода вне приоритетной группы
+    // (pickNonPriorityProxyUrl), без живой такой ноды — снова напрямую. С
+    // защитой чтения прямой маршрут идёт через её диспетчер (fetchHtmlOutcome).
+    // RU-группы здесь нет: замер 23.10.2026 на боевом воркере — из 40
+    // читаемых англоязычных сайтов RU-прокси открыли 9, а 15 из 79 «недоступных»
+    // крупных сайтов (CareFirst, Wellmark, LexisNexis…) отвечали напрямую и
+    // отказывали обеим группам прокси (403, обрыв соединения, таймаут).
+    const preferPriority = options?.preferPriority ?? attempt === 0;
+    const dispatcher = directFirst
+      ? (attempt === 0 ? null : (await getNonPriorityProxyDispatcher()) ?? null)
+      : undefined;
     outcome = await fetchHtmlOutcome(url, {
       ...options,
       preferPriority,
-      ...(otherNode ? { dispatcher: otherNode } : {}),
+      ...(dispatcher !== undefined ? { dispatcher } : {}),
     });
     if (outcome.kind === 'html') return outcome;
     if (options?.signal?.aborted) return { kind: 'aborted' };
@@ -1710,7 +1653,7 @@ export async function fetchAndExtract(
     signal?: AbortSignal;
     /** Заголовок Accept-Language; не передан — русский DEFAULT_ACCEPT_LANGUAGE. */
     acceptLanguage?: string;
-    /** Порядок групп прокси; не передан — 'priority-first', сегодняшняя лестница. */
+    /** Порядок маршрутов; не передан — 'priority-first', сегодняшняя лестница. */
     routeOrder?: WebsiteFetchRouteOrder;
     /**
      * Язык служебного текста результата (подписи склейки, заглушка «текста
@@ -1726,6 +1669,8 @@ export async function fetchAndExtract(
      * для КАЖДОЙ страницы цепочки; не передан — прежний разбор.
      */
     layoutAware?: boolean;
+    /** Opt-in ENG reuse: observed final URL and extracted text, before display truncation. */
+    onExtractedPage?: (page: { url: string; text: string }) => void;
   },
 ): Promise<string> {
   const url = normalizeUrl(rawUrl);
@@ -1744,6 +1689,15 @@ export async function fetchAndExtract(
   // Разбор — тот же для главной, www, http-варианта и «о компании»: страница
   // одного сайта, прочитанная одним правилом.
   const extractOptions: ExtractTextOptions = { layoutAware: options?.layoutAware };
+  const read = async (target: string, readOptions: FetchHtmlWithRetryOptions) => {
+    if (!options?.onExtractedPage) return fetchHtmlWithRetry(target, readOptions);
+    const outcome = await fetchHtmlOutcomeWithRetry(target, readOptions, (value) => value.kind !== 'refused');
+    if (outcome.kind !== 'html') return null;
+    if (outcome.status >= 200 && outcome.status < 400) {
+      options.onExtractedPage({ url: outcome.url, text: extractTextFromHtml(outcome.html, extractOptions) });
+    }
+    return { html: outcome.html, status: outcome.status };
+  };
   const tryWithWww = !/^https?:\/\/www\./i.test(url);
   const origin = new URL(url).origin;
   const wwwOrigin = tryWithWww ? origin.replace(/^https?:\/\//i, (m) => `${m}www.`) : origin;
@@ -1754,13 +1708,13 @@ export async function fetchAndExtract(
   let mainText = '';
   let hadAnyHtml = false;
 
-  mainHtml = await fetchHtmlWithRetry(url, { timeout, signal, allowHttpErrors: true, ...route });
+  mainHtml = await read(url, { timeout, signal, allowHttpErrors: true, ...route });
   if (mainHtml) {
     mainText = extractTextFromHtml(mainHtml.html, extractOptions);
     hadAnyHtml = true;
   }
   if (!mainText && tryWithWww) {
-    const wwwHtml = await fetchHtmlWithRetry(`${wwwOrigin}`, {
+    const wwwHtml = await read(`${wwwOrigin}`, {
       timeout,
       signal,
       allowHttpErrors: true,
@@ -1773,7 +1727,7 @@ export async function fetchAndExtract(
     }
   }
   if (!mainText && origin.startsWith('https://')) {
-    const httpHtml = await fetchHtmlWithRetry(`${httpOrigin}`, {
+    const httpHtml = await read(`${httpOrigin}`, {
       timeout,
       signal,
       allowHttpErrors: true,
@@ -1815,7 +1769,7 @@ export async function fetchAndExtract(
   let aboutText = '';
   for (const candidate of allCandidates) {
     if (signal?.aborted) break;
-    const html = await fetchHtmlWithRetry(candidate, { timeout, signal, ...route });
+    const html = await read(candidate, { timeout, signal, ...route });
     if (html) {
       const text = extractTextFromHtml(html.html, extractOptions);
       hadAnyHtml = true;
@@ -1862,6 +1816,324 @@ export interface WebsitePage {
    * подставляет, порог полезности решает вызывающий.
    */
   text: string;
+  /** Реальные ссылки страницы; только при явном companyEvidence. */
+  companyEvidenceLinks?: Array<{
+    url: string;
+    kind: 'legal' | 'about' | 'contact' | 'locations' | 'services';
+    /** Higher values point to more specific company/address evidence. */
+    priority?: number;
+    label?: string;
+  }>;
+  /** ENG evidence only: some complete source blocks did not fit the text budget. */
+  companyEvidenceTextTruncated?: boolean;
+}
+
+type CompanyEvidenceLink = NonNullable<WebsitePage['companyEvidenceLinks']>[number];
+const COMPANY_EVIDENCE_SECTION_SEPARATOR = '\n\n[source section]\n\n';
+
+/** Ссылки для проверки компании: не угадываем адреса и не доверяем префиксу origin. */
+function companyEvidenceLinks($: cheerio.CheerioAPI, pageUrl: string, evidenceTerms: readonly string[] = []): CompanyEvidenceLink[] {
+  const base = new URL(pageUrl);
+  const host = base.hostname.replace(/^www\./, '');
+  const domain = getDomain(base.hostname, { allowPrivateDomains: true });
+  // Selected ENG service terms opt into targeted evidence discovery. Some
+  // sites route their services through index.php?page=...; legacy callers
+  // retain the original query-free link policy.
+  const keepPageQueries = evidenceTerms.length > 0;
+  const links: CompanyEvidenceLink[] = [];
+  const seen = new Map<string, CompanyEvidenceLink>();
+  $('a[href]').each((_, el) => {
+    const href = $(el).attr('href')?.trim();
+    if (!href || href.startsWith('#')) return;
+    let url: URL;
+    try { url = new URL(href, base); } catch { return; }
+    const sameCompanyDomain = url.hostname.replace(/^www\./, '') === host
+      || !!domain && getDomain(url.hostname, { allowPrivateDomains: true }) === domain;
+    if (!['http:', 'https:'].includes(url.protocol)
+      || !sameCompanyDomain
+      || url.port !== base.port || url.username || url.password || (!keepPageQueries && url.search) || url.hash
+      || (base.protocol === 'https:' && url.protocol !== 'https:')) return;
+    const path = url.pathname;
+    if (/\/(?:auth|account|login|logout|sign[-_]?in|sign[-_]?up|careers?|jobs?|karriere|facebook|twitter|linkedin|instagram|youtube)(?:\/|$)/i.test(path)
+      || /\.[a-z0-9]{2,5}$/i.test(path) && !/\.(?:html?|php|aspx?)$/i.test(path)) return;
+    const label = $(el).text().replace(/\s+/g, ' ').trim().slice(0, 160);
+    const purpose = `${path.replace(/[-_]+/g, ' ')} ${label}`;
+    const leaf = (path.split('/').filter(Boolean).at(-1) ?? '').replace(/\.(?:html?|php|aspx?)$/i, '').replace(/[-_]+/g, ' ');
+    const precisePurpose = `${leaf} ${label}`;
+    const isServicePath = /\/(?:[^/]*[-_])?(?:services?|solutions?|capabilities|products?|produkte|leistungen|expertise|what[-_]we[-_]do)(?:[-_/]|$)/i.test(path);
+    const isBusinessHub = /\/(?:businesses[-_]institutions|our[-_]business(?:es)?|business[-_]areas)(?:\/|$)/i.test(path)
+      || /^(?:www\.)?(?:business|commercial|corporate|institutional)\./i.test(url.hostname)
+        && /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/?)?$/i.test(path);
+    let kind: CompanyEvidenceLink['kind'] | null = null;
+    let priority = 0;
+    if (/\b(?:registered (?:addresses?|offices?|seats?)|headquarters|head office|legal address|sitz der gesellschaft|siege social)\b/i.test(purpose)) {
+      kind = 'legal'; priority = 100;
+    } else if (/\b(?:impressum|imprint|legal notice|legal entit(?:y|ies)|mentions legales|aviso legal|company (?:registration|structure)|corporate structure|group structure)\b/i.test(precisePurpose)
+      || /^(?:company information|company registration|company structure)$/i.test(leaf)
+      || !isServicePath && /\bcorporate governance\b/i.test(precisePurpose)) {
+      kind = 'legal'; priority = 95;
+    } else if (/\b(?:legal|regulatory information|regulatory disclosures)\b/i.test(purpose) && !/\b(?:privacy|cookies?|terms)\b/i.test(purpose)) {
+      kind = 'legal'; priority = 90;
+    } else if (/\/(?:contact(?:[-_]?us)?|contacts|kontakt)(?:\/|$)/i.test(path)
+      || /\b(?:contact(?: us)?|contact and enquiries|get in touch|kontakt)\b/i.test(label)) {
+      kind = 'contact'; priority = 85;
+    } else if (/\/(?:[a-z-]*-)?(?:locations?|offices?)(?:[-_/]|$)/i.test(path)
+      || /\b(?:locations?|our offices|global offices|office locations)\b/i.test(label)) {
+      kind = 'locations'; priority = 80;
+    } else if (isServicePath || isBusinessHub
+      || /\b(?:our services|our solutions|our capabilities|our products|our expertise|what we do|produkte|leistungen)\b/i.test(label)) {
+      kind = 'services'; priority = 60;
+    } else if (ABOUT_HREF_PATTERN.test(path) || ABOUT_TEXT_PATTERN.test(label)
+      || /\/(?:ueber-uns|uber-uns|unternehmen|company-information)(?:\/|$)/i.test(path)
+      || /(?:^|\s)(?:über uns|ueber uns|unternehmen)(?:$|\s)/i.test(label)) {
+      kind = 'about'; priority = 70;
+    }
+    if (!kind) return;
+    if (evidenceTerms.length) {
+      // ENG only: rank real service links before the bounded menu is cut.
+      // Otherwise a long industry/news menu hides later, specific offerings.
+      const words = precisePurpose.normalize('NFKC').toLocaleLowerCase().match(/[\p{L}]{4,}/gu) ?? [];
+      const generic = new Set(['fund', 'service', 'services', 'business', 'company', 'companies', 'provider', 'providers', 'financial', 'solution', 'solutions']);
+      const hits = evidenceTerms.filter((term) => !generic.has(term) && words.some((word) => word.startsWith(term))).length;
+      const peripheral = /\/(?:news|articles?|blog|insights?|press|media|business[-_]expertise|careers?|jobs?|security|fraud)(?:\/|$)/i.test(path)
+        || /\b(?:newsletters?|privacy|cookies?|careers?|vacancies|fraud|scams?|market insights|trending topics)\b/i.test(precisePurpose);
+      const serviceLeaf = kind === 'services' && /\/(?:services?|solutions?|capabilities|products?|leistungen|produkte)\//i.test(path);
+      const directService = serviceLeaf && /\/(?:services?|solutions?|capabilities|products?|leistungen|produkte)\/[^/]+\/?$/i.test(path);
+      const businessOverview = kind === 'services' && /\/(?:businesses[-_]institutions|our[-_]business(?:es)?|business[-_]areas)(?:\/(?:index\.(?:html?|php|aspx?))?)?\/?$/i.test(path);
+      const organizationService = serviceLeaf && /\b(?:institutional|enterprise|corporate|commercial)\b/i.test(precisePurpose);
+      priority += Math.min(hits, 2) * 70 + Number(serviceLeaf) * 30 + Number(directService) * 20
+        + Number(businessOverview) * 70 + Number(organizationService) * 35
+        - Number(peripheral && !(serviceLeaf && hits > 0)) * 100;
+    }
+    const key = `${url.hostname.replace(/^www\./, '')}${url.port ? `:${url.port}` : ''}${path.replace(/\/$/, '')}${keepPageQueries ? url.search : ''}`;
+    const previous = seen.get(key);
+    if (previous && (previous.priority ?? 0) >= priority) return;
+    const link = { url: url.href, kind, priority, ...(label ? { label } : {}) };
+    if (previous) links.splice(links.indexOf(previous), 1);
+    seen.set(key, link);
+    links.push(link);
+  });
+  // Rank before limiting: an early menu must not push a later registered-address link out.
+  const ranked = links.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+  const balanced = new Set<CompanyEvidenceLink>();
+  for (const kind of ['legal', 'contact', 'locations', 'about', 'services'] as const) {
+    for (const link of ranked.filter((item) => item.kind === kind).slice(0, kind === 'services' ? 16 : 4)) balanced.add(link);
+  }
+  for (const link of ranked) {
+    if (balanced.size >= 36) break;
+    balanced.add(link);
+  }
+  return [...balanced].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+}
+
+/** JSON-LD — только данные организации/адреса, без WebPage, Product, reviews и произвольных scripts. */
+function companyStructuredText($: cheerio.CheerioAPI): string[] {
+  const excerpts: string[] = [];
+  const seen = new Set<string>();
+  const scalar = (value: unknown): value is string | number => typeof value === 'string' || typeof value === 'number';
+  const typeIs = (value: unknown, type: string) => (Array.isArray(value) ? value : [value])
+    .some((item) => typeof item === 'string' && (item === type || item === `https://schema.org/${type}` || item === `http://schema.org/${type}`));
+  // Explicit schema.org Organization/LocalBusiness families. A Product/Review
+  // containing a customer's address is still not a company location source.
+  const organizationTypes = [
+    'Organization', 'Corporation', 'LocalBusiness', 'FinancialService', 'AccountingService',
+    'BankOrCreditUnion', 'InsuranceAgency', 'ProfessionalService', 'LegalService', 'Attorney',
+    'EmploymentAgency', 'GovernmentOrganization', 'NGO', 'EducationalOrganization',
+    'MedicalOrganization', 'MedicalBusiness', 'OnlineBusiness', 'OnlineStore', 'Store',
+    'RealEstateAgent', 'TravelAgency', 'LodgingBusiness', 'Hotel', 'AutomotiveBusiness',
+    'HomeAndConstructionBusiness', 'EntertainmentBusiness', 'FoodEstablishment',
+    'SportsActivityLocation', 'HealthAndBeautyBusiness', 'ShoppingCenter',
+    'Dentist', 'MedicalClinic', 'Physician', 'Hospital', 'Pharmacy', 'VeterinaryCare',
+    'Electrician', 'Plumber', 'GeneralContractor', 'HVACBusiness', 'RoofingContractor',
+    'Locksmith', 'MovingCompany', 'HousePainter', 'AutoDealer', 'AutoRepair', 'AutoRental',
+    'AutoBodyShop', 'AutoPartsStore', 'MotorcycleDealer', 'MotorcycleRepair', 'Restaurant',
+    'CafeOrCoffeeShop', 'Bakery', 'BarOrPub', 'Brewery', 'Winery', 'Distillery',
+    'GroceryStore', 'WholesaleStore', 'DepartmentStore', 'HardwareStore', 'OfficeEquipmentStore',
+    'ElectronicsStore', 'FurnitureStore', 'ClothingStore', 'ComputerStore',
+  ];
+  const address = (value: unknown): unknown => {
+    if (scalar(value)) return value;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const input = value as Record<string, unknown>;
+    if (input['@type'] && !typeIs(input['@type'], 'PostalAddress')) return undefined;
+    const out: Record<string, unknown> = {};
+    for (const key of ['@type', 'name', 'streetAddress', 'postOfficeBoxNumber', 'addressLocality', 'addressRegion', 'postalCode', 'addressCountry']) {
+      if (scalar(input[key])) out[key] = input[key];
+    }
+    const country = input.addressCountry;
+    if (country && typeof country === 'object' && !Array.isArray(country)) {
+      const countryName = (country as Record<string, unknown>).name;
+      if (scalar(countryName)) out.addressCountry = { name: countryName };
+    }
+    return Object.keys(out).length ? out : undefined;
+  };
+  $('script[type="application/ld+json"]').slice(0, 16).each((_, el) => {
+    const source = $(el).text();
+    if (source.length > 256_000) return;
+    let parsed: unknown;
+    try { parsed = JSON.parse(source); } catch { return; }
+    const pending: unknown[] = [parsed];
+    for (let index = 0; index < pending.length && index < 512; index++) {
+      const value = pending[index];
+      if (Array.isArray(value)) { pending.push(...value.slice(0, 512)); continue; }
+      if (!value || typeof value !== 'object') continue;
+      const input = value as Record<string, unknown>;
+      // Only top-level/graph entities; a customer's address inside a review is not the site's office.
+      if (Array.isArray(input['@graph'])) pending.push(...input['@graph'].slice(0, 512));
+      let out: Record<string, unknown> | undefined;
+      if (organizationTypes.some((type) => typeIs(input['@type'], type))) {
+        out = {};
+        for (const key of ['@type', 'name', 'legalName', 'alternateName', 'url']) {
+          if (scalar(input[key])) out[key] = input[key];
+        }
+        const addresses = Array.isArray(input.address) ? input.address.slice(0, 12).map(address).filter(Boolean) : address(input.address);
+        if (addresses && (!Array.isArray(addresses) || addresses.length)) out.address = addresses;
+      } else if (typeIs(input['@type'], 'PostalAddress')) {
+        out = address(input) as Record<string, unknown> | undefined;
+      }
+      if (!out || !Object.keys(out).length) continue;
+      // Property names and values are copied from the source; do not label an address as HQ or an office.
+      const text = JSON.stringify(out);
+      if (!seen.has(text)) { seen.add(text); excerpts.push(text); }
+    }
+  });
+  return excerpts;
+}
+
+const COMPANY_ADDRESS_ROLE = /\b(?:registered\s+(?:address(?:es)?|office|seat)|headquarters|head\s+office|legal\s+address|hauptsitz|geschaftssitz|geschäftssitz|sitz\s+der\s+gesellschaft|hoofdkantoor|statutaire\s+zetel|huvudkontor|hovedkontor|forretningsadresse|kotipaikka|si[eè]ge\s+social)\b/i;
+const COMPANY_ADDRESS_BLOCK_LIMIT = 1400;
+
+/** Preserve one contiguous DOM block, including its nearby entity/role heading. */
+function companyAddressBlocks($: cheerio.CheerioAPI): string[] {
+  const candidates: Array<{ text: string; priority: number }> = [];
+  const seen = new Set<string>();
+  const semantic = 'address, [itemprop="address"], [class*="address" i], [id*="address" i]';
+  const mostlyNavigation = (node: cheerio.Cheerio<AnyNode>, text: string) => {
+    const anchors = node.find('a');
+    return anchors.length > 4 && sanitizeText(anchors.text()).length > text.length / 2;
+  };
+  const add = (el: AnyNode, priority: number) => {
+    let node = $(el);
+    let text = sanitizeText(node.text());
+    if (!text || text.length > COMPANY_ADDRESS_BLOCK_LIMIT || mostlyNavigation(node, text)) return;
+    // Keep the entity heading with the address when their shared wrapper is small.
+    // Never concatenate remote headings or neighbouring company blocks ourselves.
+    for (let depth = 0; depth < 2; depth++) {
+      const parent = node.parent();
+      if (!parent.length || parent.is('body, html, footer, [role="contentinfo"]')) break;
+      const parentText = sanitizeText(parent.text());
+      if (parentText.length > COMPANY_ADDRESS_BLOCK_LIMIT || mostlyNavigation(parent, parentText)) break;
+      node = parent;
+      text = parentText;
+    }
+    if (!seen.has(text)) { seen.add(text); candidates.push({ text, priority }); }
+  };
+  // An address is sometimes a heading followed by one short paragraph per
+  // field inside a much larger article. Keep that contiguous sibling run;
+  // never skip other content or add our own entity/country labels.
+  $('p, h1, h2, h3, h4, h5, h6').each((_, el) => {
+    const first = $(el);
+    const heading = sanitizeText(first.text());
+    if (heading.length > 220 || !COMPANY_ADDRESS_ROLE.test(heading)) return;
+    const fields = [heading];
+    let next = first.next();
+    while (fields.length < 8 && next.is('p, address')) {
+      const value = sanitizeText(next.text());
+      if (!value || value.length > 180 || COMPANY_ADDRESS_ROLE.test(value)) break;
+      fields.push(value);
+      next = next.next();
+    }
+    const text = fields.join('\n\n');
+    if (fields.length > 1 && text.length <= COMPANY_ADDRESS_BLOCK_LIMIT && !seen.has(text)) {
+      seen.add(text); candidates.push({ text, priority: 4 });
+    }
+  });
+  $(semantic).each((_, el) => { add(el, 2); });
+  $('p, li, div, section, article, td').each((_, el) => {
+    const text = sanitizeText($(el).text());
+    if (text.length <= COMPANY_ADDRESS_BLOCK_LIMIT && COMPANY_ADDRESS_ROLE.test(text)) add(el, 3);
+  });
+  return candidates.sort((a, b) => b.priority - a.priority).map((item) => item.text);
+}
+
+/** Отдельный ENG opt-in: основной текст + зарезервированное место адресам и JSON-LD. */
+function extractCompanyEvidencePage(html: string, url: string, layoutAware?: boolean, evidenceTerms?: string[]): WebsitePage {
+  const $ = cheerio.load(html);
+  const terms = [...new Set((evidenceTerms ?? []).slice(0, 32).flatMap((term) => typeof term === 'string'
+    ? term.slice(0, 200).normalize('NFKC').toLocaleLowerCase().match(/[\p{L}]{4,}/gu) ?? [] : []))].slice(0, 32);
+  const links = companyEvidenceLinks($, url, terms);
+  const structured = companyStructuredText($);
+  $('script, style, noscript, iframe, svg, form, .cookie-banner, .cookie-consent, #cookie-banner, #cookie-consent').remove();
+  // Keep the source's address fields readable when they occupy adjacent block elements.
+  $('br').replaceWith('\n');
+  $('p, div, li, address, section, h1, h2, h3, h4, h5, h6').append('\n');
+  $('header, nav, [role="navigation"]').remove();
+  // Some sites use Bootstrap/WordPress menus without a semantic nav element.
+  // Remove the link list, not its outer banner, which can contain the page title.
+  removeLayoutNoise($, '.navbar-nav, .navbar-collapse, .child-pages-nav, .main-menu, #main-menu, .menu-main-menu-container, [role="menu"], [role="menubar"]', (el) => {
+    const node = $(el);
+    const anchors = node.find('a');
+    return anchors.length >= 2 && !node.find('h1, h2, h3, h4, h5, h6, address, [itemprop="address"]').length
+      && sanitizeText(anchors.text()).length >= sanitizeText(node.text()).length * 0.7;
+  });
+  // ENG opt-in terms only rank real, whole source paragraphs. They never add
+  // catalogue facts or combine one company's service with another's address.
+  const serviceParagraphs: Array<{ text: string; score: number; order: number }> = [];
+  if (terms.length) $('p, li, td').each((order, el) => {
+    const node = $(el);
+    if (node.closest('footer, [role="contentinfo"]').length) return;
+    const text = sanitizeText(node.text());
+    if (text.length < 30 || text.length > 1400) return;
+    const words = text.normalize('NFKC').toLocaleLowerCase().match(/[\p{L}]{4,}/gu) ?? [];
+    const score = terms.filter((term) => words.some((word) => word.startsWith(term))).length;
+    if (score && !serviceParagraphs.some((item) => item.text === text)) serviceParagraphs.push({ text, score, order });
+  });
+  const textLimit = terms.length ? 6000 : MAX_TEXT_LENGTH;
+  const addresses = companyAddressBlocks($);
+  const footers: string[] = [];
+  outermostOf($, 'footer, [role="contentinfo"]').each((_, el) => {
+    const footer = $(el);
+    const text = sanitizeText(footer.text());
+    if (text.length <= COMPANY_ADDRESS_BLOCK_LIMIT) { if (text) footers.push(text); return; }
+    // Whole local blocks only: a country in the middle of a long footer must
+    // not disappear between a head excerpt and a tail excerpt.
+    footer.find('p, address, li, div').each((_, child) => {
+      const block = sanitizeText($(child).text());
+      if (block && block.length <= COMPANY_ADDRESS_BLOCK_LIMIT) footers.push(block);
+    });
+  });
+  const main = sanitizeText(extractTextFromHtml($.html(), { layoutAware }));
+  const parts: string[] = [];
+  let length = 0;
+  let truncated = false;
+  const addWhole = (part: string) => {
+    if (!part || parts.some((saved) => saved.includes(part))) return;
+    const extra = part.length + (parts.length ? COMPANY_EVIDENCE_SECTION_SEPARATOR.length : 0);
+    if (length + extra > textLimit) { truncated = true; return; }
+    parts.push(part);
+    length += extra;
+  };
+  // Keep room for complete address/structured blocks even on long homepages.
+  const mainLimit = addresses.length || structured.length ? 1200 : footers.length ? 2000 : MAX_TEXT_LENGTH;
+  let mainExcerpt = sliceWholeChars(main, 0, mainLimit);
+  if (mainExcerpt.length < main.length) {
+    mainExcerpt = sliceWholeChars(mainExcerpt, 0, mainLimit - '\n[excerpt omitted]'.length);
+    const boundary = Math.max(mainExcerpt.lastIndexOf('\n'), mainExcerpt.lastIndexOf('. '));
+    if (boundary > 400) mainExcerpt = mainExcerpt.slice(0, boundary + 1).trimEnd();
+    mainExcerpt += '\n[excerpt omitted]';
+    truncated = true;
+  }
+  addWhole(mainExcerpt);
+  // Leave at least 1800 characters for whole address/structured source blocks.
+  for (const { text } of serviceParagraphs.sort((a, b) => b.score - a.score || a.order - b.order)) {
+    const extra = text.length + (parts.length ? COMPANY_EVIDENCE_SECTION_SEPARATOR.length : 0);
+    if (length + extra <= textLimit - 1800) addWhole(text);
+    else truncated = true;
+  }
+  for (const part of [...addresses, ...structured, ...new Set(footers)]) addWhole(part);
+  // All evidence sections are contiguous source blocks; none is cut through an address or JSON value.
+  const text = parts.join(COMPANY_EVIDENCE_SECTION_SEPARATOR);
+  return { url, text: stripUnstorableJsonChars(text), companyEvidenceLinks: links, companyEvidenceTextTruncated: truncated };
 }
 
 /**
@@ -1901,7 +2173,7 @@ export async function fetchSinglePage(
     retries?: number;
     /** Заголовок Accept-Language; не передан — русский DEFAULT_ACCEPT_LANGUAGE. */
     acceptLanguage?: string;
-    /** Порядок групп прокси; не передан — 'priority-first'. */
+    /** Порядок маршрутов; не передан — 'priority-first'. */
     routeOrder?: WebsiteFetchRouteOrder;
     /** Защита чтения (WebsiteFetchGuard); не передана — redirect: 'follow'. */
     guard?: WebsiteFetchGuard;
@@ -1909,6 +2181,10 @@ export async function fetchSinglePage(
     maxBytes?: number;
     /** Разбор HTML → текст с учётом вёрстки конструкторов (ExtractTextOptions); не передан — прежний. */
     layoutAware?: boolean;
+    /** Отдельное чтение доказательств о компании для ENG; не передано — прежний текст/поля. */
+    companyEvidence?: boolean;
+    /** ENG-only source paragraph ranking; at most 32 bounded words, never facts. */
+    companyEvidenceTerms?: string[];
   },
 ): Promise<WebsitePage | null> {
   const url = normalizeUrl(rawUrl);
@@ -1929,6 +2205,9 @@ export async function fetchSinglePage(
   // 3xx без Location (с ним редирект пройден или отклонён) — тело заглушки,
   // а не страница.
   if (outcome.kind !== 'html' || outcome.status < 200 || outcome.status >= 300) return null;
+  if (options?.companyEvidence === true) {
+    return extractCompanyEvidencePage(outcome.html, outcome.url, options.layoutAware, options.companyEvidenceTerms);
+  }
   const text = sanitizeText(extractTextFromHtml(outcome.html, { layoutAware: options?.layoutAware }));
   return {
     url: outcome.url,

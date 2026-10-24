@@ -194,8 +194,10 @@ async function collectMetrics(log: Log): Promise<MonitorMetrics> {
     db.from('sender_messages').select('scheduled_at')
       .eq('status', 'scheduled').lte('scheduled_at', nowIso)
       .order('scheduled_at', { ascending: true }).limit(1),
+    // По времени падения: updated_at его не отражает (отправка роняет ящик, не
+    // трогая updated_at, а синхронизация Google обновляет его каждый час).
     db.from('sender_mailboxes').select('id', { count: 'exact', head: true })
-      .eq('status', 'failed').gte('updated_at', hourAgo),
+      .eq('status', 'failed').gte('failed_at', hourAgo),
     db.rpc('sender_domain_health', { p_hours: 24 }),
     db.rpc('sender_egress_overview', { p_since: hourAgo }),
     db.from('sender_mailboxes').select('id', { count: 'exact', head: true })
