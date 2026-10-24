@@ -340,7 +340,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
                     type="button"
                     onClick={() => setSelected(thread.recipient_id)}
                     className={`block w-full px-3 py-2.5 text-left transition-colors ${
-                      selected === thread.recipient_id ? 'bg-blue-50' : 'hover:bg-zinc-50'
+                      selected === thread.recipient_id ? 'sender-pick-row is-selected bg-blue-50' : 'sender-pick-row hover:bg-zinc-50'
                     }`}
                   >
                     <div className="flex items-center gap-2">
