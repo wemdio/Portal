@@ -16,6 +16,7 @@
  */
 
 import type { LLMMessage } from '../llm';
+import { LICENCE_GROUPS, type LicenceGroupCode } from '@/lib/companiesDirectory/licences';
 import { readVeAudienceScope, veAudienceScopeText, type VeAudienceScope } from '../audienceScope';
 import { readVeCollectionGeography, type VeCollectionGeography } from '../collectionGeography';
 
@@ -33,6 +34,9 @@ export interface VeCollectTask {
     identityCatalog?: 'payments-2026-10-12';
     okvedCodes?: string[];
     regionCodes?: string[];
+    /** Лицензия по реестру МСП ФНС (companies_directory_licences): компания проходит,
+     * если у её ИНН есть хотя бы одна из групп. С nameTerms не сочетается. */
+    licenceGroups?: LicenceGroupCode[];
     revenueFrom?: number;
     revenueTo?: number;
     employeesFrom?: number;
@@ -97,6 +101,10 @@ const SYSTEM = `Ты — head of lead research в агентстве Polza, эк
 - Запросы (hh text, maps queries) — непустые строки до 300 символов.
 - Отвечай строго на русском, ТОЛЬКО JSON, без markdown-обёрток.`;
 
+/** Правило фильтра licenceGroups: в подсказку попадает, только когда снимок лицензий загружен
+ * (licenceSnapshotReady), иначе модель ставила бы фильтр, который пока ничего не находит. */
+const LICENCE_RULE = `\n\nФИЛЬТР ЛИЦЕНЗИЙ ДЛЯ companies_directory: licenceGroups — лицензия по реестру МСП ФНС: компания проходит, если у неё есть лицензия хотя бы одной группы. Бери, когда аудиторию прямо задаёт лицензируемая деятельность: ${LICENCE_GROUPS.map((group) => `${group.code} — ${group.label}`).join('; ')}. Лицензия точнее ОКВЭД: с ней okvedCodes можно не ставить, а для узкой специальности оставь точный код (стоматология: 86.23 и medical). Лицензия подтверждает вид деятельности, но не специальность и не размер; для узкой медицинской гипотезы первым источником по-прежнему идёт каталог её специальности, medical — дополнительная задача реестра. В реестре лицензий только малый и средний бизнес и только юрлица: крупных сетей, холдингов и ИП в нём нет. Поэтому для гипотезы про сети, крупные компании или ИП licenceGroups не может быть единственным отбором: добавь задачу реестра по ОКВЭД или каталога по рубрике без него. Если лицензия прямо не следует из гипотезы, licenceGroups не ставь.`;
+
 export interface SourcePlanPromptInput {
   verticalName: string;
   verticalSummary?: string | null;
@@ -108,6 +116,8 @@ export interface SourcePlanPromptInput {
   collectionGeography?: VeCollectionGeography | null;
   /** Вокабуляр типов компаний из стадии vocab (опционально). */
   companyTypes?: string[];
+  /** Снимок лицензий ФНС загружен: модели доступен фильтр licenceGroups. */
+  licenceGroups?: boolean;
 }
 
 export function sourceAudiencePolicy(input: SourcePlanPromptInput): string {
@@ -133,7 +143,7 @@ ${input.hypotheses.map((h) => `- ${h.broad ? '[широкая] ' : h.tier != nul
     {
       "source": "companies_directory" | "hh_live" | "yandex_maps" | "google_maps",
       "rationale": string,
-      "directory_filters"?: { "okvedCodes"?: string[], "regionCodes"?: string[], "revenueFrom"?: number, "revenueTo"?: number, "employeesFrom"?: number, "employeesTo"?: number, "hasEmail"?: boolean, "includeIp"?: boolean },
+      "directory_filters"?: { "okvedCodes"?: string[], "regionCodes"?: string[],${input.licenceGroups ? ' "licenceGroups"?: string[],' : ''} "revenueFrom"?: number, "revenueTo"?: number, "employeesFrom"?: number, "employeesTo"?: number, "hasEmail"?: boolean, "includeIp"?: boolean },
       "hh_query"?: { "text": string, "area"?: string | string[], "date_from"?: string, "date_to"?: string },
       "maps_query"?: { "queries": string[], "geo"?: string }
     }
@@ -142,7 +152,7 @@ ${input.hypotheses.map((h) => `- ${h.broad ? '[широкая] ' : h.tier != nul
 Для source="companies_directory" обязателен "directory_filters"; для "hh_live" — "hh_query"; для "yandex_maps"/"google_maps" — "maps_query".`;
 
   return [
-    { role: 'system', content: SYSTEM + sourceAudiencePolicy(input) },
+    { role: 'system', content: SYSTEM + (input.licenceGroups ? LICENCE_RULE : '') + sourceAudiencePolicy(input) },
     { role: 'user', content: user },
   ];
 }

@@ -69,6 +69,9 @@ function filtersToRpcParams(body: CompaniesSearchFilters) {
     p_employees_to: typeof body.employeesTo === 'number' ? body.employeesTo : null,
     p_inn_list: body.innList?.length ? body.innList : null,
     p_okved_prefixes: okvedPrefixes,
+    // Только когда задан: параметр появился в миграции 20261024_0050, а вызов
+    // без него работает и со старой сигнатурой функции.
+    ...(body.licenceGroups?.length ? { p_licence_groups: body.licenceGroups } : {}),
   };
 }
 
