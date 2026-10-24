@@ -34,7 +34,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ jobId: st
     await logError('polza_ru_outreach.job.stop.failed', error, { jobId }, { userId: auth.user.id });
     return jsonError(error.message, 500);
   }
-  await logAudit('polza_ru_outreach.job.stopped', 'Наш автоаутрич: запуск остановлен', { jobId }, { userId: auth.user.id });
+  await logAudit('polza_ru_outreach.job.stopped', 'Русский автоаутрич: запуск остановлен', { jobId }, { userId: auth.user.id });
   return NextResponse.json({ ok: true });
 }
 
@@ -63,6 +63,6 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ jobId: s
     await logError('polza_ru_outreach.job.delete.failed', error, { jobId }, { userId: auth.user.id });
     return jsonError(error.message, 500);
   }
-  await logAudit('polza_ru_outreach.job.deleted', 'Наш автоаутрич: запуск удалён', { jobId }, { userId: auth.user.id });
+  await logAudit('polza_ru_outreach.job.deleted', 'Русский автоаутрич: запуск удалён', { jobId }, { userId: auth.user.id });
   return NextResponse.json({ ok: true });
 }

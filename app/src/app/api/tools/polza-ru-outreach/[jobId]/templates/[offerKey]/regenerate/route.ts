@@ -110,7 +110,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     }
     await logAudit(
       'polza_ru_outreach.template.regenerated',
-      'Наш автоаутрич: цепочка оффера переписана',
+      'Русский автоаутрич: цепочка оффера переписана',
       { jobId, offer: chain, ...result.summary },
       { userId: auth.user.id },
     );
