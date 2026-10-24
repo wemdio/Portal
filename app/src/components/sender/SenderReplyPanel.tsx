@@ -80,7 +80,7 @@ export function SenderReplyPanel({
   // ответах» (ResizableEditor): родная в углу textarea упиралась в край экрана.
   const rootRef = useRef<HTMLDivElement>(null);
   // Вдвое ниже общей: на всю высоту поле прятало переписку, на которую отвечают.
-  const editor = useEditorHeight('sender-reply-editor-height', rootRef, EDITOR_DEFAULT_PX / 2);
+  const editor = useEditorHeight('sender-reply-editor-height', rootRef, EDITOR_DEFAULT_PX / 4);
   const lastItemRef = useRef<HTMLDivElement>(null);
 
   const loadThread = useCallback(async () => {
