@@ -208,6 +208,12 @@ export async function processSenderBatch(opts: { egressIp: string; batchSize?: n
       continue;
     }
 
+    // Входящие читаются параллельно отправке: ответ лида мог отменить письмо
+    // уже после claim. Отменённое не шлём — иначе лид получил бы напоминание
+    // сразу после своего ответа.
+    const { data: current } = await db.from('sender_messages').select('status').eq('id', message.id).maybeSingle();
+    if (current && current.status !== 'sending') continue;
+
     const attempts = message.attempts + 1;
     const result = await sendSenderMail(
       {

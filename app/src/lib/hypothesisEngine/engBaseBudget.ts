@@ -62,6 +62,18 @@ export function heEngBaseBudgetActive(): boolean {
   return scopeStorage.getStore() !== undefined;
 }
 
+/**
+ * The ledger this stage already opened for the base, or null. Paid work that
+ * runs while other paid requests of the same stage are unanswered must reserve
+ * on it: opening the ledger again sees those reservations as an interrupted
+ * context (pending_spend → unknown_cost) and stops the base (23.10.2026: the
+ * catalogue site search, run beside parallel model requests, stopped fdd69f36).
+ */
+export function activeHeEngBaseBudgetLedger(baseId: string, projectId: string): HeEngBaseBudgetLedger | null {
+  const scope = scopeStorage.getStore();
+  return scope && !scope.stopped && scope.baseId === baseId && scope.projectId === projectId ? scope.ledger : null;
+}
+
 export function rejectHeEngUnbudgetedProvider(provider: string): never {
   const error = new HeEngBaseBudgetGuardError(
     'unbudgeted_provider',

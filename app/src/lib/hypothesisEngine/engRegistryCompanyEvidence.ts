@@ -270,6 +270,14 @@ function addressMatches(raw: unknown, candidate: HeEngRegistryCandidate): boolea
   // Match all three independent address parts, not a country word or TLD.
   return [street, locality, postcode].every(part => registered.includes(` ${part} `));
 }
+// «Company No.», «Registration number», «Registered in England and Wales No.»,
+// «Registered number», «Reg. No.», «under number», «CRN», «Registered in England
+// #3630812». GLEIF's UK entities carry the same number as `registeredAs`.
+const UK_COMPANY_NUMBER_LABELS = '(?:company\\s+(?:registration\\s+|reg(?:istered)?\\.?\\s*)?(?:number|no|nr)'
+  + '|registration\\s+(?:number|no|nr)'
+  + '|registered\\s+(?:in\\s+(?:england(?:\\s*(?:and|&)\\s*wales)?|wales|scotland|northern\\s+ireland)\\s*)?(?:company\\s+)?(?:number|no|nr)'
+  + '|registered\\s+in\\s+(?:england(?:\\s*(?:and|&)\\s*wales)?|wales|scotland|northern\\s+ireland)(?=\\s*#)'
+  + '|reg\\.?\\s*(?:number|no|nr)|under\\s+(?:registration\\s+)?(?:number|no)|crn)';
 /**
  * A legal block names this entity. With `numberAlone` (the site's own footer) a
  * labelled registry number is enough by itself: the number is unique, and a
@@ -285,12 +293,7 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
     brreg: 'org(?:anisasjons|anisation)?[\\s.-]*(?:nummer|number|nr)?',
     france: 'siren|siret', fdic: 'fdic\\s*(?:certificate|cert)?', nppes: 'npi',
     fmcsa: '(?:us\\s*)?dot(?:\\s*number)?',
-    // «Company No.», «Registration number», «Registered in England and Wales
-    // No.», «Registered number», «Reg. No.», «under number», «CRN».
-    companies_house: '(?:company\\s+(?:registration\\s+|reg(?:istered)?\\.?\\s*)?(?:number|no|nr)'
-      + '|registration\\s+(?:number|no|nr)'
-      + '|registered\\s+(?:in\\s+(?:england(?:\\s*(?:and|&)\\s*wales)?|wales|scotland|northern\\s+ireland)\\s*)?(?:company\\s+)?(?:number|no|nr)'
-      + '|reg\\.?\\s*(?:number|no|nr)|under\\s+(?:registration\\s+)?(?:number|no)|crn)',
+    companies_house: UK_COMPANY_NUMBER_LABELS,
     // The LEI itself; the local register number is matched separately below.
     gleif: 'lei|legal\\s+entity\\s+identifier',
     // An OpenStreetMap element id never appears on a company site.
@@ -343,11 +346,13 @@ function nameWindows(value: string, company: string): string[] {
 }
 // Labels that precede a local company number across GLEIF's countries: German
 // Handelsregister, Dutch KvK, Danish CVR, Nordic org. numbers, Finnish Y-tunnus,
-// Irish CRO, Luxembourg RCS, Austrian Firmenbuch, Belgian KBO and others.
+// Irish CRO, Luxembourg RCS, Austrian Firmenbuch, Belgian KBO and others; the UK
+// Companies House forms; the NAIC company code GLEIF holds for many US insurers.
 const LOCAL_REGISTRY_LABELS = '(?:handelsregister|registernummer|registergericht|hr[ab]|kvk|kamer\\s+van\\s+koophandel|cvr|'
   + 'org(?:anisations|anisasjons)?\\.?[\\s-]*(?:nr|nummer|number|no)|y-tunnus|business\\s+id|fo-nummer|cro|rcs|firmenbuch|fn|'
   + 'kbo|ondernemingsnummer|company\\s+(?:reg(?:istration)?\\.?\\s*)?(?:no|number|nr)|registration\\s+(?:no|number|nr)|'
-  + 'registered\\s+(?:no|number)|reg\\.?\\s*(?:no|nr)|krs|nip|regon|cif|nif|p\\.?\\s*iva|partita\\s+iva)';
+  + 'registered\\s+(?:no|number)|reg\\.?\\s*(?:no|nr)|krs|nip|regon|cif|nif|p\\.?\\s*iva|partita\\s+iva|'
+  + `naic(?:\\s+company)?(?:\\s+(?:code|number|no))?|${UK_COMPANY_NUMBER_LABELS})`;
 /**
  * GLEIF's `registeredAs`: «HRB 7876», «B123456», «12345678». A number with its
  * own letters is matched as written; a bare number needs a register label.
@@ -358,7 +363,10 @@ function localRegistryNumber(value: string, candidate: HeEngRegistryCandidate): 
   if (candidate.provider !== 'gleif' || !candidate.localRegistryId) return false;
   const chars = candidate.localRegistryId.normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
   if (chars.length < 5 || chars.length > 30) return false;
-  const pattern = chars.split('').map(char => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s.:/-]*');
+  // GLEIF keeps a Companies House number padded («01167327»); the site writes
+  // «company number 1167327». Same rule as companiesHouseDigits.
+  const digits = companiesHouseDigits(chars);
+  const pattern = `${digits !== chars ? '(?:0[\\s.:/-]*)*' : ''}${digits.split('').map(char => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s.:/-]*')}`;
   const end = '(?![\\p{L}\\p{N}]|[\\s.-]{1,3}\\d)';
   return /\p{L}/u.test(chars)
     ? new RegExp(`(?<![\\p{L}\\p{N}])${pattern}${end}`, 'iu').test(value)
@@ -396,6 +404,12 @@ export function readHeEngRegistryOwnSiteFacts(
     try { walk(JSON.parse(json), 0); } catch { /* Invalid structured data proves nothing. */ }
   });
   $('script, style, noscript, template').remove();
+  // .text() glues adjacent blocks: Fremtind's footer «0106 Oslo</p><p>Organisasjonsnummer:
+  // 915 651 232</p></div><div><a>Kontakt oss» read «OsloOrganisasjonsnummer: 915 651
+  // 232Kontakt», and neither end of the labelled number matched. A block never ends
+  // mid-word, so a separator after each one changes no word (as in websiteParser).
+  $('br').replaceWith(' ');
+  $('p, div, li, address, section, article, header, footer, h1, h2, h3, h4, h5, h6, td, th, tr, dt, dd').append(' ');
   // A legal page linked from the home page of this site (terms, privacy, legal
   // notice) names the entity with its number: «Acme Ltd, company number …».
   const legalText = options.legalPage ? $('body').text().replace(/\s+/g, ' ').slice(0, 200_000) : '';
