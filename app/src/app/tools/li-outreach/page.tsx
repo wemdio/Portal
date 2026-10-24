@@ -1772,18 +1772,15 @@ export default function LiOutreachPage() {
                           </td>
                           <td className="px-3 py-1.5">
                             <div className="flex items-center justify-end gap-0.5">
-                              {active ? (
-                                <button type="button" onClick={() => void cancelTask(t.id)} className="px-2 py-1 text-xs text-red-600 hover:underline">Отменить</button>
-                              ) : (
-                                <>
-                                  <button type="button" onClick={() => setViewTask(t)} aria-label="Посмотреть собранные контакты" title="Посмотреть собранные контакты" className="li-icon-btn cursor-pointer rounded-lg p-1.5">
-                                    <Eye className="h-4 w-4" />
-                                  </button>
-                                  <button type="button" onClick={() => void deleteTask(t.id)} aria-label="Удалить задачу" title="Удалить задачу из списка" className="li-icon-btn li-icon-btn-danger cursor-pointer rounded-lg p-1.5">
-                                    <Trash2 className="h-4 w-4" />
-                                  </button>
-                                </>
-                              )}
+                              <RowActionsMenu
+                                vertical
+                                items={active
+                                  ? [{ label: 'Отменить', icon: Square, danger: true, onClick: () => void cancelTask(t.id) }]
+                                  : [
+                                    { label: 'Посмотреть контакты', icon: Eye, onClick: () => setViewTask(t) },
+                                    { label: 'Удалить', icon: Trash2, danger: true, title: 'Удалить задачу из списка. Собранные контакты останутся в базе.', onClick: () => void deleteTask(t.id) },
+                                  ]}
+                              />
                             </div>
                           </td>
                         </tr>
