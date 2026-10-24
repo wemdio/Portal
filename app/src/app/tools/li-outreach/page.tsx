@@ -1071,7 +1071,16 @@ export default function LiOutreachPage() {
           {/* Campaign performance */}
           {dashData && dashData.campaign_stats.length > 0 && (
             <div className="rounded-xl border border-gray-200 bg-white p-5">
-              <h3 className="text-sm font-semibold text-gray-900 mb-4">Кампании — эффективность</h3>
+              <div className="mb-4 flex items-center justify-between gap-3 flex-wrap">
+                <h3 className="text-sm font-semibold text-gray-900">Кампании — эффективность</h3>
+                {/* Цвета относятся только к полосе «Обработано за период» */}
+                <div className="flex items-center gap-3 text-[10px] text-gray-500 flex-wrap" title="Цвета полосы «Обработано за период»">
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-green-500" /> Завершено</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-400" /> Ошибка</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-gray-400" /> Пропущено</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-gray-100 border border-gray-200" /> В работе / ожидают</span>
+                </div>
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
@@ -1162,13 +1171,6 @@ export default function LiOutreachPage() {
                     })}
                   </tbody>
                 </table>
-                <div className="mt-3 flex items-center gap-3 text-[10px] text-gray-500 flex-wrap">
-                  <span className="font-medium text-gray-600">Легенда:</span>
-                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-green-500" /> Завершено</span>
-                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-400" /> Ошибка</span>
-                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-gray-400" /> Пропущено</span>
-                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-gray-100 border border-gray-200" /> В работе / ожидают</span>
-                </div>
               </div>
             </div>
           )}
