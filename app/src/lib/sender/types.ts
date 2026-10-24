@@ -12,8 +12,8 @@ export const SCHEDULED_START_CLAIM_MARK = 'запускается';
 export type RecipientStatus = 'active' | 'replied' | 'bounced' | 'unsubscribed' | 'finished' | 'stopped';
 export type MessageStatus = 'scheduled' | 'sending' | 'sent' | 'failed' | 'canceled' | 'unknown';
 export type ReplyKind = 'human' | 'auto_reply' | 'bounce' | 'warmup' | 'unknown';
-/** Кто создал рассылку: человек в форме или заливка автоаутрича RU / EN. */
-export type CampaignSourceKind = 'manual' | 'polza_ru' | 'polza_en';
+/** Кто создал рассылку: форма, заливка автоаутрича RU / EN или запуск Движка вертикалей (ve2). */
+export type CampaignSourceKind = 'manual' | 'polza_ru' | 'polza_en' | 've2';
 
 /** password — пароль приложения из выгрузки; google_sa — ключ служебного аккаунта. */
 export type MailboxAuthType = 'password' | 'google_sa';
