@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Loader2, Search } from 'lucide-react';
 import { fetchCampaignRecipients, type CampaignDto, type CampaignRecipientDto } from './api';
 import { SenderModal } from './SenderModal';
@@ -17,6 +17,26 @@ const STATUS_FILTERS = [
 
 const SEARCH_DEBOUNCE_MS = 300;
 
+/** Подписи колонок файла по ключам из базы; неизвестный ключ показываем как есть. */
+const COLUMN_LABELS: Record<string, string> = {
+  company: 'Компания',
+  domain: 'Домен',
+  сайт: 'Сайт',
+  деятельность: 'Деятельность',
+  дата_проверки: 'Дата проверки',
+  назначение_адреса: 'Назначение адреса',
+  происхождение: 'Происхождение',
+  сегмент: 'Сегмент',
+  сигнал_маркетплейсов: 'Сигнал маркетплейсов',
+  источник_email: 'Источник email',
+  источник_сигнала: 'Источник сигнала',
+  китай_основание: 'Основание (Китай)',
+  фрагмент_публикации: 'Фрагмент публикации',
+  email_статус: 'Статус email',
+  email_провайдер: 'Провайдер email',
+  комментарий: 'Комментарий',
+};
+
 /**
  * База получателей кампании (задача 5.2 хендоффа фич).
  *
@@ -26,8 +46,10 @@ const SEARCH_DEBOUNCE_MS = 300;
  */
 export function RecipientsModal({ campaign, onClose }: { campaign: CampaignDto; onClose: () => void }) {
   const [recipients, setRecipients] = useState<CampaignRecipientDto[]>([]);
+  const [columns, setColumns] = useState<string[]>([]);
+  const [openId, setOpenId] = useState<string | null>(null);
   const [total, setTotal] = useState(0);
-  const [pageSize, setPageSize] = useState(30);
+  const [pageSize, setPageSize] = useState(20);
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState('');
   const [search, setSearch] = useState('');
@@ -45,6 +67,7 @@ export function RecipientsModal({ campaign, onClose }: { campaign: CampaignDto; 
           status: status || undefined,
         });
         setRecipients(res.recipients);
+        setColumns(res.columns);
         setTotal(res.total);
         setPageSize(res.pageSize);
         if (res.recipients.length === 0 && res.total > 0 && targetPage > 1) {
@@ -133,6 +156,7 @@ export function RecipientsModal({ campaign, onClose }: { campaign: CampaignDto; 
             {appliedSearch || status ? 'Под фильтр не попал ни один получатель.' : 'База пуста.'}
           </p>
         ) : (
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="text-left text-xs uppercase text-zinc-500">
               <tr className="border-b border-zinc-200">
@@ -140,30 +164,67 @@ export function RecipientsModal({ campaign, onClose }: { campaign: CampaignDto; 
                 <th className="py-2 pr-3 font-medium">Статус</th>
                 <th className="py-2 pr-3 font-medium">Писем</th>
                 <th className="py-2 pr-3 font-medium">Ящик</th>
-                <th className="py-2 font-medium">Обновлён</th>
+                <th className="py-2 pr-3 font-medium">Обновлён</th>
+                {columns.map((column) => (
+                  <th key={column} className="whitespace-nowrap py-2 pr-3 font-medium normal-case">{COLUMN_LABELS[column] ?? column}</th>
+                ))}
               </tr>
             </thead>
             <tbody>
               {recipients.map((recipient) => (
-                <tr key={recipient.id} className="border-b border-zinc-100 last:border-0">
+                <Fragment key={recipient.id}>
+                <tr className="border-b border-zinc-100 last:border-0">
                   <td className="py-2 pr-3">
                     <div className="font-medium text-zinc-900">{recipient.email}</div>
                     {recipient.name ? <div className="text-xs text-zinc-500">{recipient.name}</div> : null}
+                    {recipient.letters.length ? (
+                      <button
+                        type="button"
+                        onClick={() => setOpenId(openId === recipient.id ? null : recipient.id)}
+                        className="mt-0.5 text-xs text-blue-600 hover:underline"
+                      >
+                        {openId === recipient.id ? 'Скрыть письма' : 'Письма'}
+                      </button>
+                    ) : null}
                   </td>
                   <td className="py-2 pr-3 text-zinc-600">{recipient.statusLabel}</td>
                   <td className="py-2 pr-3 text-zinc-600">
                     {recipient.lastStepSent > 0 ? `шаг ${recipient.lastStepSent}` : '—'}
                   </td>
                   <td className="py-2 pr-3 text-xs text-zinc-500">{recipient.mailboxEmail ?? '—'}</td>
-                  <td className="py-2 text-xs text-zinc-500">
+                  <td className="py-2 pr-3 text-xs text-zinc-500">
                     {recipient.repliedAt
                       ? `ответ ${new Date(recipient.repliedAt).toLocaleDateString('ru-RU')}`
                       : new Date(recipient.updatedAt).toLocaleDateString('ru-RU')}
                   </td>
+                  {columns.map((column) => (
+                    <td key={column} className="max-w-[240px] truncate py-2 pr-3 text-xs text-zinc-600" title={recipient.vars[column]}>
+                      {recipient.vars[column] || '—'}
+                    </td>
+                  ))}
                 </tr>
+                {openId === recipient.id ? (
+                  <tr className="border-b border-zinc-100 bg-zinc-50">
+                    <td colSpan={5 + columns.length} className="px-3 py-3">
+                      <div className="space-y-3">
+                        {recipient.letters.map((letter) => (
+                          <div key={letter.step}>
+                            <div className="text-xs font-medium text-zinc-500">
+                              Письмо {letter.step}{letter.variant ? ` · вариант ${letter.variant}` : ''}
+                            </div>
+                            <div className="text-sm font-medium text-zinc-900">{letter.subject || '(без темы)'}</div>
+                            <div className="whitespace-pre-wrap text-sm text-zinc-700">{letter.body}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </td>
+                  </tr>
+                ) : null}
+                </Fragment>
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

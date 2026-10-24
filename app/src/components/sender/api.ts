@@ -721,6 +721,10 @@ export interface CampaignRecipientDto {
   repliedAt: string | null;
   updatedAt: string;
   mailboxEmail: string | null;
+  /** Колонки загруженного файла как есть. */
+  vars: Record<string, string>;
+  /** Письма цепочки в том виде, в каком они уйдут этому адресу. */
+  letters: { step: number; variant: string | null; subject: string; body: string }[];
 }
 
 export function fetchCampaignRecipients(
@@ -730,7 +734,7 @@ export function fetchCampaignRecipients(
   const query = new URLSearchParams({ page: String(params.page ?? 1) });
   if (params.search) query.set('search', params.search);
   if (params.status) query.set('status', params.status);
-  return authFetchJson<{ recipients: CampaignRecipientDto[]; total: number; pageSize: number }>(
+  return authFetchJson<{ recipients: CampaignRecipientDto[]; columns: string[]; total: number; pageSize: number }>(
     `${BASE}/campaigns/${campaignId}/recipients?${query.toString()}`,
   );
 }
