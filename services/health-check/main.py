@@ -81,7 +81,8 @@ JOB_STUCK_MINUTES = max(
 # test target can't spam the chat, and so we don't hammer the proxy pool every
 # health cycle. The main cycle (site/DB) still runs every HEALTH_INTERVAL_SEC.
 PROXY_CHECK_INTERVAL_SEC = max(60, int(os.environ.get("PROXY_CHECK_INTERVAL_SEC", "300")))
-HEARTBEAT_INTERVAL_SEC = max(60, int(os.environ.get("HEARTBEAT_INTERVAL_SEC", "1800")))
+# Сводка раз в час (24.10.2026): раз в полчаса её было слишком много среди алертов.
+HEARTBEAT_INTERVAL_SEC = max(60, int(os.environ.get("HEARTBEAT_INTERVAL_SEC", "3600")))
 DEADMAN_GRACE_SEC = max(120, int(os.environ.get("HEALTH_DEADMAN_GRACE_SEC", str(HEALTH_INTERVAL_SEC * 3))))
 
 # Суточные пайплайны (OutreachOS + Mailganer auto-pipeline). Отдельные пороги от
@@ -569,6 +570,44 @@ async def send_telegram_photo(
             return r.is_success
     except Exception as e:
         print(f"[health] TG photo error: {e}")
+        return False
+
+
+async def send_telegram_photos(
+    photos: list[bytes],
+    caption: str = "",
+    force: bool = False,
+) -> bool:
+    """Несколько картинок одним сообщением (альбом); подпись — у первой."""
+    if len(photos) == 1:
+        return await send_telegram_photo(photos[0], caption=caption, force=force)
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    if not force and not await get_send_alerts():
+        return True
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
+    media = []
+    files = {}
+    for idx, photo in enumerate(photos):
+        name = f"photo{idx}"
+        item = {"type": "photo", "media": f"attach://{name}"}
+        if idx == 0 and caption:
+            item["caption"] = caption
+            item["parse_mode"] = "HTML"
+        media.append(item)
+        files[name] = (f"{name}.png", photo, "image/png")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                url,
+                data={"chat_id": TELEGRAM_CHAT_ID, "media": json.dumps(media)},
+                files=files,
+            )
+            if not r.is_success:
+                print(f"[health] TG media group error {r.status_code}: {r.text[:200]}")
+            return r.is_success
+    except Exception as e:
+        print(f"[health] TG media group error: {e}")
         return False
 
 
@@ -2589,16 +2628,17 @@ def _apply_xticks(ax, timestamps: list[datetime], n: int, max_ticks: int = 6) ->
     )
 
 
-def _render_heartbeat_chart() -> bytes | None:
+def _render_heartbeat_chart(which: str | None = None) -> bytes | None:
     """Render transactions & connections chart as PNG bytes.
 
-    Shows a 2-column layout when Instantly DB metrics are available.
+    which="main" / "instantly" — картинка только по одной базе (сводка шлёт их
+    отдельными картинками); None — обе базы в два столбца.
     """
     if not HAS_MATPLOTLIB:
         return None
 
-    main_series = _extract_chart_series(_METRICS)
-    inst_series = _extract_chart_series(_METRICS_INSTANTLY)
+    main_series = _extract_chart_series(_METRICS) if which in (None, "main") else None
+    inst_series = _extract_chart_series(_METRICS_INSTANTLY) if which in (None, "instantly") else None
 
     if not main_series and not inst_series:
         return None
@@ -2783,11 +2823,11 @@ def _format_db_section(
         line += f" / {max_c}"
     bits = []
     if data["conn_active"]:
-        bits.append(f"active {data['conn_active']}")
+        bits.append(f"в работе {data['conn_active']}")
     if data["conn_idle"]:
-        bits.append(f"idle {data['conn_idle']}")
+        bits.append(f"простаивают {data['conn_idle']}")
     if data["conn_idle_txn"]:
-        bits.append(f"idle_txn {data['conn_idle_txn']}")
+        bits.append(f"зависли в транзакции {data['conn_idle_txn']}")
     if bits:
         line += f"  ({', '.join(bits)})"
     parts.append(line)
@@ -2957,14 +2997,8 @@ async def _ping_site(count: int = 5) -> str:
     times = [ms for _, ms in results if ms > 0]
     avg_ms = sum(times) / len(times) if times else 0
 
-    pings = "  ".join(
-        f"{code}·{ms:.0f}ms" if code else "✖"
-        for code, ms in results
-    )
-    return (
-        f"🌐 <b>Пинг сервера</b> ({ok_count}/{count}, avg {avg_ms:.0f}ms):\n"
-        f"<code>  {pings}</code>"
-    )
+    # В отчёт — только итог: отдельные попытки читать никто не будет.
+    return f"🌐 <b>Пинг сервера</b>: {ok_count} из {count}, в среднем {avg_ms:.0f} мс"
 
 
 async def _ping_one_proxy(
@@ -3019,16 +3053,13 @@ async def _ping_proxies(count: int = 3) -> str:
     alive = sum(1 for _, _, ok, *_ in rows if ok)
     total = len(rows)
 
-    lines = [f"🔗 <b>Прокси</b>: {alive}/{total} работают"]
-    for group, addr, ok_flag, ok_cnt, cnt, avg in rows:
-        icon = "✅" if ok_flag else "❌"
-        if ok_flag and avg > 0:
-            lines.append(f"  {icon} [{group}] {addr} — {ok_cnt}/{cnt}, avg {avg:.0f}ms")
-        elif ok_flag:
-            lines.append(f"  {icon} [{group}] {addr} — {ok_cnt}/{cnt}")
-        else:
-            lines.append(f"  {icon} [{group}] {addr} — не отвечает")
-
+    # Живые прокси по одному не перечисляем — только счёт; поимённо — те, что не отвечают.
+    dead = [(group, addr) for group, addr, ok_flag, *_ in rows if not ok_flag]
+    if not dead:
+        return f"🔗 <b>Прокси</b>: {total} из {total} работают"
+    lines = [f"🔗 <b>Прокси</b>: {alive} из {total} работают, не отвечают {len(dead)}:"]
+    for group, addr in dead:
+        lines.append(f"  ❌ [{group}] {addr}")
     return "\n".join(lines)
 
 
@@ -3062,11 +3093,12 @@ async def send_heartbeat():
     extra_parts.append(proxy_text)
     extra_block = "\n\n".join(extra_parts)
 
-    chart = _render_heartbeat_chart()
-    if chart:
+    # Графики Main DB и Instantly DB — отдельными картинками, а не одним коллажем.
+    charts = [c for c in (_render_heartbeat_chart("main"), _render_heartbeat_chart("instantly")) if c]
+    if charts:
         caption = _format_heartbeat_caption(db_data, instantly_data, include_sparklines=False)
         caption += f"\n\n{ping_text}\n\n{extra_block}"
-        ok = await send_telegram_photo(chart, caption=caption)
+        ok = await send_telegram_photos(charts, caption=caption)
         if not ok:
             text = _format_heartbeat_caption(db_data, instantly_data, include_sparklines=True)
             text += f"\n\n{ping_text}\n\n{extra_block}"

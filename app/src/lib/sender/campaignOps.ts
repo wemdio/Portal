@@ -20,6 +20,7 @@ import {
 import { applyVars, recipientVars } from './template';
 import { SCHEDULED_START_CLAIM_MARK, type CampaignSourceKind } from './types';
 import { MAX_VARIANTS } from './variants';
+import { syncCampaignTagMailboxes } from './campaignTags';
 
 /**
  * Операции над кампанией «Рассылки»: создание, шаги цепочки, заливка базы и
@@ -680,6 +681,8 @@ export async function startCampaign(
   const nowIso = new Date().toISOString();
   const campaign = await assertStartable(campaignId);
 
+  // Ящики, добавленные под привязанный тег, пока кампания стояла, догоняют пул.
+  await syncCampaignTagMailboxes(campaignId).catch((e) => console.warn('[sender] tag sync on start failed:', e));
   // Стоп-листы клиента и проекта — до постановки в очередь, на любом пути
   // запуска (кнопка, автоаутрич, расписание): клиента или проект могли
   // поставить уже после заливки. Не сверено — не запускаем.

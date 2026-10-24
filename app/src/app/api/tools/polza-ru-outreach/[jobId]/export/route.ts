@@ -192,7 +192,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   return new NextResponse(buffer as ArrayBuffer, {
     headers: {
       'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'Content-Disposition': `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(`Наш автоаутрич — ${kind === 'ready' ? 'готовые' : kind === 'doubtful' ? 'очень спорные' : 'журнал'} ${date}.xlsx`)}`,
+      'Content-Disposition': `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(`Русский автоаутрич — ${kind === 'ready' ? 'готовые' : kind === 'doubtful' ? 'очень спорные' : 'журнал'} ${date}.xlsx`)}`,
     },
   });
 }

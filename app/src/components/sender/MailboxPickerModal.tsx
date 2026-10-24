@@ -18,10 +18,12 @@ export interface PickedMailbox {
    */
   status?: MailboxDto['status'];
   enabled?: boolean;
+  /** Тег ящика: по нему форма кампании показывает тег целиком, а не его адреса. */
+  tagId?: string | null;
 }
 
 function toPicked(mailbox: MailboxDto): PickedMailbox {
-  return { id: mailbox.id, email: mailbox.email, status: mailbox.status, enabled: mailbox.enabled };
+  return { id: mailbox.id, email: mailbox.email, status: mailbox.status, enabled: mailbox.enabled, tagId: mailbox.tag?.id ?? null };
 }
 
 const PAGE_SIZE = 200;
@@ -32,7 +34,10 @@ const MAX_TAG_PAGES = 5;
 
 interface Props {
   initial: PickedMailbox[];
-  onSave: (picked: PickedMailbox[]) => void;
+  /** Теги, уже привязанные к кампании целиком. */
+  initialTagIds?: string[];
+  /** Второй аргумент — теги, взятые целиком: кампания запомнит их и будет докладывать новые ящики тега. */
+  onSave: (picked: PickedMailbox[], tagIds: string[]) => void;
   onClose: () => void;
   /** Подпись под заголовком: у кампании и у папки ящики значат разное. */
   subtitle?: string;
@@ -49,6 +54,7 @@ interface Props {
  */
 export function MailboxPickerModal({
   initial,
+  initialTagIds = [],
   onSave,
   onClose,
   subtitle = 'Письма кампании уходят по очереди со всех выбранных ящиков',
@@ -60,6 +66,9 @@ export function MailboxPickerModal({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [picked, setPicked] = useState<PickedMailbox[]>(initial);
+  // Теги, взятые целиком. Тег перестаёт быть «целым», как только из его ящиков
+  // что-то сняли руками: тогда это уже отдельные ящики, а не весь тег.
+  const [linkedTags, setLinkedTags] = useState<Set<string>>(new Set(initialTagIds));
   const [tags, setTags] = useState<MailboxTagDto[]>([]);
   const toneByTag = useMemo(() => tagTones(tags), [tags]);
   // Какой тег сейчас докладываем: ящики тега доезжают запросом, и на пуле в
@@ -119,6 +128,14 @@ export function MailboxPickerModal({
   const allShownPicked = rows.length > 0 && rows.every((row) => pickedIds.has(row.id));
 
   const toggle = (mailbox: MailboxDto) => {
+    if (pickedIds.has(mailbox.id) && mailbox.tag?.id && linkedTags.has(mailbox.tag.id)) {
+      const tagId = mailbox.tag.id;
+      setLinkedTags((prev) => {
+        const next = new Set(prev);
+        next.delete(tagId);
+        return next;
+      });
+    }
     setPicked((prev) =>
       prev.some((m) => m.id === mailbox.id)
         ? prev.filter((m) => m.id !== mailbox.id)
@@ -149,6 +166,14 @@ export function MailboxPickerModal({
       if (!collected.length) return;
 
       setTagMailboxIds((prev) => new Map(prev).set(tag.id, new Set(collected.map((m) => m.id))));
+      const knownNow = new Set(picked.map((m) => m.id));
+      const removing = collected.every((m) => knownNow.has(m.id));
+      setLinkedTags((prev) => {
+        const next = new Set(prev);
+        if (removing) next.delete(tag.id);
+        else next.add(tag.id);
+        return next;
+      });
       setPicked((prev) => {
         const known = new Set(prev.map((m) => m.id));
         const allIn = collected.every((m) => known.has(m.id));
@@ -166,6 +191,10 @@ export function MailboxPickerModal({
   };
 
   const toggleShown = () => {
+    if (allShownPicked) {
+      const shownTags = new Set(rows.map((r) => r.tag?.id).filter((id): id is string => Boolean(id)));
+      setLinkedTags((prev) => new Set([...prev].filter((id) => !shownTags.has(id))));
+    }
     setPicked((prev) => {
       if (allShownPicked) {
         const shown = new Set(rows.map((r) => r.id));
@@ -193,7 +222,7 @@ export function MailboxPickerModal({
           </button>
           <button
             type="button"
-            onClick={() => onSave(picked)}
+            onClick={() => onSave(picked, [...linkedTags])}
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500"
           >
             Сохранить
@@ -221,6 +250,7 @@ export function MailboxPickerModal({
               // «Взят» — когда в выборке уже столько ящиков этого тега, сколько
               // в нём есть. Считаем по счётчику тега, а не по экрану: на экране
               // первые две сотни и результат поиска.
+              if (linkedTags.has(tag.id)) return true;
               const inPicked = picked.filter((m) => tagMailboxIds.get(tag.id)?.has(m.id)).length;
               return tag.mailboxes > 0 && inPicked >= tag.mailboxes;
             }}

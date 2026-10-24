@@ -30,7 +30,7 @@ const LOG: Record<OutreachLang, string> = {
   en: 'parser.polza_outreach.sender',
 };
 const TOOL: Record<OutreachLang, string> = {
-  ru: 'Наш автоаутрич',
+  ru: 'Русский автоаутрич',
   en: 'Английский автоаутрич',
 };
 

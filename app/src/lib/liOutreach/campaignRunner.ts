@@ -1,4 +1,5 @@
 import 'server-only';
+import { advanceBaseQueue } from '@/lib/liOutreach/baseQueue';
 import { enrollActiveBase } from '@/lib/liOutreach/enroll';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -190,6 +191,19 @@ export async function runCampaignTickAllAccounts(
     }
   } catch (err) {
     console.warn(`[li-outreach] campaign ${campaignId}: enroll from base failed:`, err);
+  }
+  // Рассылаемая база закончилась — берём следующую из очереди кампании.
+  try {
+    const next = await advanceBaseQueue(supabaseAdmin, campaignId);
+    if (next) {
+      await supabaseAdmin.from('li_campaign_logs').insert({
+        campaign_id: campaignId, level: 'info',
+        message: `База закончилась, начата следующая: «${next.name}»`,
+      });
+      await enrollActiveBase(supabaseAdmin, campaignId);
+    }
+  } catch (err) {
+    console.warn(`[li-outreach] campaign ${campaignId}: advance base queue failed:`, err);
   }
   const { data: row } = await supabaseAdmin
     .from('li_campaigns').select('account_id').eq('id', campaignId).maybeSingle();

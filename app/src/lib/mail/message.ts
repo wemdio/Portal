@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { letterBlocks, splitBold, type LetterBlock } from './letterFormat';
+import { letterBlocks, splitStyled, type LetterBlock, type StyledChunk } from './letterFormat';
 import { linkMarkupToText, splitLinkMarkup } from './linkMarkup';
 
 /**
@@ -42,23 +42,35 @@ function escapeHtml(text: string): string {
   return text.replace(/[&<>"]/g, (c) => HTML_ESCAPES[c] ?? c);
 }
 
-/** Строка письма в HTML: ссылки под словом — тегом, жирный — <strong>, остальное экранируется. */
+/** Кусок оформленного текста в HTML: жирный, курсив, подчёркнутый и зачёркнутый — вложенными тегами. */
+function styledToHtml(part: StyledChunk): string {
+  let html = escapeHtml(part.text);
+  if (part.bold) html = `<strong>${html}</strong>`;
+  if (part.italic) html = `<em>${html}</em>`;
+  if (part.underline) html = `<u>${html}</u>`;
+  if (part.strike) html = `<s>${html}</s>`;
+  return html;
+}
+
+/** Строка письма в HTML: ссылки под словом — тегом, оформление — тегами, остальное экранируется. */
 function inlineToHtml(text: string): string {
   return splitLinkMarkup(text)
     .map((chunk) =>
       chunk.kind === 'link'
         ? `<a href="${escapeHtml(chunk.url)}">${escapeHtml(chunk.text)}</a>`
-        : splitBold(chunk.text)
-            .map((part) => (part.bold ? `<strong>${escapeHtml(part.text)}</strong>` : escapeHtml(part.text)))
-            .join(''),
+        : splitStyled(chunk.text).map(styledToHtml).join(''),
     )
     .join('');
 }
 
-/** Блок письма в HTML: абзац или маркированный список. */
+/** Блок письма в HTML: абзац, список (маркированный или нумерованный) или цитата. */
 function blockToHtml(block: LetterBlock): string {
   if (block.kind === 'list') {
-    return `<ul>${block.items.map((item) => `<li>${inlineToHtml(item)}</li>`).join('')}</ul>`;
+    const tag = block.ordered ? 'ol' : 'ul';
+    return `<${tag}>${block.items.map((item) => `<li>${inlineToHtml(item)}</li>`).join('')}</${tag}>`;
+  }
+  if (block.kind === 'quote') {
+    return `<blockquote>${inlineToHtml(block.lines.join('\n')).replace(/\n/g, '<br>')}</blockquote>`;
   }
   return `<p>${inlineToHtml(block.lines.join('\n')).replace(/\n/g, '<br>')}</p>`;
 }

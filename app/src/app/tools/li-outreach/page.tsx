@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
-import { Archive, ArchiveRestore, ArrowLeft, BarChart3, Eye, Megaphone, Pause, Pencil, Play, Search, Square, Trash2, UserCircle } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowLeft, BarChart3, Eye, Pause, Pencil, Play, Rocket, Search, Square, Trash2, UserCircle } from 'lucide-react';
 import { RowActionsMenu, type RowAction } from '@/components/sender/RowActionsMenu';
 import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
 import LiDashboard, { type LiActivity, type LiDashPeriod } from '@/components/li-outreach/LiDashboard';
@@ -274,7 +274,8 @@ export default function LiOutreachPage() {
   const [loadingTasks, setLoadingTasks] = useState(false);
   // Range key currently being exported (button shows '...' until done).
   // Null when no export is in flight.
-  const [exportingCampaignLogsRange, setExportingCampaignLogsRange] = useState<'24h' | '7d' | null>(null);
+  const campaignLogsBox = useRef<HTMLDivElement>(null);
+  const [exportingCampaignLogsRange, setExportingCampaignLogsRange] = useState<'24h' | '7d' | '30d' | null>(null);
   const [syncing, setSyncing] = useState(false);
 
   // Scraper form
@@ -386,13 +387,18 @@ export default function LiOutreachPage() {
   const loadCampaignLogs = useCallback(async (id: string) => {
     setLoadingCampaignLogs(true);
     try {
-      const d = await api<{ items: LiCampaignLog[]; total: number }>(`/campaigns/${id}/logs`);
+      const d = await api<{ items: LiCampaignLog[]; total: number }>(`/campaigns/${id}/logs?limit=500`);
       setCampaignLogs(Array.isArray(d?.items) ? d.items : []);
     } catch (e) {
       console.error('[li-outreach] loadCampaignLogs failed', e);
       setCampaignLogs([]);
     } finally {
       setLoadingCampaignLogs(false);
+      // Свежие записи — внизу: открываем журнал сразу на них.
+      window.setTimeout(() => {
+        const box = campaignLogsBox.current;
+        if (box) box.scrollTop = box.scrollHeight;
+      }, 60);
     }
   }, []);
   const loadDashboard = useCallback(async (period: LiDashPeriod = dashPeriod) => {
@@ -479,7 +485,7 @@ export default function LiOutreachPage() {
   // Reuses the existing global export endpoint with campaign_id filter — same
   // contract as the per-campaign export in tg-outreach.
   const exportCampaignLogs = useCallback(
-    async (range: '24h' | '7d') => {
+    async (range: '24h' | '7d' | '30d') => {
       if (!selectedCampaignId) return;
       setExportingCampaignLogsRange(range);
       try {
@@ -1027,9 +1033,9 @@ export default function LiOutreachPage() {
 
   const tabs = [
     { id: 'dashboard', label: 'Дашборд', icon: BarChart3 },
-    { id: 'campaigns', label: 'Кампании', icon: Megaphone },
-    { id: 'scraper', label: 'Скрапер', icon: Search },
+    { id: 'campaigns', label: 'Кампании', icon: Rocket },
     { id: 'accounts', label: 'Аккаунты', icon: UserCircle },
+    { id: 'scraper', label: 'Скрапер', icon: Search },
   ] as const;
 
   /** Базы и кампании перечитываем вместе: рассылаемая база — поле кампании. */
@@ -1071,7 +1077,16 @@ export default function LiOutreachPage() {
           {/* Campaign performance */}
           {dashData && dashData.campaign_stats.length > 0 && (
             <div className="rounded-xl border border-gray-200 bg-white p-5">
-              <h3 className="text-sm font-semibold text-gray-900 mb-4">Кампании — эффективность</h3>
+              <div className="mb-4 flex items-center justify-between gap-3 flex-wrap">
+                <h3 className="text-sm font-semibold text-gray-900">Кампании — эффективность</h3>
+                {/* Цвета относятся только к полосе «Обработано за период» */}
+                <div className="flex items-center gap-3 text-[10px] text-gray-500 flex-wrap" title="Цвета полосы «Обработано за период»">
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-green-500" /> Завершено</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-400" /> Ошибка</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-gray-400" /> Пропущено</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-gray-100 border border-gray-200" /> В работе / ожидают</span>
+                </div>
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
@@ -1162,13 +1177,6 @@ export default function LiOutreachPage() {
                     })}
                   </tbody>
                 </table>
-                <div className="mt-3 flex items-center gap-3 text-[10px] text-gray-500 flex-wrap">
-                  <span className="font-medium text-gray-600">Легенда:</span>
-                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-green-500" /> Завершено</span>
-                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-400" /> Ошибка</span>
-                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-gray-400" /> Пропущено</span>
-                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-gray-100 border border-gray-200" /> В работе / ожидают</span>
-                </div>
               </div>
             </div>
           )}
@@ -1227,7 +1235,7 @@ export default function LiOutreachPage() {
               </div>
               {editingCampaignId && (
                 <div role="tablist" aria-label="Разделы кампании" className="inline-flex gap-1 rounded-xl border border-gray-200 p-1 text-sm font-medium">
-                  {(['summary', 'bases', 'logs', 'settings'] as const).map((id) => (
+                  {(['summary', 'bases', 'settings', 'logs'] as const).map((id) => (
                     <button
                       key={id}
                       type="button"
@@ -1248,6 +1256,8 @@ export default function LiOutreachPage() {
                 <CampaignSummary
                   stats={dashData?.campaign_stats.find((x) => x.id === editingCampaignId)}
                   periodText={dashData?.period ? `за ${dashData.period.days} дн.` : 'за 30 дней'}
+                  period={dashPeriod}
+                  onPeriodChange={(next) => { setDashPeriod(next); if (next.mode !== 'custom' || (next.from && next.to)) void loadDashboard(next); }}
                   accounts={(editingCampaign?.account_ids ?? [])
                     .map((id) => accounts.find((a) => a.id === id))
                     .filter((a): a is NonNullable<typeof a> => !!a)
@@ -1260,7 +1270,7 @@ export default function LiOutreachPage() {
                   bases={leadLists.filter((l) => l.campaign_id === editingCampaignId)}
                   onChanged={reloadBases}
                   focusBaseId={focusBaseId}
-                  onOpenScraper={(listId) => { setScraperListId(listId); setTab('scraper'); }}
+                  accounts={accounts.filter((a) => a.is_active).map((a) => ({ id: a.id, label: a.name || a.unipile_account_id }))}
                 />
               ) : editingCampaignId && campaignPageTab === 'logs' ? (
                 <div className="space-y-3 rounded-xl border border-gray-200 bg-white p-4">
@@ -1268,8 +1278,8 @@ export default function LiOutreachPage() {
                     <h3 className="text-sm font-semibold text-gray-900">Логи кампании</h3>
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs text-gray-500">Выгрузить .txt:</span>
-                      {(['24h', '7d'] as const).map((r) => {
-                        const labels: Record<typeof r, string> = { '24h': '24 часа', '7d': '7 дней' };
+                      {(['24h', '7d', '30d'] as const).map((r) => {
+                        const labels: Record<typeof r, string> = { '24h': '24 часа', '7d': '7 дней', '30d': '30 дней' };
                         const busy = exportingCampaignLogsRange === r;
                         return (
                           <button
@@ -1287,16 +1297,16 @@ export default function LiOutreachPage() {
                       <button type="button" onClick={() => editingCampaignId && void loadCampaignLogs(editingCampaignId)} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">Обновить</button>
                     </div>
                   </div>
-                  <div className="max-h-[70vh] overflow-y-auto space-y-1">
+                  <div ref={campaignLogsBox} className="max-h-[calc(100vh-22rem)] min-h-48 overflow-y-auto space-y-1">
                     {loadingCampaignLogs ? (
                       <div className="flex items-center justify-center py-10" role="status" aria-label="Загрузка логов">
                         <div className="h-6 w-6 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
                       </div>
                     ) : campaignLogs.length === 0 ? (
                       <div className="text-xs text-gray-400">Нет логов</div>
-                    ) : campaignLogs.map((log) => (
-                      <div key={log.id} className={`text-xs px-2 py-1 rounded ${log.level === 'error' ? 'bg-red-50 text-red-700' : log.level === 'warning' ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-700'}`}>
-                        <span className="text-gray-400">{new Date(log.created_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>{' '}
+                    ) : [...campaignLogs].reverse().map((log) => (
+                      <div key={log.id} className={`li-log text-xs px-2 py-1 rounded ${log.level === 'error' ? 'li-log-error' : log.level === 'warning' ? 'li-log-warning' : 'li-log-info'}`}>
+                        <span className="li-log-time">{new Date(log.created_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>{' '}
                         {log.lead_name ? <span className="font-medium">[{log.lead_name}]</span> : null}{' '}
                         {log.message}
                       </div>
@@ -1304,14 +1314,15 @@ export default function LiOutreachPage() {
                   </div>
                 </div>
               ) : (
-                <div className="space-y-4 rounded-xl border border-gray-200 bg-white p-4">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Название *</label>
+                <div className="space-y-4">
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(300px,380px)_minmax(0,1fr)] lg:items-start">
+              <div className="space-y-3">
+              <section className="space-y-2 rounded-xl border border-gray-200 bg-white p-4">
+                <div className="flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">1</span><h3 className="text-sm font-semibold text-gray-900">Название кампании *</h3></div>
                   <input type="text" placeholder="Моя кампания" value={cf.name} onChange={(e) => setCf({ ...cf, name: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Аккаунты * <span className="text-gray-400">({cf.account_ids.length})</span></label>
+              </section>
+              <section className="space-y-2 rounded-xl border border-gray-200 bg-white p-4">
+                <div className="flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">2</span><h3 className="text-sm font-semibold text-gray-900">Аккаунты * <span className="font-normal text-gray-400">({cf.account_ids.length})</span></h3></div>
                   <details className="group relative">
                     <summary className="flex w-full cursor-pointer list-none items-center justify-between gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm">
                       <span className="truncate">
@@ -1352,9 +1363,9 @@ export default function LiOutreachPage() {
                         })}
                     </div>
                   </details>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Рассылаемая база</label>
+              </section>
+              <section className="space-y-2 rounded-xl border border-gray-200 bg-white p-4">
+                <div className="flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">3</span><h3 className="text-sm font-semibold text-gray-900">Рассылаемая база</h3></div>
                   {editingCampaignId ? (
                     <select value={cf.lead_list_id} onChange={(e) => setCf({ ...cf, lead_list_id: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm">
                       <option value="">Без базы</option>
@@ -1369,9 +1380,47 @@ export default function LiOutreachPage() {
                       Базу загрузите после создания кампании — в разделе «Базы».
                     </div>
                   )}
+              </section>
+              <section className="space-y-3 rounded-xl border border-gray-200 bg-white p-4">
+                <div className="flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">4</span><h3 className="text-sm font-semibold text-gray-900">Когда и сколько отправлять</h3></div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-xs text-gray-600">Лимит инвайтов в день</label>
+                  <input type="number" min={1} max={100} value={cf.daily_invite_limit} onChange={(e) => setCf({ ...cf, daily_invite_limit: +e.target.value })} className="w-20 rounded border border-gray-200 px-2 py-1 text-xs" />
                 </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-xs text-gray-600" title="Окна, в которые runner отправляет инвайты и сообщения. Несколько через запятую (например, 09:00-13:00, 14:00-18:00 для перерыва на обед). Пустое поле = работает 24/7.">Часы работы</label>
+                  <input
+                    type="text"
+                    value={cf.working_hours}
+                    onChange={(e) => setCf({ ...cf, working_hours: e.target.value })}
+                    placeholder="09:00-18:00"
+                    className="w-44 rounded border border-gray-200 px-2 py-1 text-xs"
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-xs text-gray-600" title="Часовой пояс кампании в часах от UTC. Например, 3 для MSK.">Часовой пояс (UTC)</label>
+                  <input
+                    type="number"
+                    min={-12}
+                    max={14}
+                    value={cf.timezone_offset}
+                    onChange={(e) => setCf({ ...cf, timezone_offset: Number(e.target.value) || 0 })}
+                    className="w-20 rounded border border-gray-200 px-2 py-1 text-xs"
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-xs text-gray-600">Пауза между людьми, сек</label>
+                  <div className="flex items-center gap-1.5">
+                    <input type="number" min={10} value={cf.min_delay} onChange={(e) => setCf({ ...cf, min_delay: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
+                    <span className="text-xs text-gray-400">—</span>
+                    <input type="number" min={30} value={cf.max_delay} onChange={(e) => setCf({ ...cf, max_delay: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
+                  </div>
+                </div>
+                <LiSwitch checked={cf.stop_on_reply} onChange={(v) => setCf({ ...cf, stop_on_reply: v })} label="Остановить цепочку при ответе" />
+              </section>
               </div>
-
+              <div className="space-y-3">
+              <div className="px-1 text-xs font-semibold uppercase tracking-wide text-gray-400">Шаги цепочки</div>
               {/* Step 1: Invite */}
               {(() => {
                 // Тумблер «Использовать персонализированный инвайт» имеет смысл
@@ -1465,71 +1514,38 @@ export default function LiOutreachPage() {
                 )}
               </div>
 
-              {/* Settings row */}
-              <div className="flex flex-wrap gap-4 items-center">
-                <LiSwitch checked={cf.use_ai} onChange={(v) => setCf({ ...cf, use_ai: v })} label="AI-персонализация" />
-                <LiSwitch checked={cf.stop_on_reply} onChange={(v) => setCf({ ...cf, stop_on_reply: v })} label="Стоп при ответе" />
-                <div className="flex items-center gap-1.5">
-                  <label className="text-xs text-gray-600">Лимит/день:</label>
-                  <input type="number" min={1} max={100} value={cf.daily_invite_limit} onChange={(e) => setCf({ ...cf, daily_invite_limit: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <label className="text-xs text-gray-600" title="Окна, в которые runner отправляет инвайты и сообщения. Несколько через запятую (например, 09:00-13:00, 14:00-18:00 для перерыва на обед). Пустое поле = работает 24/7.">Часы работы:</label>
-                  <input
-                    type="text"
-                    value={cf.working_hours}
-                    onChange={(e) => setCf({ ...cf, working_hours: e.target.value })}
-                    placeholder="09:00-18:00"
-                    className="w-40 rounded border border-gray-200 px-2 py-1 text-xs"
-                  />
-                  <label className="text-xs text-gray-600" title="Часовой пояс кампании в часах от UTC. Например, 3 для MSK.">UTC:</label>
-                  <input
-                    type="number"
-                    min={-12}
-                    max={14}
-                    value={cf.timezone_offset}
-                    onChange={(e) => setCf({ ...cf, timezone_offset: Number(e.target.value) || 0 })}
-                    className="w-14 rounded border border-gray-200 px-2 py-1 text-xs"
-                  />
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <label className="text-xs text-gray-600">Задержка (сек):</label>
-                  <input type="number" min={10} value={cf.min_delay} onChange={(e) => setCf({ ...cf, min_delay: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
-                  <span className="text-xs text-gray-400">—</span>
-                  <input type="number" min={30} value={cf.max_delay} onChange={(e) => setCf({ ...cf, max_delay: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
-                </div>
-              </div>
-
-              {/* AI settings */}
-              <details className="rounded-lg border border-blue-200 bg-blue-50/40 p-3">
-                <summary className="cursor-pointer text-xs font-semibold text-blue-800">AI настройки (промпты и режимы)</summary>
-                <div className="mt-3 space-y-3">
-                  <p className="text-xs text-gray-600">
-                    Промпт персонализации используется для инвайтов и follow-up, промпт автоответов - для ответов на входящие сообщения.
-                  </p>
-                  <div>
-                    <label className="text-xs text-gray-600 block mb-1">Промпт персонализации</label>
-                    <textarea
-                      rows={3}
-                      value={cf.ai_prompt_invite}
-                      onChange={(e) => setCf({ ...cf, ai_prompt_invite: e.target.value })}
-                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs text-gray-600 block mb-1">Промпт автоответов</label>
-                    <textarea
-                      rows={3}
-                      value={cf.ai_prompt_chat}
-                      onChange={(e) => setCf({ ...cf, ai_prompt_chat: e.target.value })}
-                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
-                    />
-                  </div>
+              <section className="space-y-3 rounded-xl border border-blue-200 bg-blue-50/40 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <h3 className="text-sm font-semibold text-blue-800">AI-персонализация</h3>
                   <div className="flex flex-wrap gap-4">
+                    <LiSwitch checked={cf.use_ai} onChange={(v) => setCf({ ...cf, use_ai: v })} label="Включить" />
                     <LiSwitch checked={cf.use_ai_followup} onChange={(v) => setCf({ ...cf, use_ai_followup: v })} label="AI для follow-up" />
                   </div>
                 </div>
-              </details>
+                <p className="text-xs text-gray-600">
+                  Промпт персонализации используется для инвайтов и follow-up, промпт автоответов — для ответов на входящие сообщения.
+                </p>
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Промпт персонализации</label>
+                  <textarea
+                    rows={4}
+                    value={cf.ai_prompt_invite}
+                    onChange={(e) => setCf({ ...cf, ai_prompt_invite: e.target.value })}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Промпт автоответов</label>
+                  <textarea
+                    rows={4}
+                    value={cf.ai_prompt_chat}
+                    onChange={(e) => setCf({ ...cf, ai_prompt_chat: e.target.value })}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                  />
+                </div>
+              </section>
+              </div>
+              </div>
 
               {editingCampaignId ? (
                 <div className="sticky bottom-3 z-10 flex justify-center">
@@ -1722,7 +1738,7 @@ export default function LiOutreachPage() {
                       <th className="w-[20%] py-2 pl-6 pr-3 text-left font-medium">Источник</th>
                       <th className="w-[13%] px-3 py-2 text-left font-medium">Аккаунт</th>
                       
-                      <th className="w-[8%] px-3 py-2 text-right font-medium">Лимит</th>
+                      <th className="w-[8%] px-3 py-2 text-right font-medium">Кол-во контактов</th>
                       <th className="w-[10%] px-3 py-2 text-right font-medium">Создана</th>
                       <th className="w-[96px] px-3 py-2" />
                     </tr>
@@ -1746,7 +1762,11 @@ export default function LiOutreachPage() {
                               </div>
                               <span className="w-16 shrink-0 text-right text-xs tabular-nums text-gray-500">{t.progress}/{t.total}</span>
                             </div>
-                            {t.error_message && <div className="mt-1 text-xs text-red-600">{t.error_message}</div>}
+                            {t.error_message && (
+                              <div className="mt-1 cursor-help text-xs text-red-600" title={t.error_message}>
+                                {t.error_message.length > 50 ? `${t.error_message.slice(0, 50)}…` : t.error_message}
+                              </div>
+                            )}
                           </td>
                           <td className="py-2.5 pl-6 pr-3">
                             {taskUrl ? (
@@ -1762,18 +1782,15 @@ export default function LiOutreachPage() {
                           </td>
                           <td className="px-3 py-1.5">
                             <div className="flex items-center justify-end gap-0.5">
-                              {active ? (
-                                <button type="button" onClick={() => void cancelTask(t.id)} className="px-2 py-1 text-xs text-red-600 hover:underline">Отменить</button>
-                              ) : (
-                                <>
-                                  <button type="button" onClick={() => setViewTask(t)} aria-label="Посмотреть собранные контакты" title="Посмотреть собранные контакты" className="li-icon-btn cursor-pointer rounded-lg p-1.5">
-                                    <Eye className="h-4 w-4" />
-                                  </button>
-                                  <button type="button" onClick={() => void deleteTask(t.id)} aria-label="Удалить задачу" title="Удалить задачу из списка" className="li-icon-btn li-icon-btn-danger cursor-pointer rounded-lg p-1.5">
-                                    <Trash2 className="h-4 w-4" />
-                                  </button>
-                                </>
-                              )}
+                              <RowActionsMenu
+                                vertical
+                                items={active
+                                  ? [{ label: 'Отменить', icon: Square, danger: true, onClick: () => void cancelTask(t.id) }]
+                                  : [
+                                    { label: 'Посмотреть контакты', icon: Eye, onClick: () => setViewTask(t) },
+                                    { label: 'Удалить', icon: Trash2, danger: true, title: 'Удалить задачу из списка. Собранные контакты останутся в базе.', onClick: () => void deleteTask(t.id) },
+                                  ]}
+                              />
                             </div>
                           </td>
                         </tr>
@@ -1866,6 +1883,7 @@ export default function LiOutreachPage() {
         <AccountLogsModal
           account={accountLogsModal}
           onClose={() => setAccountLogsModal(null)}
+          onUpdated={() => void loadAccounts()}
         />
       )}
     </div>
@@ -2062,8 +2080,40 @@ type AccountLogItem = {
   campaign?: { name: string } | null;
 };
 
-function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: () => void }) {
-  const [range, setRange] = useState<'24h' | '7d'>('24h');
+function AccountLogsModal({ account, onClose, onUpdated }: { account: LiAccount; onClose: () => void; onUpdated: () => void }) {
+  const [range, setRange] = useState<'24h' | '7d' | '30d'>('24h');
+  const [counts, setCounts] = useState<{ error: number; warning: number } | null>(null);
+  const [proxyUrl, setProxyUrl] = useState(account.proxy_url ?? '');
+  const [proxyDraft, setProxyDraft] = useState(account.proxy_url ?? '');
+  const [editingProxy, setEditingProxy] = useState(false);
+  const [savingProxy, setSavingProxy] = useState(false);
+  const [proxyMsg, setProxyMsg] = useState<string | null>(null);
+
+  // Показываем адрес и порт; логин и пароль прокси на экран не выводим.
+  const proxyShown = (() => {
+    const raw = proxyUrl.trim();
+    if (!raw) return null;
+    const noScheme = raw.replace(/^[a-z]+:\/\//i, '');
+    if (noScheme.includes('@')) return noScheme.split('@').pop() ?? noScheme;
+    const [host, port] = noScheme.split(':');
+    return port ? `${host}:${port}` : host;
+  })();
+
+  const saveProxy = async () => {
+    setSavingProxy(true);
+    setProxyMsg(null);
+    try {
+      await api(`/accounts/${account.id}`, { method: 'PATCH', json: { proxy_url: proxyDraft.trim() || null } });
+      setProxyUrl(proxyDraft.trim());
+      setEditingProxy(false);
+      setProxyMsg('Сохранено');
+      onUpdated();
+    } catch (e) {
+      setProxyMsg(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSavingProxy(false);
+    }
+  };
   const [logs, setLogs] = useState<AccountLogItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -2075,10 +2125,11 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
     setLoading(true);
     setError(null);
     try {
-      const d = await api<{ items: AccountLogItem[]; truncated: boolean }>(
+      const d = await api<{ items: AccountLogItem[]; truncated: boolean; counts?: { error: number; warning: number } }>(
         `/accounts/${account.id}/logs?range=${range}`,
       );
       setLogs(d.items ?? []);
+      setCounts(d.counts ?? null);
       setTruncated(Boolean(d.truncated));
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось загрузить логи');
@@ -2102,7 +2153,7 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
   }, [logs]);
 
   const exportTxt = useCallback(
-    async (r: '24h' | '7d') => {
+    async (r: '24h' | '7d' | '30d') => {
       setExportingRange(r);
       try {
         const res = await authFetch(`/api/tools/li-outreach/accounts/${account.id}/logs?range=${r}&format=txt`);
@@ -2145,8 +2196,8 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
     }
   };
 
-  const errorCount = logs.filter((l) => l.level === 'error').length;
-  const warningCount = logs.filter((l) => l.level === 'warning').length;
+  const errorCount = counts?.error ?? logs.filter((l) => l.level === 'error').length;
+  const warningCount = counts?.warning ?? logs.filter((l) => l.level === 'warning').length;
   const cooling = isAccountInCooldown(account);
 
   return (
@@ -2180,6 +2231,31 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
                 </span>
               )}
             </div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+              <span>Прокси:</span>
+              {editingProxy ? (
+                <>
+                  <input
+                    type="text"
+                    autoFocus
+                    placeholder="ip:port:user:pass"
+                    value={proxyDraft}
+                    onChange={(e) => { setProxyDraft(e.target.value); setProxyMsg(null); }}
+                    className="w-64 rounded-lg border border-gray-200 px-2 py-1 font-mono text-xs"
+                  />
+                  <button type="button" onClick={() => void saveProxy()} disabled={savingProxy || proxyDraft.trim() === proxyUrl.trim()} className="cursor-pointer rounded-lg bg-blue-600 px-2.5 py-1 text-xs font-medium text-white disabled:opacity-40">{savingProxy ? '...' : 'Сохранить'}</button>
+                  <button type="button" onClick={() => { setEditingProxy(false); setProxyDraft(proxyUrl); setProxyMsg(null); }} className="cursor-pointer px-1 text-xs text-gray-500 hover:underline">Отмена</button>
+                </>
+              ) : (
+                <>
+                  <span className={proxyShown ? 'font-mono text-gray-700' : 'text-gray-400'}>{proxyShown ?? 'не указан'}</span>
+                  <button type="button" onClick={() => { setProxyDraft(proxyUrl); setEditingProxy(true); }} aria-label="Заменить прокси" title="Заменить прокси" className="li-icon-btn cursor-pointer rounded-lg p-1">
+                    <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                </>
+              )}
+              {proxyMsg && <span className={proxyMsg.startsWith('Ошибка') ? 'text-red-600' : 'text-green-600'}>{proxyMsg}</span>}
+            </div>
           </div>
           <button
             type="button"
@@ -2194,8 +2270,8 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
         <div className="px-5 py-3 border-b border-gray-100 flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-gray-500 mr-1">Период:</span>
-            {(['24h', '7d'] as const).map((r) => {
-              const labels: Record<typeof r, string> = { '24h': '24ч', '7d': '7д' };
+            {(['24h', '7d', '30d'] as const).map((r) => {
+              const labels: Record<typeof r, string> = { '24h': '24ч', '7d': '7д', '30d': '30д' };
               const active = range === r;
               return (
                 <button
@@ -2217,12 +2293,8 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
             {loading ? '…' : (
               <>
                 Всего строк: <span className="font-semibold text-gray-700">{logs.length}</span>
-                {errorCount > 0 && (
-                  <> · <span className="text-rose-600 font-semibold">{errorCount} ошибок</span></>
-                )}
-                {warningCount > 0 && (
-                  <> · <span className="text-amber-600 font-semibold">{warningCount} предупреждений</span></>
-                )}
+                {' · '}<span className={`font-semibold ${errorCount > 0 ? 'text-rose-600' : 'text-gray-500'}`}>Ошибок: {errorCount}</span>
+                {' · '}<span className={`font-semibold ${warningCount > 0 ? 'text-amber-600' : 'text-gray-500'}`}>Предупреждений: {warningCount}</span>
                 {truncated && (
                   <> · <span className="text-gray-400">(показано не всё — обрезано лимитом)</span></>
                 )}
@@ -2231,8 +2303,8 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
           </div>
           <div className="ml-auto flex items-center gap-1.5">
             <span className="text-xs text-gray-500 mr-1">.txt:</span>
-            {(['24h', '7d'] as const).map((r) => {
-              const labels: Record<typeof r, string> = { '24h': '24ч', '7d': '7д' };
+            {(['24h', '7d', '30d'] as const).map((r) => {
+              const labels: Record<typeof r, string> = { '24h': '24ч', '7d': '7д', '30d': '30д' };
               const busy = exportingRange === r;
               return (
                 <button

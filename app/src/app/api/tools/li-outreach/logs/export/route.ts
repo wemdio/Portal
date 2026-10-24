@@ -10,6 +10,7 @@ const RANGES: Record<string, { ms: number; suffix: string }> = {
   '6h': { ms: 6 * 60 * 60 * 1000, suffix: '6h' },
   '24h': { ms: 24 * 60 * 60 * 1000, suffix: '24h' },
   '7d': { ms: 7 * 24 * 60 * 60 * 1000, suffix: '7d' },
+  '30d': { ms: 30 * 24 * 60 * 60 * 1000, suffix: '30d' },
 };
 
 // Hard cap so a chatty week of logs can't OOM the export.

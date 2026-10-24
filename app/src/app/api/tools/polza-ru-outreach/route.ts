@@ -67,6 +67,6 @@ export async function POST(req: NextRequest) {
     await logError('polza_ru_outreach.job.create.failed', error, { config }, { userId: auth.user.id });
     return jsonError(error.message, 500);
   }
-  await logAudit('polza_ru_outreach.job.created', 'Наш автоаутрич: запуск создан', { jobId: data?.id, config }, { userId: auth.user.id });
+  await logAudit('polza_ru_outreach.job.created', 'Русский автоаутрич: запуск создан', { jobId: data?.id, config }, { userId: auth.user.id });
   return NextResponse.json({ job: data });
 }

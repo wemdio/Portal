@@ -1,6 +1,6 @@
 'use client';
 
-import type { LiDashCampaign } from '@/components/li-outreach/LiDashboard';
+import { LiPeriodPicker, type LiDashCampaign, type LiDashPeriod } from '@/components/li-outreach/LiDashboard';
 import { LiFunnelChart, LiInviteChart } from '@/components/li-outreach/LiDashboardCharts';
 
 /**
@@ -30,10 +30,14 @@ export default function CampaignSummary({
   stats,
   accounts,
   periodText,
+  period,
+  onPeriodChange,
 }: {
   stats: LiDashCampaign | undefined;
   accounts: CampaignSummaryAccount[];
   periodText: string;
+  period: LiDashPeriod;
+  onPeriodChange: (next: LiDashPeriod) => void;
 }) {
   if (!stats) {
     return <p className="rounded-xl border border-gray-200 bg-white p-6 text-sm text-gray-500">Статистика по этой кампании пока недоступна.</p>;
@@ -48,7 +52,10 @@ export default function CampaignSummary({
 
   return (
     <div className="space-y-4">
-      <p className="text-xs text-gray-500">Статистика {periodText}</p>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <LiPeriodPicker period={period} onChange={onPeriodChange} />
+        <p className="text-xs text-gray-500">Статистика {periodText}</p>
+      </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5 [&>*]:min-w-0">
         <Tile label="Контактов в рассылке" value={nf(stats.funnel.total)} caption="всего в базе кампании" tint="kpi-tint-sky" valueClass="kpi-value-sky" />

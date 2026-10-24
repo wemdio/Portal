@@ -1,8 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { Link2, List } from 'lucide-react';
-import { letterBlocks, splitBold } from '@/lib/mail/letterFormat';
+import { Eraser, Italic, Link2, List, ListOrdered, Quote, Strikethrough, Underline } from 'lucide-react';
+import { letterBlocks, splitStyled } from '@/lib/mail/letterFormat';
 import { normalizeLinkUrl, splitLinkMarkup } from '@/lib/mail/linkMarkup';
 
 /**
@@ -48,7 +48,7 @@ export function LinkInsert({
           setLabel(onOpen());
           setOpen(true);
         }}
-        className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-2.5 py-1 text-xs text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50"
+        className="letter-tool inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-2.5 py-1 text-xs text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50"
       >
         <Link2 className="h-3.5 w-3.5" />
         Ссылка
@@ -109,7 +109,14 @@ function Inline({ text }: { text: string }) {
           </a>
         ) : (
           <span key={index}>
-            {splitBold(chunk.text).map((part, i) => (part.bold ? <strong key={i}>{part.text}</strong> : part.text))}
+            {splitStyled(chunk.text).map((part, i) => {
+              let node: React.ReactNode = part.text;
+              if (part.bold) node = <strong>{node}</strong>;
+              if (part.italic) node = <em>{node}</em>;
+              if (part.underline) node = <u>{node}</u>;
+              if (part.strike) node = <s>{node}</s>;
+              return <span key={i}>{node}</span>;
+            })}
           </span>
         ),
       )}
@@ -123,11 +130,23 @@ export function LetterText({ text, className }: { text: string; className?: stri
     <div className={className ?? 'break-words text-sm text-zinc-700'}>
       {letterBlocks(text).map((block, index) =>
         block.kind === 'list' ? (
-          <ul key={index} className="my-1 list-disc pl-5">
-            {block.items.map((item, i) => (
-              <li key={i}><Inline text={item} /></li>
-            ))}
-          </ul>
+          block.ordered ? (
+            <ol key={index} className="my-1 list-decimal pl-5">
+              {block.items.map((item, i) => (
+                <li key={i}><Inline text={item} /></li>
+              ))}
+            </ol>
+          ) : (
+            <ul key={index} className="my-1 list-disc pl-5">
+              {block.items.map((item, i) => (
+                <li key={i}><Inline text={item} /></li>
+              ))}
+            </ul>
+          )
+        ) : block.kind === 'quote' ? (
+          <blockquote key={index} className="my-1 whitespace-pre-wrap border-l-2 border-zinc-300 pl-3 text-zinc-500">
+            <Inline text={block.lines.join('\n')} />
+          </blockquote>
         ) : (
           <p key={index} className="my-1 whitespace-pre-wrap">
             <Inline text={block.lines.join('\n')} />
@@ -139,48 +158,65 @@ export function LetterText({ text, className }: { text: string; className?: stri
 }
 
 /**
- * Панель инструментов письма внизу окна, как в Instantly: жирный, список и
- * ссылка. Кнопки не отнимают фокус у поля, поэтому выделение остаётся.
+ * Панель инструментов письма внизу окна, как в Instantly: жирный, курсив,
+ * подчёркнутый, зачёркнутый, списки, цитата, очистка оформления и ссылка.
+ * Кнопки не отнимают фокус у поля, поэтому выделение остаётся.
  */
 export function LetterToolbar({
   disabled,
   onBold,
+  onItalic,
+  onUnderline,
+  onStrike,
   onBullets,
+  onNumbered,
+  onQuote,
+  onClear,
   children,
 }: {
   disabled?: boolean;
   onBold: () => void;
+  onItalic?: () => void;
+  onUnderline?: () => void;
+  onStrike?: () => void;
   onBullets: () => void;
+  onNumbered?: () => void;
+  onQuote?: () => void;
+  onClear?: () => void;
   /** Остальные инструменты панели — например, вставка ссылки. */
   children?: React.ReactNode;
 }) {
   const button =
-    'inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-lg px-2 text-sm text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50';
+    'letter-tool inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-lg px-2 text-sm text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50';
+  const tool = (label: string, onClick: (() => void) | undefined, content: React.ReactNode, extra = '') =>
+    onClick ? (
+      <button
+        key={label}
+        type="button"
+        title={label}
+        aria-label={label}
+        disabled={disabled}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={onClick}
+        className={`${button} ${extra}`}
+      >
+        {content}
+      </button>
+    ) : null;
+  const divider = <span aria-hidden="true" className="mx-0.5 h-5 w-px bg-zinc-300" />;
   return (
     <div className="sticky bottom-3 z-10 mt-3 flex justify-center">
       <div className="flex flex-wrap items-center gap-1 rounded-xl border border-zinc-300 bg-white px-2 py-1.5 shadow-lg">
-        <button
-          type="button"
-          title="Жирный"
-          aria-label="Жирный"
-          disabled={disabled}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={onBold}
-          className={`${button} font-bold`}
-        >
-          Ж
-        </button>
-        <button
-          type="button"
-          title="Список с маркерами"
-          aria-label="Список с маркерами"
-          disabled={disabled}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={onBullets}
-          className={button}
-        >
-          <List className="h-4 w-4" />
-        </button>
+        {tool('Жирный', onBold, 'Ж', 'font-bold')}
+        {tool('Курсив', onItalic, <Italic className="h-4 w-4" />)}
+        {tool('Подчёркнутый', onUnderline, <Underline className="h-4 w-4" />)}
+        {tool('Зачёркнутый', onStrike, <Strikethrough className="h-4 w-4" />)}
+        {divider}
+        {tool('Список с маркерами', onBullets, <List className="h-4 w-4" />)}
+        {tool('Нумерованный список', onNumbered, <ListOrdered className="h-4 w-4" />)}
+        {tool('Цитата', onQuote, <Quote className="h-4 w-4" />)}
+        {divider}
+        {tool('Убрать оформление', onClear, <Eraser className="h-4 w-4" />)}
         {children}
       </div>
     </div>

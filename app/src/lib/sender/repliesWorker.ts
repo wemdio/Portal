@@ -63,7 +63,17 @@ async function findRecipientByThread(inReplyTo: string | null): Promise<string |
     .select('recipient_id')
     .eq('message_id', inReplyTo)
     .maybeSingle();
-  return data ? String(data.recipient_id) : null;
+  if (data) return String(data.recipient_id);
+  // Ответ на наше ручное письмо: новый контакт из ответа лида или тот, кто был
+  // в копии, пишет с адреса, которого нет в базе кампании, — только по треду.
+  const { data: manual } = await supabaseAdmin
+    .from('sender_manual_messages')
+    .select('recipient_id')
+    .eq('message_id', inReplyTo)
+    .not('recipient_id', 'is', null)
+    .limit(1)
+    .maybeSingle();
+  return manual ? String(manual.recipient_id) : null;
 }
 
 async function findRecipientByEmail(email: string | null, campaignIds: string[]): Promise<string | null> {

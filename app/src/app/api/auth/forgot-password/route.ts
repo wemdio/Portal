@@ -1,8 +1,7 @@
 import { after, NextResponse, type NextRequest } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { sendTransactionalEmail } from '@/lib/email/smtpClient';
-import { renderPasswordResetEmail } from '@/lib/email/templates/passwordReset';
-import { generateStrongPassword } from '@/lib/passwordGenerator';
+import { renderPasswordResetLinkEmail } from '@/lib/email/templates/passwordReset';
 import { logAudit, logError } from '@/lib/loggerServer';
 import {
   engResetClientIp,
@@ -12,6 +11,14 @@ import {
   resolveEngResetAccount,
   sendEngResetLink,
 } from './_engReset';
+import {
+  createRuResetLink,
+  formatMoscowTime,
+  isRuResetRequest,
+  ruResetOrigin,
+  ruResetPageResponse,
+  ruResetSubmitResponse,
+} from './_ruReset';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,20 +41,6 @@ interface Body {
 const RECENT_RESETS = new Map<string, number>();
 const RESET_COOLDOWN_MS = 60_000;
 
-function formatMoscowTime(d: Date): string {
-  const parts = new Intl.DateTimeFormat('ru-RU', {
-    timeZone: 'Europe/Moscow',
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).formatToParts(d);
-  const map: Record<string, string> = {};
-  for (const p of parts) map[p.type] = p.value;
-  return `${map.day}.${map.month}.${map.year}, ${map.hour}:${map.minute} МСК`;
-}
-
 /**
  * Constant success response. The endpoint NEVER reveals whether the email is
  * registered — every input that survives basic shape validation returns the
@@ -59,10 +52,12 @@ function jsonOk() {
 }
 
 /**
- * GET /api/auth/forgot-password?token=… — ENG only: the page of the reset link
+ * GET /api/auth/forgot-password?token=… — ENG: the page of the reset link
  * (a form for the new password). Does not use the link up. See _engReset.ts.
+ * GET ?rt=… — RU: the confirm page with a button (_ruReset.ts).
  */
-export function GET(req: NextRequest) {
+export async function GET(req: NextRequest) {
+  if (isRuResetRequest(req)) return ruResetPageResponse(req);
   return engResetPageResponse(req);
 }
 
@@ -80,19 +75,21 @@ export function GET(req: NextRequest) {
  *      link work (rate limits, block check, GoTrue, SMTP) runs AFTER the
  *      {ok:true} response, so the response time does not tell an ENG
  *      customer's address from an unknown one.
- *   4. RU (unchanged): look up profiles.email → auth user id. Silent success
- *      on miss to avoid leaking which emails are registered.
- *   5. Generate a strong password, write it to auth.users via admin update.
- *   6. Email the new password to profiles.email (never to the input email
- *      directly — they're equal here, but the indirection makes the security
- *      property explicit and refactor-resistant).
- *   7. Return the same {ok:true} response either way.
+ *   4. RU: look up profiles.email → auth user id. Silent success on miss to
+ *      avoid leaking which emails are registered.
+ *   5. RU (since 24.10.2026): email a signed confirm link to profiles.email —
+ *      the password is NOT changed here. Before, it was rotated right away, so
+ *      anyone who knew a staff address could lock that person out every minute.
+ *      The link's button (POST ?rt=…) rotates it and mails it (_ruReset.ts).
+ *   6. Return the same {ok:true} response either way.
  *
  * A form post (urlencoded) is the ENG reset page saving the new password
  * (_engReset.ts, engResetSubmitResponse); the RU form and «Forgot password?»
  * send JSON and never reach it.
  */
 export async function POST(req: NextRequest) {
+  // RU confirm button (a form post with ?rt=…) — before the ENG form check.
+  if (isRuResetRequest(req)) return ruResetSubmitResponse(req);
   if (isEngResetFormRequest(req)) return engResetSubmitResponse(req);
 
   let body: Body;
@@ -178,19 +175,16 @@ export async function POST(req: NextRequest) {
     return jsonOk();
   }
 
-  const newPassword = generateStrongPassword(14);
-  const { error: updateErr } = await supabaseAdmin.auth.admin.updateUserById(
-    profile.id as string,
-    { password: newPassword },
-  );
-  if (updateErr) {
-    await logError('auth.forgot.update.failed', updateErr, {}, logMeta);
+  // RU: a confirm link, not a new password (_ruReset.ts).
+  const link = await createRuResetLink(ruResetOrigin(req), profile.id as string, Date.now());
+  if (!link) {
+    await logError('auth.forgot.ru_link.create_failed', null, {}, logMeta);
     return jsonOk();
   }
 
-  const { subject, html, text } = renderPasswordResetEmail({
-    password: newPassword,
-    resetAtMsk: formatMoscowTime(new Date()),
+  const { subject, html, text } = renderPasswordResetLinkEmail({
+    link,
+    requestedAtMsk: formatMoscowTime(new Date()),
   });
 
   try {
@@ -200,11 +194,9 @@ export async function POST(req: NextRequest) {
       html,
       text,
     });
-    await logAudit('auth.forgot.success', `Password reset email sent`, { to: profile.email }, logMeta);
+    await logAudit('auth.forgot.ru_link_sent', 'Password reset confirm link sent', { to: profile.email }, logMeta);
   } catch (err) {
-    // Password is already rotated. Surface the failure in logs; user can hit
-    // reset again after RESET_COOLDOWN_MS — the next attempt will generate
-    // and try to send a fresh password.
+    // Nothing changed yet: the user can ask again after RESET_COOLDOWN_MS.
     await logError('auth.forgot.email.failed', err, { to: profile.email }, logMeta);
   }
 

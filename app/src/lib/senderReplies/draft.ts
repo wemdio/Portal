@@ -6,6 +6,7 @@ import type { CampaignStepText } from '@/lib/replyPersonalization/campaignSequen
 import { getGlobalKnowledgeBase, getGlobalSystemPrompt } from '@/lib/replyPersonalization/db';
 import { generateReplyWithSearch } from '@/lib/replyPersonalization/geminiClient';
 import type { ReplyLanguage, ThreadMessage } from '@/lib/replyPersonalization/types';
+import { loadReferredEmails, resolveReplyTargets } from './referred';
 
 /**
  * Персонализированный ответ лиду «Рассылки» — те же правила и та же модель,
@@ -29,6 +30,7 @@ interface RecipientRow {
   email: string;
   name: string | null;
   campaign_id: string;
+  mailbox_id: string | null;
   vars: Record<string, unknown> | null;
   reply_language: ReplyLanguage | null;
 }
@@ -49,6 +51,8 @@ export interface SenderReplyContext {
   thread: ThreadMessage[];
   steps: CampaignStepText[];
   language: ReplyLanguage;
+  /** Ящик переписки: подсказка ИИ, что это наш адрес, а не новый контакт. */
+  mailboxEmail: string | null;
 }
 
 function clip(text: string | null | undefined): string {
@@ -65,13 +69,13 @@ export function defaultReplyLanguage(campaign: Pick<CampaignRow, 'source_kind' |
 export async function loadSenderReplyContext(db: SupabaseClient, recipientId: string): Promise<SenderReplyContext> {
   const { data: recipient, error: recipientError } = await db
     .from('sender_recipients')
-    .select('id, email, name, campaign_id, vars, reply_language')
+    .select('id, email, name, campaign_id, mailbox_id, vars, reply_language')
     .eq('id', recipientId)
     .maybeSingle();
   if (recipientError) throw new SenderDraftError(recipientError.message, 500);
   if (!recipient) throw new SenderDraftError('Переписка не найдена', 404);
 
-  const [{ data: campaign, error: campaignError }, { data: messages }, { data: replies }, { data: manual }] = await Promise.all([
+  const [{ data: campaign, error: campaignError }, { data: messages }, { data: replies }, { data: manual }, { data: mailbox }] = await Promise.all([
     db.from('sender_campaigns')
       .select('id, name, source_kind, reply_brief, reply_tone, reply_example, sender_folders(key)')
       .eq('id', recipient.campaign_id)
@@ -94,6 +98,9 @@ export async function loadSenderReplyContext(db: SupabaseClient, recipientId: st
       .eq('status', 'sent')
       .order('created_at')
       .limit(50),
+    recipient.mailbox_id
+      ? db.from('sender_mailboxes').select('email').eq('id', recipient.mailbox_id).maybeSingle()
+      : Promise.resolve({ data: null }),
   ]);
   if (campaignError) throw new SenderDraftError(campaignError.message, 500);
   if (!campaign) throw new SenderDraftError('Кампания переписки не найдена', 404);
@@ -127,6 +134,7 @@ export async function loadSenderReplyContext(db: SupabaseClient, recipientId: st
     thread,
     steps,
     language: typedRecipient.reply_language ?? defaultReplyLanguage(typedCampaign),
+    mailboxEmail: (mailbox as { email?: string } | null)?.email ?? null,
   };
 }
 
@@ -136,6 +144,10 @@ export interface SenderDraftResult {
   factsUsed: string;
   sources: Array<{ url: string; title?: string }>;
   language: ReplyLanguage;
+  /** Новый контакт, под которого написан черновик; null — ответ в ту же переписку. */
+  recipientEmail: string | null;
+  /** Копия, под которую написан черновик. */
+  ccEmails: string[];
   createdAt: string;
 }
 
@@ -144,11 +156,16 @@ export async function generateSenderDraft(
   recipientId: string,
   userId: string,
   language: ReplyLanguage,
+  target: { toEmail?: unknown; ccEmails?: unknown } = {},
 ): Promise<SenderDraftResult> {
   const ctx = await loadSenderReplyContext(db, recipientId);
   if (!ctx.thread.some((m) => !m.fromUs)) {
     throw new SenderDraftError('Отвечать пока не на что: в переписке нет ответа получателя', 409);
   }
+  // Черновик под адресата из ответа лида — только если адрес правда там есть.
+  const referred = await loadReferredEmails(db, recipientId, [ctx.recipient.email, ctx.mailboxEmail]);
+  const targets = resolveReplyTargets({ referred, leadEmail: ctx.recipient.email, toEmail: target.toEmail, ccEmails: target.ccEmails });
+  if ('error' in targets) throw new SenderDraftError(targets.error, 422);
 
   const [globalKb, systemPrompt] = await Promise.all([getGlobalKnowledgeBase(), getGlobalSystemPrompt()]);
   const vars = ctx.recipient.vars ?? {};
@@ -163,6 +180,9 @@ export async function generateSenderDraft(
     thread: ctx.thread,
     contextComplete: true,
     campaignSteps: ctx.steps,
+    recipientEmail: targets.newContact,
+    ccEmails: targets.cc,
+    ourEmail: ctx.mailboxEmail,
     language,
   });
 
@@ -179,6 +199,8 @@ export async function generateSenderDraft(
       facts_used: factsUsed,
       sources: result.sources,
       language,
+      recipient_email: targets.newContact,
+      cc_emails: targets.cc,
       model: result.model,
       latency_ms: Date.now() - started,
       created_by: userId,
@@ -190,14 +212,23 @@ export async function generateSenderDraft(
   // Выбор языка запоминаем на переписке: следующий сотрудник увидит тот же.
   await db.from('sender_recipients').update({ reply_language: language }).eq('id', recipientId);
 
-  return { id: data.id, text: result.text, factsUsed, sources: result.sources, language, createdAt: data.created_at };
+  return {
+    id: data.id,
+    text: result.text,
+    factsUsed,
+    sources: result.sources,
+    language,
+    recipientEmail: targets.newContact,
+    ccEmails: targets.cc,
+    createdAt: data.created_at,
+  };
 }
 
 /** Последний неотправленный черновик переписки — чтобы он пережил перезагрузку страницы. */
 export async function latestOpenDraft(db: SupabaseClient, recipientId: string): Promise<SenderDraftResult | null> {
   const { data } = await db
     .from('sender_reply_drafts')
-    .select('id, generated_text, facts_used, sources, language, created_at, status')
+    .select('id, generated_text, facts_used, sources, language, recipient_email, cc_emails, created_at, status')
     .eq('recipient_id', recipientId)
     .order('created_at', { ascending: false })
     .limit(1)
@@ -209,6 +240,8 @@ export async function latestOpenDraft(db: SupabaseClient, recipientId: string): 
     factsUsed: data.facts_used ?? '',
     sources: Array.isArray(data.sources) ? data.sources : [],
     language: data.language === 'en' ? 'en' : 'ru',
+    recipientEmail: data.recipient_email ?? null,
+    ccEmails: Array.isArray(data.cc_emails) ? data.cc_emails : [],
     createdAt: data.created_at,
   };
 }
