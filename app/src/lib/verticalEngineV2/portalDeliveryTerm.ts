@@ -224,10 +224,13 @@ export async function loadNoPeriodPlanOwners(portalDb: SupabaseClient, portalPro
  * Ночная синхронизация перезаписывает projects.contacts_done суммой по
  * связанным кампаниям. Если связок нет, а факт уже есть, его ведут руками:
  * первая же кампания VE2 затёрла бы это число. Такой запуск не начинаем.
+ * Кампании своей «Рассылки» (project_sender_campaigns) — такие же связки:
+ * факт по ним уже считает синхронизация. Без portalDb их не видно.
  */
 export async function findManualFactIssue(
   instantlyDb: SupabaseClient,
   project: Pick<PortalProjectTermRow, 'id' | 'contacts_done'>,
+  opts: { portalDb?: SupabaseClient } = {},
 ): Promise<PortalProjectTermIssue | null> {
   const fact = clean(project.contacts_done);
   if (!fact || exactCount(fact) === 0) return null;
@@ -240,6 +243,17 @@ export async function findManualFactIssue(
     throw new Error('Portal project campaign links count is unavailable');
   }
   if (count > 0) return null;
+  if (opts.portalDb) {
+    const { count: senderCount, error: senderError } = await opts.portalDb
+      .from('project_sender_campaigns')
+      .select('id', { count: 'exact', head: true })
+      .eq('project_id', project.id);
+    if (senderError) throw new Error(`Portal project sender campaign links read failed: ${senderError.message}`);
+    if (typeof senderCount !== 'number' || !Number.isSafeInteger(senderCount)) {
+      throw new Error('Portal project sender campaign links count is unavailable');
+    }
+    if (senderCount > 0) return null;
+  }
   const exact = exactCount(fact);
   return portalProjectTermIssue(
     'PORTAL_PROJECT_MANUAL_FACT',

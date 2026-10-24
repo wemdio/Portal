@@ -2,6 +2,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { getCampaign } from '@/lib/instantly/client';
 import { readContactDeliveryPages } from './contactDeliveryInventory';
 import { launchMailboxScopesEqual } from './launchPortfolio';
+import { observeSenderLaunchItem } from './senderTransport/senderDelivery';
+import { readSenderUploadsEnabled, transportOf } from './senderTransport/transport';
 
 /** Compatibility for older internal callers: sending is always started in Instantly. */
 export async function activateApprovedLaunchCampaigns(input: {
@@ -21,20 +23,43 @@ export async function activateApprovedLaunchCampaigns(input: {
  * Observe manual Start/Pause in Instantly; never call the activation API.
  * Retains its old export/result shape for worker compatibility. `activated`
  * is always zero: recording a provider state is not starting a campaign.
+ *
+ * Launches through «Рассылка» are observed from the main DB. Their failures go
+ * to `senderErrors`, not `errors`: an Instantly failure defers the whole
+ * project, while a sender one only lets its own observation go stale, which
+ * stops uploads and paid supply for that launch alone.
  */
 export async function activateDeliveredContactCampaigns(input: {
   portalDb: SupabaseClient; veProjectId: string; itemId?: string;
-}): Promise<{ activated: number; errors: string[] }> {
-  const items = await readContactDeliveryPages<{id: string; instantly_account_id: string; mailbox_ids: string[]}>(
+}): Promise<{ activated: number; errors: string[]; senderErrors?: string[] }> {
+  const items = await readContactDeliveryPages<{id: string; instantly_account_id: string; mailbox_ids: string[]; transport?: unknown}>(
     'manual campaign state items', (from, to) => {
       let query = input.portalDb.from('ve_launch_queue_items')
-        .select('id, instantly_account_id, mailbox_ids', {count: 'exact'})
+        .select('id, instantly_account_id, mailbox_ids, transport', {count: 'exact'})
         .eq('project_id', input.veProjectId).in('status', ['prepared','queued','active','uncertain']);
       if (input.itemId) query = query.eq('id', input.itemId);
       return query.order('id', {ascending: true}).range(from, to);
     });
   const errors: string[] = [];
+  const senderErrors: string[] = [];
+  let senderUploads: boolean | undefined;
   for (const item of items) {
+    if (transportOf(item.transport) === 'sender') {
+      try {
+        senderUploads ??= await readSenderUploadsEnabled(input.portalDb, input.veProjectId);
+        if (!senderUploads) throw new Error('Подача контактов в «Рассылку» выключена');
+        const campaigns = await readContactDeliveryPages<{id: string; campaign_id: string}>(
+          'sender campaign state children', (from, to) => input.portalDb.from('ve_launch_queue_campaigns')
+            .select('id, campaign_id', {count: 'exact'}).eq('item_id', item.id)
+            .order('id', {ascending: true}).range(from, to));
+        const notes = await observeSenderLaunchItem(input.portalDb, { veProjectId: input.veProjectId, item, campaigns });
+        // Наблюдение записано, но в часть кампаний подача закрыта — пусть это видно.
+        senderErrors.push(...notes.map((note) => `${item.id}: ${note.slice(0, 500)}`));
+      } catch (error) {
+        senderErrors.push(`${item.id}: ${(error instanceof Error ? error.message : String(error)).slice(0, 500)}`);
+      }
+      continue;
+    }
     try {
       const campaigns = await readContactDeliveryPages<{id: string; campaign_id: string}>(
         'manual campaign state children', (from, to) => input.portalDb.from('ve_launch_queue_campaigns')
@@ -58,5 +83,5 @@ export async function activateDeliveredContactCampaigns(input: {
       errors.push(`${item.id}: ${(error instanceof Error ? error.message : String(error)).slice(0, 500)}`);
     }
   }
-  return {activated: 0, errors};
+  return senderErrors.length ? {activated: 0, errors, senderErrors} : {activated: 0, errors};
 }

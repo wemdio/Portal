@@ -1,6 +1,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getCampaign, listLeads } from '@/lib/instantly/client';
 import { launchMailboxScopesEqual } from './launchPortfolio';
+import { findSenderMembership } from './senderTransport/senderDelivery';
+import { transportOf } from './senderTransport/transport';
 
 type Claim = { token: string; email: string; campaign_id: string; account_id: string; mailbox_ids: string[] };
 const PAGE_SIZE = 100;
@@ -58,13 +60,28 @@ async function findMembership(claim: Claim, deps: { getCampaign: typeof getCampa
   throw new Error('Lead search pagination budget exceeded');
 }
 
+/** Куда шла загрузка: (instantly_account_id, campaign_id) у строк очереди
+ * уникальна. Строки нет — Instantly: прежний путь, а id «Рассылки» Instantly
+ * всё равно не подтвердит как «нет», только как ошибку. */
+async function claimTransport(db: SupabaseClient, claim: Claim) {
+  const { data, error } = await db.from('ve_launch_queue_campaigns').select('transport')
+    .eq('instantly_account_id', claim.account_id).eq('campaign_id', claim.campaign_id).maybeSingle();
+  if (error) throw new Error(`Launch campaign transport unavailable: ${error.message}`);
+  return transportOf((data as { transport?: unknown } | null)?.transport);
+}
+
 /** Read-only provider recovery. DB claims/CAS and separate evidence records
- * survive restarts; only DB may resolve a row or release its existing quota. */
+ * survive restarts; only DB may resolve a row or release its existing quota.
+ * Uploads into «Рассылка» are checked against sender_recipients instead. */
 export async function reconcileContactDeliveries(input: {
   portalDb: SupabaseClient;
   veProjectId: string;
   shouldStop?: () => boolean;
-  deps?: { getCampaign: typeof getCampaign; listLeads: typeof listLeads };
+  deps?: {
+    getCampaign: typeof getCampaign;
+    listLeads: typeof listLeads;
+    findSenderMembership?: typeof findSenderMembership;
+  };
 }): Promise<{ accepted: number; released: number; errors: string[] }> {
   const deps = input.deps ?? { getCampaign, listLeads };
   const result = { accepted: 0, released: 0, errors: [] as string[] };
@@ -78,7 +95,9 @@ export async function reconcileContactDeliveries(input: {
     let absent = false;
     let problem: string | null = null;
     try {
-      providerLeadId = await findMembership(claim, deps);
+      providerLeadId = await claimTransport(input.portalDb, claim) === 'sender'
+        ? await (deps.findSenderMembership ?? findSenderMembership)(input.portalDb, claim.campaign_id, claim.email)
+        : await findMembership(claim, deps);
       absent = providerLeadId === null;
     } catch (error) {
       problem = (error instanceof Error ? error.message : String(error)).slice(0, 500);
