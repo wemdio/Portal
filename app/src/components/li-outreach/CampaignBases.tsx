@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-import { Download, Eye, EyeOff, Search, Trash2, Upload } from 'lucide-react';
+import { Download, Eye, EyeOff, Trash2, Upload } from 'lucide-react';
 
 import { RowActionsMenu } from '@/components/sender/RowActionsMenu';
 import { authFetchJson, getAccessToken } from '@/lib/authFetch';
@@ -64,7 +64,6 @@ export default function CampaignBases({
   activeListId,
   bases,
   onChanged,
-  onOpenScraper,
   focusBaseId = null,
 }: {
   campaignId: string;
@@ -73,7 +72,6 @@ export default function CampaignBases({
   bases: LiBase[];
   /** Перечитать базы и кампании после любого изменения. */
   onChanged: () => Promise<void>;
-  onOpenScraper: (listId: string) => void;
   /** Раскрыть эту базу при открытии (переход из скрапера к собранной базе). */
   focusBaseId?: string | null;
 }) {
@@ -286,7 +284,6 @@ export default function CampaignBases({
                           disabled: busy !== null,
                           onClick: () => { target.current = base.id; csvInput.current?.click(); },
                         },
-                        { label: 'Собрать скрапером', icon: Search, title: 'Открыть скрапер с выбранной базой', onClick: () => onOpenScraper(base.id) },
                         { label: 'Скачать CSV', icon: Download, disabled: busy !== null, onClick: () => void exportCsv(base) },
                         { label: 'Удалить', icon: Trash2, danger: true, disabled: busy !== null, onClick: () => void remove(base) },
                       ]}

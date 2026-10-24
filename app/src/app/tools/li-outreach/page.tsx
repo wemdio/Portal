@@ -1264,7 +1264,6 @@ export default function LiOutreachPage() {
                   bases={leadLists.filter((l) => l.campaign_id === editingCampaignId)}
                   onChanged={reloadBases}
                   focusBaseId={focusBaseId}
-                  onOpenScraper={(listId) => { setScraperListId(listId); setTab('scraper'); }}
                 />
               ) : editingCampaignId && campaignPageTab === 'logs' ? (
                 <div className="space-y-3 rounded-xl border border-gray-200 bg-white p-4">
