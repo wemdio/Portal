@@ -11,6 +11,7 @@ import { createVeDeliveryIdentityResolver, veDeliveryPolicyRow } from './project
 import { ContactDeliveryAnalyticsUnavailableError, loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows } from './contactDeliveryInventory';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
+import { resolveVeLaunchTransport } from './senderTransport/transport';
 import {
   describePortalProjectTerm,
   findManualFactIssue,
@@ -377,6 +378,8 @@ export async function buildVeContactDeliveryPreview(
   const effectiveDaily = plan.days[0]?.quota ?? 0;
   const portalProjectName = projectDisplayName(project);
   const portalPeriodLabel = period ? cleanString(period.name) || null : null;
+  // Куда пойдут кампании запуска: обзор показывает, запуск возвращает это обратно.
+  const { transport } = await resolveVeLaunchTransport(portalDb, base.project_id);
 
   return {
     status: 200,
@@ -410,6 +413,7 @@ export async function buildVeContactDeliveryPreview(
         weekday_plan: plan.days,
         delivery_timezone: timezone,
         delivery_schedule_days: scheduleDays,
+        transport,
         project: {
           id: project.id,
           name: portalProjectName,

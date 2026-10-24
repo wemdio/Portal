@@ -224,6 +224,8 @@ export interface CreateCampaignInput {
   sourceKind?: CampaignSourceKind;
   /** Запуск автоаутрича (parser_jobs.id), из которого зальются получатели. */
   sourceJobId?: string | null;
+  /** Часть запуска (у Движка вертикалей — сегмент); с sourceJobId уникальна для 've2'. */
+  sourceRef?: string | null;
   /**
    * Черновик без ящиков — только у заливки из автоаутрича. Ящики рассылка
    * берёт из папки, а там их могли ещё не выбрать (сиды папок приходят
@@ -267,6 +269,7 @@ export async function createCampaign(input: CreateCampaignInput): Promise<{ id: 
       client_user_id: clientUserIdOf(input.clientUserId),
       source_kind: input.sourceKind ?? 'manual',
       source_job_id: input.sourceJobId ?? null,
+      ...(input.sourceRef ? { source_ref: input.sourceRef } : {}),
       created_by: input.createdBy,
     })
     .select('id')
