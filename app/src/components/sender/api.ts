@@ -210,6 +210,10 @@ export interface ThreadItemDto {
   at: string | null;
   note: string | null;
   fromEmail: string | null;
+  /** Ручной ответ ушёл новому контакту из ответа лида, а не ему. */
+  toEmail?: string | null;
+  /** Ручной ответ ушёл лиду с этими адресами в копии. */
+  ccEmails?: string[];
 }
 
 export interface ImportRecipientsResult {
@@ -546,6 +550,8 @@ export function fetchThread(recipientId: string) {
       reply_count: number;
     };
     items: ThreadItemDto[];
+    /** Адреса, которые адресат прислал в последнем ответе («пишите Екатерине»). */
+    referredEmails?: string[];
   }>(`${BASE}/threads/${recipientId}`);
 }
 
@@ -744,11 +750,17 @@ export function fetchCampaignRecipients(
 }
 
 /** Ответить лиду из окна переписки (задача 4.1): уходит с закреплённого ящика. */
-export function replyToThread(recipientId: string, text: string, draftId?: string | null) {
+/** Кому уходит ответ: toEmail — новый контакт из ответа лида, иначе лиду в переписку с копией. */
+export interface ReplyTargetDto {
+  toEmail: string | null;
+  ccEmails: string[];
+}
+
+export function replyToThread(recipientId: string, text: string, draftId?: string | null, target?: ReplyTargetDto) {
   return authFetchJson<{ ok: true; messageId?: string }>(`${BASE}/threads/${recipientId}/reply`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, draftId: draftId ?? null }),
+    body: JSON.stringify({ text, draftId: draftId ?? null, toEmail: target?.toEmail ?? null, ccEmails: target?.ccEmails ?? [] }),
   });
 }
 
@@ -761,6 +773,9 @@ export interface ReplyDraftDto {
   factsUsed: string;
   sources: Array<{ url: string; title?: string }>;
   language: ReplyLanguage;
+  /** Новый контакт, под которого написан черновик; null — ответ лиду в переписку. */
+  recipientEmail: string | null;
+  ccEmails: string[];
   createdAt: string;
 }
 
@@ -770,11 +785,11 @@ export function fetchReplyDraft(recipientId: string) {
   );
 }
 
-export function generateReplyDraft(recipientId: string, language: ReplyLanguage) {
+export function generateReplyDraft(recipientId: string, language: ReplyLanguage, target?: ReplyTargetDto) {
   return authFetchJson<{ draft: ReplyDraftDto }>(`${BASE}/threads/${recipientId}/draft`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ language }),
+    body: JSON.stringify({ language, toEmail: target?.toEmail ?? null, ccEmails: target?.ccEmails ?? [] }),
   });
 }
 

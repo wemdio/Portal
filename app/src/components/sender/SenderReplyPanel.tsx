@@ -42,6 +42,8 @@ function writeSaved(recipientId: string, text: string) {
   }
 }
 
+const sameEmails = (a: string[], b: string[]) => [...a].sort().join() === [...b].sort().join();
+
 /** Пока ответ в очереди или отправляется, переписку перечитываем: видно, ушёл ли он. */
 const PENDING_NOTES = new Set(['в очереди', 'отправляется']);
 
@@ -49,7 +51,9 @@ const PENDING_NOTES = new Set(['в очереди', 'отправляется'])
  * Переписка «Рассылки» с персонализированным ответом — как в инструменте
  * «Персонализированные ответы»: лента писем, метка лида, ИИ пишет ответ на
  * русском или английском по брифу кампании и нашей цепочке, сотрудник правит
- * и отправляет. Письмо уходит с ящика переписки тем же тредом.
+ * и отправляет. Письмо уходит с ящика переписки тем же тредом — или, если
+ * адресат прислал новый контакт («пишите Екатерине»), ей отдельным письмом
+ * либо лиду с ней в копии (плашка «Кому», как в персонализированных ответах).
  */
 export function SenderReplyPanel({
   recipientId,
@@ -74,6 +78,12 @@ export function SenderReplyPanel({
   const [confirming, setConfirming] = useState(false);
   const [sending, setSending] = useState(false);
   const [copied, setCopied] = useState(false);
+  /** Адреса, на которые адресат перенаправил («пишите Екатерине, почта ...»). */
+  const [referredEmails, setReferredEmails] = useState<string[]>([]);
+  /** Кому пишем: null — ответ в ту же переписку, иначе новый контакт из ответа. */
+  const [recipient, setRecipient] = useState<string | null>(null);
+  /** Присланные адресатом адреса в копии ответа ему (при recipient === null). */
+  const [ccEmails, setCcEmails] = useState<string[]>([]);
   /** Лента писем и последнее письмо в ней — чтобы открыть переписку на его начале. */
   const threadRef = useRef<HTMLDivElement>(null);
   // Высота поля ответа — своя ручка над блоком ответа, как в «Персонализированных
@@ -92,17 +102,24 @@ export function SenderReplyPanel({
       mailbox: res.thread.mailbox_email,
       email: res.thread.recipient_email,
     });
+    const referred = res.referredEmails ?? [];
+    setReferredEmails(referred);
+    return referred;
   }, [recipientId]);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const [, draftRes] = await Promise.all([loadThread(), fetchReplyDraft(recipientId)]);
+        const [referred, draftRes] = await Promise.all([loadThread(), fetchReplyDraft(recipientId)]);
         if (cancelled) return;
         setLanguage(draftRes.language);
         setHasBrief(draftRes.hasBrief);
         setDraft(draftRes.draft);
+        // «Кому» — тот, под кого написан сохранённый черновик, пока адрес ещё в ответе.
+        const draftTo = draftRes.draft?.recipientEmail ?? null;
+        setRecipient(draftTo && referred.includes(draftTo) ? draftTo : null);
+        setCcEmails((draftRes.draft?.ccEmails ?? []).filter((e) => referred.includes(e)));
         // Сохранённый черновик ИИ подставляем, только если руками ничего не набрано.
         if (draftRes.draft && !readSaved(recipientId).trim()) setText(draftRes.draft.text);
       } catch (e) {
@@ -142,7 +159,7 @@ export function SenderReplyPanel({
     setGenerating(true);
     setError(null);
     try {
-      const res = await generateReplyDraft(recipientId, language);
+      const res = await generateReplyDraft(recipientId, language, { toEmail: recipient, ccEmails: recipient === null ? ccEmails : [] });
       setDraft(res.draft);
       setText(res.draft.text);
     } catch (e) {
@@ -163,10 +180,15 @@ export function SenderReplyPanel({
     setSending(true);
     setError(null);
     try {
-      await replyToThread(recipientId, body, draft && body ? draft.id : null);
+      await replyToThread(recipientId, body, draft && body ? draft.id : null, {
+        toEmail: recipient,
+        ccEmails: recipient === null ? ccEmails : [],
+      });
       setConfirming(false);
       setText('');
       setDraft(null);
+      setRecipient(null);
+      setCcEmails([]);
       await loadThread();
       onSent?.();
     } catch (e) {
@@ -236,7 +258,10 @@ export function SenderReplyPanel({
                 >
                   <div className={`max-w-[85%] rounded-xl border p-3 ${outgoing ? 'border-blue-100 bg-blue-50' : 'border-zinc-200 bg-white'}`}>
                     <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
-                      <span className="font-medium text-zinc-700">{outgoing ? 'Мы' : item.fromEmail || 'Адресат'}</span>
+                      <span className="font-medium text-zinc-700">
+                        {outgoing ? (item.toEmail ? `Мы → ${item.toEmail}` : 'Мы') : item.fromEmail || 'Адресат'}
+                      </span>
+                      {item.ccEmails?.length ? <span>копия: {item.ccEmails.join(', ')}</span> : null}
                       <span>{formatAt(item.at)}</span>
                       {item.note ? <span className="rounded-md bg-zinc-100 px-1.5 py-0.5">{item.note}</span> : null}
                     </div>
@@ -257,6 +282,55 @@ export function SenderReplyPanel({
         gripClassName="bg-zinc-300 group-hover:bg-zinc-400"
       />
       <div className="px-5 pb-3 pt-1">
+        {/* Кому: адресат прислал новый адрес — можно написать туда, а не ему.
+            Черновик пишется под выбранного получателя, поэтому после смены
+            его нужно сгенерировать заново. */}
+        {referredEmails.length > 0 ? (
+          <div className="mb-2 space-y-1 text-xs">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-zinc-500">Кому:</span>
+              {[null, ...referredEmails].map((email) => {
+                const active = recipient === email;
+                return (
+                  <button
+                    key={email ?? 'lead'}
+                    type="button"
+                    onClick={() => setRecipient(email)}
+                    aria-pressed={active}
+                    disabled={generating || sending}
+                    className={`rounded-full border px-2 py-0.5 transition ${
+                      active ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-zinc-200 text-zinc-600 hover:bg-zinc-50'
+                    }`}
+                  >
+                    {email ? `${email} · новый контакт` : `${header?.email ?? 'адресат'} · ответить в переписку`}
+                  </button>
+                );
+              })}
+            </div>
+            {recipient === null ? (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-zinc-600">
+                <span className="text-zinc-500">В копию:</span>
+                {referredEmails.map((email) => (
+                  <label key={email} className="inline-flex cursor-pointer items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      checked={ccEmails.includes(email)}
+                      disabled={generating || sending}
+                      onChange={(e) => setCcEmails((cur) => (e.target.checked ? [...cur, email] : cur.filter((x) => x !== email)))}
+                      className="rounded border-zinc-300"
+                    />
+                    {email}
+                  </label>
+                ))}
+              </div>
+            ) : null}
+            {draft && draft.recipientEmail !== recipient ? (
+              <p className="text-amber-600">Черновик написан для {draft.recipientEmail ?? header?.email} — нажмите «Сгенерировать заново».</p>
+            ) : draft && recipient === null && !sameEmails(ccEmails, draft.ccEmails) ? (
+              <p className="text-amber-600">Копия изменилась — нажмите «Сгенерировать заново», чтобы текст писался под неё.</p>
+            ) : null}
+          </div>
+        ) : null}
         <div className="mb-2 flex flex-wrap items-center gap-2">
           <button
             type="button"
@@ -319,7 +393,11 @@ export function SenderReplyPanel({
         {confirming ? (
           <div className="mt-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
             <span>
-              Уйдёт с {header?.mailbox ?? 'ящика переписки'} на {header?.email} в эту же переписку — в течение минуты.
+              {recipient
+                ? `Уйдёт с ${header?.mailbox ?? 'ящика переписки'} новым письмом на ${recipient} — не в эту переписку, в течение минуты.`
+                : `Уйдёт с ${header?.mailbox ?? 'ящика переписки'} на ${header?.email}${
+                    ccEmails.length ? `, копия: ${ccEmails.join(', ')},` : ''
+                  } в эту же переписку — в течение минуты.`}
             </span>
             <span className="flex gap-2">
               <button type="button" onClick={() => setConfirming(false)} disabled={sending} className="rounded-md px-2.5 py-1 text-blue-700 hover:bg-blue-100">

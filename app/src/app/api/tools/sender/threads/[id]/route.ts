@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { referredFromLastReply } from '@/lib/senderReplies/referred';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -17,6 +18,10 @@ interface ThreadItem {
   /** Исходящее: статус очереди. Входящее: вид ответа (человек, автоответ, отбойник). */
   note: string | null;
   fromEmail: string | null;
+  /** Ручной ответ ушёл не лиду, а новому контакту из его ответа. */
+  toEmail?: string | null;
+  /** Ручной ответ ушёл лиду с этими адресами в копии. */
+  ccEmails?: string[];
 }
 
 /**
@@ -55,7 +60,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         .limit(MAX_ITEMS),
       db
         .from('sender_manual_messages')
-        .select('id, subject, body, status, sent_at, created_at, error')
+        .select('id, subject, body, status, sent_at, created_at, error, to_email, cc_emails')
         .eq('recipient_id', id)
         .order('created_at')
         .limit(MAX_ITEMS),
@@ -110,9 +115,14 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           ?? (x.status === 'sent' && x.error ? x.error : null)
           ?? (x.status === 'sent' ? null : `${x.status}${x.error ? `: ${x.error}` : ''}`),
         fromEmail: null,
+        toEmail: x.to_email && x.to_email.toLowerCase() !== String(thread.recipient_email).toLowerCase() ? x.to_email : null,
+        ccEmails: Array.isArray(x.cc_emails) ? x.cc_emails : [],
       })),
     ].sort((a, b) => new Date(a.at ?? 0).getTime() - new Date(b.at ?? 0).getTime());
 
-    return NextResponse.json({ thread, items });
+    // «Кому»: адреса, которые адресат прислал в последнем ответе («пишите Екатерине»).
+    const referredEmails = referredFromLastReply(replies ?? [], [thread.recipient_email, thread.mailbox_email]);
+
+    return NextResponse.json({ thread, items, referredEmails });
   });
 }
