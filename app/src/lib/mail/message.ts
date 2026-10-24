@@ -70,9 +70,7 @@ function blockToHtml(block: LetterBlock): string {
     return `<${tag}>${block.items.map((item) => `<li>${inlineToHtml(item)}</li>`).join('')}</${tag}>`;
   }
   if (block.kind === 'quote') {
-    return `<blockquote>${inlineToHtml(block.lines.join('
-')).replace(/
-/g, '<br>')}</blockquote>`;
+    return `<blockquote>${inlineToHtml(block.lines.join('\n')).replace(/\n/g, '<br>')}</blockquote>`;
   }
   return `<p>${inlineToHtml(block.lines.join('\n')).replace(/\n/g, '<br>')}</p>`;
 }
