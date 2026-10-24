@@ -1229,7 +1229,7 @@ export default function LiOutreachPage() {
               </div>
               {editingCampaignId && (
                 <div role="tablist" aria-label="Разделы кампании" className="inline-flex gap-1 rounded-xl border border-gray-200 p-1 text-sm font-medium">
-                  {(['summary', 'bases', 'logs', 'settings'] as const).map((id) => (
+                  {(['summary', 'bases', 'settings', 'logs'] as const).map((id) => (
                     <button
                       key={id}
                       type="button"
@@ -1291,7 +1291,7 @@ export default function LiOutreachPage() {
                       <button type="button" onClick={() => editingCampaignId && void loadCampaignLogs(editingCampaignId)} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">Обновить</button>
                     </div>
                   </div>
-                  <div className="max-h-[70vh] overflow-y-auto space-y-1">
+                  <div className="max-h-[calc(100vh-22rem)] min-h-48 overflow-y-auto space-y-1">
                     {loadingCampaignLogs ? (
                       <div className="flex items-center justify-center py-10" role="status" aria-label="Загрузка логов">
                         <div className="h-6 w-6 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
