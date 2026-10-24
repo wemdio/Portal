@@ -4097,3 +4097,7 @@ html[data-portal-theme='dark'] body .li-log-info { background: rgba(148, 163, 18
 html[data-portal-theme='dark'] body .li-log-warning { background: rgba(250, 204, 21, 0.14); color: #fde047; border-left-color: #facc15; }
 html[data-portal-theme='dark'] body .li-log-error { background: rgba(239, 68, 68, 0.18); color: #fca5a5; border-left-color: #f87171; }
 html body .li-log .li-log-time { opacity: 0.6; }
+
+/* Панель инструментов письма (Ж, список, ссылка): при наведении кнопка заметно подсвечивается. */
+html body .letter-tool:hover:not(:disabled) { background-color: #dbeafe !important; color: #1d4ed8 !important; }
+html[data-portal-theme='dark'] body .letter-tool:hover:not(:disabled) { background-color: rgba(96, 165, 250, 0.28) !important; color: #ffffff !important; }

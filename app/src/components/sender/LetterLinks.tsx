@@ -48,7 +48,7 @@ export function LinkInsert({
           setLabel(onOpen());
           setOpen(true);
         }}
-        className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-2.5 py-1 text-xs text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50"
+        className="letter-tool inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-2.5 py-1 text-xs text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50"
       >
         <Link2 className="h-3.5 w-3.5" />
         Ссылка
@@ -155,7 +155,7 @@ export function LetterToolbar({
   children?: React.ReactNode;
 }) {
   const button =
-    'inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-lg px-2 text-sm text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50';
+    'letter-tool inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-lg px-2 text-sm text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50';
   return (
     <div className="sticky bottom-3 z-10 mt-3 flex justify-center">
       <div className="flex flex-wrap items-center gap-1 rounded-xl border border-zinc-300 bg-white px-2 py-1.5 shadow-lg">
