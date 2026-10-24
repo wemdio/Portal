@@ -100,6 +100,11 @@ export interface VeTemplateLaunchInfo {
   reconciliation_required?: boolean;
   /** Все кампании запуска (основная + сегментные). Поля нет у запусков до сплита. */
   campaigns?: VeTemplateLaunchCampaign[];
+  /**
+   * Куда ушёл запуск: 'sender' — в «Рассылку» (решение владельца 24.10.2026).
+   * Поля нет — Instantly: так читаются все запуски до перевода и запуски Instantly.
+   */
+  transport?: 'sender';
 }
 
 /** Безопасный для UI пункт селектора пресетов (GET launch), без адресов почт. */
@@ -209,6 +214,7 @@ export function parseLaunchInfo(raw: unknown): VeTemplateLaunchInfo | null {
       : {}),
     ...(r.reconciliation_required === true ? { reconciliation_required: true } : {}),
     ...(campaigns && campaigns.length > 0 ? { campaigns } : {}),
+    ...(r.transport === 'sender' ? { transport: 'sender' as const } : {}),
   };
 }
 

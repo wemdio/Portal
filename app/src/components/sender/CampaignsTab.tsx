@@ -69,6 +69,9 @@ function matchesSearch(campaign: CampaignDto, query: string): boolean {
 function deleteConfirmText(campaign: CampaignDto): string {
   const question = `Удалить кампанию «${campaign.name}» вместе с базой получателей и историей писем?`;
   if (!campaign.source_kind || campaign.source_kind === 'manual') return question;
+  if (campaign.source_kind === 've2') {
+    return `${question}\n\nЭто кампания запуска Движка вертикалей: ею управляет VE2 (подача контактов, учёт периодов проекта). Пока она привязана к проекту, удалить её нельзя — поставьте на паузу.`;
+  }
   return (
     `${question}\n\nКомпании в ней — из автоаутрича. Если письма из кампании уже уходили, эти компании больше `
     + 'не зальются в Рассылку — чтобы им не написали второй раз. Если писем ещё не было, их можно будет залить заново.'

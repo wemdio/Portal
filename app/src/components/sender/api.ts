@@ -91,7 +91,7 @@ export interface CampaignDto {
   /** Папка на вкладке кампаний; null — кампания вне папок («Остальные»). */
   folder_id: string | null;
   /** Кто создал: форма «Рассылки» или заливка автоаутрича RU / EN. */
-  source_kind: 'manual' | 'polza_ru' | 'polza_en';
+  source_kind: 'manual' | 'polza_ru' | 'polza_en' | 've2';
   /** Запуск автоаутрича, из которого залиты получатели. */
   source_job_id: string | null;
   /** Отложенный запуск (ISO): кампания стартует сама, когда наступит это время. */
