@@ -14,6 +14,19 @@ const API = '/api/tools/agency-lead-handoff';
 const LABELS: Record<HandoffScope, string> = {
   auto_ru: 'Автоаутрич RU', auto_en: 'Автоаутрич EN', own_ru: 'Email-аутрич RU · Polza', own_en: 'Email-аутрич EN · ENagency', outreachos: 'OutreachOS',
 };
+/**
+ * Свой цвет у каждого источника: автоаутрич — зелёный, наш email-аутрич —
+ * жёлтый, OutreachOS — фиолетовый. Одинаковые синие блоки подряд не
+ * различались. Классы целиком строками — иначе Tailwind их не соберёт.
+ */
+const TONES: Record<HandoffScope, { card: string; chip: string }> = {
+  auto_ru: { card: 'border-l-emerald-500 bg-emerald-500/5', chip: 'bg-emerald-500/20 text-emerald-700' },
+  auto_en: { card: 'border-l-emerald-500 bg-emerald-500/5', chip: 'bg-emerald-500/20 text-emerald-700' },
+  own_ru: { card: 'border-l-amber-500 bg-amber-500/5', chip: 'bg-amber-500/20 text-amber-700' },
+  own_en: { card: 'border-l-amber-500 bg-amber-500/5', chip: 'bg-amber-500/20 text-amber-700' },
+  outreachos: { card: 'border-l-violet-500 bg-violet-500/5', chip: 'bg-violet-500/20 text-violet-700' },
+};
+const HISTORY_PAGE = 10;
 const STATUS: Record<string, string> = {
   pending: 'готовится', queued: 'в очереди отправки', sending: 'отправляется', sent: 'отправлено',
   failed: 'ошибка', unknown: 'отправка не подтверждена, проверьте исходящие', skipped: 'пропущено',
@@ -39,8 +52,9 @@ function SettingsForm({ value, reload }: { value: AgencyHandoffSettings; reload:
     finally { setBusy(false); }
   };
   const field = 'mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm';
-  return <div className="space-y-3 rounded-lg border border-l-4 border-zinc-200 border-l-blue-500 bg-blue-500/5 p-4">
-    <h3 className="inline-block rounded-md bg-blue-500/15 px-2.5 py-1 text-base font-semibold">{LABELS[value.scope]}</h3>
+  const tone = TONES[value.scope];
+  return <div className={`space-y-3 rounded-lg border border-l-4 border-zinc-200 p-4 ${tone.card}`}>
+    <h3 className={`inline-block rounded-md px-2.5 py-1 text-base font-semibold ${tone.chip}`}>{LABELS[value.scope]}</h3>
     <label className="flex items-center gap-2 text-sm">
       <input type="checkbox" checked={form.enabled} onChange={e => setForm({ ...form, enabled: e.target.checked })} />
       Автоматически отвечать новым лидам после передачи в Telegram
@@ -64,6 +78,7 @@ export function HandoffSettings({ folderKey }: { folderKey: string }) {
   const [data, setData] = useState<{ settings: AgencyHandoffSettings[]; history: HistoryRow[] } | null>(null);
   const [error, setError] = useState('');
   const [checkedAt, setCheckedAt] = useState(0);
+  const [page, setPage] = useState(1);
   const load = useCallback(async () => {
     try { setData(await authFetchJson(API)); setError(''); setCheckedAt(Date.now()); }
     catch (err) { setError(err instanceof Error ? err.message : 'Не удалось загрузить передачу'); }
@@ -77,25 +92,38 @@ export function HandoffSettings({ folderKey }: { folderKey: string }) {
   }, []);
   const en = folderKey === 'auto_en';
   const scopes = new Set([en ? 'auto_en' : 'auto_ru', en ? 'own_en' : 'own_ru', ...(en ? [] : ['outreachos'])]);
+  const history = (data?.history ?? []).filter(r => scopes.has(r.scope));
+  const pages = Math.max(1, Math.ceil(history.length / HISTORY_PAGE));
+  const currentPage = Math.min(page, pages);
   return <section className="space-y-3 rounded-xl border border-zinc-200 bg-white p-5">
     <h2 className="text-base font-semibold">Ответ лиду и передача по email</h2>
     <p className="text-sm text-zinc-500">Отправляется один раз после квалификации и доставки лида в чат. При включении старые лиды не получают писем. После отключения новые передачи не отправляются.</p>
     {error && <p className="text-sm text-red-600">{error}</p>}
-    {data?.settings.filter(s => scopes.has(s.scope)).map(s => <SettingsForm key={s.scope} value={s} reload={load} />)}
+    {/* Источники — раздельными блоками в одну строку, у каждого свой цвет. */}
+    <div className="grid gap-4 lg:grid-cols-2">
+      {data?.settings.filter(s => scopes.has(s.scope)).map(s => <SettingsForm key={s.scope} value={s} reload={load} />)}
+    </div>
     <div className="flex items-center justify-between"><h3 className="text-sm font-medium">Последние передачи</h3>
       <button type="button" onClick={() => void load()} className="text-sm text-blue-600">Обновить</button></div>
-    {data?.history.filter(r => scopes.has(r.scope)).map(row => {
+    {history.slice((currentPage - 1) * HISTORY_PAGE, currentPage * HISTORY_PAGE).map(row => {
       const manual = Array.isArray(row.sender_manual_messages) ? row.sender_manual_messages[0] : row.sender_manual_messages;
       const rawStatus = manual?.status ?? row.status;
       const stale = rawStatus === 'sending' && checkedAt - Date.parse(manual?.updated_at ?? row.updated_at) > 10 * 60_000;
       const status = stale ? 'unknown' : rawStatus;
       const when = formatMoscow(manual?.sent_at ?? row.sent_at ?? row.created_at);
       return <div key={row.id} className="border-t border-zinc-100 pt-2 text-sm">
-        <p>{when} · {row.lead_email} · {LABELS[row.scope]} · {STATUS[status] || status}</p>
+        <p>{when} · {row.lead_email} · <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${TONES[row.scope].chip}`}>{LABELS[row.scope]}</span> · {STATUS[status] || status}</p>
         {(manual?.error || row.error) && <p className="text-xs text-red-600">{manual?.error || row.error}</p>}
         {row.cc_emails?.length ? <p className="text-xs text-zinc-500">Копия: {row.cc_emails.join(', ')}</p> : null}
         {row.body && <details className="mt-1 text-xs"><summary className="cursor-pointer">Текст ответа</summary><p className="whitespace-pre-wrap">{row.body}</p></details>}
       </div>;
     })}
+    {pages > 1 && (
+      <div className="flex items-center justify-center gap-4 pt-2 text-sm">
+        <button type="button" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={currentPage <= 1} className="rounded-md px-3 py-1.5 hover:bg-zinc-100 disabled:opacity-40">← Назад</button>
+        <span className="text-zinc-500">Стр. {currentPage} из {pages} · {history.length}</span>
+        <button type="button" onClick={() => setPage(p => Math.min(pages, p + 1))} disabled={currentPage >= pages} className="rounded-md px-3 py-1.5 hover:bg-zinc-100 disabled:opacity-40">Вперёд →</button>
+      </div>
+    )}
   </section>;
 }
