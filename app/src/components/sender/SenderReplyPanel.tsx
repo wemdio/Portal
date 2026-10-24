@@ -191,7 +191,10 @@ export function SenderReplyPanel({
   // вся правая часть исчезала и собиралась заново.
   return (
     <div ref={rootRef} className="flex h-full min-h-0 flex-col">
-      <div className="border-b border-zinc-200 px-5 py-3">
+      {/* Шапка и метка лида в одну строку: каждая прежде занимала свою полосу,
+          и на ноутбуке письма читались в щёлку. */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-zinc-200 px-5 py-2.5">
+       <div className="min-w-0 flex-1">
         {loading && !header ? (
           <>
             <div className="h-6 w-48 animate-pulse rounded bg-zinc-100" />
@@ -206,12 +209,12 @@ export function SenderReplyPanel({
             </div>
           </>
         )}
-      </div>
-
-      {/* Метка лида — вне ленты: подгружается отдельно и не должна сдвигать
-          письма, уже прокрученные к последнему. */}
-      <div className="px-5 pt-3">
-        <LeadVerdictBar recipientId={recipientId} onChange={onVerdictChange} />
+       </div>
+        {/* Метка лида — подгружается отдельно и не должна сдвигать письма,
+            уже прокрученные к последнему. */}
+        <div className="shrink-0">
+          <LeadVerdictBar recipientId={recipientId} onChange={onVerdictChange} />
+        </div>
       </div>
 
       <div ref={threadRef} className="relative min-h-0 flex-1 overflow-y-auto px-5 pb-4 [scrollbar-gutter:stable]">
@@ -259,7 +262,7 @@ export function SenderReplyPanel({
             type="button"
             onClick={() => void generate()}
             disabled={loading || generating || !hasIncoming}
-            title={hasIncoming ? undefined : 'Отвечать пока не на что: адресат ещё не ответил'}
+            title={hasIncoming ? (hasBrief ? 'В поле появится черновик ИИ, его можно править' : 'У кампании нет брифа — ИИ опирается на нашу цепочку писем (шестерёнка у кампании слева)') : 'Отвечать пока не на что: адресат ещё не ответил'}
             className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
           >
             {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
@@ -301,15 +304,7 @@ export function SenderReplyPanel({
             </button>
           </span>
         </div>
-        {/* Подсказка — своей строкой фиксированной высоты: тексты разной длины
-            раньше двигали кнопки рядом. */}
-        <p className="mb-2 h-4 truncate text-xs text-zinc-500">
-          {generating
-            ? 'ИИ пишет, обычно до минуты'
-            : hasBrief
-              ? 'В поле — черновик ИИ, его можно править'
-              : 'У кампании нет брифа — ИИ опирается на нашу цепочку писем (шестерёнка у кампании слева)'}
-        </p>
+        {generating ? <p className="mb-2 text-xs text-zinc-500">ИИ пишет, обычно до минуты</p> : null}
 
         <textarea
           value={text}
