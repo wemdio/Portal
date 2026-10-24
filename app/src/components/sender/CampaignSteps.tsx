@@ -7,7 +7,17 @@ import { placeholderKeys } from '@/lib/sender/templateVars';
 import { MAX_VARIANTS, MIN_RECIPIENTS_PER_VARIANT, variantLabel } from '@/lib/sender/variants';
 import type { RecipientColumnsDto } from './api';
 import { LetterToolbar, LinkInsert } from './LetterLinks';
-import { toggleBold, toggleBullets, type TextEdit } from '@/lib/mail/letterFormat';
+import {
+  clearFormatting,
+  toggleBold,
+  toggleBullets,
+  toggleItalic,
+  toggleNumbered,
+  toggleQuote,
+  toggleStrike,
+  toggleUnderline,
+  type TextEdit,
+} from '@/lib/mail/letterFormat';
 import { TemplateField, insertLink, insertVariable, placeCaret } from './TemplateField';
 
 /**
@@ -251,12 +261,18 @@ function LetterFields({
       <LetterToolbar
         disabled={disabled}
         onBold={() => applyFormat(toggleBold)}
+        onItalic={() => applyFormat(toggleItalic)}
+        onUnderline={() => applyFormat(toggleUnderline)}
+        onStrike={() => applyFormat(toggleStrike)}
         onBullets={() => applyFormat(toggleBullets)}
+        onNumbered={() => applyFormat(toggleNumbered)}
+        onQuote={() => applyFormat(toggleQuote)}
+        onClear={() => applyFormat(clearFormatting)}
       >
         <LinkInsert disabled={disabled} onOpen={grabSelection} onInsert={addLink} />
       </LetterToolbar>
       <p className="mt-1 text-center text-xs text-zinc-500">
-        Выделите текст и нажмите «Ж» — жирный, или значок списка — пункты. Слово + «Ссылка» — ссылка под словом
+        Выделите текст и нажмите кнопку на панели: жирный, курсив, подчёркнутый, зачёркнутый, списки, цитата. Слово + «Ссылка» — ссылка под словом
       </p>
       {hasBrokenLinkMarkup(letter.body) ? (
         <p className="mt-2 text-sm text-amber-600">
