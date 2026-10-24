@@ -27,6 +27,7 @@ import { checkSeedProbes, planSeedProbes, sendDueSeedProbes } from '@/lib/sender
 import { runSenderMonitor } from '@/lib/sender/monitorWorker';
 import { runDomainHealth } from '@/lib/sender/domainHealth';
 import { syncGoogleWorkspaceMailboxes } from '@/lib/sender/googleSyncWorker';
+import { BackgroundLane } from '@/lib/sender/backgroundLane';
 import {
   checkEgress,
   egressIdentityFromEnv,
@@ -48,6 +49,20 @@ const HEARTBEAT_PATH = '/tmp/sender-worker-heartbeat';
 
 const REPLIES_INTERVAL_MS = Number(process.env.SENDER_REPLIES_INTERVAL_MS ?? 60_000);
 let lastRepliesAt = 0;
+// Не чаще этого — вход в один и тот же работающий ящик за входящими: частые
+// входы провайдеры (Яндекс) принимают за подбор пароля. Остальные — раз в сутки.
+const REPLIES_MIN_GAP_SECONDS = Math.round(Number(process.env.SENDER_REPLIES_MIN_GAP_MS ?? 300_000) / 1000);
+
+// Отправка ничего не ждёт: планировщик и прочие задачи парка, входы в ящики
+// (проверка, перепроверка, входящие) идут фоном, каждая дорожка — один проход
+// за раз и не чаще интервала (lib/sender/backgroundLane). 22.10.2026 каждый
+// адрес простаивал по 4–11 часов: всё это шло в цикле отправки.
+const FLEET_INTERVAL_MS = Number(process.env.SENDER_FLEET_INTERVAL_MS ?? 15_000);
+const MAILBOX_JOBS_INTERVAL_MS = Number(process.env.SENDER_MAILBOX_JOBS_INTERVAL_MS ?? 15_000);
+/** Сколько ждать фоновый проход при остановке: контейнеру дают две минуты. */
+const DRAIN_TIMEOUT_MS = 60_000;
+const fleetLane = new BackgroundLane('Задачи парка', FLEET_INTERVAL_MS, log);
+const mailboxLane = new BackgroundLane('Ящики адреса', MAILBOX_JOBS_INTERVAL_MS, log);
 
 // Каталог Workspace меняется редко — раз в час достаточно, чтобы новый ящик
 // появился на экране в тот же рабочий час, а домен на сотню ящиков не дёргал
@@ -117,8 +132,12 @@ async function guarded(name: string, job: () => Promise<unknown>): Promise<void>
   }
 }
 
-/** Общие задачи парка — только у держателя аренды. */
-async function runFleetJobs(): Promise<void> {
+/**
+ * Общие задачи парка — только у держателя аренды. Идут фоном; stillLeader
+ * сверяется между кампаниями планировщика: потерял аренду или воркер
+ * останавливается — проход заканчивается, второго планировщика рядом не будет.
+ */
+async function runFleetJobs(stillLeader: () => boolean): Promise<void> {
   const db = supabaseAdmin;
   if (!db) return;
 
@@ -142,7 +161,8 @@ async function runFleetJobs(): Promise<void> {
     lastDeadMailboxesAt = Date.now();
     await guarded('Лиды упавших ящиков не разобраны', () => releaseDeadMailboxRecipients({ db, log }));
   }
-  await guarded('Планировщик не отработал', () => planSenderMessages({ log }));
+  await guarded('Планировщик не отработал', () => planSenderMessages({ log, shouldContinue: stillLeader }));
+  if (!stillLeader()) return;
   await guarded('Доставка проб не проверилась', () => checkDeliveredProbes(log));
   // Контрольные ящики: план на день (пока выключен SENDER_SEED_PROBES_ENABLED)
   // и проверка папки уже отправленных проб — раз в 5 минут.
@@ -165,7 +185,28 @@ async function runFleetJobs(): Promise<void> {
   }
 }
 
-function makeTick(identity: EgressIdentity, lease: LeaseKeeper) {
+/** Входы в ящики своего адреса: проверка новых, перепроверка упавших, входящие. */
+async function runMailboxJobs(egressIp: string, shouldContinue: () => boolean): Promise<void> {
+  await guarded('Ящики не проверились', () => verifyPendingMailboxes({ log, egressIp }));
+  if (!shouldContinue()) return;
+  if (Date.now() - lastRecheckAt >= RECHECK_INTERVAL_MS) {
+    lastRecheckAt = Date.now();
+    await guarded('Упавшие ящики не перепроверились', () => recheckFailedMailboxes({ log, egressIp }));
+  }
+  if (!shouldContinue()) return;
+  // Входящие — реже отправки: ответ не требует реакции в ту же секунду.
+  if (Date.now() - lastRepliesAt >= REPLIES_INTERVAL_MS) {
+    lastRepliesAt = Date.now();
+    await guarded('Входящие не прочитались', () => processSenderReplies({
+      log,
+      egressIp,
+      minGapSeconds: REPLIES_MIN_GAP_SECONDS,
+      shouldContinue,
+    }));
+  }
+}
+
+function makeTick(identity: EgressIdentity, lease: LeaseKeeper, shouldStop: () => boolean) {
   const egressIp = identity.ip;
   return async function tick(): Promise<boolean> {
     await refreshEgressVerdict(identity);
@@ -177,22 +218,13 @@ function makeTick(identity: EgressIdentity, lease: LeaseKeeper) {
       return false;
     }
 
-    if (lease.isHeld()) await runFleetJobs();
+    if (lease.isHeld() && !shouldStop()) {
+      fleetLane.kick(() => runFleetJobs(() => lease.isHeld() && !shouldStop()));
+    }
     if (egressOk !== true) return false;
 
-    await verifyPendingMailboxes({ log, egressIp });
-    if (Date.now() - lastRecheckAt >= RECHECK_INTERVAL_MS) {
-      lastRecheckAt = Date.now();
-      await guarded('Упавшие ящики не перепроверились', () => recheckFailedMailboxes({ log, egressIp }));
-    }
+    mailboxLane.kick(() => runMailboxJobs(egressIp, () => egressOk === true && !shouldStop()));
     const sent = await processSenderBatch({ log, egressIp });
-
-    // Входящие опрашиваем реже отправки: IMAP-опрос всех ящиков дорогой, а
-    // новые ответы не требуют реакции в ту же секунду.
-    if (Date.now() - lastRepliesAt >= REPLIES_INTERVAL_MS) {
-      lastRepliesAt = Date.now();
-      await processSenderReplies({ log, egressIp });
-    }
 
     // Проверочные отправки, ручные ответы операторов и тестовые письма себе —
     // с ящиков своего адреса.
@@ -231,9 +263,19 @@ async function main() {
     pollIntervalMs: 15_000,
     shouldStop,
     realtimeTables: ['sender_messages'],
-    pollOnce: makeTick(identity, lease),
+    pollOnce: makeTick(identity, lease, shouldStop),
   });
 
+  // Аренду отдаём, только когда фоновый планировщик дописал: иначе новый
+  // держатель начал бы свой проход рядом с нашим. Ждём его без срока — он
+  // останавливается на следующем лиде, а аренда тем временем продлевается; если
+  // контейнер убьют раньше, аренда истечёт сама (90 с), и наложения не будет.
+  const mailboxDone = mailboxLane.drain(DRAIN_TIMEOUT_MS);
+  if (!(await fleetLane.drain(DRAIN_TIMEOUT_MS))) {
+    log('warn', 'Планировщик ещё пишет — держу аренду до его конца');
+    await fleetLane.drain(Number.POSITIVE_INFINITY);
+  }
+  if (!(await mailboxDone)) log('warn', 'Входы в ящики не закончились за минуту — останавливаюсь без них');
   clearInterval(reporter);
   await lease.stop();
 }
