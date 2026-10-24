@@ -5,6 +5,7 @@ import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import type { Account, Campaign, PaginatedResponse } from '@/lib/instantly/types';
 import { normalizeLaunchMailboxIds, launchMailboxScopesEqual } from './launchPortfolio';
 import { readContactDeliveryPages } from './contactDeliveryInventory';
+import { transportOf } from './senderTransport/transport';
 import { VE_CAMPAIGN_SENDING_SETTINGS, DeliveryRateError, calculateDeliveryRate, distributeDeliveryRate, isSendingCampaign, type DeliveryRatePolicy, type DeliveryRateRow } from './contactDeliveryRate';
 
 // consumer — подпись в счётчиках instantly_api_usage_hourly: без неё расчёт
@@ -44,9 +45,9 @@ export async function previewDeliveryRate(portalDb: SupabaseClient, instantlyDb:
   const accountId = resolveInstantlyAccountId(preset.instantly_account_id);
   if (project.launch_instantly_account_id && project.launch_instantly_account_id !== accountId) throw new DeliveryRateError('Рабочее пространство профиля изменилось.');
   const mailboxes = normalizeLaunchMailboxIds(preset.email_account_ids);
-  const items = await readContactDeliveryPages<{id: string; template_id: string; status: string; mailbox_ids: string[]; instantly_account_id: string}>(
+  const items = await readContactDeliveryPages<{id: string; template_id: string; status: string; mailbox_ids: string[]; instantly_account_id: string; transport?: unknown}>(
     'rate launch items', (from, to) => portalDb.from('ve_launch_queue_items')
-      .select('id, template_id, status, mailbox_ids, instantly_account_id', {count: 'exact'}).eq('project_id', input.projectId)
+      .select('id, template_id, status, mailbox_ids, instantly_account_id, transport', {count: 'exact'}).eq('project_id', input.projectId)
       .order('id', {ascending:true}).range(from,to));
   const activeItems = items.filter(item => item.status === 'active');
   for (const item of activeItems) {
@@ -59,9 +60,12 @@ export async function previewDeliveryRate(portalDb: SupabaseClient, instantlyDb:
   if (templateError || templates?.length !== templateIds.length || templates.some(t => t.status !== 'ready' || !Array.isArray(t.letters) || !t.letters.length)) throw new DeliveryRateError('Итоговые письма ещё не готовы.');
   const { data: bases, error: baseError } = await portalDb.from('ve_bases').select('id, project_id').in('id', [...new Set(templates.map(t=>t.base_id))]);
   if (baseError || templates.some(t=>!bases?.some(b=>b.id===t.base_id && b.project_id===input.projectId))) throw new DeliveryRateError('Письма относятся к другому проекту.');
-  const children = activeItems.length ? await readContactDeliveryPages<{id:string;campaign_id:string}>(
+  // Кампании «Рассылки» в Instantly не читаются и не правятся: темп Instantly
+  // распределяется только по его кампаниям. Сверка набора почт выше — для всех.
+  const providerItems = activeItems.filter(item => transportOf(item.transport) === 'instantly');
+  const children = providerItems.length ? await readContactDeliveryPages<{id:string;campaign_id:string}>(
     'rate active campaigns', (from,to)=>portalDb.from('ve_launch_queue_campaigns').select('id, campaign_id',{count:'exact'})
-      .in('item_id',activeItems.map(item=>item.id)).order('id',{ascending:true}).range(from,to)) : [];
+      .in('item_id',providerItems.map(item=>item.id)).order('id',{ascending:true}).range(from,to)) : [];
   const ownIds = new Set(children.map(child=>child.campaign_id));
   const options = { ...READ_OPTIONS, accountId };
   const [accounts, campaigns] = await Promise.all([

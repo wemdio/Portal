@@ -193,6 +193,11 @@ export async function runBoundContactDeliveries(input: {
       const observed = await (input.recoverActivation ?? activateDeliveredContactCampaigns)({
         portalDb: input.portalDb, veProjectId: project.id,
       });
+      // Сбой наблюдения «Рассылки» проект не откладывает: подачу в такие
+      // кампании закрывает их устаревшее наблюдение, а Instantly идёт дальше.
+      if (observed.senderErrors?.length) {
+        input.log('warn', `VE2 sender campaign state project ${project.id} unavailable`, observed.senderErrors);
+      }
       if (observed.errors.length) throw new Error(observed.errors.join('; '));
     } catch (error) {
       failedProjects += 1;

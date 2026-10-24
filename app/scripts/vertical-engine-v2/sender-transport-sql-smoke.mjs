@@ -1,5 +1,5 @@
 /** Executable PostgreSQL smoke for VE2 launches through «Рассылка» (migrations
- * 20261024_0020, 20261024_0030); never connects to Portal/prod.
+ * 20261024_0020, 20261024_0030, 20261024_0070); never connects to Portal/prod.
  *
  * Run from app/: node scripts/vertical-engine-v2/sender-transport-sql-smoke.mjs
  * Supply PGLITE_MODULE when @electric-sql/pglite is installed outside this repo.
@@ -49,6 +49,10 @@ try {
       email text, last_step_sent integer not null default 0);
     create table public.sender_mailboxes(id uuid primary key default gen_random_uuid(),
       email text unique, status text, enabled boolean);
+    create table public.sender_messages(id uuid primary key default gen_random_uuid(),
+      campaign_id uuid not null references public.sender_campaigns on delete cascade,
+      recipient_id uuid not null references public.sender_recipients on delete cascade,
+      step_no int not null, status text not null, sent_at timestamptz);
   `);
   for (const name of [
     '20260820_0001_vertical_engine_v2_foundation.sql',
@@ -67,6 +71,7 @@ try {
     '20260928_0004_ve_contact_delivery_rate.sql',
     '20261024_0020_ve_launch_transport.sql',
     '20261024_0030_sender_ve2_campaigns.sql',
+    '20261024_0070_sender_first_contacted_since.sql',
   ]) {
     await db.exec(migration(name));
   }
@@ -213,6 +218,30 @@ try {
   const released = await one('select status, release_reason from public.ve_launch_queue_items where id=$1', [senderItem]);
   check(released?.status === 'released' && released?.release_reason === 'Все кампании завершены',
     'a sender bundle with every campaign stopped is released', JSON.stringify(released));
+
+  // ── Первые письма с открытия периода ──
+  // Получатели SENDER_CAMPAIGN (r0..r3 выше): первое письмо r0 — 05.09, r1 —
+  // 20.09 (и второй шаг 21.09), у r2 упало, у r3 ещё в очереди.
+  const recipients = (await rows('select id from public.sender_recipients where campaign_id=$1 order by email', [SENDER_CAMPAIGN])).map((r) => r.id);
+  await rows(`insert into public.sender_messages(campaign_id,recipient_id,step_no,status,sent_at) values
+    ($1,$2,1,'sent','2030-09-05T00:00:00Z'),($1,$3,1,'scheduled',null),($1,$3,2,'sent','2030-09-21T00:00:00Z'),
+    ($1,$4,1,'failed','2030-09-22T00:00:00Z'),($1,$5,1,'scheduled',null)`, [SENDER_CAMPAIGN, ...recipients]);
+  await rows(`update public.sender_messages set status='sent', sent_at='2030-09-20T00:00:00Z' where recipient_id=$1 and step_no=1`, [recipients[1]]);
+  await rows(`update public.sender_messages set status='sent', sent_at='2030-09-25T00:00:00Z' where recipient_id=$1 and step_no=1`, [recipients[1]]);
+  const stamped = await rows('select recipient_id, first_sent_at from public.sender_first_sends order by first_sent_at');
+  check(stamped.length === 2 && stamped[1].recipient_id === recipients[1] && new Date(stamped[1].first_sent_at).toISOString() === '2030-09-20T00:00:00.000Z',
+    'trigger records the first send of letter 1 once, nothing for other steps or failures', JSON.stringify(stamped));
+  const since = await rows(`select campaign_id, first_contacted from public.sender_campaign_first_contacted_since($1::uuid[], $2::timestamptz[])
+    order by campaign_id`, [[SENDER_CAMPAIGN, NEW_CAMPAIGN], ['2030-09-15T00:00:00Z', null]]);
+  check(since.length === 2 && Number(since.find((r) => r.campaign_id === SENDER_CAMPAIGN).first_contacted) === 1
+    && Number(since.find((r) => r.campaign_id === NEW_CAMPAIGN).first_contacted) === 1,
+    'since counts recipients whose letter 1 went after the moment; null since — last_step_sent rule', JSON.stringify(since));
+  await rows('delete from public.sender_messages where campaign_id=$1', [SENDER_CAMPAIGN]);
+  const afterDelete = await one(`select first_contacted from public.sender_campaign_first_contacted_since($1::uuid[], $2::timestamptz[])`,
+    [[SENDER_CAMPAIGN], ['2030-09-01T00:00:00Z']]);
+  check(Number(afterDelete.first_contacted) === 2, 'deleting letters (mailbox cascade) does not lower the period count', JSON.stringify(afterDelete));
+  await expectError('ids and moments must be pairs',
+    `select * from public.sender_campaign_first_contacted_since($1::uuid[], $2::timestamptz[])`, [[SENDER_CAMPAIGN, NEW_CAMPAIGN], [null]], /pairs/);
 
   // ── Ящики пресета в «Рассылке» ──
   await rows(`insert into public.sender_mailboxes(email,status,enabled) values('Box@Example.org','verified',true),('off@example.org','failed',true)`);

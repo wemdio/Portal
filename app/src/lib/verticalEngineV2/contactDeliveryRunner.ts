@@ -18,6 +18,7 @@ import {
   AppendLeadsPartialError,
   appendLeadsToClientCampaign,
   type AppendLeadsResult,
+  type AppendLeadsToClientCampaignInput,
 } from '@/lib/clientLaunch/appendLeads';
 import {
   checkCampaignProjectOwnershipConflicts,
@@ -30,6 +31,8 @@ import type { LeadCreatePayload } from '@/lib/instantly/types';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { loadVeContactDeliveryCampaignInventory } from './contactDeliveryInventory';
 import { activateDeliveredContactCampaigns } from './contactDeliveryActivation';
+import { reserveSenderCampaignLinks, type SenderCampaignLinkResult } from './senderTransport/senderDelivery';
+import { transportOf, type VeLaunchTransport } from './senderTransport/transport';
 import {
   claimProjectCampaignLinks,
   describeOwnershipConflicts,
@@ -100,6 +103,12 @@ export interface ContactDeliveryRunnerDeps {
   /** Plans without a period own campaigns through the legacy project link. */
   checkCampaignProjectOwnershipConflicts?: typeof checkCampaignProjectOwnershipConflicts;
   claimCampaignProjectOwnership?: typeof claimCampaignProjectOwnership;
+  /** Launches with transport='sender' upload into «Рассылка» instead of Instantly. */
+  appendSenderLeads?: (
+    input: AppendLeadsToClientCampaignInput,
+    ctx: { veProjectId: string; portalDb: SupabaseClient },
+  ) => Promise<AppendLeadsResult>;
+  reserveSenderLinks?: typeof reserveSenderCampaignLinks;
 }
 
 export type ContactDeliveryDayStatus =
@@ -262,6 +271,9 @@ async function loadPreflight(
   observedFirstContacted: number;
   instantlyAccountId: string;
   activeCampaignIds: string[];
+  instantlyCampaignIds: string[];
+  senderCampaignIds: string[];
+  campaignTransports: Record<string, VeLaunchTransport>;
   links: PeriodCampaignReservation[];
 }> {
   const { data: projectData, error: projectError } = await portalDb
@@ -329,6 +341,11 @@ async function loadPreflight(
     throw new Error('delivery preset workspace differs from the immutable launch workspace');
   }
 
+  // Кампании «Рассылки» не попадают в связи проекта с кампаниями Instantly:
+  // их проект и период держит project_sender_campaigns.
+  const campaignTransports = inventory.campaignTransports ?? {};
+  const senderCampaignIds = inventory.activeCampaignIds.filter((id) => campaignTransports[id] === 'sender');
+  const instantlyCampaignIds = inventory.activeCampaignIds.filter((id) => campaignTransports[id] !== 'sender');
   return {
     project,
     period,
@@ -336,7 +353,10 @@ async function loadPreflight(
     observedFirstContacted: inventory.observedFirstContacted,
     instantlyAccountId,
     activeCampaignIds: inventory.activeCampaignIds,
-    links: !periodId ? [] : inventory.activeCampaignIds.map((campaignId) => ({
+    instantlyCampaignIds,
+    senderCampaignIds,
+    campaignTransports,
+    links: !periodId ? [] : instantlyCampaignIds.map((campaignId) => ({
       periodId,
       campaignId,
       matchSource: 'manual',
@@ -345,6 +365,20 @@ async function loadPreflight(
       matchReason: `Vertical Engine v2 delivery · ${veProjectId}`,
     })),
   };
+}
+
+/** Кампания появилась после чтения инвентаря — рассыльщик берём из её строки. */
+async function readCampaignTransport(
+  portalDb: SupabaseClient,
+  instantlyAccountId: string,
+  campaignId: string,
+): Promise<VeLaunchTransport> {
+  // (instantly_account_id, campaign_id) уникальна; у запусков «Рассылки» там
+  // тот же воркспейс пресета.
+  const { data, error } = await portalDb.from('ve_launch_queue_campaigns')
+    .select('transport').eq('instantly_account_id', instantlyAccountId).eq('campaign_id', campaignId).maybeSingle();
+  if (error) throw new Error(`delivery campaign transport read failed: ${error.message}`);
+  return transportOf((data as { transport?: unknown } | null)?.transport);
 }
 
 async function finalizeAttempt(
@@ -383,21 +417,23 @@ export async function runContactDeliveryDay(input: {
   // Cross-database ownership is established before the main DB can expose a
   // provider batch. A conflict therefore cannot consume or strand drip rows.
   if (preflight.period) {
-    const ownership = await deps.reservePeriodCampaignLinks(
+    if (preflight.links.length > 0) {
+      const ownership = await deps.reservePeriodCampaignLinks(
       input.instantlyDb,
-      preflight.project.portal_project_id as string,
-      preflight.links,
-    );
-    if (ownership.status === 'conflict') {
-      throw new Error(
-        `delivery campaign ownership conflict: ${ownership.conflictingProjectIds.join(', ')}`,
+        preflight.project.portal_project_id as string,
+        preflight.links,
       );
+      if (ownership.status === 'conflict') {
+        throw new Error(
+          `delivery campaign ownership conflict: ${ownership.conflictingProjectIds.join(', ')}`,
+        );
+      }
     }
-  } else {
+  } else if (preflight.instantlyCampaignIds.length > 0) {
     const conflicts = await claimProjectCampaignLinks(
       input.instantlyDb,
       preflight.project.portal_project_id as string,
-      preflight.activeCampaignIds,
+      preflight.instantlyCampaignIds,
       `Vertical Engine v2 delivery · ${input.veProjectId}`,
       {
         check: deps.checkCampaignProjectOwnershipConflicts,
@@ -406,6 +442,22 @@ export async function runContactDeliveryDay(input: {
     );
     if (conflicts.length > 0) {
       throw new Error(`delivery campaign ownership conflict: ${describeOwnershipConflicts(conflicts)}`);
+    }
+  }
+  if (preflight.senderCampaignIds.length > 0) {
+    const senderOwnership: SenderCampaignLinkResult = await (deps.reserveSenderLinks ?? reserveSenderCampaignLinks)(
+      input.portalDb,
+      {
+        projectId: preflight.project.portal_project_id as string,
+        periodId: preflight.period?.id ?? null,
+        campaignIds: preflight.senderCampaignIds,
+        reason: `Vertical Engine v2 delivery · ${input.veProjectId}`,
+      },
+    );
+    if (senderOwnership.status === 'conflict') {
+      throw new Error(
+        `delivery campaign ownership conflict: ${senderOwnership.conflictingProjectIds.join(', ') || 'кампания без проекта'}`,
+      );
     }
   }
 
@@ -426,6 +478,9 @@ export async function runContactDeliveryDay(input: {
     const activation = await activateDeliveredContactCampaigns({
       portalDb: input.portalDb, veProjectId: input.veProjectId,
     });
+    // Сбой наблюдения «Рассылки» — в текст, но не в статус: у Instantly он
+    // откладывает весь проект, здесь подачу закрывает устаревшее наблюдение.
+    const notes = [...activation.errors, ...(activation.senderErrors ?? [])];
     return {
       status: activation.errors.length > 0 ? 'uncertain' : reservation.status,
       runId: reservation.run_id,
@@ -433,7 +488,7 @@ export async function runContactDeliveryDay(input: {
       accepted: 0,
       skipped: 0,
       uncertain: 0,
-      ...(activation.errors.length > 0 ? { error: activation.errors.join('; ').slice(0, 500) } : {}),
+      ...(notes.length > 0 ? { error: notes.join('; ').slice(0, 500) } : {}),
     };
   }
   if (!reservation.run_id) throw new Error('reserved delivery day has no run id');
@@ -445,6 +500,8 @@ export async function runContactDeliveryDay(input: {
   let capacityBlocked = false;
 
   for (const batch of reservation.batches) {
+    const transport = preflight.campaignTransports[batch.campaign_id]
+      ?? await readCampaignTransport(input.portalDb, preflight.instantlyAccountId, batch.campaign_id);
     const attemptId = deps.createAttemptId();
     const { data: markData, error: markError } = await input.portalDb.rpc(
       've_begin_recoverable_contact_delivery',
@@ -455,13 +512,28 @@ export async function runContactDeliveryDay(input: {
         p_row_ids: batch.row_ids,
       },
     );
-    if (markError) throw new Error(`delivery attempt fence failed: ${markError.message}`);
+    if (markError) {
+      // Пачка «Рассылки» с устаревшим наблюдением не должна останавливать
+      // пачки Instantly того же дня: строки остаются в резерве.
+      if (transport === 'sender') {
+        errors.push(`sender campaign ${batch.campaign_id}: ${markError.message}`.slice(0, 500));
+        continue;
+      }
+      throw new Error(`delivery attempt fence failed: ${markError.message}`);
+    }
     if (!parseMarked(markData)) continue;
 
     let outcome: AttemptFinalizeInput;
     let receivedResult = false;
     try {
-      const appendResult = await deps.appendLeads({
+      const append = transport === 'sender'
+        ? async (appendInput: AppendLeadsToClientCampaignInput) => {
+          const appendSender = deps.appendSenderLeads
+            ?? (await import('./senderTransport/senderAppend')).appendLeadsToVeSenderCampaign;
+          return appendSender(appendInput, { veProjectId: input.veProjectId, portalDb: input.portalDb });
+        }
+        : deps.appendLeads;
+      const appendResult = await append({
         userId: preflight.clientUserId,
         campaignId: batch.campaign_id,
         leads: batch.leads,
@@ -525,6 +597,7 @@ export async function runContactDeliveryDay(input: {
     portalDb: input.portalDb, veProjectId: input.veProjectId,
   });
   errors.push(...activation.errors);
+  const notes = [...errors, ...(activation.senderErrors ?? [])];
   return {
     status: uncertain > 0 || activation.errors.length > 0 ? 'uncertain' : capacityBlocked ? 'capacity_blocked'
       : errors.length > 0 ? 'failed' : 'completed',
@@ -533,6 +606,6 @@ export async function runContactDeliveryDay(input: {
     accepted,
     skipped,
     uncertain,
-    ...(errors.length > 0 ? { error: errors.join('; ').slice(0, 500) } : {}),
+    ...(notes.length > 0 ? { error: notes.join('; ').slice(0, 500) } : {}),
   };
 }

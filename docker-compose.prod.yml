@@ -2024,6 +2024,33 @@ services:
     networks:
       - portal-network
 
+  # Ежемесячное обновление лицензий ФНС для сбора VE2 (companies_directory_licences).
+  # Раз в 6 часов сверяет новейший файл реестра МСП на nalog.gov.ru со снимком в
+  # таблице; новый файл (выходит 10-го) читает потоком и заменяет снимок одной
+  # транзакцией. Итог и сбои — в канал health-check бота. Подключение к БД —
+  # DATABASE_URL из .env. См. app/worker/fnsLicencesCron.ts.
+  worker-fns-licences:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-fns-licences
+    command: ["node", "/app/workers/fnsLicencesCron.js"]
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN}
+      - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
+      - FNS_LICENCES_TICK_MS=${FNS_LICENCES_TICK_MS:-21600000}
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+          pids: 256
+    restart: unless-stopped
+    networks:
+      - portal-network
+
 volumes:
   telegram-bot-api-data:
   he-eng-companies-house:

@@ -1,4 +1,4 @@
-import type { Readable } from 'node:stream';
+import { pipeline, type Readable } from 'node:stream';
 import { TextDecoder } from 'node:util';
 
 import { SaxesParser } from 'saxes';
@@ -44,6 +44,33 @@ export interface FnsSmeLicenceScan {
 interface Doc { kind: string; date: string; inn: string; activities: string[]; issuers: string[] }
 
 /**
+ * Страница набора «Единый реестр МСП»: на ней ссылка на текущий файл и все
+ * прежние. meta.csv того же набора отстаёт — 24.10.2026 последним в нём был
+ * файл от 10.09, хотя 10.10 уже вышел.
+ */
+export const FNS_SME_DATASET_PAGE = 'https://www.nalog.gov.ru/opendata/7707329152-rsmp/';
+const FNS_SME_FILE_BASE = 'https://file.nalog.ru/opendata/7707329152-rsmp/';
+
+export interface FnsSmeRelease {
+  name: string;
+  /** Дата реестра из имени файла, ГГГГ-ММ-ДД. */
+  date: string;
+  url: string;
+}
+
+/** Новейший файл реестра со страницы набора: data-ДДММГГГГ-structure-ДДММГГГГ.zip. */
+export function latestFnsSmeRelease(html: string): FnsSmeRelease | null {
+  let latest: FnsSmeRelease | null = null;
+  for (const name of new Set(html.match(/data-\d{8}-structure-\d{8}\.zip/g) ?? [])) {
+    const digits = name.slice(5, 13);
+    const date = `${digits.slice(4)}-${digits.slice(2, 4)}-${digits.slice(0, 2)}`;
+    if (!Number.isFinite(Date.parse(date))) continue;
+    if (!latest || date > latest.date) latest = { name, date, url: FNS_SME_FILE_BASE + name };
+  }
+  return latest;
+}
+
+/**
  * Читает ZIP реестра МСП потоком и отдаёт юрлица, у которых есть хотя бы одна
  * лицензия. Структура файла проверяется по корню и версии формата; ИНН — по
  * контрольной сумме, запись с неверным ИНН или датой пропускается и считается.
@@ -53,10 +80,17 @@ export async function parseFnsSmeLicencesZip(input: {
   onRecord(record: FnsSmeLicenceRecord): Promise<void> | void;
 }): Promise<FnsSmeLicenceScan> {
   const zip = unzipper.Parse({ forceStream: true });
-  input.input.pipe(zip);
+  // pipe() не передаёт ошибку источника дальше: обрыв скачивания падал бы
+  // необработанным 'error', а цикл ниже ждал бы вечно. pipeline() закрывает оба
+  // потока и при раннем выходе из цикла. Ошибку отдаём и записи, которую сейчас
+  // читаем: unzipper сообщает её только самому Parse, и чтение записи зависло бы.
+  // Пропускаемой записи (autodrain) её не отдаём — у неё нет слушателя 'error'.
+  let reading: { destroy(error?: Error): void } | null = null;
+  pipeline(input.input, zip, (error) => { if (error) reading?.destroy(error); });
   const scan: FnsSmeLicenceScan = { entries: 0, documents: 0, legalEntities: 0, legalEntitiesWithLicence: 0, invalidRecords: 0, registryDate: null };
   for await (const entry of zip) {
     if (entry.type !== 'File' || !entry.path.toLowerCase().endsWith('.xml')) { entry.autodrain(); continue; }
+    reading = entry as unknown as { destroy(error?: Error): void };
     validateFnsSmeZipEntryName(entry.path);
     scan.entries += 1;
     const pending: FnsSmeLicenceRecord[] = [];
@@ -107,18 +141,28 @@ export async function parseFnsSmeLicencesZip(input: {
       }
     });
     const decoder = new TextDecoder('utf-8', { fatal: true });
+    // «Битый XML» — только ошибки разбора. Ошибка чтения потока (обрыв скачивания)
+    // уходит как есть: иначе сетевой сбой выглядел бы в алерте как новый формат реестра.
+    const xml = (step: () => void) => {
+      try {
+        step();
+      } catch (error) {
+        throw new Error(`Malformed or invalid XML in ${entry.path}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    };
     let bytes = 0;
-    try {
-      for await (const chunk of entry) {
-        bytes += chunk.length;
+    for await (const chunk of entry) {
+      bytes += chunk.length;
+      xml(() => {
         if (bytes > MAX_XML_ENTRY_BYTES) throw new Error('entry exceeds size limit');
         parser.write(decoder.decode(chunk, { stream: true }));
-      }
+      });
+    }
+    reading = null;
+    xml(() => {
       parser.write(decoder.decode());
       parser.close();
-    } catch (error) {
-      throw new Error(`Malformed or invalid XML in ${entry.path}: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    });
     for (const record of pending) await input.onRecord(record);
   }
   return scan;

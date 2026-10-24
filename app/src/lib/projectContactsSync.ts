@@ -15,6 +15,15 @@
  *   - Проекты, у которых нет привязок в `project_instantly_campaigns`
  *     (Колди, Тригга и пр.) — не трогаем вообще. `contacts_done` для них
  *     заполняет специалист.
+ *   - Кампании своей «Рассылки» (запуски Движка вертикалей) — по привязке
+ *     `project_sender_campaigns` (main DB) к проекту, но не по baseline: у
+ *     «Рассылки» есть время каждого письма, и период считает первые письма,
+ *     ушедшие с его открытия (sender_campaign_first_contacted_since). Без
+ *     активного периода — за всё время. Кампания прошлого периода так сама
+ *     переходит в новый, но берёт факт периода, только если она к нему
+ *     привязана или в нём писала: иначе молчащая старая кампания каждую ночь
+ *     затирала бы ручной факт нового периода нулём. Не прочитались — прогон
+ *     падает до записи: меньшая сумма затёрла бы факт.
  *   - Если у проекта есть привязки, но сумма равна 0, всё равно записываем
  *     "0" (например, кампании поставили на паузу до отправок).
  *
@@ -52,6 +61,8 @@ export interface ProjectContactsSyncResult {
   projectsMissing: string[];
   /** Привязанные campaign_id, которых нет в каталоге аналитики (синхронизация ещё не дотянула). */
   campaignsMissing: string[];
+  /** Сколько кампаний «Рассылки» посчитано. */
+  senderCampaignsResolved: number;
 }
 
 interface LinkRow {
@@ -67,6 +78,14 @@ interface PeriodLinkRow extends LinkRow {
 interface ActivePeriodRow {
   id: string;
   project_id: string;
+  created_at?: string | null;
+}
+
+interface SenderLinkRow {
+  id: string;
+  project_id: string;
+  period_id: string | null;
+  campaign_id: string;
 }
 
 interface CampaignAnalyticsRow {
@@ -96,7 +115,7 @@ async function fetchAllLinks(db: SupabaseClient): Promise<LinkRow[]> {
 async function fetchActivePeriods(db: SupabaseClient): Promise<Map<string, ActivePeriodRow>> {
   const { data, error } = await db
     .from('project_periods')
-    .select('id, project_id')
+    .select('id, project_id, created_at')
     .eq('status', 'active');
   if (error) throw new Error(`project_periods read: ${error.message}`);
 
@@ -151,6 +170,55 @@ async function fetchCampaignContacts(
   return map;
 }
 
+/** Привязки кампаний «Рассылки». Страницы по id: без порядка строки на границе
+ * страниц могли бы прочитаться дважды и сложиться дважды. */
+async function fetchAllSenderLinks(db: SupabaseClient): Promise<SenderLinkRow[]> {
+  const byId = new Map<string, SenderLinkRow>();
+  let from = 0;
+  for (;;) {
+    const { data, error } = await db
+      .from('project_sender_campaigns')
+      .select('id, project_id, period_id, campaign_id')
+      .order('id', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw new Error(`project_sender_campaigns read: ${error.message}`);
+    if (!data?.length) break;
+    for (const row of data as SenderLinkRow[]) byId.set(row.id, row);
+    if (data.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return [...byId.values()];
+}
+
+/** Первые письма кампаний «Рассылки» с момента (null — за всё время); у
+ * каждой кампании обязана быть строка. */
+async function fetchSenderContacts(
+  db: SupabaseClient,
+  requests: Array<{ campaignId: string; since: string | null }>,
+): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  const CHUNK = 100;
+  for (let i = 0; i < requests.length; i += CHUNK) {
+    const part = requests.slice(i, i + CHUNK);
+    const chunk = part.map((request) => request.campaignId);
+    const { data, error } = await db.rpc('sender_campaign_first_contacted_since', {
+      p_campaign_ids: chunk,
+      p_since: part.map((request) => request.since),
+    });
+    if (error) throw new Error(`sender_campaign_first_contacted_since: ${error.message}`);
+    if (!Array.isArray(data)) throw new Error('sender_campaign_first_contacted_since: invalid response');
+    for (const row of data as Array<{ campaign_id?: unknown; first_contacted?: unknown }>) {
+      const n = Number(row.first_contacted);
+      if (!Number.isSafeInteger(n) || n < 0) throw new Error(`sender campaign ${String(row.campaign_id)}: invalid first-contacted count`);
+      map.set(String(row.campaign_id), n);
+    }
+    for (const id of chunk) {
+      if (!map.has(id)) throw new Error(`sender campaign ${id}: no first-contacted row`);
+    }
+  }
+  return map;
+}
+
 export async function syncProjectContactsFromInstantly(
   deps: ProjectContactsSyncDeps,
 ): Promise<ProjectContactsSyncResult> {
@@ -158,10 +226,11 @@ export async function syncProjectContactsFromInstantly(
   const log = deps.log ?? (() => {});
 
   // 1. All project↔campaign links.
-  const [activePeriods, legacyLinks, periodLinks] = await Promise.all([
+  const [activePeriods, legacyLinks, periodLinks, senderLinks] = await Promise.all([
     fetchActivePeriods(mainDb),
     fetchAllLinks(instantlyDb),
     fetchAllPeriodLinks(instantlyDb),
+    fetchAllSenderLinks(mainDb),
   ]);
   const activePeriodIds = new Set([...activePeriods.values()].map((p) => p.id));
   const activePeriodLinks = periodLinks.filter((link) => {
@@ -181,6 +250,22 @@ export async function syncProjectContactsFromInstantly(
       : new Map<string, number>();
   const campaignsMissing = allCampaignIds.filter((id) => !contactsByCampaign.has(id));
 
+  // «Рассылка»: каждая кампания проекта — один раз, с открытия активного
+  // периода или за всё время. Открытие периода не прочиталось — ошибка:
+  // «за всё время» задвоило бы прошлые периоды.
+  const senderProjectByCampaign = new Map<string, string>();
+  for (const link of senderLinks) senderProjectByCampaign.set(link.campaign_id, link.project_id);
+  const senderRequests = [...senderProjectByCampaign].map(([campaignId, projectId]) => {
+    const active = activePeriods.get(projectId);
+    if (active && !(typeof active.created_at === 'string' && Number.isFinite(Date.parse(active.created_at)))) {
+      throw new Error(`project_periods ${active.id}: created_at is unavailable`);
+    }
+    return { campaignId, since: active ? active.created_at as string : null };
+  });
+  const senderContacts = senderRequests.length > 0
+    ? await fetchSenderContacts(mainDb, senderRequests)
+    : new Map<string, number>();
+
   // 3. SUM по project_id.
   const sumByProject = new Map<string, number>();
   const periodIdByProject = new Map<string, string>();
@@ -196,6 +281,16 @@ export async function syncProjectContactsFromInstantly(
     const contacts = contactsByCampaign.get(link.campaign_id);
     if (contacts === undefined) continue; // catalog не дотянулся — пропускаем эту кампанию
     sumByProject.set(link.project_id, (sumByProject.get(link.project_id) ?? 0) + contacts);
+  }
+  const senderLinkedToActive = new Set(senderLinks
+    .filter((link) => link.period_id !== null && activePeriods.get(link.project_id)?.id === link.period_id)
+    .map((link) => link.campaign_id));
+  for (const [campaignId, projectId] of senderProjectByCampaign) {
+    const contacts = senderContacts.get(campaignId)!;
+    const active = activePeriods.get(projectId);
+    if (active && contacts === 0 && !senderLinkedToActive.has(campaignId)) continue;
+    sumByProject.set(projectId, (sumByProject.get(projectId) ?? 0) + contacts);
+    if (active) periodIdByProject.set(projectId, active.id);
   }
 
   // 4. Записываем в projects.contacts_done. Один UPDATE на проект — щадяще
@@ -315,6 +410,7 @@ export async function syncProjectContactsFromInstantly(
     projectsUpdated: updated,
     projectsMissing: missing.length,
     campaignsMissing: campaignsMissing.length,
+    senderCampaignsResolved: senderContacts.size,
     historyWritten,
   });
 
@@ -324,5 +420,6 @@ export async function syncProjectContactsFromInstantly(
     projectsUpdated: updated,
     projectsMissing: missing,
     campaignsMissing,
+    senderCampaignsResolved: senderContacts.size,
   };
 }

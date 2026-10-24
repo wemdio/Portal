@@ -194,6 +194,13 @@ async function checkStopListsBeforeStart(id: string) {
 }
 
 /**
+ * Кампанией запуска Движка вертикалей управляет он сам: по ней считается факт
+ * проекта и идёт подача контактов. Завершённая или удалённая кампания
+ * оставила бы запуск без кампании, поэтому — только пауза.
+ */
+const VE2_MANAGED_CAMPAIGN = 'Кампанией управляет Движок вертикалей: её можно только поставить на паузу';
+
+/**
  * Правка настроек кампании: название, пул ящиков, письмо и окно отправки.
  *
  * Только у черновика и остановленной кампании. У идущей запрещено намеренно:
@@ -205,7 +212,7 @@ async function updateSettings(id: string, body: PatchBody) {
   if (!supabaseAdmin) return jsonError('Сервис не настроен', 503);
 
   const { data: campaign } = await supabaseAdmin
-    .from('sender_campaigns').select('id, status, client_user_id, project_id').eq('id', id).maybeSingle();
+    .from('sender_campaigns').select('id, status, client_user_id, project_id, source_kind').eq('id', id).maybeSingle();
   if (!campaign) return jsonError('Кампания не найдена', 404);
   if (!EDITABLE_CAMPAIGN_STATUSES.includes(String(campaign.status))) {
     return jsonError('Идущую и завершённую кампанию править нельзя — сначала поставьте на паузу', 409);
@@ -215,6 +222,10 @@ async function updateSettings(id: string, body: PatchBody) {
   const scopeChanged =
     ('clientUserId' in body && clientUserIdOf(body.clientUserId) !== (campaign.client_user_id ?? null)) ||
     ('projectId' in body && projectIdOf(body.projectId) !== (campaign.project_id ?? null));
+  // По проекту кампании Движок вертикалей считает факт, по клиенту — стоп-лист.
+  if (campaign.source_kind === 've2' && scopeChanged) {
+    return jsonError('У кампании Движка вертикалей проект и клиента менять нельзя', 409);
+  }
 
   // Та же проверка, что при создании (campaignOps): ошибка — SenderOpError,
   // её в ответ превращает PATCH.
@@ -329,6 +340,13 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       throw e;
     }
 
+    if (body.action === 'finish') {
+      const { data: target, error: targetError } = await supabaseAdmin
+        .from('sender_campaigns').select('source_kind').eq('id', id).maybeSingle();
+      if (targetError) return jsonError(targetError.message, 500);
+      if (target?.source_kind === 've2') return jsonError(VE2_MANAGED_CAMPAIGN, 409);
+    }
+
     const status = body.action === 'pause' ? 'paused' : 'done';
     const { error } = await supabaseAdmin
       .from('sender_campaigns')
@@ -377,6 +395,7 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
       .eq('id', id)
       .maybeSingle();
     if (!campaign) return jsonError('Кампания не найдена', 404);
+    if (campaign.source_kind === 've2') return jsonError(VE2_MANAGED_CAMPAIGN, 409);
     if (String(campaign.status) === 'running') {
       return jsonError('Идущую кампанию удалить нельзя — сначала поставьте на паузу или завершите', 409);
     }
