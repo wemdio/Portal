@@ -15,16 +15,16 @@ services:
       - .env
     ports:
       - "3000:3000"
+    # 24.10.2026: docker.sock больше не монтируется — с ним любая дыра в Next.js
+    # давала root на хосте, а код, которому он был нужен (lib/adminBots/docker.ts),
+    # нигде не используется. Вместе с ним убран group_add группы docker.
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ./.env:/app/host.env
     # 10.06.2026 (Claude): SSR-запросы контейнера к https://polza-portal.ru ловили
     # спорадический DNS EAI_AGAIN -> 500 (auth profile / support-unread).
     # Резолвим хост локально через host-gateway, как у health-check ниже.
     extra_hosts:
       - "polza-portal.ru:host-gateway"
-    group_add:
-      - "${DOCKER_GID:-999}"
     environment:
       - NODE_ENV=production
       - BODY_SIZE_LIMIT=600mb

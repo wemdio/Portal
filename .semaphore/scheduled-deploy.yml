@@ -706,14 +706,10 @@ blocks:
                   sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate --remove-orphans \${CORE_TARGETS};
                 fi;
                 if [ \"\${PORTAL_CHANGED}\" = 1 ]; then
-                  echo '--- Step 5.1: verify Docker socket access inside portal ---';
-                  PORTAL_GROUPS=\$(sudo -n docker inspect portal --format '{{json .HostConfig.GroupAdd}}' 2>/dev/null || echo '[]');
-                  echo \"portal GroupAdd=\${PORTAL_GROUPS}\";
-                  case \"\${PORTAL_GROUPS}\" in
-                    *\"\\\"\${DOCKER_GID}\\\"\"*) echo 'portal has expected DOCKER_GID in GroupAdd';;
-                    *) echo 'portal is missing expected DOCKER_GID in GroupAdd' && exit 1;;
-                  esac;
-                  sudo -n docker exec portal sh -lc 'id; ls -ln /var/run/docker.sock; test -S /var/run/docker.sock && test -r /var/run/docker.sock && test -w /var/run/docker.sock';
+                  # 24.10.2026: docker.sock из портала убран (любая дыра в Next.js давала root
+                  # на хосте). Проверяем обратное: сокета в контейнере быть не должно.
+                  echo '--- Step 5.1: portal must not see the Docker socket ---';
+                  if sudo -n docker exec portal sh -lc 'test -S /var/run/docker.sock'; then echo 'WARNING: docker.sock is still mounted into portal'; else echo 'portal has no docker.sock'; fi;
                 fi;
                 if [ \"\${PORTAL_CHANGED}\" = 1 ]; then
                   echo '--- Step 6: disable maintenance mode (normal path) ---';
