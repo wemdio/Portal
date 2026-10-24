@@ -80,7 +80,8 @@ JOB_STUCK_MINUTES = max(
 # test target can't spam the chat, and so we don't hammer the proxy pool every
 # health cycle. The main cycle (site/DB) still runs every HEALTH_INTERVAL_SEC.
 PROXY_CHECK_INTERVAL_SEC = max(60, int(os.environ.get("PROXY_CHECK_INTERVAL_SEC", "300")))
-HEARTBEAT_INTERVAL_SEC = max(60, int(os.environ.get("HEARTBEAT_INTERVAL_SEC", "1800")))
+# Сводка раз в час (24.10.2026): раз в полчаса её было слишком много среди алертов.
+HEARTBEAT_INTERVAL_SEC = max(60, int(os.environ.get("HEARTBEAT_INTERVAL_SEC", "3600")))
 DEADMAN_GRACE_SEC = max(120, int(os.environ.get("HEALTH_DEADMAN_GRACE_SEC", str(HEALTH_INTERVAL_SEC * 3))))
 
 # Суточные пайплайны (OutreachOS + Mailganer auto-pipeline). Отдельные пороги от
@@ -568,6 +569,44 @@ async def send_telegram_photo(
             return r.is_success
     except Exception as e:
         print(f"[health] TG photo error: {e}")
+        return False
+
+
+async def send_telegram_photos(
+    photos: list[bytes],
+    caption: str = "",
+    force: bool = False,
+) -> bool:
+    """Несколько картинок одним сообщением (альбом); подпись — у первой."""
+    if len(photos) == 1:
+        return await send_telegram_photo(photos[0], caption=caption, force=force)
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    if not force and not await get_send_alerts():
+        return True
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
+    media = []
+    files = {}
+    for idx, photo in enumerate(photos):
+        name = f"photo{idx}"
+        item = {"type": "photo", "media": f"attach://{name}"}
+        if idx == 0 and caption:
+            item["caption"] = caption
+            item["parse_mode"] = "HTML"
+        media.append(item)
+        files[name] = (f"{name}.png", photo, "image/png")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                url,
+                data={"chat_id": TELEGRAM_CHAT_ID, "media": json.dumps(media)},
+                files=files,
+            )
+            if not r.is_success:
+                print(f"[health] TG media group error {r.status_code}: {r.text[:200]}")
+            return r.is_success
+    except Exception as e:
+        print(f"[health] TG media group error: {e}")
         return False
 
 
@@ -2541,16 +2580,17 @@ def _apply_xticks(ax, timestamps: list[datetime], n: int, max_ticks: int = 6) ->
     )
 
 
-def _render_heartbeat_chart() -> bytes | None:
+def _render_heartbeat_chart(which: str | None = None) -> bytes | None:
     """Render transactions & connections chart as PNG bytes.
 
-    Shows a 2-column layout when Instantly DB metrics are available.
+    which="main" / "instantly" — картинка только по одной базе (сводка шлёт их
+    отдельными картинками); None — обе базы в два столбца.
     """
     if not HAS_MATPLOTLIB:
         return None
 
-    main_series = _extract_chart_series(_METRICS)
-    inst_series = _extract_chart_series(_METRICS_INSTANTLY)
+    main_series = _extract_chart_series(_METRICS) if which in (None, "main") else None
+    inst_series = _extract_chart_series(_METRICS_INSTANTLY) if which in (None, "instantly") else None
 
     if not main_series and not inst_series:
         return None
@@ -3005,11 +3045,12 @@ async def send_heartbeat():
     extra_parts.append(proxy_text)
     extra_block = "\n\n".join(extra_parts)
 
-    chart = _render_heartbeat_chart()
-    if chart:
+    # Графики Main DB и Instantly DB — отдельными картинками, а не одним коллажем.
+    charts = [c for c in (_render_heartbeat_chart("main"), _render_heartbeat_chart("instantly")) if c]
+    if charts:
         caption = _format_heartbeat_caption(db_data, instantly_data, include_sparklines=False)
         caption += f"\n\n{ping_text}\n\n{extra_block}"
-        ok = await send_telegram_photo(chart, caption=caption)
+        ok = await send_telegram_photos(charts, caption=caption)
         if not ok:
             text = _format_heartbeat_caption(db_data, instantly_data, include_sparklines=True)
             text += f"\n\n{ping_text}\n\n{extra_block}"
