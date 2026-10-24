@@ -2,6 +2,9 @@
 
 import { useEffect, useRef, useState } from 'react';
 
+import { Download, Eye, EyeOff, Search, Trash2, Upload } from 'lucide-react';
+
+import { RowActionsMenu } from '@/components/sender/RowActionsMenu';
 import { authFetchJson, getAccessToken } from '@/lib/authFetch';
 
 /**
@@ -258,25 +261,37 @@ export default function CampaignBases({
                   <div className="min-w-0 truncate text-sm font-semibold text-gray-900">{base.name}</div>
                   {active && <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">рассылается</span>}
                   {base.has_custom_invites && <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">✎ персональные инвайты</span>}
-                  <span className="ml-auto text-xs text-gray-500 tabular-nums">{base.leads_count ?? 0} чел.</span>
-                </div>
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  {!active && (
-                    <button type="button" disabled={busy !== null} onClick={() => void run(`active:${base.id}`, async () => { await makeActive(base.id); await onChanged(); })} className={button} title="Кампания будет рассылать эту базу. Люди из неё попадут в рассылку в течение ~5 минут, перезапуск не нужен.">
-                      Рассылать эту базу
+                  <span className="text-xs text-gray-500 tabular-nums">{base.leads_count ?? 0} чел.</span>
+                  <div className="ml-auto flex items-center gap-1">
+                    {!active && (
+                      <button type="button" disabled={busy !== null} onClick={() => void run(`active:${base.id}`, async () => { await makeActive(base.id); await onChanged(); })} className={button} title="Кампания будет рассылать эту базу. Люди из неё попадут в рассылку в течение ~5 минут, перезапуск не нужен.">
+                        Рассылать эту базу
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void toggleLeads(base.id)}
+                      aria-label={openId === base.id ? 'Скрыть людей' : 'Показать людей'}
+                      title={openId === base.id ? 'Скрыть людей' : 'Показать людей'}
+                      className="row-actions-btn cursor-pointer rounded-md p-1.5"
+                    >
+                      {openId === base.id ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                     </button>
-                  )}
-                  <button type="button" disabled={busy !== null} onClick={() => { target.current = base.id; csvInput.current?.click(); }} className={button}>
-                    {busy === 'csv' && target.current === base.id ? 'Загружаю…' : 'Загрузить CSV'}
-                  </button>
-                  <button type="button" onClick={() => onOpenScraper(base.id)} className={button} title="Открыть скрапер с выбранной базой">
-                    Собрать скрапером
-                  </button>
-                  <button type="button" onClick={() => void toggleLeads(base.id)} className={button}>
-                    {openId === base.id ? 'Скрыть людей' : 'Показать людей'}
-                  </button>
-                  <button type="button" disabled={busy !== null} onClick={() => void exportCsv(base)} className={button}>Скачать CSV</button>
-                  <button type="button" disabled={busy !== null} onClick={() => void remove(base)} className="ml-auto cursor-pointer text-xs text-red-600 hover:underline disabled:opacity-50">Удалить</button>
+                    <RowActionsMenu
+                      vertical
+                      items={[
+                        {
+                          label: busy === 'csv' && target.current === base.id ? 'Загружаю…' : 'Загрузить CSV',
+                          icon: Upload,
+                          disabled: busy !== null,
+                          onClick: () => { target.current = base.id; csvInput.current?.click(); },
+                        },
+                        { label: 'Собрать скрапером', icon: Search, title: 'Открыть скрапер с выбранной базой', onClick: () => onOpenScraper(base.id) },
+                        { label: 'Скачать CSV', icon: Download, disabled: busy !== null, onClick: () => void exportCsv(base) },
+                        { label: 'Удалить', icon: Trash2, danger: true, disabled: busy !== null, onClick: () => void remove(base) },
+                      ]}
+                    />
+                  </div>
                 </div>
 
                 {openId === base.id && (
