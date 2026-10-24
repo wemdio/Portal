@@ -145,8 +145,7 @@ export function LetterText({ text, className }: { text: string; className?: stri
           )
         ) : block.kind === 'quote' ? (
           <blockquote key={index} className="my-1 whitespace-pre-wrap border-l-2 border-zinc-300 pl-3 text-zinc-500">
-            <Inline text={block.lines.join('
-')} />
+            <Inline text={block.lines.join('\n')} />
           </blockquote>
         ) : (
           <p key={index} className="my-1 whitespace-pre-wrap">

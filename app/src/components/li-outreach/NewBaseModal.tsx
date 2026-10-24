@@ -160,7 +160,7 @@ export default function NewBaseModal({
 
   const makeActive = (listId: string) => call(`/campaigns/${campaignId}`, 'PUT', { lead_list_id: listId });
 
-  const useScraped = async () => {
+  const applyScraped = async () => {
     const listId = draft.current.listId;
     if (!listId) return;
     setSaving(true);
@@ -361,7 +361,7 @@ export default function NewBaseModal({
               ) : phase === 'done' ? (
                 <>
                   <button type="button" onClick={() => void startScrape()} disabled={saving} className={secondary}>Пересобрать</button>
-                  <button type="button" onClick={() => void useScraped()} disabled={saving || leads.length === 0} className={primary}>
+                  <button type="button" onClick={() => void applyScraped()} disabled={saving || leads.length === 0} className={primary}>
                     {saving ? 'Сохраняю…' : 'Использовать эту'}
                   </button>
                 </>
