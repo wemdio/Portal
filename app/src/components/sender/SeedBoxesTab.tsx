@@ -266,16 +266,6 @@ export function SeedBoxesTab() {
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 px-5 py-3">
           <h2 className="text-sm font-semibold text-zinc-900">Контрольные ящики</h2>
           <div className="flex gap-2">
-            {boxes.length ? (
-              <button
-                type="button"
-                onClick={() => void checkMany(boxes.filter((b) => b.enabled).map((b) => b.id))}
-                disabled={busyId !== null}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
-              >
-                <RefreshCw className="h-4 w-4" /> Проверить все
-              </button>
-            ) : null}
             <button
               type="button"
               onClick={() => setAddOpen(true)}
