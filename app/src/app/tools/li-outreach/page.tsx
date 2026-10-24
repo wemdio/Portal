@@ -1314,14 +1314,15 @@ export default function LiOutreachPage() {
                   </div>
                 </div>
               ) : (
-                <div className="space-y-4 rounded-xl border border-gray-200 bg-white p-4">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Название *</label>
+                <div className="space-y-4">
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(300px,380px)_minmax(0,1fr)] lg:items-start">
+              <div className="space-y-3">
+              <section className="space-y-2 rounded-xl border border-gray-200 bg-white p-4">
+                <div className="flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">1</span><h3 className="text-sm font-semibold text-gray-900">Название кампании *</h3></div>
                   <input type="text" placeholder="Моя кампания" value={cf.name} onChange={(e) => setCf({ ...cf, name: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Аккаунты * <span className="text-gray-400">({cf.account_ids.length})</span></label>
+              </section>
+              <section className="space-y-2 rounded-xl border border-gray-200 bg-white p-4">
+                <div className="flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">2</span><h3 className="text-sm font-semibold text-gray-900">Аккаунты * <span className="font-normal text-gray-400">({cf.account_ids.length})</span></h3></div>
                   <details className="group relative">
                     <summary className="flex w-full cursor-pointer list-none items-center justify-between gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm">
                       <span className="truncate">
@@ -1362,9 +1363,9 @@ export default function LiOutreachPage() {
                         })}
                     </div>
                   </details>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Рассылаемая база</label>
+              </section>
+              <section className="space-y-2 rounded-xl border border-gray-200 bg-white p-4">
+                <div className="flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">3</span><h3 className="text-sm font-semibold text-gray-900">Рассылаемая база</h3></div>
                   {editingCampaignId ? (
                     <select value={cf.lead_list_id} onChange={(e) => setCf({ ...cf, lead_list_id: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm">
                       <option value="">Без базы</option>
@@ -1379,9 +1380,47 @@ export default function LiOutreachPage() {
                       Базу загрузите после создания кампании — в разделе «Базы».
                     </div>
                   )}
+              </section>
+              <section className="space-y-3 rounded-xl border border-gray-200 bg-white p-4">
+                <div className="flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">4</span><h3 className="text-sm font-semibold text-gray-900">Когда и сколько отправлять</h3></div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-xs text-gray-600">Лимит инвайтов в день</label>
+                  <input type="number" min={1} max={100} value={cf.daily_invite_limit} onChange={(e) => setCf({ ...cf, daily_invite_limit: +e.target.value })} className="w-20 rounded border border-gray-200 px-2 py-1 text-xs" />
                 </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-xs text-gray-600" title="Окна, в которые runner отправляет инвайты и сообщения. Несколько через запятую (например, 09:00-13:00, 14:00-18:00 для перерыва на обед). Пустое поле = работает 24/7.">Часы работы</label>
+                  <input
+                    type="text"
+                    value={cf.working_hours}
+                    onChange={(e) => setCf({ ...cf, working_hours: e.target.value })}
+                    placeholder="09:00-18:00"
+                    className="w-44 rounded border border-gray-200 px-2 py-1 text-xs"
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-xs text-gray-600" title="Часовой пояс кампании в часах от UTC. Например, 3 для MSK.">Часовой пояс (UTC)</label>
+                  <input
+                    type="number"
+                    min={-12}
+                    max={14}
+                    value={cf.timezone_offset}
+                    onChange={(e) => setCf({ ...cf, timezone_offset: Number(e.target.value) || 0 })}
+                    className="w-20 rounded border border-gray-200 px-2 py-1 text-xs"
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-xs text-gray-600">Пауза между людьми, сек</label>
+                  <div className="flex items-center gap-1.5">
+                    <input type="number" min={10} value={cf.min_delay} onChange={(e) => setCf({ ...cf, min_delay: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
+                    <span className="text-xs text-gray-400">—</span>
+                    <input type="number" min={30} value={cf.max_delay} onChange={(e) => setCf({ ...cf, max_delay: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
+                  </div>
+                </div>
+                <LiSwitch checked={cf.stop_on_reply} onChange={(v) => setCf({ ...cf, stop_on_reply: v })} label="Остановить цепочку при ответе" />
+              </section>
               </div>
-
+              <div className="space-y-3">
+              <div className="px-1 text-xs font-semibold uppercase tracking-wide text-gray-400">Шаги цепочки</div>
               {/* Step 1: Invite */}
               {(() => {
                 // Тумблер «Использовать персонализированный инвайт» имеет смысл
@@ -1475,71 +1514,38 @@ export default function LiOutreachPage() {
                 )}
               </div>
 
-              {/* Settings row */}
-              <div className="flex flex-wrap gap-4 items-center">
-                <LiSwitch checked={cf.use_ai} onChange={(v) => setCf({ ...cf, use_ai: v })} label="AI-персонализация" />
-                <LiSwitch checked={cf.stop_on_reply} onChange={(v) => setCf({ ...cf, stop_on_reply: v })} label="Стоп при ответе" />
-                <div className="flex items-center gap-1.5">
-                  <label className="text-xs text-gray-600">Лимит/день:</label>
-                  <input type="number" min={1} max={100} value={cf.daily_invite_limit} onChange={(e) => setCf({ ...cf, daily_invite_limit: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <label className="text-xs text-gray-600" title="Окна, в которые runner отправляет инвайты и сообщения. Несколько через запятую (например, 09:00-13:00, 14:00-18:00 для перерыва на обед). Пустое поле = работает 24/7.">Часы работы:</label>
-                  <input
-                    type="text"
-                    value={cf.working_hours}
-                    onChange={(e) => setCf({ ...cf, working_hours: e.target.value })}
-                    placeholder="09:00-18:00"
-                    className="w-40 rounded border border-gray-200 px-2 py-1 text-xs"
-                  />
-                  <label className="text-xs text-gray-600" title="Часовой пояс кампании в часах от UTC. Например, 3 для MSK.">UTC:</label>
-                  <input
-                    type="number"
-                    min={-12}
-                    max={14}
-                    value={cf.timezone_offset}
-                    onChange={(e) => setCf({ ...cf, timezone_offset: Number(e.target.value) || 0 })}
-                    className="w-14 rounded border border-gray-200 px-2 py-1 text-xs"
-                  />
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <label className="text-xs text-gray-600">Задержка (сек):</label>
-                  <input type="number" min={10} value={cf.min_delay} onChange={(e) => setCf({ ...cf, min_delay: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
-                  <span className="text-xs text-gray-400">—</span>
-                  <input type="number" min={30} value={cf.max_delay} onChange={(e) => setCf({ ...cf, max_delay: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
-                </div>
-              </div>
-
-              {/* AI settings */}
-              <details className="rounded-lg border border-blue-200 bg-blue-50/40 p-3">
-                <summary className="cursor-pointer text-xs font-semibold text-blue-800">AI настройки (промпты и режимы)</summary>
-                <div className="mt-3 space-y-3">
-                  <p className="text-xs text-gray-600">
-                    Промпт персонализации используется для инвайтов и follow-up, промпт автоответов - для ответов на входящие сообщения.
-                  </p>
-                  <div>
-                    <label className="text-xs text-gray-600 block mb-1">Промпт персонализации</label>
-                    <textarea
-                      rows={3}
-                      value={cf.ai_prompt_invite}
-                      onChange={(e) => setCf({ ...cf, ai_prompt_invite: e.target.value })}
-                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs text-gray-600 block mb-1">Промпт автоответов</label>
-                    <textarea
-                      rows={3}
-                      value={cf.ai_prompt_chat}
-                      onChange={(e) => setCf({ ...cf, ai_prompt_chat: e.target.value })}
-                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
-                    />
-                  </div>
+              <section className="space-y-3 rounded-xl border border-blue-200 bg-blue-50/40 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <h3 className="text-sm font-semibold text-blue-800">AI-персонализация</h3>
                   <div className="flex flex-wrap gap-4">
+                    <LiSwitch checked={cf.use_ai} onChange={(v) => setCf({ ...cf, use_ai: v })} label="Включить" />
                     <LiSwitch checked={cf.use_ai_followup} onChange={(v) => setCf({ ...cf, use_ai_followup: v })} label="AI для follow-up" />
                   </div>
                 </div>
-              </details>
+                <p className="text-xs text-gray-600">
+                  Промпт персонализации используется для инвайтов и follow-up, промпт автоответов — для ответов на входящие сообщения.
+                </p>
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Промпт персонализации</label>
+                  <textarea
+                    rows={4}
+                    value={cf.ai_prompt_invite}
+                    onChange={(e) => setCf({ ...cf, ai_prompt_invite: e.target.value })}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Промпт автоответов</label>
+                  <textarea
+                    rows={4}
+                    value={cf.ai_prompt_chat}
+                    onChange={(e) => setCf({ ...cf, ai_prompt_chat: e.target.value })}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                  />
+                </div>
+              </section>
+              </div>
+              </div>
 
               {editingCampaignId ? (
                 <div className="sticky bottom-3 z-10 flex justify-center">
