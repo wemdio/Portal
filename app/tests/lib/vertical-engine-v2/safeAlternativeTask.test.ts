@@ -8,6 +8,10 @@
  * тысяч организаций отрасли. Виноваты были пороги размера компании.
  */
 import { safeAlternativeTask } from '@/lib/verticalEngineV2/stages/baseCollect';
+import { veSourceStrategyKey } from '@/lib/verticalEngineV2/adaptiveCollection';
+import { applyVeCollectionGeographyToPlan } from '@/lib/verticalEngineV2/collectionGeography';
+import { stripUnfoundedSizeFilters } from '@/lib/verticalEngineV2/planWidening';
+import { VeSourcePlanSchema } from '@/lib/verticalEngineV2/schemas';
 import type { VeCollectTask } from '@/lib/verticalEngineV2/prompts/sourcePlan';
 
 const directory = (filters: Record<string, unknown>): VeCollectTask => ({
@@ -63,5 +67,21 @@ describe('safeAlternativeTask', () => {
     expect(safeAlternativeTask(directory({ okvedCodes: ['68.31'] }), { ...hh, hh_query: { ...hh.hh_query!, area: '1' } } as VeCollectTask)).toBeNull();
     // Живой парсер вакансий взамен по-прежнему не предлагается.
     expect(safeAlternativeTask(hh, directory({ okvedCodes: ['68.3'] }))).toBeNull();
+  });
+
+  it('новое поле фильтров не меняет ключ стратегии старых задач', () => {
+    // Ключ стратегии — хэш всех directory_filters. По нему квитанция geography_repair
+    // сверяет сохранённые задачи 11 баз Solo: поле со значением по умолчанию поменяло бы
+    // ключи старых задач, и базы встали бы с «Invalid bounded geography repair checkpoint».
+    const old = directory({ okvedCodes: ['86'], regionCodes: ['77'], includeIp: false });
+    const key = veSourceStrategyKey(old);
+    for (const filters of [old.directory_filters, { ...old.directory_filters, licenceGroups: [] }, { ...old.directory_filters, licenceGroups: null }]) {
+      const [parsed] = VeSourcePlanSchema.parse({ tasks: [{ ...old, directory_filters: filters }] }).tasks as VeCollectTask[];
+      const [normalized] = applyVeCollectionGeographyToPlan(stripUnfoundedSizeFilters({ tasks: [parsed] }, 'частные клиники').plan, null).tasks;
+      expect(veSourceStrategyKey(normalized)).toBe(key);
+    }
+    // Замена задачи реестра без лицензии даёт тот же ключ, что и до появления поля.
+    expect(veSourceStrategyKey(safeAlternativeTask(directory({ okvedCodes: ['86.23'], hasEmail: true }), old)!))
+      .toBe(veSourceStrategyKey(directory({ okvedCodes: ['86.23'], regionCodes: ['77'], includeIp: false, hasEmail: true })));
   });
 });
