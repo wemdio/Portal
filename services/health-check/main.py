@@ -2735,11 +2735,11 @@ def _format_db_section(
         line += f" / {max_c}"
     bits = []
     if data["conn_active"]:
-        bits.append(f"active {data['conn_active']}")
+        bits.append(f"в работе {data['conn_active']}")
     if data["conn_idle"]:
-        bits.append(f"idle {data['conn_idle']}")
+        bits.append(f"простаивают {data['conn_idle']}")
     if data["conn_idle_txn"]:
-        bits.append(f"idle_txn {data['conn_idle_txn']}")
+        bits.append(f"зависли в транзакции {data['conn_idle_txn']}")
     if bits:
         line += f"  ({', '.join(bits)})"
     parts.append(line)
@@ -2909,14 +2909,8 @@ async def _ping_site(count: int = 5) -> str:
     times = [ms for _, ms in results if ms > 0]
     avg_ms = sum(times) / len(times) if times else 0
 
-    pings = "  ".join(
-        f"{code}·{ms:.0f}ms" if code else "✖"
-        for code, ms in results
-    )
-    return (
-        f"🌐 <b>Пинг сервера</b> ({ok_count}/{count}, avg {avg_ms:.0f}ms):\n"
-        f"<code>  {pings}</code>"
-    )
+    # В отчёт — только итог: отдельные попытки читать никто не будет.
+    return f"🌐 <b>Пинг сервера</b>: {ok_count} из {count}, в среднем {avg_ms:.0f} мс"
 
 
 async def _ping_one_proxy(
@@ -2971,16 +2965,13 @@ async def _ping_proxies(count: int = 3) -> str:
     alive = sum(1 for _, _, ok, *_ in rows if ok)
     total = len(rows)
 
-    lines = [f"🔗 <b>Прокси</b>: {alive}/{total} работают"]
-    for group, addr, ok_flag, ok_cnt, cnt, avg in rows:
-        icon = "✅" if ok_flag else "❌"
-        if ok_flag and avg > 0:
-            lines.append(f"  {icon} [{group}] {addr} — {ok_cnt}/{cnt}, avg {avg:.0f}ms")
-        elif ok_flag:
-            lines.append(f"  {icon} [{group}] {addr} — {ok_cnt}/{cnt}")
-        else:
-            lines.append(f"  {icon} [{group}] {addr} — не отвечает")
-
+    # Живые прокси по одному не перечисляем — только счёт; поимённо — те, что не отвечают.
+    dead = [(group, addr) for group, addr, ok_flag, *_ in rows if not ok_flag]
+    if not dead:
+        return f"🔗 <b>Прокси</b>: {total} из {total} работают"
+    lines = [f"🔗 <b>Прокси</b>: {alive} из {total} работают, не отвечают {len(dead)}:"]
+    for group, addr in dead:
+        lines.append(f"  ❌ [{group}] {addr}")
     return "\n".join(lines)
 
 
