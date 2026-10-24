@@ -187,8 +187,8 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
             <button
               type="button"
               onClick={() => pickCampaign('')}
-              className={`block w-full px-4 py-2 text-left text-sm transition-colors ${
-                picked && !unlinkedOpen && campaignId === '' ? 'bg-blue-50 font-medium text-blue-700' : 'text-zinc-600 hover:bg-zinc-100'
+              className={`sender-pick-row block w-full px-4 py-3 text-left text-sm transition-colors ${
+                picked && !unlinkedOpen && campaignId === '' ? 'is-selected bg-blue-50 font-medium text-blue-700' : 'text-zinc-600 hover:bg-zinc-100'
               }`}
             >
               Все кампании
@@ -196,8 +196,8 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
             {shownCampaigns.map((campaign) => (
               <div key={campaign.id}>
                 <div
-                  className={`group flex items-center gap-1 px-4 py-2 text-sm transition-colors ${
-                    !unlinkedOpen && campaignId === campaign.id ? 'bg-blue-50 text-blue-700' : 'text-zinc-700 hover:bg-zinc-100'
+                  className={`sender-pick-row group flex items-center gap-1 px-4 py-3 text-sm transition-colors ${
+                    !unlinkedOpen && campaignId === campaign.id ? 'is-selected bg-blue-50 text-blue-700' : 'text-zinc-700 hover:bg-zinc-100'
                   }`}
                 >
                   {/* Статус всегда справа, у шестерёнки: длинное название

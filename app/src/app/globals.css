@@ -4101,3 +4101,7 @@ html body .li-log .li-log-time { opacity: 0.6; }
 /* Панель инструментов письма (Ж, список, ссылка): при наведении кнопка заметно подсвечивается. */
 html body .letter-tool:hover:not(:disabled) { background-color: #dbeafe !important; color: #1d4ed8 !important; }
 html[data-portal-theme='dark'] body .letter-tool:hover:not(:disabled) { background-color: rgba(96, 165, 250, 0.28) !important; color: #ffffff !important; }
+
+/* Строки кампаний в «Письмах» Рассылки: наведение заметно и в тёмной теме. */
+html body .sender-pick-row:not(.is-selected):hover { background-color: #dbeafe !important; }
+html[data-portal-theme='dark'] body .sender-pick-row:not(.is-selected):hover { background-color: rgba(96, 165, 250, 0.2) !important; }
