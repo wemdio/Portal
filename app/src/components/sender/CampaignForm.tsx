@@ -30,6 +30,9 @@ import {
   WORKDAYS,
   letterAccent,
   letterIssues,
+  LetterToolsContext,
+  SharedLetterToolbar,
+  type LetterTools,
   type LetterVariant,
 } from './CampaignSteps';
 import { LetterText } from './LetterLinks';
@@ -111,6 +114,12 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
 
   const [name, setName] = useState('');
   const [mailboxes, setMailboxes] = useState<PickedMailbox[]>([]);
+  // Действия письма, в котором стоит курсор, — их зовёт общая панель оформления.
+  const letterTools = useRef<(() => LetterTools) | null>(null);
+  const registerLetterTools = useCallback((get: () => LetterTools, onlyIfEmpty?: boolean) => {
+    if (onlyIfEmpty && letterTools.current) return;
+    letterTools.current = get;
+  }, []);
   // Теги, привязанные к кампании целиком: новые ящики тега доливаются в идущую кампанию.
   const [tagIds, setTagIds] = useState<string[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -708,7 +717,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
     <div className="mx-auto max-w-[1600px]">
       {/* Шапка не уезжает при прокрутке: что мешает сохранить и сама кнопка
           нужны из любого места длинной формы. */}
-      <div className="sticky top-0 z-20 mb-4 border-b border-zinc-200 backdrop-blur-xl">
+      <div className="mb-4 border-b border-zinc-200">
         <div className="flex flex-wrap items-center gap-3 px-4 py-3">
           <button
             type="button"
@@ -940,6 +949,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
           />
         </div>
 
+        <LetterToolsContext.Provider value={registerLetterTools}>
         <div className="space-y-3">
           {letters.map((step, index) => (
             <LetterStep
@@ -1094,7 +1104,12 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
               </span>
             </div>
           </div>
+
+          {/* Одна панель оформления на все письма: внизу блока, при прокрутке остаётся
+              у нижнего края окна, а в конце страницы стоит под предпросмотром. */}
+          <SharedLetterToolbar active={letterTools} disabled={readOnly} />
         </div>
+        </LetterToolsContext.Provider>
       </div>
 
       {pickerOpen ? (

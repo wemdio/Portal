@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
 import { Split } from 'lucide-react';
 import { hasBrokenLinkMarkup } from '@/lib/mail/linkMarkup';
 import { placeholderKeys } from '@/lib/sender/templateVars';
@@ -152,6 +152,56 @@ export function letterIssues(subject: string, body: string, columns: RecipientCo
   };
 }
 
+/**
+ * Панель оформления письма одна на всю форму: она закреплена внизу блока писем
+ * и работает с тем письмом, в котором стоит курсор. Поэтому письма
+ * регистрируют свои действия (формат, ссылка) в общем месте, а панель их зовёт.
+ */
+export interface LetterTools {
+  format: (edit: (text: string, start: number, end: number) => TextEdit) => void;
+  grabSelection: () => string;
+  addLink: (label: string, url: string) => void;
+}
+
+type RegisterTools = (get: () => LetterTools, onlyIfEmpty?: boolean) => void;
+
+export const LetterToolsContext = createContext<RegisterTools | null>(null);
+
+/** Общая панель инструментов письма: внизу блока писем, под предпросмотром. */
+export function SharedLetterToolbar({
+  active,
+  disabled,
+}: {
+  active: MutableRefObject<(() => LetterTools) | null>;
+  disabled?: boolean;
+}) {
+  const run = (edit: (text: string, start: number, end: number) => TextEdit) => active.current?.().format(edit);
+  return (
+    <div>
+      <LetterToolbar
+        disabled={disabled}
+        onBold={() => run(toggleBold)}
+        onItalic={() => run(toggleItalic)}
+        onUnderline={() => run(toggleUnderline)}
+        onStrike={() => run(toggleStrike)}
+        onBullets={() => run(toggleBullets)}
+        onNumbered={() => run(toggleNumbered)}
+        onQuote={() => run(toggleQuote)}
+        onClear={() => run(clearFormatting)}
+      >
+        <LinkInsert
+          disabled={disabled}
+          onOpen={() => active.current?.().grabSelection() ?? ''}
+          onInsert={(label, url) => active.current?.().addLink(label, url)}
+        />
+      </LetterToolbar>
+      <p className="mt-1 text-center text-xs text-zinc-500">
+        Выделите текст в письме и нажмите кнопку на панели: жирный, курсив, подчёркнутый, зачёркнутый, списки, цитата. Слово + «Ссылка» — ссылка под словом
+      </p>
+    </div>
+  );
+}
+
 /** Одно письмо шага. Их несколько, когда у шага идёт А/Б-тест. */
 export interface LetterVariant {
   subject: string;
@@ -189,6 +239,13 @@ function LetterFields({
   // вписывает адрес, фокус уже не в письме, и выделение оттуда не прочитать.
   const linkRange = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
   const { variables, unknownKeys, partlyEmpty } = letterIssues(letter.subject, letter.body, columns);
+  const registerTools = useContext(LetterToolsContext);
+  // Действия письма читают свежий текст: панель вызывает их уже после перерисовки.
+  const toolsRef = useRef<LetterTools | null>(null);
+  useEffect(() => {
+    registerTools?.(() => toolsRef.current as LetterTools, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const insertAtCursor = (key: string) => {
     const isSubject = lastField === 'subject';
@@ -228,6 +285,9 @@ function LetterFields({
     placeCaret(bodyRef.current, next.caret);
   };
 
+  toolsRef.current = { format: applyFormat, grabSelection, addLink };
+  const activate = () => registerTools?.(() => toolsRef.current as LetterTools);
+
   return (
     <>
       <div className="mb-2">
@@ -236,7 +296,10 @@ function LetterFields({
           onChange={(value) => onChange({ subject: value })}
           variables={variables}
           fieldRef={subjectRef}
-          onFocus={() => setLastField('subject')}
+          onFocus={() => {
+            setLastField('subject');
+            activate();
+          }}
           placeholder={subjectPlaceholder}
           disabled={disabled}
           className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
@@ -248,32 +311,16 @@ function LetterFields({
         onChange={(value) => onChange({ body: value })}
         variables={variables}
         fieldRef={bodyRef}
-        onFocus={() => setLastField('body')}
+        onFocus={() => {
+          setLastField('body');
+          activate();
+        }}
         rows={rows}
         placeholder="Здравствуйте, {{first_name}}! Пишу по поводу {{company_name}}…"
         disabled={disabled}
         className="w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
       />
 
-      {/* Ссылка под словом: выделили «Alial» — кнопка подставит подпись, адрес
-          вписывается рядом. В тексте это остаётся разметкой с видимым адресом,
-          синей ссылкой её покажет предпросмотр. */}
-      <LetterToolbar
-        disabled={disabled}
-        onBold={() => applyFormat(toggleBold)}
-        onItalic={() => applyFormat(toggleItalic)}
-        onUnderline={() => applyFormat(toggleUnderline)}
-        onStrike={() => applyFormat(toggleStrike)}
-        onBullets={() => applyFormat(toggleBullets)}
-        onNumbered={() => applyFormat(toggleNumbered)}
-        onQuote={() => applyFormat(toggleQuote)}
-        onClear={() => applyFormat(clearFormatting)}
-      >
-        <LinkInsert disabled={disabled} onOpen={grabSelection} onInsert={addLink} />
-      </LetterToolbar>
-      <p className="mt-1 text-center text-xs text-zinc-500">
-        Выделите текст и нажмите кнопку на панели: жирный, курсив, подчёркнутый, зачёркнутый, списки, цитата. Слово + «Ссылка» — ссылка под словом
-      </p>
       {hasBrokenLinkMarkup(letter.body) ? (
         <p className="mt-2 text-sm text-amber-600">
           Ссылка без «https://» останется в письме текстом — впишите адрес целиком.
