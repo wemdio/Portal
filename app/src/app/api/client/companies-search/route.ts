@@ -42,6 +42,11 @@ export interface CompaniesSearchFilters {
   employeesTo?: number | null;
   includeIp?: boolean;
   innList?: string[];
+  /**
+   * Группы лицензий по реестру МСП ФНС (lib/companiesDirectory/licences.ts):
+   * компания проходит, если у её ИНН есть хотя бы одна. Ставит сбор VE2.
+   */
+  licenceGroups?: string[];
   countOnly?: boolean;
   limit?: number;
   /**

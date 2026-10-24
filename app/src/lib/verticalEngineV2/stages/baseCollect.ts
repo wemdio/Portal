@@ -127,6 +127,7 @@ import { projectMarket, type VeMarket } from '../market';
 import { findIrrelevantRows, type VeRelevanceDecision } from '../relevanceGate';
 import { veRelevanceGeographySourceRows } from '../relevanceGeography';
 import { isVePaidWebsiteSearchEnabled } from '../paidSearchPolicy';
+import { licenceSnapshotReady } from '@/lib/companiesDirectory/licences';
 import { isVeRelevanceTriageEnabled } from '../relevanceTriageConfig';
 import { capVeContactsPerCompany, countVeTargetContacts, normalizeVeMaxEmailsPerCompany, stripVeCompanyCapMarker, veContactLimitKey, VE_COMPANY_CAP_FIELD } from '../companyContactCap';
 import { readVeGeographyRepair, type VeGeographyRepairReceipt } from '../collectionGeographyRepair';
@@ -550,6 +551,9 @@ export function mapDirectoryFilters(
   if (filters.identityCatalog) out.identityCatalog = filters.identityCatalog;
   if (filters.okvedCodes?.length) out.okvedCodes = filters.okvedCodes;
   if (filters.regionCodes?.length) out.regionCodes = filters.regionCodes;
+  // Нишевый читатель по названиям (nameTerms) лицензии не понимает и отклонил бы
+  // весь запрос: для него фильтр не передаём, отбор там держат названия.
+  if (filters.licenceGroups?.length && !filters.nameTerms) out.licenceGroups = filters.licenceGroups;
   if (typeof filters.revenueFrom === 'number') out.revenueFrom = filters.revenueFrom;
   if (typeof filters.revenueTo === 'number') out.revenueTo = filters.revenueTo;
   if (typeof filters.employeesFrom === 'number') out.employeesFrom = filters.employeesFrom;
@@ -1238,6 +1242,8 @@ async function buildPlan(
     audienceScope: audienceSnapshot?.hypotheses[0].audience_scope,
     collectionGeography,
     companyTypes,
+    // Фильтр по лицензиям ФНС — только русскому рынку и только при загруженном снимке.
+    licenceGroups: market !== 'us' && await licenceSnapshotReady(ctx.supabase),
   };
 
   const llm = await callLLMWithSchema(
@@ -3326,7 +3332,8 @@ export function safeAlternativeTask(candidate: VeCollectTask, original: VeCollec
       // includeIp:false — один и тот же срез реестра (см. нормализацию в
       // mapDirectoryFilters и veSourceStrategyKey). Он ничего не сужает, зато
       // стоял у 326 задач из 331 и в одиночку запрещал уход на карты.
-      .some(([key, value]) => !['okvedCodes', 'nameTerms', 'hasEmail', 'includeIp', ...SIZE_FILTER_KEYS].includes(key) && value !== undefined)
+      // licenceGroups — отраслевой охват, как ОКВЭД: рубрика карт заменяет его так же.
+      .some(([key, value]) => !['okvedCodes', 'licenceGroups', 'nameTerms', 'hasEmail', 'includeIp', ...SIZE_FILTER_KEYS].includes(key) && value !== undefined)
       || original.maps_query?.geo || original.pdl_filters?.countries?.length || original.pdl_filters?.sizes?.length
       || original.funded_filters || original.eng_hiring_query
       // Запрос вакансий — сигнал найма, а не граница рынка: по всей России
@@ -3337,7 +3344,13 @@ export function safeAlternativeTask(candidate: VeCollectTask, original: VeCollec
   }
   if (candidate.source === 'companies_directory' && original.source === candidate.source) return {
     ...candidate, directory_filters: { ...candidate.directory_filters, ...original.directory_filters,
-      okvedCodes: candidate.directory_filters?.okvedCodes ?? original.directory_filters?.okvedCodes,
+      // Отраслевой охват — ОКВЭД и лицензия вместе. Кандидат со своим охватом заменяет
+      // исходный целиком: иначе лицензия исходной задачи сужала бы любую замену до того же
+      // исчерпанного среза, а ОКВЭД исходной — замену по лицензии.
+      okvedCodes: candidate.directory_filters?.licenceGroups?.length ? candidate.directory_filters.okvedCodes
+        : candidate.directory_filters?.okvedCodes ?? original.directory_filters?.okvedCodes,
+      licenceGroups: candidate.directory_filters?.okvedCodes?.length || candidate.directory_filters?.licenceGroups?.length
+        ? candidate.directory_filters?.licenceGroups : original.directory_filters?.licenceGroups,
       // Пороги размера берём у КАНДИДАТА, а не у исходной задачи: иначе
       // самовыдуманный планировщиком порог невозможно ослабить ни одной
       // альтернативой — перетирался бы обратно на каждой попытке.

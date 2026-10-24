@@ -19,7 +19,7 @@ import {
 } from './engCompanyFit';
 import {
   HE_ENG_COMPANY_QUALIFICATION_VERSION, HeEngQualificationScopeError,
-  heEngCatalogDirectHypothesis, heEngCompanyKey, heEngCompanyQualified, heEngConstructWebsite, heEngQualificationVersion,
+  heEngCompanyKey, heEngCompanyQualified, heEngConstructWebsite, heEngQualificationVersion,
   type HeEngCatalogSiteSearch, type HeEngCompanyVerdict, type HeEngQualificationInFlight, type HeEngQualificationMemo,
   type HeEngQualificationRow, type HeEngQualificationScope,
   type HeEngCollectedCompanyEvidence, type HeEngCompanyQualificationAssessment,
@@ -453,26 +453,6 @@ function fitVerdict(row: HeEngQualificationRow, company: HeEngCompanyFitInput, s
     } } : {}) };
 }
 
-/**
- * Softer acceptance (heEngCatalogDirectHypothesis) when the company's own site
- * gave the models no evidence either way. Only for pages read from the
- * catalogue site itself — a page from another domain proves its identity
- * through the models — and only with a proven source country.
- */
-function catalogVerdict(row: HeEngQualificationRow, key: string, scope: HeEngQualificationScope, crossSite: boolean): HeEngCompanyVerdict | null {
-  const direct = crossSite ? null : heEngCatalogDirectHypothesis(row, scope);
-  const location = heEngSourceCountry(row, scope.countries);
-  if (!direct || location.status !== 'confirmed') return null;
-  return { ...unverified(scope, key, 'catalog_industry_match'), status: 'accepted', country: location.country,
-    countryProof: location.proof, hypothesisId: direct.hypothesisId,
-    catalogFit: { source: 'pdl', industry: direct.industry, hypothesisId: direct.hypothesisId } };
-}
-
-/** INSUFFICIENT or a NOT_TARGET without quotes: the models found no contrary evidence. */
-function withoutContraryEvidence(decision: HeEngCompanyFitDecision | undefined): boolean {
-  return decision?.status === 'unverified' && ['activity_unverified', 'hypothesis_unconfirmed'].includes(decision.reason);
-}
-
 function knownResponseCost(response: unknown): number | undefined {
   const usage = (response as { usage?: { cost?: unknown } } | null)?.usage;
   return typeof usage?.cost === 'number' && Number.isFinite(usage.cost) && usage.cost >= 0 ? usage.cost : undefined;
@@ -510,7 +490,10 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
   for (const row of input.rows) {
     const key = heEngCompanyKey(row);
     const verdict = memo.verdicts[key];
-    if (verdict?.status === 'accepted' && !heEngCompanyQualified({ ...row, _eng_company_qualification: verdict }, scope)) throw new HeEngQualificationScopeError('invalid saved acceptance');
+    // A saved softer-catalogue acceptance (switched off, see catalogFit) stays
+    // decided: the company is not bought again, and output() drops its rows.
+    if (verdict?.status === 'accepted' && verdict.catalogFit === undefined &&
+      !heEngCompanyQualified({ ...row, _eng_company_qualification: verdict }, scope)) throw new HeEngQualificationScopeError('invalid saved acceptance');
     if (!verdict && !pending.has(key)) pending.set(key, row);
     if (version === 3) {
       const country = heEngSourceCountry(row, scope.countries);
@@ -873,14 +856,13 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     const prepared = memo.economy!.prepared[key];
     if (!prepared || memo.verdicts[key]) return;
     const company = fitInput(key, row, prepared.website, prepared.pages, scope, prepared.excerptVersion);
-    const catalog = () => catalogVerdict(row, key, scope, prepared.company !== undefined);
-    if (!company.quotes.length) { finish(key, catalog() ?? unverified(scope, key, 'activity_unverified')); await save(); return; }
+    if (!company.quotes.length) { finish(key, unverified(scope, key, 'activity_unverified')); await save(); return; }
     if (!memo.economy!.proposals![key]) {
       const proposals = await purchase(buildHeEngCompanyFitClassifierRequest([company], safeScope), [company], false);
       if (!proposals || proposals === 'failed') return;
       const proposal = proposals.get(key)!;
-      if (!heEngCompanyFitNeedsReview(proposal)) finish(key, (withoutContraryEvidence(proposal) ? catalog() : null) ??
-        fitVerdict(row, company, scope, finalizeHeEngCompanyFit(new Map([[key, proposal]]), new Map()).get(key)!), proposal);
+      if (!heEngCompanyFitNeedsReview(proposal)) finish(key, fitVerdict(row, company, scope,
+        finalizeHeEngCompanyFit(new Map([[key, proposal]]), new Map()).get(key)!), proposal);
       else memo.economy!.proposals![key] = proposal;
       await save(); // Persist the first paid answer before buying independent review.
       if (memo.verdicts[key]) return;
@@ -891,10 +873,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     const reviews = await purchase(request, request.companies, true);
     if (!reviews || reviews === 'failed') return;
     const final = finalizeHeEngCompanyFit(proposals, reviews);
-    // A proposed match the reviewer found too little to confirm is no contrary evidence either.
-    const softened = proposals.get(key)?.status === 'match' && final.get(key)?.reason === 'review_disagreement' &&
-      withoutContraryEvidence(reviews.get(key)) ? catalog() : null;
-    finish(key, softened ?? fitVerdict(row, company, scope, final.get(key)!), proposals.get(key), reviews.get(key));
+    finish(key, fitVerdict(row, company, scope, final.get(key)!), proposals.get(key), reviews.get(key));
     // Keep a completed, independently checked result even if its charge is unknown.
     // The same durable hold prevents any further purchase in this base.
     await save();

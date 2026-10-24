@@ -63,8 +63,9 @@ function withoutSize(filters: NonNullable<VeCollectTask['directory_filters']>): 
   delete rest.sizeOrUnknown;
   return rest;
 }
-/** Без ОКВЭД и региона снятие порога превратило бы срез в весь реестр. */
-const scoped = (filters: VeCollectTask['directory_filters']) => Boolean(filters?.okvedCodes?.length || filters?.regionCodes?.length);
+/** Без ОКВЭД, региона и лицензии снятие порога превратило бы срез в весь реестр. */
+const scoped = (filters: VeCollectTask['directory_filters']) => Boolean(filters?.okvedCodes?.length || filters?.regionCodes?.length
+  || filters?.licenceGroups?.length);
 
 /** Пороги размера без основания в гипотезе не сохраняются в плане. */
 export function stripUnfoundedSizeFilters(plan: VeSourcePlan, hypothesisText: string): { plan: VeSourcePlan; stripped: number } {
