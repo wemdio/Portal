@@ -278,7 +278,9 @@ export function pickRefillTemplate(
   const launched = templates
     .map((t) => {
       const launch = parseLaunchInfo(t.launch_info);
-      if (!launch) return null;
+      // Долив пишет прямо в Instantly; запуски «Рассылки» получают контакты
+      // только через подачу VE2 (contactDeliveryRunner).
+      if (!launch || launch.transport === 'sender') return null;
       const plan = t.personalization_plan as { operator_mapping?: VeOperatorMapping[] } | null;
       const ts =
         Date.parse(launch.created_at) ||

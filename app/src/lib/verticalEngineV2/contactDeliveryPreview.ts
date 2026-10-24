@@ -204,7 +204,7 @@ export async function buildVeContactDeliveryPreview(
     }
     if (!boundHere) {
       try {
-        const manualFact = await findManualFactIssue(instantlyDb, project);
+        const manualFact = await findManualFactIssue(instantlyDb, project, { portalDb });
         if (manualFact) return outcome(409, manualFact.code, manualFact.error);
       } catch {
         return outcome(500, 'PORTAL_PROJECT_LINKS_UNAVAILABLE', 'Не удалось проверить кампании, привязанные к проекту Portal');

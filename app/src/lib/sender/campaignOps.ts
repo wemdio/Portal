@@ -358,11 +358,16 @@ async function loadSuppressedEmails(emails: string[], campaignId: string): Promi
  * — иначе «перезалить базу» означало бы потерять историю по тем, кто уже
  * получил письмо и, может быть, ответил. Нет ни одной годной строки — база не
  * трогается вовсе (accepted = 0), что с этим делать, решает вызывающий.
+ *
+ * beforeWrite вызывается один раз, прямо перед первой записью в базу, и
+ * только если запись будет. Ошибка до него значит «ничего не записано» —
+ * заливке из Движка вертикалей это нужно, чтобы отпустить контакты, а не
+ * считать их неясными.
  */
 export async function importRecipients(
   campaignId: string,
   rows: RecipientInput[],
-  opts: { mode: 'append' | 'replace' } = { mode: 'append' },
+  opts: { mode: 'append' | 'replace'; beforeWrite?: () => Promise<void> } = { mode: 'append' },
 ): Promise<ImportRecipientsResult> {
   const db = requireDb();
 
@@ -444,6 +449,20 @@ export async function importRecipients(
     );
   }
 
+  const toInsert = recipients
+    .filter((recipient) => !suppressed.has(recipient.email) && !stopped.has(recipient.email))
+    .map((recipient) => ({
+      campaign_id: campaignId,
+      email: recipient.email,
+      name: recipient.name,
+      vars: recipient.vars,
+      // Все строки пачки с одним набором колонок: у ручной базы ключа нет.
+      group_key: recipient.groupKey ?? null,
+      status: 'active',
+      next_step_at: nextStepAt,
+    }));
+  if (replace || toInsert.length) await opts.beforeWrite?.();
+
   if (replace) {
     // mailbox_id проставляется ровно в тот момент, когда планировщик завёл
     // письмо, поэтому «пустой ящик и нулевой шаг» — это и есть «мы к нему
@@ -457,19 +476,6 @@ export async function importRecipients(
     if (wipeError) throw new SenderOpError(wipeError.message, 500);
   }
 
-  const toInsert = recipients
-    .filter((recipient) => !suppressed.has(recipient.email) && !stopped.has(recipient.email))
-    .map((recipient) => ({
-      campaign_id: campaignId,
-      email: recipient.email,
-      name: recipient.name,
-      vars: recipient.vars,
-      // Все строки пачки с одним набором колонок: у ручной базы ключа нет.
-      group_key: recipient.groupKey ?? null,
-      status: 'active',
-      next_step_at: nextStepAt,
-    }));
-
   for (let i = 0; i < toInsert.length; i += INSERT_CHUNK) {
     const chunk = toInsert.slice(i, i + INSERT_CHUNK);
     // ignoreDuplicates: адрес, который уже стоит в кампании, не трогаем, а в
@@ -480,6 +486,30 @@ export async function importRecipients(
       .select('id');
     if (error) throw new SenderOpError(error.message, 500);
     result.inserted += data?.length ?? 0;
+  }
+
+  // Кампанию могли запустить, пока база заливалась: строки легли без очереди,
+  // а её ставит только запуск (startCampaign) — они не ушли бы никогда. Ставим
+  // их сами: «активен, ни ящика, ни шага, ни очереди» — это ровно такие строки.
+  if (!nextStepAt && toInsert.length) {
+    const { data: now, error: statusError } = await db
+      .from('sender_campaigns').select('status').eq('id', campaignId).maybeSingle();
+    if (statusError) throw new SenderOpError(statusError.message, 500);
+    if (now?.status === 'running') {
+      const nowIso = new Date().toISOString();
+      for (const part of chunkForInFilter(toInsert.map((row) => row.email))) {
+        const { error: queueError } = await db
+          .from('sender_recipients')
+          .update({ next_step_at: nowIso, updated_at: nowIso })
+          .eq('campaign_id', campaignId)
+          .in('email', part)
+          .eq('status', 'active')
+          .eq('last_step_sent', 0)
+          .is('mailbox_id', null)
+          .is('next_step_at', null);
+        if (queueError) throw new SenderOpError(queueError.message, 500);
+      }
+    }
   }
 
   result.skippedSuppressed = suppressed.size;
@@ -738,6 +768,21 @@ export async function startCampaign(
   const { data: switched, error } = await switchQuery.select('id');
   if (error) throw new SenderOpError(error.message, 500);
   if (!switched?.length) throw new SenderOpError('Кампанию уже запустили или завершили — обновите экран', 409);
+
+  // База, долитая между постановкой в очередь выше и сменой статуса, легла
+  // без очереди, а заливка (importRecipients) ещё видела черновик. Ставим и
+  // её — только нетронутых: без ящика и без шага, снятых выше это не задевает.
+  const { error: lateError } = await db
+    .from('sender_recipients')
+    .update({ next_step_at: nowIso, updated_at: nowIso })
+    .eq('campaign_id', campaignId)
+    .eq('status', 'active')
+    .eq('last_step_sent', 0)
+    .is('mailbox_id', null)
+    .is('next_step_at', null);
+  if (lateError) {
+    throw new SenderOpError(`Кампания запущена, но часть базы не встала в очередь: ${lateError.message}. Нажмите «Пауза» и «Запустить» ещё раз`, 500);
+  }
 }
 
 /** Дальше этого отложить запуск нельзя: опечатка в годе не должна прятать кампанию на годы. */
