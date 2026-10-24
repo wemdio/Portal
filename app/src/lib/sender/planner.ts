@@ -396,7 +396,12 @@ function variantFor(steps: StepRow[], stepNo: number, recipientId: string): Step
   return variants[pickVariant(recipientId, stepNo, variants.length) - 1];
 }
 
-async function planCampaign(campaign: CampaignRow, log: Log, phase: PlanPhase): Promise<number> {
+async function planCampaign(
+  campaign: CampaignRow,
+  log: Log,
+  phase: PlanPhase,
+  shouldContinue: () => boolean = () => true,
+): Promise<number> {
   if (!supabaseAdmin) return 0;
   const db = supabaseAdmin;
 
@@ -476,6 +481,9 @@ async function planCampaign(campaign: CampaignRow, log: Log, phase: PlanPhase): 
   // Письмо текущего шага уже ушло, а шаг получателя не был записан — сдвинуты.
   const advanced: string[] = [];
   for (const recipient of recipients) {
+    // Каждый лид — законченная запись (письмо и закрепление), между ними
+    // проход можно оборвать: так остановка воркера не ждёт кампанию целиком.
+    if (!shouldContinue()) break;
     if (suppressed.has(recipient.email)) {
       await db
         .from('sender_recipients')
@@ -639,8 +647,13 @@ async function planCampaign(campaign: CampaignRow, log: Log, phase: PlanPhase): 
   return planned;
 }
 
-/** Один проход планировщика по всем запущенным кампаниям. */
-export async function planSenderMessages(opts?: { log?: Log }): Promise<number> {
+/**
+ * Один проход планировщика по всем запущенным кампаниям. shouldContinue
+ * сверяется перед каждой кампанией: проход идёт фоном и минутами, и воркер,
+ * потерявший аренду или останавливающийся, должен закончить его сам — иначе
+ * рядом шёл бы проход нового держателя, и лимиты ящиков считались бы дважды.
+ */
+export async function planSenderMessages(opts?: { log?: Log; shouldContinue?: () => boolean }): Promise<number> {
   if (!supabaseAdmin) return 0;
   const log: Log = opts?.log ?? (() => {});
 
@@ -660,11 +673,15 @@ export async function planSenderMessages(opts?: { log?: Log }): Promise<number> 
   // так что запланированное в первом проходе уже учтено во втором.
   for (const phase of ['followups', 'first'] as const) {
     for (const campaign of (data ?? []) as CampaignRow[]) {
+      if (opts?.shouldContinue && !opts.shouldContinue()) {
+        log('warn', `Проход планировщика остановлен: аренда потеряна или воркер останавливается (запланировано ${planned})`);
+        return planned;
+      }
       // Каждая кампания — отдельно: исключение в одной (битые данные, сбой
       // запроса) раньше обрывало весь проход, и остальные кампании стояли,
       // пока её не починят.
       try {
-        planned += await planCampaign(campaign, log, phase);
+        planned += await planCampaign(campaign, log, phase, opts?.shouldContinue);
       } catch (e) {
         log('error', `Кампания ${campaign.name} (${campaign.id}): проход планировщика упал — остальные идут дальше`, e);
       }

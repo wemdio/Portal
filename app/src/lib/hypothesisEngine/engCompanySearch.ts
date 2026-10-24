@@ -3,7 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { beginProviderUsage, type ProviderUsageDetails } from '@/lib/providerUsage';
 import { addHeSite, heCompanySiteIdentity, heSameCompanySite, newHeSiteSet } from './collectionIdentity';
 import { engCountryIso2, engCountryLabel, normalizeEngCountry } from './engCountries';
-import { HeEngBaseBudgetError, openHeEngBaseBudget } from './engBaseBudgetLedger';
+import { HeEngBaseBudgetError, openHeEngBaseBudget, type HeEngBaseBudgetLedger } from './engBaseBudgetLedger';
 import type { HeEngRegistryCandidate } from './engPublicRegistryTypes';
 
 const SEARCH_URL = 'https://google.serper.dev/search';
@@ -353,6 +353,12 @@ async function boundedJson(response: Response): Promise<Record<string, unknown>>
  */
 export async function runHeEngCompanySearchPage(input: {
   db: SupabaseClient; baseId: string; projectId: string;
+  /**
+   * The stage's already open ledger (activeHeEngBaseBudgetLedger). Required
+   * when other paid requests of the stage may be unanswered at the same time;
+   * absent, the ledger is opened here, which is only safe for sequential work.
+   */
+  ledger?: HeEngBaseBudgetLedger;
   plan: HeEngCompanySearchPlan; checkpoint?: HeEngCompanySearchCheckpoint;
   seenWebsites?: readonly string[]; signal?: AbortSignal;
   onCheckpoint: (checkpoint: HeEngCompanySearchCheckpoint, candidates: HeEngCompanySearchCandidate[]) => Promise<void>;
@@ -377,7 +383,10 @@ export async function runHeEngCompanySearchPage(input: {
   const page = state.pages[task.id] ?? 1;
   // Availability above has already rejected an invalid explicit override.
   const tariff = searchTariff(process.env)!;
-  const ledger = await openHeEngBaseBudget(input.db, input.baseId, input.projectId);
+  if (input.ledger && (input.ledger.baseId !== input.baseId || input.ledger.projectId !== input.projectId)) {
+    throw new HeEngBaseBudgetError('invalid_ledger');
+  }
+  const ledger = input.ledger ?? await openHeEngBaseBudget(input.db, input.baseId, input.projectId);
   const reservation = await ledger.reserve({ requestId: randomUUID(), provider: 'serper', stage: 'base_collect',
     model: 'google-search', reservedMicrousd: Math.max(1, Math.ceil(tariff * 1000 * RESERVED_CREDITS)) });
   state.inFlight = { taskId: task.id, page, requestId: reservation.requestId };
