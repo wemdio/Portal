@@ -1756,7 +1756,11 @@ export default function LiOutreachPage() {
                               </div>
                               <span className="w-16 shrink-0 text-right text-xs tabular-nums text-gray-500">{t.progress}/{t.total}</span>
                             </div>
-                            {t.error_message && <div className="mt-1 text-xs text-red-600">{t.error_message}</div>}
+                            {t.error_message && (
+                              <div className="mt-1 cursor-help text-xs text-red-600" title={t.error_message}>
+                                {t.error_message.length > 50 ? `${t.error_message.slice(0, 50)}…` : t.error_message}
+                              </div>
+                            )}
                           </td>
                           <td className="py-2.5 pl-6 pr-3">
                             {taskUrl ? (
