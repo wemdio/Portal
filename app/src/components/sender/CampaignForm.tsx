@@ -9,6 +9,7 @@ import { variantLabel } from '@/lib/sender/variants';
 import {
   createCampaign,
   fetchCampaign,
+  fetchMailboxTags,
   fetchSenderProjects,
   fetchTestLetter,
   previewCampaignSteps,
@@ -17,6 +18,7 @@ import {
   updateCampaign,
   uploadRecipients,
   type CampaignDto,
+  type MailboxTagDto,
   type PreviewSampleDto,
   type RecipientColumnsDto,
   type SenderProjectDto,
@@ -36,6 +38,7 @@ import {
   type LetterVariant,
 } from './CampaignSteps';
 import { LetterText } from './LetterLinks';
+import { TagChip, tagTones } from './MailboxTags';
 import { MailboxPickerModal, type PickedMailbox } from './MailboxPickerModal';
 import { SenderModal } from './SenderModal';
 
@@ -122,6 +125,10 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   }, []);
   // Теги, привязанные к кампании целиком: новые ящики тега доливаются в идущую кампанию.
   const [tagIds, setTagIds] = useState<string[]>([]);
+  const [allTags, setAllTags] = useState<MailboxTagDto[]>([]);
+  useEffect(() => {
+    void fetchMailboxTags().then((res) => setAllTags(res.tags)).catch(() => undefined);
+  }, []);
   const [pickerOpen, setPickerOpen] = useState(false);
   // Файл сразу разбирается на сервере (без записи): какие колонки нашлись и
   // какие переменные можно вставить в письмо. Файл без колонки почты не
@@ -602,8 +609,16 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
     else await create();
   };
 
-  const shown = mailboxes.slice(0, SHOWN_MAILBOXES);
-  const rest = mailboxes.length - shown.length;
+  // Тег, взятый целиком, показываем одним чипом, а не россыпью его адресов.
+  const tagged = new Set(tagIds);
+  const single = mailboxes.filter((m) => !m.tagId || !tagged.has(m.tagId));
+  const shown = single.slice(0, SHOWN_MAILBOXES);
+  const rest = single.length - shown.length;
+  const tagToneById = tagTones(allTags);
+  const linkedTags = tagIds
+    .map((id) => allTags.find((t) => t.id === id))
+    .filter((t): t is NonNullable<typeof t> => Boolean(t))
+    .map((t) => ({ tag: t, inCampaign: mailboxes.filter((m) => m.tagId === t.id).length }));
   const statusHint = editing ? STATUS_HINT[status] : STATUS_HINT.draft;
 
   /**
@@ -910,6 +925,12 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
                 <span className="text-sm text-zinc-500">Ни одного не выбрано</span>
               ) : (
                 <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  {linkedTags.map(({ tag, inCampaign }) => (
+                    <span key={tag.id} className="inline-flex items-center gap-1.5" title="Тег целиком: новые ящики под этим тегом добавляются в кампанию сами">
+                      <TagChip name={tag.name} tone={tagToneById.get(tag.id)} />
+                      <span className="text-xs text-zinc-500">{Math.max(inCampaign, 0) || tag.mailboxes} ящ.</span>
+                    </span>
+                  ))}
                   {shown.map((mailbox) => (
                     <span
                       key={mailbox.id}

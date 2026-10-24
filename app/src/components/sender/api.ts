@@ -253,7 +253,7 @@ export interface CampaignDetailsDto {
   };
   /** Строка на вариант письма: у шага без А/Б-теста она одна (variant_no = 1). */
   steps: { step_no: number; variant_no?: number; delay_hours: number; subject: string; body: string }[];
-  mailboxes: { id: string; email: string }[];
+  mailboxes: { id: string; email: string; tagId?: string | null }[];
   /** Теги, привязанные к кампании целиком: ящики, добавленные под тег, доливаются в идущую кампанию. */
   tagIds?: string[];
   /** Ответили по шагам цепочки: на каком касании лид ответил (задача 6.4). */

@@ -70,7 +70,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           .order('variant_no'),
         supabaseAdmin
           .from('sender_campaign_mailboxes')
-          .select('mailbox_id, sender_mailboxes(id, email)')
+          .select('mailbox_id, sender_mailboxes(id, email, tag_id)')
           .eq('campaign_id', id),
         supabaseAdmin
           .from('sender_recipients')
@@ -125,9 +125,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       const raw = (row as { sender_mailboxes?: unknown }).sender_mailboxes;
       const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
       return list
-        .map((m) => m as { id?: string; email?: string })
-        .filter((m): m is { id: string; email: string } => Boolean(m.id && m.email))
-        .map((m) => ({ id: String(m.id), email: String(m.email) }));
+        .map((m) => m as { id?: string; email?: string; tag_id?: string | null })
+        .filter((m): m is { id: string; email: string; tag_id?: string | null } => Boolean(m.id && m.email))
+        .map((m) => ({ id: String(m.id), email: String(m.email), tagId: m.tag_id ? String(m.tag_id) : null }));
     });
 
     const rows = (sample ?? []) as { email: string; name: string | null; vars: Record<string, string> }[];

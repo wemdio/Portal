@@ -18,10 +18,12 @@ export interface PickedMailbox {
    */
   status?: MailboxDto['status'];
   enabled?: boolean;
+  /** Тег ящика: по нему форма кампании показывает тег целиком, а не его адреса. */
+  tagId?: string | null;
 }
 
 function toPicked(mailbox: MailboxDto): PickedMailbox {
-  return { id: mailbox.id, email: mailbox.email, status: mailbox.status, enabled: mailbox.enabled };
+  return { id: mailbox.id, email: mailbox.email, status: mailbox.status, enabled: mailbox.enabled, tagId: mailbox.tag?.id ?? null };
 }
 
 const PAGE_SIZE = 200;
