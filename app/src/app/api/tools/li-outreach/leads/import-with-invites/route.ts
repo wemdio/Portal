@@ -20,6 +20,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
 import { extractPublicIdentifier } from '@/lib/liOutreach/leadHelpers';
+import { logCampaignEvent } from '@/lib/liOutreach/campaignLog';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -201,6 +203,15 @@ export async function POST(req: NextRequest) {
         imported += batch.length;
       }
 
+      if (supabaseAdmin) {
+        await logCampaignEvent(
+          supabaseAdmin,
+          campaignIdRaw?.trim() || null,
+          'info',
+          `Загружена база с персональными инвайтами «${leadList.name}»: добавлено ${imported}, пропущено ${skipped.length}`,
+          auth.user.email ?? null,
+        );
+      }
       return NextResponse.json({
         imported,
         skipped: skipped.length,

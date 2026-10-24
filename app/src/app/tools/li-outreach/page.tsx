@@ -274,7 +274,8 @@ export default function LiOutreachPage() {
   const [loadingTasks, setLoadingTasks] = useState(false);
   // Range key currently being exported (button shows '...' until done).
   // Null when no export is in flight.
-  const [exportingCampaignLogsRange, setExportingCampaignLogsRange] = useState<'24h' | '7d' | null>(null);
+  const campaignLogsBox = useRef<HTMLDivElement>(null);
+  const [exportingCampaignLogsRange, setExportingCampaignLogsRange] = useState<'24h' | '7d' | '30d' | null>(null);
   const [syncing, setSyncing] = useState(false);
 
   // Scraper form
@@ -386,13 +387,18 @@ export default function LiOutreachPage() {
   const loadCampaignLogs = useCallback(async (id: string) => {
     setLoadingCampaignLogs(true);
     try {
-      const d = await api<{ items: LiCampaignLog[]; total: number }>(`/campaigns/${id}/logs`);
+      const d = await api<{ items: LiCampaignLog[]; total: number }>(`/campaigns/${id}/logs?limit=500`);
       setCampaignLogs(Array.isArray(d?.items) ? d.items : []);
     } catch (e) {
       console.error('[li-outreach] loadCampaignLogs failed', e);
       setCampaignLogs([]);
     } finally {
       setLoadingCampaignLogs(false);
+      // Свежие записи — внизу: открываем журнал сразу на них.
+      window.setTimeout(() => {
+        const box = campaignLogsBox.current;
+        if (box) box.scrollTop = box.scrollHeight;
+      }, 60);
     }
   }, []);
   const loadDashboard = useCallback(async (period: LiDashPeriod = dashPeriod) => {
@@ -479,7 +485,7 @@ export default function LiOutreachPage() {
   // Reuses the existing global export endpoint with campaign_id filter — same
   // contract as the per-campaign export in tg-outreach.
   const exportCampaignLogs = useCallback(
-    async (range: '24h' | '7d') => {
+    async (range: '24h' | '7d' | '30d') => {
       if (!selectedCampaignId) return;
       setExportingCampaignLogsRange(range);
       try {
@@ -1272,8 +1278,8 @@ export default function LiOutreachPage() {
                     <h3 className="text-sm font-semibold text-gray-900">Логи кампании</h3>
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs text-gray-500">Выгрузить .txt:</span>
-                      {(['24h', '7d'] as const).map((r) => {
-                        const labels: Record<typeof r, string> = { '24h': '24 часа', '7d': '7 дней' };
+                      {(['24h', '7d', '30d'] as const).map((r) => {
+                        const labels: Record<typeof r, string> = { '24h': '24 часа', '7d': '7 дней', '30d': '30 дней' };
                         const busy = exportingCampaignLogsRange === r;
                         return (
                           <button
@@ -1291,16 +1297,16 @@ export default function LiOutreachPage() {
                       <button type="button" onClick={() => editingCampaignId && void loadCampaignLogs(editingCampaignId)} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">Обновить</button>
                     </div>
                   </div>
-                  <div className="max-h-[calc(100vh-22rem)] min-h-48 overflow-y-auto space-y-1">
+                  <div ref={campaignLogsBox} className="max-h-[calc(100vh-22rem)] min-h-48 overflow-y-auto space-y-1">
                     {loadingCampaignLogs ? (
                       <div className="flex items-center justify-center py-10" role="status" aria-label="Загрузка логов">
                         <div className="h-6 w-6 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
                       </div>
                     ) : campaignLogs.length === 0 ? (
                       <div className="text-xs text-gray-400">Нет логов</div>
-                    ) : campaignLogs.map((log) => (
-                      <div key={log.id} className={`text-xs px-2 py-1 rounded ${log.level === 'error' ? 'bg-red-50 text-red-700' : log.level === 'warning' ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-700'}`}>
-                        <span className="text-gray-400">{new Date(log.created_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>{' '}
+                    ) : [...campaignLogs].reverse().map((log) => (
+                      <div key={log.id} className={`li-log text-xs px-2 py-1 rounded ${log.level === 'error' ? 'li-log-error' : log.level === 'warning' ? 'li-log-warning' : 'li-log-info'}`}>
+                        <span className="li-log-time">{new Date(log.created_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>{' '}
                         {log.lead_name ? <span className="font-medium">[{log.lead_name}]</span> : null}{' '}
                         {log.message}
                       </div>
