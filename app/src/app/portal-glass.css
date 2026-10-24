@@ -82,6 +82,13 @@ html[data-portal-theme='dark'] body > .row-actions-menu {
   background-color: #1c1e26 !important;
   border-color: rgba(255, 255, 255, 0.12) !important;
 }
+/* Подписи и подсветка пунктов — явно: вне оболочки портала тёмная тема их не перекрашивает. */
+html[data-portal-theme='dark'] body > .row-actions-menu button:not(.text-red-600) {
+  color: #f4f4f5 !important;
+}
+html[data-portal-theme='dark'] body > .row-actions-menu button:hover:not(:disabled) {
+  background-color: rgba(255, 255, 255, 0.08) !important;
+}
 
 /* Панель массовых действий над ящиками липнет к шапке при прокрутке: заливка
    сплошная, иначе строки таблицы просвечивали бы под ней. */
