@@ -99,6 +99,7 @@ export function Step({
   no,
   title,
   hint,
+  badge,
   done,
   accent,
   children,
@@ -107,6 +108,8 @@ export function Step({
   no: number | string;
   title: string;
   hint?: string;
+  /** Заметная метка сразу за заголовком — например, «А/Б-тест». */
+  badge?: ReactNode;
   done: boolean;
   /** Цвет письма цепочки; у остальных шагов его нет. */
   accent?: StepAccent;
@@ -123,6 +126,7 @@ export function Step({
           {no}
         </span>
         <h3 className="text-sm font-medium text-zinc-900">{title}</h3>
+        {badge}
         {hint ? <span className="ml-auto text-xs text-zinc-500">{hint}</span> : null}
       </div>
       {children}
@@ -445,12 +449,15 @@ export function LetterStep({
       title={title}
       done={done}
       accent={accent}
-      hint={[
-        delayHours != null && onDelayHours ? `через ${delayHours} ч после предыдущего` : null,
-        testing ? `А/Б-тест: ${variants.length} варианта` : null,
-      ]
-        .filter(Boolean)
-        .join(' · ') || undefined}
+      badge={
+        testing ? (
+          <span className="inline-flex items-center gap-1 rounded-md bg-amber-500 px-2 py-0.5 text-xs font-semibold text-white" title="База делится поровну между вариантами письма">
+            <Split className="h-3 w-3" />
+            А/Б-тест ({variants.length} {variants.length >= 5 ? 'вариантов' : 'варианта'})
+          </span>
+        ) : undefined
+      }
+      hint={delayHours != null && onDelayHours ? `через ${delayHours} ч после предыдущего` : undefined}
     >
       {/* Задержка и удаление — атрибуты шага цепочки, а не письма: живут
           в шапке шага, чтобы текст оставался только текстом. */}
