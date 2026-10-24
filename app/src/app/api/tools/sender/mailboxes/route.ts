@@ -6,6 +6,7 @@ import { parseMailboxFile, FileParseError } from '@/lib/sender/fileParse';
 import { parseMailboxRows } from '@/lib/sender/mailboxImport';
 import { HEALTH_WINDOW_DAYS, mailboxHealth } from '@/lib/sender/mailboxHealth';
 import { isIpv4 } from '@/lib/sender/egress';
+import { addTagMailboxesToLiveCampaigns } from '@/lib/sender/campaignTags';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -297,7 +298,16 @@ export async function PATCH(req: NextRequest) {
         .update({ tag_id: tagId, updated_at: nowIso }, { count: 'exact' })
         .in('id', ids);
       if (error) return jsonError(error.message, 500);
-      return NextResponse.json({ ok: true, affected: count ?? 0 });
+      // Ящики попали под тег — идущие кампании, привязанные к тегу целиком, берут их сами.
+      let campaignsUpdated = 0;
+      if (tagId) {
+        try {
+          campaignsUpdated = await addTagMailboxesToLiveCampaigns(tagId, ids);
+        } catch (e) {
+          console.warn('[sender] tag mailboxes to live campaigns failed:', e);
+        }
+      }
+      return NextResponse.json({ ok: true, affected: count ?? 0, campaignsUpdated });
     }
 
     // «Лимиты»: «новых в день» и «всего в день» на всю выборку (15.10.2026).

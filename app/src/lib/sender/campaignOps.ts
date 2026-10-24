@@ -11,6 +11,7 @@ import {
 import { applyVars, recipientVars } from './template';
 import type { CampaignSourceKind } from './types';
 import { MAX_VARIANTS } from './variants';
+import { syncCampaignTagMailboxes } from './campaignTags';
 
 /**
  * Операции над кампанией «Рассылки»: создание, шаги цепочки, заливка базы и
@@ -602,6 +603,9 @@ export async function startCampaign(campaignId: string): Promise<void> {
   const db = requireDb();
   const nowIso = new Date().toISOString();
   const campaign = await assertStartable(campaignId);
+
+  // Ящики, добавленные под привязанный тег, пока кампания стояла, догоняют пул.
+  await syncCampaignTagMailboxes(campaignId).catch((e) => console.warn('[sender] tag sync on start failed:', e));
 
   // Пауза отменяет запланированные письма, но строки остаются, а у очереди
   // есть уникальность (recipient_id, step_no). Без уборки повторный запуск

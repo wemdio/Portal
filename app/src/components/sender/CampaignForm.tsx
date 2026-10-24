@@ -111,6 +111,8 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
 
   const [name, setName] = useState('');
   const [mailboxes, setMailboxes] = useState<PickedMailbox[]>([]);
+  // Теги, привязанные к кампании целиком: новые ящики тега доливаются в идущую кампанию.
+  const [tagIds, setTagIds] = useState<string[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   // Файл сразу разбирается на сервере (без записи): какие колонки нашлись и
   // какие переменные можно вставить в письмо. Файл без колонки почты не
@@ -203,6 +205,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
       setName(details.campaign.name);
       setStatus(details.campaign.status);
       setMailboxes(details.mailboxes);
+      setTagIds(details.tagIds ?? []);
       setHourFrom(details.campaign.send_hour_from);
       setHourTo(details.campaign.send_hour_to);
       setWeekdays(details.campaign.send_weekdays ?? []);
@@ -336,6 +339,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   const campaignPayload = {
     name,
     mailboxIds: mailboxes.map((m) => m.id),
+    tagIds,
     steps: stepsPayload,
     timezone,
     sendHourFrom: hourFrom ?? 9,
@@ -1096,9 +1100,11 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
       {pickerOpen ? (
         <MailboxPickerModal
           initial={mailboxes}
+          initialTagIds={tagIds}
           onClose={() => setPickerOpen(false)}
-          onSave={(picked) => {
+          onSave={(picked, pickedTagIds) => {
             setMailboxes(picked);
+            setTagIds(pickedTagIds);
             setPickerOpen(false);
           }}
         />

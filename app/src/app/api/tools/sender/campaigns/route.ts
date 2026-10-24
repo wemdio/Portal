@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
 import { createCampaign, SenderOpError, type CampaignStepInput } from '@/lib/sender/campaignOps';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { saveCampaignTags } from '@/lib/sender/campaignTags';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -18,6 +19,8 @@ const POOL_CHUNK = 50;
 interface CreateBody {
   name?: string;
   mailboxIds?: string[];
+  /** Теги ящиков, привязанные к кампании целиком. */
+  tagIds?: string[];
   steps?: CampaignStepInput[];
   timezone?: string;
   sendHourFrom?: number;
@@ -181,6 +184,7 @@ export async function POST(req: NextRequest) {
         partial: body.draft === true,
         createdBy: auth.user.id,
       });
+      if (Array.isArray(body.tagIds)) await saveCampaignTags(id, body.tagIds.map(String));
       return NextResponse.json({ id });
     } catch (e) {
       if (e instanceof SenderOpError) return jsonError(e.message, e.status);

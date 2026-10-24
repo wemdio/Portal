@@ -15,6 +15,7 @@ import {
 import { fillPoolFromFolder } from '@/lib/sender/folders';
 import { describeSavedRecipients, mergeVariableStats } from '@/lib/sender/recipientImport';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { loadCampaignTagIds, saveCampaignTags } from '@/lib/sender/campaignTags';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -26,6 +27,8 @@ interface PatchBody {
   /** Правка настроек: приезжает вместо action. */
   name?: string;
   mailboxIds?: string[];
+  /** Теги ящиков, привязанные к кампании целиком. Нет поля — привязку не трогаем. */
+  tagIds?: string[];
   steps?: CampaignStepInput[];
   timezone?: string;
   sendHourFrom?: number;
@@ -157,6 +160,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       campaign,
       steps: steps ?? [],
       mailboxes,
+      tagIds: await loadCampaignTagIds(id),
       repliesByStep,
       variantStats,
       recipients: {
@@ -229,6 +233,8 @@ async function updateSettings(id: string, body: PatchBody) {
   if (poolError) return jsonError(poolError.message, 500);
 
   await replaceSteps(id, steps);
+  // Привязка к тегам целиком: без поля в теле не трогаем (кампанию правят и не из формы).
+  if (Array.isArray(body.tagIds)) await saveCampaignTags(id, body.tagIds.map(String));
 
   // Лид закреплён за ящиком на всю переписку. Если ящик убрали из пула, те,
   // кому ещё не писали, зависли бы навсегда: планировщик ждёт именно «свой»

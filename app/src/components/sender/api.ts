@@ -254,6 +254,8 @@ export interface CampaignDetailsDto {
   /** Строка на вариант письма: у шага без А/Б-теста она одна (variant_no = 1). */
   steps: { step_no: number; variant_no?: number; delay_hours: number; subject: string; body: string }[];
   mailboxes: { id: string; email: string }[];
+  /** Теги, привязанные к кампании целиком: ящики, добавленные под тег, доливаются в идущую кампанию. */
+  tagIds?: string[];
   /** Ответили по шагам цепочки: на каком касании лид ответил (задача 6.4). */
   repliesByStep?: { step: number; replied: number }[];
   /** Результаты А/Б-теста: сколько ушло и сколько ответили по каждому варианту. */
@@ -491,6 +493,7 @@ export function updateFolder(id: string, body: FolderSettingsInput) {
 export function createCampaign(body: {
   name: string;
   mailboxIds: string[];
+  tagIds?: string[];
   steps: StepInput[];
   timezone: string;
   sendHourFrom: number;
@@ -574,6 +577,7 @@ export function updateCampaign(
   body: {
     name: string;
     mailboxIds: string[];
+    tagIds?: string[];
     steps: StepInput[];
     timezone: string;
     sendHourFrom: number;
