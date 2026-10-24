@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
-import { Archive, ArchiveRestore, ArrowLeft, BarChart3, Eye, Megaphone, Pause, Pencil, Play, Search, Square, Trash2, UserCircle } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowLeft, BarChart3, Eye, Pause, Pencil, Play, Rocket, Search, Square, Trash2, UserCircle } from 'lucide-react';
 import { RowActionsMenu, type RowAction } from '@/components/sender/RowActionsMenu';
 import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
 import LiDashboard, { type LiActivity, type LiDashPeriod } from '@/components/li-outreach/LiDashboard';
@@ -1033,9 +1033,9 @@ export default function LiOutreachPage() {
 
   const tabs = [
     { id: 'dashboard', label: 'Дашборд', icon: BarChart3 },
-    { id: 'campaigns', label: 'Кампании', icon: Megaphone },
-    { id: 'scraper', label: 'Скрапер', icon: Search },
+    { id: 'campaigns', label: 'Кампании', icon: Rocket },
     { id: 'accounts', label: 'Аккаунты', icon: UserCircle },
+    { id: 'scraper', label: 'Скрапер', icon: Search },
   ] as const;
 
   /** Базы и кампании перечитываем вместе: рассылаемая база — поле кампании. */
