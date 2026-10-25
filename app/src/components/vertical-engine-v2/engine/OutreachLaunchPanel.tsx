@@ -21,6 +21,8 @@ type PreflightItem = VeOutreachLaunchRequest['items'][number] & {
 interface Preflight {
   ready: boolean;
   items: PreflightItem[];
+  /** Куда пойдут кампании; запуск возвращает это обратно. */
+  transport?: 'instantly' | 'sender';
   error?: string;
 }
 export function OutreachLaunchPanel({
@@ -121,7 +123,7 @@ export function OutreachLaunchPanel({
   const preflightKey = requestKey ? `${uploadMode}/${requestKey}` : '';
   const preflight = preflightState?.key === preflightKey ? preflightState.result : null;
   const confirmationKey = preflight?.ready
-    ? preflightKey + JSON.stringify(preflight.items.map((i) => i.segmentation_audit_id))
+    ? preflightKey + JSON.stringify(preflight.items.map((i) => i.segmentation_audit_id)) + (preflight.transport ?? '')
     : '';
   useEffect(() => {
     if (!requestKey) return;
@@ -185,6 +187,7 @@ export function OutreachLaunchPanel({
               segmentation_audit_id,
             }),
           ),
+          ...(preflight.transport === 'sender' ? { expected_transport: 'sender' } : {}),
           idempotency_key: idempotency.current.id,
           confirmed_customer_approval: true,
         },

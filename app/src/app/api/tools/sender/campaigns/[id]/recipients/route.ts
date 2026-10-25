@@ -126,6 +126,16 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     const { id: campaignId } = await params;
 
+    // Базу кампании Движка вертикалей подаёт он сам, по дневному плану; ручная
+    // заливка шла бы мимо его учёта, а в черновик несостоявшегося запуска —
+    // запирала бы этот запуск навсегда.
+    const { data: target, error: targetError } = await supabaseAdmin
+      .from('sender_campaigns').select('source_kind').eq('id', campaignId).maybeSingle();
+    if (targetError) return jsonError(targetError.message, 500);
+    if (target?.source_kind === 've2') {
+      return jsonError('Базу этой кампании подаёт Движок вертикалей — загрузить её вручную нельзя', 409);
+    }
+
     let form: FormData;
     try {
       form = await req.formData();

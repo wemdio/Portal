@@ -21,6 +21,11 @@ import {
 } from '@/lib/verticalEngineV2/launchHandoff';
 import { reconcileExpiredLaunchReservation } from '@/lib/verticalEngineV2/launchReservation';
 import {
+  findSenderCampaignIds,
+  readVeSenderReservationCampaigns,
+  rollbackVeSenderReservation,
+} from '@/lib/verticalEngineV2/senderTransport/senderRecovery';
+import {
   buildLaunchPortfolioMetadata,
   normalizedMailboxIds,
 } from '@/lib/verticalEngineV2/launchTemplate';
@@ -607,7 +612,22 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
           { status: 409 },
         );
       }
+      // Запуск через «Рассылку» не сверяется с Instantly: его черновики этой
+      // попытки удаляются, и запуск можно повторить.
+      let senderDrafts: Array<{ id: string; status: string }>;
+      try {
+        senderDrafts = await readVeSenderReservationCampaigns(supabaseAdmin, launchReservationId);
+      } catch {
+        return jsonError('Не удалось проверить черновики «Рассылки». Очередь не изменена.', 500, 'VE_SENDER_RECOVERY_READ_FAILED');
+      }
       const knownLaunch = launchForAudit(template, audit);
+      if (resolution === 'campaign_created' && (senderDrafts.length > 0 || knownLaunch?.transport === 'sender')) {
+        return jsonError(
+          'Запуск через «Рассылку» сверяется только отменой: черновики этой попытки будут удалены, запуск можно повторить.',
+          409,
+          'VE_SENDER_RECOVERY_ABSENT_ONLY',
+        );
+      }
       if (resolution === 'no_campaign' && knownLaunch) {
         return NextResponse.json(
           {
@@ -632,6 +652,21 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
               },
             ]
           : [];
+      if (resolution === 'no_campaign' && senderDrafts.length > 0) {
+        let rollback: { ok: boolean; remaining: number };
+        try {
+          rollback = await rollbackVeSenderReservation(supabaseAdmin, launchReservationId);
+        } catch {
+          return jsonError('Не удалось удалить черновики «Рассылки». Очередь не изменена.', 500, 'VE_SENDER_RECOVERY_READ_FAILED');
+        }
+        if (!rollback.ok) {
+          return jsonError(
+            `В «Рассылке» остались кампании этой попытки (${rollback.remaining}): в них уже есть получатели или их запустили. Очередь не изменена.`,
+            409,
+            'VE_SENDER_ROLLBACK_INCOMPLETE',
+          );
+        }
+      }
       const requestedIds = campaignIds(body?.campaign_ids);
       const resolvedIds = [
         ...new Set([
@@ -641,6 +676,17 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       ];
       if (resolution === 'campaign_created' && resolvedIds.length === 0) {
         return jsonError('Укажите хотя бы один ID кампании из Instantly', 400);
+      }
+      if (resolution === 'campaign_created') {
+        let senderIds: string[];
+        try {
+          senderIds = await findSenderCampaignIds(supabaseAdmin, resolvedIds);
+        } catch {
+          return jsonError('Не удалось проверить кампании. Очередь не изменена.', 500, 'VE_SENDER_RECOVERY_READ_FAILED');
+        }
+        if (senderIds.length) {
+          return jsonError('Это кампании «Рассылки», а не Instantly: сверка Instantly для них не выполняется.', 409, 'VE_SENDER_CAMPAIGN_ID_REFUSED');
+        }
       }
       const presetId = audit.launch_preset_id || knownLaunch?.preset_id || '';
       if (resolution === 'campaign_created' && !presetId) {

@@ -537,6 +537,8 @@ export interface VeDeliveryPlanPreviewDto {
   capacity_deficit: number;
   delivery_timezone?: string | null;
   delivery_schedule_days?: number[] | null;
+  /** Куда пойдут кампании запуска; запуск возвращает это значение обратно (expected_transport). */
+  transport?: 'instantly' | 'sender';
   /** Только без периода: карточка проекта для показа. */
   project_term?: Omit<VePortalProjectTermDto, 'issue'> | null;
 }

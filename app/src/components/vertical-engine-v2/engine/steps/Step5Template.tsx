@@ -721,6 +721,7 @@ export function useTemplateLaunch(
         portal_project_id: deliveryPreview.portal_project_id,
         expected_portal_period_id: deliveryPreview.portal_period_id,
         target_contacts: deliveryPreview.target_contacts,
+        ...(deliveryPreview.transport === 'sender' ? { expected_transport: 'sender' } : {}),
       })
         .then(({ ok, data }) => {
           if (data.code === 'TEMPLATE_LAUNCH_UNCERTAIN' || data.code === 'TEMPLATE_LAUNCH_IN_PROGRESS') {
