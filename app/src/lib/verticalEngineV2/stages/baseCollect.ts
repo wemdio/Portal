@@ -180,6 +180,7 @@ import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAl
   type VeNicheSourceProfile } from '../nicheSourcePolicy';
 import { detectVeClinicSourceProfile, isVeClinicCatalogTask, normalizeVeClinicSourcePlan, veClinicRubricAllowed,
   type VeClinicSourceProfile } from '../clinicSourcePolicy';
+import { normalizeVeLicenceSourcePlan } from '../licenceSourcePolicy';
 import { detectVeMediaSourceProfile, normalizeVeMediaSourcePlan, veMediaRubricAllowed,
   type VeMediaSourceProfile } from '../mediaSourcePolicy';
 import { VeCatalogRepairSchema, VeSourcePlanSchema } from '../schemas';
@@ -1294,7 +1295,13 @@ async function buildPlan(
   const restaurant = normalizeVeRestaurantSourcePlan(media ? normalizeVeMediaSourcePlan(generation.plan, media).plan : generation.plan, {
     market, hypotheses: !structuredAudience && hypothesisId && broadFlag === false ? hypotheses.map((h) => ({ ...h, broad: false })) : [],
   });
-  const plan = applyVeCollectionGeographyToPlan(restaurant.plan, collectionGeography);
+  // Лицензия medical — только вместе с ОКВЭД и с добором по тому же ОКВЭД без лицензии.
+  // Последним перед географией: прежние нормализаторы переставляют и режут задачи, а
+  // ключи стратегий для проверки дублей сравниваются в одной форме — до географии.
+  const licence = normalizeVeLicenceSourcePlan(restaurant.plan);
+  const plan = applyVeCollectionGeographyToPlan(licence.plan, collectionGeography);
+  if (licence.changed) stageLog(ctx, `[base_collect] план: лицензия medical только с ОКВЭД, рядом добор по тому же ОКВЭД без лицензии (${licence.changed} правок)`);
+  if (licence.skipped) stageLog(ctx, `[base_collect] план: добор без лицензии не добавлен — в плане уже ${VE_PLAN_MAX_TASKS} задач (${licence.skipped})`);
   if (generation.changed) stageLog(ctx, '[base_collect] план генерации: профильные каталоги впереди, водоканалы исключены, вакансии ограничены отраслью');
   if (broadened) stageLog(ctx, `[base_collect] план широкой гипотезы: классы ОКВЭД, без порогов размера и сигнала найма (${broadened} задач)`);
   return {

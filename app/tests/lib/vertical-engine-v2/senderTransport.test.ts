@@ -19,16 +19,34 @@ import { loadVeContactDeliveryCampaignInventory } from '@/lib/verticalEngineV2/c
 import { reconcileContactDeliveries } from '@/lib/verticalEngineV2/contactDeliveryReconciliation';
 import { parseLaunchInfo } from '@/lib/verticalEngineV2/launchHandoff';
 import { appendLeadsToVeSenderCampaign } from '@/lib/verticalEngineV2/senderTransport/senderAppend';
+import { createCampaign as createSenderCampaign } from '@/lib/sender/campaignOps';
+import { createCampaign as createInstantlyCampaign } from '@/lib/instantly/client';
+import { runVeTemplateLaunch } from '@/lib/verticalEngineV2/launchTemplate';
+import { validateStoredAuditSnapshot } from '@/lib/verticalEngineV2/stages/segmentationAudit';
+import {
+  veSenderScheduleFromPreset,
+  veSenderSyntaxIssue,
+  veSequenceToSenderSteps,
+} from '@/lib/verticalEngineV2/senderTransport/senderLaunchPlan';
 import {
   decideVeLaunchTransport,
   resolveVeLaunchTransport,
   senderRemoteStatus,
+  transportExpectationIssue,
   transportOf,
 } from '@/lib/verticalEngineV2/senderTransport/transport';
 
 jest.mock('@/lib/instantly/client', () => ({
   getCampaign: jest.fn(), getCampaignAnalyticsOverview: jest.fn(), listLeads: jest.fn(),
+  createCampaign: jest.fn(), updateCampaign: jest.fn(),
 }));
+jest.mock('@/lib/loggerServer', () => ({ logAudit: jest.fn(async () => {}), logError: jest.fn(async () => {}) }));
+jest.mock('@/lib/verticalEngineV2/projectLaunchPresetBinding', () => ({
+  ensureVeProjectLaunchPresetBinding: jest.fn(async () => ({
+    status: 'bound', newlyBound: false, binding: { launch_preset_id: 'preset-1', launch_instantly_account_id: 'workspace-a' },
+  })),
+}));
+jest.mock('@/lib/verticalEngineV2/stages/segmentationAudit', () => ({ validateStoredAuditSnapshot: jest.fn() }));
 jest.mock('@/lib/supabaseAdmin', () => ({ supabaseAdmin: {} }));
 jest.mock('@/lib/clientReports/ledgerStore', () => ({
   startAppendLedgerBatch: jest.fn(async () => ({ batchId: 'batch-1' })),
@@ -39,7 +57,7 @@ jest.mock('@/lib/sender/campaignOps', () => {
   class SenderOpError extends Error {
     constructor(message: string, readonly status: number) { super(message); }
   }
-  return { importRecipients: jest.fn(), SenderOpError };
+  return { importRecipients: jest.fn(), createCampaign: jest.fn(), SenderOpError };
 });
 
 beforeEach(() => {
@@ -317,5 +335,141 @@ describe('подача контактов VE2 в «Рассылку»', () => {
     await expect(syncProjectContactsFromInstantly({ mainDb: broken as never, instantlyDb: instantly as never, now: new Date() }))
       .rejects.toThrow('sender_campaign_first_contacted_since');
     expect(broken.updates).toEqual([]);
+  });
+});
+
+describe('запуск VE2 в «Рассылку»', () => {
+  it('пресет и письма переносятся в «Рассылку» без молчаливых потерь, а лишнее — отказ', () => {
+    expect(veSenderScheduleFromPreset({ schedule_from: '09:30', schedule_to: '18:30', schedule_days: [0, 1, 1],
+      schedule_timezone: 'Europe/Moscow', email_gap_minutes: 10 })).toEqual({ ok: true, schedule: {
+      timezone: 'Europe/Moscow', sendHourFrom: 10, sendHourTo: 18, sendWeekdays: [1, 7], gapSeconds: 600, gapJitterSeconds: 120 } });
+    expect(veSenderScheduleFromPreset({ schedule_from: '09:00', schedule_to: '00:00', schedule_days: [1],
+      schedule_timezone: 'Europe/Moscow', email_gap_minutes: 0 })).toMatchObject({ ok: true, schedule: { sendHourTo: 24, gapSeconds: 60 } });
+    for (const [from, to] of [['22:00', '06:00'], ['09:30', '10:15']]) {
+      expect(veSenderScheduleFromPreset({ schedule_from: from, schedule_to: to, schedule_days: [1],
+        schedule_timezone: 'Europe/Moscow', email_gap_minutes: 10 })).toMatchObject({ ok: false, code: 'VE_SENDER_SCHEDULE_INVALID' });
+    }
+
+    const sequence = (steps: Array<{ subject: string; body: string; wait_days: number; variants?: Array<{ subject?: string; body: string }> }>) =>
+      ({ steps, droppedSegmentVariants: 0, lettersWithSegmentVariants: 0, appliedSegmentVariants: 0 });
+    expect(veSequenceToSenderSteps(sequence([
+      { subject: 'Для {{companyName}}', body: 'А', wait_days: 0, variants: [{ subject: '', body: 'Б' }] },
+      { subject: '', body: 'Напоминание', wait_days: 3 },
+    ]))).toEqual({ ok: true, steps: [
+      { delayHours: 0, variants: [{ subject: 'Для {{companyName}}', body: 'А' }, { subject: 'Для {{companyName}}', body: 'Б' }] },
+      { delayHours: 72, variants: [{ subject: '', body: 'Напоминание' }] },
+    ] });
+    const letter = { subject: 'Т', body: 'Т', wait_days: 1 };
+    expect(veSequenceToSenderSteps(sequence(Array.from({ length: 6 }, () => letter)))).toMatchObject({ code: 'VE_SENDER_CHAIN_TOO_LONG' });
+    expect(veSequenceToSenderSteps(sequence([{ ...letter, variants: Array.from({ length: 4 }, () => ({ subject: 'Т', body: 'Т' })) }])))
+      .toMatchObject({ code: 'VE_SENDER_TOO_MANY_VARIANTS' });
+    for (const body of ['{{firstName|коллеги}}', '{% if x %}', '{{RANDOM | a | b}}']) {
+      expect(veSenderSyntaxIssue([{ variants: [{ subject: 'Т', body }] }])).toMatchObject({ code: 'VE_SENDER_TEMPLATE_UNSUPPORTED' });
+    }
+    expect(veSenderSyntaxIssue([{ variants: [{ subject: '{{companyName}}', body: '[сайт](https://acme.ru)' }] }])).toBeNull();
+    expect(transportExpectationIssue({ transport: 'sender', source: 'override' }, undefined)).toMatchObject({ code: 'VE_LAUNCH_TRANSPORT_CHANGED' });
+    expect(transportExpectationIssue({ transport: 'instantly', source: 'error' }, 'sender')).toMatchObject({ status: 503 });
+    expect(transportExpectationIssue({ transport: 'instantly', source: 'error' }, undefined)).toBeNull();
+  });
+
+  const STAFF = '837cbcb1-9afb-49c9-965c-d83d1e7d8e9c';
+  const CLIENT = '0f1e2d3c-4b5a-4968-8776-655443322110';
+  const BOX = '11111111-2222-4333-8444-555555555555';
+  const launchLeads = [{ email: 'hr@acme.ru' }, { email: 'ceo@acme.ru' }];
+
+  function launchDbs(links: 'ok' | 'conflict' = 'ok', finalizeRaises = false) {
+    const portal = createMockSupabase({
+      tables: {
+        ve_projects: [{ id: 've-project-1', market: 'ru', launch_transport_override: 'sender' }],
+        ve_launch_transport_settings: [{ market: 'ru', mode: 'pilot', sender_uploads_enabled: true }],
+        ve_templates: [{ id: 'template-1', base_id: 'base-1', status: 'ready', updated_at: '2026-10-24T10:00:00.000Z', launch_info: null,
+          letters: [{ subject: 'Для вас', body: 'Письмо', wait_days: 0 }, { subject: '', body: 'Ещё раз', wait_days: 2 }] }],
+        ve_bases: [{ id: 'base-1', project_id: 've-project-1', vertical_id: 'vertical-1', hypothesis_id: null,
+          filename: 'base.csv', columns: ['email'], data: launchLeads, source: 'auto' }],
+        ve_segmentation_audits: [{ id: 'audit-1', template_id: 'template-1', base_id: 'base-1', status: 'ready', launch_status: 'idle', input_hash: 'h' }],
+        ve_verticals: [{ id: 'vertical-1', potential_pct: 50 }],
+        projects: [{ id: STAFF, client: 'Staff Line', name: 'Аутрич', status: 'В работе', deadline: '2026-12-30',
+          launch_date: '2026-08-30', contacts_obligation: '4000', contacts_done: '0' }],
+        project_periods: [],
+        sender_campaigns: [],
+        sender_recipients: [],
+        project_sender_campaigns: [],
+      },
+      rpcHandlers: {
+        ve_reserve_final_template_launch: async (params, db) => {
+          await db.from('ve_segmentation_audits').update({ launch_status: 'running', launch_reservation_id: params.p_reservation_id }).eq('id', params.p_audit_id);
+          return { data: true };
+        },
+        ve_bind_contact_delivery_plan: async () => ({ data: { bound: true, replayed: false } }),
+        ve_finalize_template_launch: async () => ({ data: { finalized: true } }),
+        ve_finalize_template_contact_delivery: async () => (finalizeRaises
+          ? { data: null, error: { message: 'bound Portal project period is not active at launch finalize', code: 'P0001' } as never }
+          : { data: { finalized: true } }),
+        ve_sender_pool_for_emails: () => ({ data: [{ id: BOX, email: 'Sender@Example.test', status: 'verified', enabled: true }] }),
+        reserve_project_sender_campaigns: () => ({ data: links === 'ok' ? { status: 'ok' } : { status: 'conflict', conflicting_project_ids: [] } }),
+      },
+    });
+    const instantly = createMockSupabase({
+      tables: { client_campaign_presets: [{ id: 'preset-1', client_user_id: CLIENT, instantly_account_id: 'workspace-a',
+        email_account_ids: ['sender@example.test'], daily_limit: 30, schedule_from: '09:00', schedule_to: '18:00',
+        schedule_days: [1, 2, 3, 4, 5], schedule_timezone: 'Europe/Moscow', email_gap_minutes: 10 }] },
+      rpcHandlers: { client_blocklist_snapshot: () => ({ data: { count: 0, emails: [] } }) },
+    });
+    jest.mocked(validateStoredAuditSnapshot).mockReturnValue({
+      state: 'complete',
+      snapshot: { audience: { rows: launchLeads, leads: launchLeads, totalRows: 2,
+        excluded: { lowRelevance: 0, relevanceUnchecked: 0, invalidEmailStatus: 0, invalidEmail: 0, duplicateEmail: 0 } }, segments: [] },
+      assignments: new Map<number, string | null>([[0, null], [1, null]]),
+    } as never);
+    jest.mocked(createSenderCampaign).mockReset().mockImplementation(async (input) => {
+      const id = '99999999-8888-4777-8666-555555555555';
+      await portal.from('sender_campaigns').insert({ id, status: 'draft', source_kind: input.sourceKind, source_job_id: input.sourceJobId,
+        source_ref: input.sourceRef, project_id: input.projectId });
+      return { id };
+    });
+    const launch = (expectedTransport?: 'sender') => runVeTemplateLaunch({
+      portalDb: portal as never, instantlyDb: instantly as never, templateId: 'template-1', presetId: 'preset-1', force: false,
+      segmentationAuditId: 'audit-1', confirmSegmentation: true, userId: 'staff-1', portalProjectId: STAFF,
+      expectedPortalPeriodId: null, targetContacts: 4000, locale: 'ru', eventPrefix: 'test.ve2.launch',
+      ...(expectedTransport ? { expectedTransport } : {}),
+    });
+    return { portal, instantly, launch };
+  }
+
+  it('при «Рассылке» запуск создаёт черновики с ящиками пресета и пишет transport в запуск — Instantly не трогается', async () => {
+    const { portal, instantly, launch } = launchDbs();
+    // Обзор показывал Instantly, а переключатель уже на «Рассылке» — отказ до любой записи.
+    expect((await launch()).body).toMatchObject({ code: 'VE_LAUNCH_TRANSPORT_CHANGED' });
+    expect(portal.rpcCalls).toEqual([]);
+
+    const outcome = await launch('sender');
+    expect(outcome.status).toBe(200);
+    expect(createInstantlyCampaign).not.toHaveBeenCalled();
+    expect(instantly.rpcCalls.map((call) => call.fn)).toEqual(['client_blocklist_snapshot']);
+    const reservation = portal.rpcCalls.find((call) => call.fn === 've_reserve_final_template_launch')?.params.p_reservation_id;
+    expect(jest.mocked(createSenderCampaign).mock.calls[0][0]).toMatchObject({
+      mailboxIds: [BOX], timezone: 'Europe/Moscow', sendHourFrom: 9, sendHourTo: 18, sendWeekdays: [1, 2, 3, 4, 5], gapSeconds: 600,
+      projectId: STAFF, clientUserId: CLIENT, sourceKind: 've2', sourceJobId: reservation, sourceRef: 'default',
+      steps: [{ delayHours: 0, variants: [{ subject: 'Для вас', body: 'Письмо' }] }, { delayHours: 48, variants: [{ subject: '', body: 'Ещё раз' }] }],
+    });
+    expect(portal.rpcCalls.find((call) => call.fn === 'reserve_project_sender_campaigns')?.params)
+      .toMatchObject({ p_project_id: STAFF, p_period_id: null });
+    expect(portal.rpcCalls.at(-1)).toMatchObject({ fn: 've_finalize_template_contact_delivery', params: {
+      p_launch_status: 'succeeded',
+      p_launch_info: { transport: 'sender', instantly_account_id: 'workspace-a', mailbox_ids: ['sender@example.test'],
+        campaign_url: '/tools/sender/campaigns/99999999-8888-4777-8666-555555555555' },
+      p_drip_rows: [expect.objectContaining({ email_normalized: 'hr@acme.ru' }), expect.objectContaining({ email_normalized: 'ceo@acme.ru' })],
+    } });
+  });
+
+  it('привязка или запись запуска отказали — черновик удалён, запуск не записан и его можно повторить', async () => {
+    for (const [links, finalizeRaises] of [['conflict', false], ['ok', true]] as const) {
+      const { portal, launch } = launchDbs(links, finalizeRaises);
+      const outcome = await launch('sender');
+      expect(outcome).toMatchObject({ status: 500, body: { code: 'VE_SENDER_LAUNCH_FAILED' } });
+      expect(portal.getRows('sender_campaigns')).toEqual([]);
+      expect(portal.rpcCalls.at(-1)).toMatchObject({ fn: 've_finalize_template_launch',
+        params: { p_launch_status: 'failed', p_launch_info: null } });
+    }
   });
 });

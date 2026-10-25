@@ -483,6 +483,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         portal_project_id?: unknown;
         expected_portal_period_id?: unknown;
         target_contacts?: unknown;
+        expected_transport?: unknown;
       };
       try {
         body = (await req.json()) as typeof body;
@@ -520,6 +521,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         );
       }
 
+      // Способ отправки из обзора запуска; нет поля — Instantly, как до «Рассылки».
+      const expectedTransport = body?.expected_transport;
+      if (expectedTransport !== undefined && expectedTransport !== 'instantly' && expectedTransport !== 'sender') {
+        return jsonError('Некорректный способ отправки', 400);
+      }
+
       const outcome = await runVeTemplateLaunch({
         portalDb: supabaseAdmin,
         instantlyDb: supabaseInstantly,
@@ -534,6 +541,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         userId,
         locale: 'ru',
         eventPrefix: 'tools.vertical-engine-v2.template.launch',
+        ...(expectedTransport ? { expectedTransport } : {}),
       });
 
       return NextResponse.json(outcome.body, { status: outcome.status });

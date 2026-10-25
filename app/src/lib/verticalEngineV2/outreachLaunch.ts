@@ -10,6 +10,7 @@ import { requeueVeJob, type VeStageContext, type VeStageResult } from './stages/
 import type { VeBase, VeJob, VeSegmentationAudit, VeTemplate } from './types';
 import { readDeliveryRate } from './contactDeliveryRateService';
 import { activateDeliveredContactCampaigns } from './contactDeliveryActivation';
+import { resolveVeLaunchTransport, transportExpectationIssue, transportOf } from './senderTransport/transport';
 
 const itemSchema = z.object({
   hypothesis_id: z.string().uuid(), base_id: z.string().uuid(), template_id: z.string().uuid(),
@@ -21,6 +22,8 @@ export const outreachLaunchRequestSchema = z.object({
   // null — проект Portal без периодов; поле обязательно, чтобы режим был выбран явно.
   portal_project_id: z.string().uuid(), expected_portal_period_id: z.string().uuid().nullable(),
   target_contacts: z.number().int().positive().max(1_000_000), items: z.array(itemSchema).min(1).max(50),
+  // Способ отправки из обзора запуска; нет — Instantly. Должен совпасть с переключателем «Рассылки».
+  expected_transport: z.enum(['instantly', 'sender']).optional(),
 }).strict();
 export type VeOutreachLaunchRequest = z.infer<typeof outreachLaunchRequestSchema>;
 type LaunchItem = VeOutreachLaunchRequest['items'][number];
@@ -137,7 +140,9 @@ export async function prepareVeOutreachLaunch(db: SupabaseClient, instantlyDb: S
       items.push({ ...item, status: 'blocked', error: error instanceof VeOutreachLaunchError ? error.message : 'Не удалось подготовить проверку запуска.' });
     }
   }
-  return { ready: items.every((item) => item.status === 'ready'), items };
+  // Куда пойдут кампании: обзор отдаёт, запуск возвращает (expected_transport).
+  const { transport } = await resolveVeLaunchTransport(db, projectId);
+  return { ready: items.every((item) => item.status === 'ready'), items, transport };
 }
 
 export async function startVeOutreach(db: SupabaseClient, instantlyDb: SupabaseClient, input: {
@@ -160,6 +165,8 @@ export async function startVeOutreach(db: SupabaseClient, instantlyDb: SupabaseC
     return { existing: true, run: active as VeOutreachRun };
   }
   await readSetup(db, input.projectId, request);
+  const transportIssue = transportExpectationIssue(await resolveVeLaunchTransport(db, input.projectId), request.expected_transport);
+  if (transportIssue) throw new VeOutreachLaunchError(transportIssue.error, transportIssue.status);
   for (const item of request.items) {
     if (!item.segmentation_audit_id) fail('Дождитесь проверки аудитории и просмотрите обзор запуска.');
     const { template, base } = await readItem(db, input.projectId, item);
@@ -209,6 +216,9 @@ export async function runVeOutreachStartStage(job: VeJob, ctx: VeStageContext, i
     if (!launch) {
       // A reserved or uncertain provider creation is not replayed blindly after restart.
       if (audit.launch_status !== 'idle') fail('Предыдущая попытка создания кампаний уже выполнялась. Проверьте её результат перед новым запуском.');
+      // До согласования запаса: иначе после отказа осталось бы согласование без запуска.
+      const transportIssue = transportExpectationIssue(await resolveVeLaunchTransport(db, job.project_id), request.expected_transport);
+      if (transportIssue) fail(transportIssue.error);
       item.status = 'approving'; await saveProgress(db, job, run); ctx.signal?.throwIfAborted();
       const approved = await approveVeContactSupply(db, instantlyDb, { ...deliveryInput(request, item), userId: run.requested_by,
         confirmed: true, reviewedRevision: item.preview_revision });
@@ -216,7 +226,8 @@ export async function runVeOutreachStartStage(job: VeJob, ctx: VeStageContext, i
       item.status = 'creating'; await saveProgress(db, job, run); ctx.signal?.throwIfAborted();
       const created = await runVeTemplateLaunch({ portalDb: db, instantlyDb, ...deliveryInput(request, item),
         segmentationAuditId: item.segmentation_audit_id!, force: false, confirmSegmentation: true, userId: run.requested_by,
-        locale: 'ru', eventPrefix: 'tools.vertical-engine-v2.outreach.start' });
+        locale: 'ru', eventPrefix: 'tools.vertical-engine-v2.outreach.start',
+        ...(request.expected_transport ? { expectedTransport: request.expected_transport } : {}) });
       if (created.status < 200 || created.status >= 300) fail(typeof created.body.error === 'string' ? created.body.error : 'Не удалось подтвердить создание кампаний.');
       const { data: updated, error: readError } = await db.from('ve_templates').select('launch_info').eq('id', item.template_id).single();
       if (readError) throw new Error('Could not read committed campaign launch');
@@ -224,7 +235,8 @@ export async function runVeOutreachStartStage(job: VeJob, ctx: VeStageContext, i
     }
     if (!launch || launch.reconciliation_required || launch.segmentation_audit_id !== item.segmentation_audit_id
       || launch.preset_id !== request.preset_id || launch.portal_project_id !== request.portal_project_id
-      || (launch.portal_period_id ?? null) !== request.expected_portal_period_id || launch.target_contacts !== request.target_contacts) fail('Сохранённые кампании не соответствуют этому запуску. Нужна сверка.');
+      || (launch.portal_period_id ?? null) !== request.expected_portal_period_id || launch.target_contacts !== request.target_contacts
+      || transportOf(launch.transport) !== (request.expected_transport ?? 'instantly')) fail('Сохранённые кампании не соответствуют этому запуску. Нужна сверка.');
     const { data: queue, error: queueError } = await db.from('ve_launch_queue_items').select('id,status,plan_version')
       .eq('template_id', item.template_id).eq('project_id', job.project_id).maybeSingle();
     if (queueError || !queue) fail('Кампании сохранены, но очередь активации пока недоступна.');

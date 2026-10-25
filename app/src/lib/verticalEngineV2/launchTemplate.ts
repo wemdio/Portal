@@ -63,6 +63,9 @@ import {
   loadNoPeriodPlanOwners,
   loadPortalProjectTerm,
 } from './portalDeliveryTerm';
+import { rollbackVeSenderReservation } from './senderTransport/senderRecovery';
+import { resolveVeLaunchTransport, transportExpectationIssue, type VeLaunchTransport } from './senderTransport/transport';
+import type { VeSenderLaunchPlan } from './senderTransport/senderLaunch';
 
 export type VeLaunchLocale = 'ru' | 'en';
 
@@ -86,6 +89,10 @@ interface VeLaunchMessages {
   noValidEmails: string;
   tooManyLeads: (count: number) => string;
   segmentSplitInfo: (campaignsCount: number) => string;
+  segmentSplitInfoSender: (campaignsCount: number) => string;
+  senderDroppedNote: (count: number) => string;
+  senderLaunchFailed: string;
+  senderLaunchInfoSaveWarning: string;
   rowsSkippedNote: (invalid: number, irrelevant: number) => string;
   instantlyFailedFallback: string;
   zeroAccepted: string;
@@ -127,6 +134,13 @@ const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
       `Слишком много лидов для запуска из мастера: ${count.toLocaleString('ru-RU')}. Максимум — ${VE_LAUNCH_MAX_LEADS.toLocaleString('ru-RU')}`,
     segmentSplitInfo: (campaignsCount) =>
       `Сегментные варианты материализованы: запуск разбит на ${campaignsCount} кампании по сегментам базы (у каждой сегментной — свои тексты писем). Все кампании на паузе.`,
+    segmentSplitInfoSender: (campaignsCount) =>
+      `Сегментные варианты материализованы: запуск разбит на ${campaignsCount} кампании «Рассылки» по сегментам базы (у каждой сегментной — свои тексты писем). Все кампании — черновики.`,
+    senderDroppedNote: (count) =>
+      `Не пойдут в «Рассылку» контактов: ${count.toLocaleString('ru-RU')} — первое письмо у них выходит пустым или адрес не принимается.`,
+    senderLaunchFailed: 'Не удалось подготовить кампании в «Рассылке». Черновики этой попытки удалены, запуск можно повторить.',
+    senderLaunchInfoSaveWarning:
+      'Черновики в «Рассылке» созданы, но запись о запуске не сохранилась. Не запускайте их вручную — сверьте запуск в Движке вертикалей.',
     rowsSkippedNote: (invalid, irrelevant) =>
       `Пропущено строк базы: ${invalid.toLocaleString('ru-RU')} с невалидным email (верификация) и ${irrelevant.toLocaleString('ru-RU')} нерелевантных вертикали.`,
     instantlyFailedFallback: 'Не удалось создать кампанию',
@@ -168,6 +182,13 @@ const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
       `Too many leads for a wizard launch: ${count.toLocaleString('en-US')}. Maximum is ${VE_LAUNCH_MAX_LEADS.toLocaleString('en-US')}.`,
     segmentSplitInfo: (campaignsCount) =>
       `Segment variants materialized: the launch was split into ${campaignsCount} campaigns by base segment (each segment campaign carries its own letter texts). All campaigns are paused.`,
+    segmentSplitInfoSender: (campaignsCount) =>
+      `Segment variants materialized: the launch was split into ${campaignsCount} «Рассылка» campaigns by base segment. All campaigns are drafts.`,
+    senderDroppedNote: (count) =>
+      `Contacts that will not go to «Рассылка»: ${count.toLocaleString('en-US')} — their first letter renders empty or the address is not accepted.`,
+    senderLaunchFailed: 'Failed to prepare the «Рассылка» campaigns. Drafts of this attempt were removed; the launch can be retried.',
+    senderLaunchInfoSaveWarning:
+      'The «Рассылка» drafts were created, but the launch record was not saved. Do not start them by hand — reconcile the launch in the Vertical Engine.',
     rowsSkippedNote: (invalid, irrelevant) =>
       `Base rows skipped: ${invalid.toLocaleString('en-US')} with an invalid email (verification) and ${irrelevant.toLocaleString('en-US')} irrelevant to the vertical.`,
     instantlyFailedFallback: 'Failed to create the campaign',
@@ -207,6 +228,8 @@ export interface VeTemplateLaunchInput {
   expectedPortalPeriodId: string | null;
   /** Exact specialist-confirmed integer; legacy range strings are never parsed. */
   targetContacts: number;
+  /** Способ отправки из обзора запуска; нет — Instantly. Должен совпасть с переключателем. */
+  expectedTransport?: VeLaunchTransport;
 }
 
 export interface VeTemplateLaunchOutcome {
@@ -337,6 +360,16 @@ async function settleTemplateLaunch(input: {
   dripRows?: VeTemplateLaunchDripRow[];
   error?: string | null;
 }): Promise<string | null> {
+  const failure = await settleTemplateLaunchResult(input);
+  return failure?.message ?? null;
+}
+
+/**
+ * definitive — функция завершения ответила ошибкой базы (у неё есть код):
+ * её транзакция откатилась, и ничего из этой попытки в очереди нет. Обрыв
+ * связи и «резервирование уже не наше» — не definitive: исход неизвестен.
+ */
+async function settleTemplateLaunchResult(input: Parameters<typeof settleTemplateLaunch>[0]): Promise<{ message: string; definitive: boolean } | null> {
   const completedAt = new Date().toISOString();
   const persistDripRows = input.status === 'succeeded' && Array.isArray(input.dripRows);
   const { data, error } = await input.portalDb.rpc(
@@ -354,9 +387,9 @@ async function settleTemplateLaunch(input: {
       ...(persistDripRows ? { p_drip_rows: input.dripRows ?? [] } : {}),
     },
   );
-  if (error) return error.message;
+  if (error) return { message: error.message, definitive: Boolean((error as { code?: string }).code) };
   const result = data && typeof data === 'object' ? (data as Record<string, unknown>) : null;
-  return result?.finalized === true ? null : 'Резервирование запуска больше не активно';
+  return result?.finalized === true ? null : { message: 'Резервирование запуска больше не активно', definitive: false };
 }
 
 async function heartbeatTemplateLaunch(input: {
@@ -394,6 +427,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     portalProjectId,
     expectedPortalPeriodId,
     targetContacts,
+    expectedTransport,
   } = input;
   const t = MESSAGES[locale];
 
@@ -581,6 +615,11 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     return conflict('SUPPLY_WORKSPACE_CHANGED', 'Workspace пресета изменился после согласования. Проверьте клиентский аккаунт.');
   }
   const instantlyRequestOptions = { accountId: instantlyAccountId };
+  // Куда пойдёт запуск — решает переключатель «Рассылки» сейчас, и это должно
+  // совпасть с обзором, который видел специалист. Только чтение.
+  const transportDecision = await resolveVeLaunchTransport(portalDb, base.project_id);
+  const transportIssue = transportExpectationIssue(transportDecision, expectedTransport);
+  if (transportIssue) return { status: transportIssue.status, body: { error: transportIssue.error, code: transportIssue.code } };
 
   // Client-scoped blocklist is the safety boundary for shared Instantly
   // workspaces. Read it fail-closed before the launch reservation and before
@@ -644,6 +683,19 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   }
   if (groups.length === 0) {
     return { status: 400, body: { code: 'DELIVERY_CONTACTS_ALREADY_RESERVED', error: 'Эти контакты уже закреплены за другими запусками проекта' } };
+  }
+  // «Рассылка»: всё, чего она не сможет, — отказ до первой записи запуска.
+  // Группы уже окончательные (чёрный список, исключения, резерв).
+  let senderPlan: VeSenderLaunchPlan | null = null;
+  if (transportDecision.transport === 'sender') {
+    const { prepareVeSenderLaunch } = await import('./senderTransport/senderLaunch');
+    const prepared = await prepareVeSenderLaunch(portalDb, {
+      preset, mailboxEmails: mailboxIds, groups, letters: templateLetters, leads, rows: audience.rows,
+      portalProjectId, clientUserId, force,
+    });
+    if (!prepared.ok) return { status: prepared.status, body: { error: prepared.error, code: prepared.code } };
+    senderPlan = prepared.plan;
+    groups = senderPlan.groups.map((group) => ({ segment: group.segment, leadIdx: group.leadIdx }));
   }
   const segmentsMaterialized = groups.some((group) => group.segment !== null);
 
@@ -879,7 +931,52 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   const groupErrors: string[] = [];
   let externalMutationAttempted = false;
   let ambiguousGroupFailure = false;
-  for (const group of groups) {
+  if (senderPlan) {
+    // «Рассылка»: черновики на группы и привязка к проекту. Любая ошибка —
+    // откат черновиков этой попытки; запись о запуске при этом не пишется,
+    // иначе шаблон числился бы запущенным без очереди.
+    const { createVeSenderLaunchCampaigns } = await import('./senderTransport/senderLaunch');
+    try {
+      const created = await createVeSenderLaunchCampaigns(portalDb, {
+        reservationId,
+        plan: senderPlan,
+        campaignName: (segment) => buildLaunchCampaignName({ clientName: campaignClientName, audienceName: campaignAudienceName, segment }),
+        leads,
+        rows: audience.rows,
+        portalProjectId,
+        periodId: expectedPortalPeriodId,
+        clientUserId,
+        userId,
+        heartbeat: () => heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId }),
+      });
+      campaigns.push(...created.campaigns);
+      dripRows.push(...created.dripRows);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : t.senderLaunchFailed;
+      let rolledBack = false;
+      try {
+        rolledBack = (await rollbackVeSenderReservation(portalDb, reservationId)).ok;
+      } catch (rollbackError) {
+        await logError(`${eventPrefix}.sender_rollback_failed`, rollbackError, { userId, templateId, reservationId });
+      }
+      await settleTemplateLaunch({
+        portalDb,
+        auditId: audit.id,
+        templateId,
+        reservationId,
+        status: rolledBack ? 'failed' : 'uncertain',
+        error: message,
+      });
+      await logError(`${eventPrefix}.sender_failed`, err, { userId, templateId, reservationId });
+      return {
+        status: 500,
+        body: rolledBack
+          ? { error: `${t.senderLaunchFailed} ${message}`.slice(0, 300), code: 'VE_SENDER_LAUNCH_FAILED' }
+          : { error: message.slice(0, 300), code: 'TEMPLATE_LAUNCH_UNCERTAIN' },
+      };
+    }
+  }
+  for (const group of senderPlan ? [] : groups) {
     const sequence = buildLaunchSequence(templateLetters, { segmentWhen: group.segment });
     if (!sequence) {
       if (campaigns.length > 0) {
@@ -999,7 +1096,8 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     };
   }
 
-  if (!ambiguousGroupFailure) {
+  // Кампании «Рассылки» к проекту уже привязаны (createVeSenderLaunchCampaigns).
+  if (!ambiguousGroupFailure && !senderPlan) {
     try {
       if (expectedPortalPeriodId !== null) {
         const ownership = await reservePeriodCampaignLinks(
@@ -1089,6 +1187,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     segmentation_audit_input_hash: currentInputHash,
     ...(ambiguousGroupFailure ? { reconciliation_required: true } : {}),
     campaigns,
+    ...(senderPlan ? { transport: 'sender' as const } : {}),
   };
   const warnings: string[] = [];
   if (blockedContactsCount > 0) {
@@ -1102,8 +1201,11 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       ),
     );
   }
+  if (senderPlan && senderPlan.droppedLeads > 0) {
+    warnings.push(t.senderDroppedNote(senderPlan.droppedLeads));
+  }
   if (segmentsMaterialized && campaigns.length > 1) {
-    warnings.push(t.segmentSplitInfo(campaigns.length));
+    warnings.push(senderPlan ? t.segmentSplitInfoSender(campaigns.length) : t.segmentSplitInfo(campaigns.length));
   }
   for (const ge of groupErrors) {
     warnings.push(
@@ -1113,7 +1215,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
 
   // launch_info and the terminal reservation state commit together under a
   // template advisory lock. An old process cannot overwrite a reconciliation.
-  const settleError = await settleTemplateLaunch({
+  const settleFailure = await settleTemplateLaunchResult({
     portalDb,
     auditId: audit.id,
     templateId,
@@ -1123,6 +1225,23 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     ...(ambiguousGroupFailure ? {} : { dripRows }),
     error: ambiguousGroupFailure ? groupErrors.join('; ') : null,
   });
+  const settleError = settleFailure?.message ?? null;
+  // «Рассылка»: база однозначно отказала в записи запуска — очереди нет, и
+  // черновики этой попытки убираются, а запуск можно повторить. Иначе они
+  // остались бы привязанными к проекту без запуска.
+  if (settleFailure?.definitive && senderPlan) {
+    let rolledBack = false;
+    try {
+      rolledBack = (await rollbackVeSenderReservation(portalDb, reservationId)).ok;
+    } catch (rollbackError) {
+      await logError(`${eventPrefix}.sender_rollback_failed`, rollbackError, { userId, templateId, reservationId });
+    }
+    if (rolledBack) {
+      await settleTemplateLaunch({ portalDb, auditId: audit.id, templateId, reservationId, status: 'failed', error: settleFailure.message });
+      await logError(`${eventPrefix}.sender_finalize_refused`, new Error(settleFailure.message), { userId, templateId, reservationId });
+      return { status: 500, body: { error: `${t.senderLaunchFailed} ${settleFailure.message}`.slice(0, 300), code: 'VE_SENDER_LAUNCH_FAILED' } };
+    }
+  }
   if (settleError) {
     await logError(`${eventPrefix}.reservation_settle_failed`, new Error(settleError), {
       userId,
@@ -1147,7 +1266,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     return {
       status: 500,
       body: {
-        error: t.launchInfoSaveWarning,
+        error: senderPlan ? t.senderLaunchInfoSaveWarning : t.launchInfoSaveWarning,
         code: 'TEMPLATE_LAUNCH_UNCERTAIN',
       },
     };
@@ -1155,7 +1274,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
 
   await logAudit(
     `${eventPrefix}.success`,
-    'Vertical Engine v2 template sent to Instantly (paused)',
+    senderPlan ? 'Vertical Engine v2 template sent to «Рассылка» (draft)' : 'Vertical Engine v2 template sent to Instantly (paused)',
     {
       userId,
       templateId,
@@ -1176,6 +1295,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       blockedContacts: blockedContactsCount,
       projectExcludedContacts: projectExcludedCount,
       force,
+      ...(senderPlan ? { transport: 'sender', senderDroppedLeads: senderPlan.droppedLeads } : {}),
     },
   );
 

@@ -51,7 +51,8 @@ export async function reconcileProjectVerticals(
     const campaignsByVertical = new Map<string, string[]>();
     for (const t of templates as Array<{ vertical_id: string; launch_info: unknown }>) {
       const info = parseLaunchInfo(t.launch_info);
-      if (!info) continue;
+      // Кампаний «Рассылки» в аналитике Instantly нет — переспрашивать её незачем.
+      if (!info || info.transport === 'sender') continue;
       const ids = (info.campaigns?.length
         ? info.campaigns.map((c) => c.campaign_id)
         : [info.campaign_id]

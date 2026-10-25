@@ -96,6 +96,27 @@ export async function resolveVeLaunchTransport(
   }
 }
 
+/**
+ * Специалист запускает то, что видел в обзоре запуска: способ отправки из
+ * обзора приходит с запуском (expected_transport; нет — Instantly) и обязан
+ * совпасть с тем, что решает переключатель сейчас. Иначе — отказ, а не тихая
+ * смена канала. Ошибка чтения настроек при ожидаемой «Рассылке» — 503:
+ * «способ изменился» было бы неправдой.
+ */
+export function transportExpectationIssue(
+  resolved: { transport: VeLaunchTransport; source: VeLaunchTransportSource },
+  expected: unknown,
+): null | { status: number; code: string; error: string } {
+  if (expected !== undefined && expected !== null && expected !== 'instantly' && expected !== 'sender') {
+    return { status: 400, code: 'VE_LAUNCH_TRANSPORT_INVALID', error: 'Некорректный способ отправки' };
+  }
+  if (resolved.transport === (expected ?? 'instantly')) return null;
+  if (resolved.source === 'error') {
+    return { status: 503, code: 'VE_LAUNCH_TRANSPORT_UNAVAILABLE', error: 'Не удалось проверить способ отправки. Повторите.' };
+  }
+  return { status: 409, code: 'VE_LAUNCH_TRANSPORT_CHANGED', error: 'Способ отправки изменился — обновите обзор запуска.' };
+}
+
 /** Можно ли подавать контакты в кампании «Рассылки» проекта. Ошибка — нельзя. */
 export async function readSenderUploadsEnabled(portalDb: SupabaseClient, veProjectId: string): Promise<boolean> {
   try {
