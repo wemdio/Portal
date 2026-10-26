@@ -106,6 +106,39 @@ async function findRecipientByEmail(email: string | null, campaignIds: string[])
 }
 
 /**
+ * Получатель по корпоративному домену отправителя — когда ответил не тот,
+ * кому мы писали, а коллега: переслал письмо («FW:») или ответил с другого
+ * адреса. Ссылки на наше письмо в пересылке нет, адреса в базе нет, и ответ
+ * оставался ничьим: 20.10.2026 CMO «Рускона» (kutateladze.d@) предложил
+ * встречу в ответ на письмо на lk@ruscon.ru — ни оценки, ни чата, ни сделки,
+ * а цепочка дошла до конца.
+ *
+ * Только среди тех, кому из этого ящика уже ушло письмо, и только по
+ * корпоративному домену: бесплатные почты (gmail, mail.ru…) компанию не
+ * определяют. Если в компании писали нескольким, берём последнего, кому
+ * писали именно с этого ящика.
+ */
+async function findRecipientByDomain(
+  email: string | null,
+  campaignIds: string[],
+  mailboxId: string,
+): Promise<string | null> {
+  const domain = corporateDomain(email);
+  if (!supabaseAdmin || !domain || !campaignIds.length) return null;
+  const { data } = await supabaseAdmin
+    .from('sender_recipients')
+    .select('id, mailbox_id')
+    .in('campaign_id', campaignIds)
+    .eq('email_domain', domain)
+    .gte('last_step_sent', 1)
+    .order('updated_at', { ascending: false })
+    .limit(20);
+  const rows = (data ?? []) as Array<{ id: string; mailbox_id: string | null }>;
+  const own = rows.find((row) => row.mailbox_id === mailboxId) ?? rows[0];
+  return own ? String(own.id) : null;
+}
+
+/**
  * Писали ли мы когда-нибудь этому человеку или в его компанию — в любой
  * кампании. Нет — значит, письмо не ответ на рассылку, а прогрев чужой сети
  * Instantly: те ящики переписываются с нашими, но в базах их нет. Коллега лида
@@ -356,7 +389,8 @@ export async function processSenderReplies(opts: {
               : (await findRecipientByThread(reply.inReplyTo)) ??
               (kind === 'bounce'
                 ? await findRecipientByEmail(bouncedEmail, campaignIds)
-                : await findRecipientByEmail(reply.fromEmail, campaignIds));
+                : (await findRecipientByEmail(reply.fromEmail, campaignIds)) ??
+                  (await findRecipientByDomain(reply.fromEmail, campaignIds, mailbox.id)));
           // Не ответ на наше письмо и не от того, кому мы писали, — прогрев
           // чужой сети. Иначе он копился бы во «Входящих без привязки» и в
           // метриках (453 «ответа» при 7 письмах на старте прода).

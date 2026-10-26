@@ -16,6 +16,14 @@ export function mskDayStartUtc(now: Date): string {
   return new Date(start - 3 * 60 * 60 * 1000).toISOString();
 }
 
+/**
+ * Когда обнулится суточная норма — начало следующих МСК-суток. В отказе
+ * раньше стояло начало текущих, и клиент видел уже прошедшую дату сброса.
+ */
+export function mskNextDayStartUtc(dayStart: string): string {
+  return new Date(Date.parse(dayStart) + 24 * 60 * 60 * 1000).toISOString();
+}
+
 function withRetryAfter(response: NextResponse, seconds: number): NextResponse {
   response.headers.set('Retry-After', String(seconds));
   return response;
@@ -67,7 +75,7 @@ export async function checkBenchLimits(
       return benchError(
         'quota_exceeded',
         `Исчерпана суточная норма: ${key.daily_jobs_limit} задач`,
-        { limit: key.daily_jobs_limit, resets_at: dayStart },
+        { limit: key.daily_jobs_limit, resets_at: mskNextDayStartUtc(dayStart) },
       );
     }
   }
@@ -89,7 +97,7 @@ export async function checkBenchLimits(
       return benchError(
         'quota_exceeded',
         `Исчерпана суточная норма: ${key.daily_rows_limit} строк`,
-        { limit: key.daily_rows_limit, resets_at: dayStart },
+        { limit: key.daily_rows_limit, resets_at: mskNextDayStartUtc(dayStart) },
       );
     }
   }

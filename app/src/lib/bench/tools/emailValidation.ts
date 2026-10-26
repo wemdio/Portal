@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { buildQueueItems } from '@/lib/emailValidation/queueItems';
+import { mskNextDayStartUtc } from '../limits';
 import type { BenchJobTool, BenchStatus, JobRow } from '../types';
 
 /**
@@ -161,7 +162,7 @@ export const emailValidationTool: BenchJobTool = {
           limit: DAILY_EMAILS_LIMIT,
           used_today: usedToday,
           requested: p.emails.length,
-          resets_at: dayStart,
+          resets_at: mskNextDayStartUtc(dayStart),
         },
       };
     }
