@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -261,7 +262,11 @@ async def _run_transcription(file: UploadFile, job_id: str) -> JSONResponse:
             raise TranscriptionCancelledError("Transcription cancelled by user")
 
         with tempfile.TemporaryDirectory(prefix="transcribe-") as tmp:
-            raw_path = os.path.join(tmp, file.filename or "input.bin")
+            # Имя файла приходит снаружи (Telegram document.file_name): берём
+            # только расширение, иначе «../..» в имени писал бы мимо tmp.
+            ext = os.path.splitext(os.path.basename(file.filename or ""))[1]
+            safe_ext = ext if re.fullmatch(r"\.[A-Za-z0-9]{1,10}", ext) else ".bin"
+            raw_path = os.path.join(tmp, "input" + safe_ext)
             wav_path = os.path.join(tmp, "audio.wav")
 
             data = await file.read()

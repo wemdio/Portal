@@ -32,6 +32,7 @@ import {
 } from './engContactDiagnostics';
 import {
   fetchAndExtract,
+  fetchFollowingGuarded,
   WEBSITE_ACCEPT_LANGUAGE_EN,
   WEBSITE_NO_TEXT_STUB_EN,
   type WebsiteFetchGuard,
@@ -894,13 +895,14 @@ export async function stepFindEmails(
     return [header, ...body];
   }
 
-  // EN: защита чтения и потолок тела в каждый обход (см. EN_SITE_READ_MAX_BYTES).
+  // Защита чтения и потолок тела в каждый обход (см. EN_SITE_READ_MAX_BYTES) —
+  // у обоих рынков. До 26.10.2026 её получала только EN-джоба, и клиент
+  // конструктора мог подсунуть RU-джобе адрес внутреннего сервиса и получить
+  // его текст в колонке описания (SSRF, аудит 26.10.2026).
   // Переход https → http почтовому обходу разрешён: сертификат он и так не
   // проверяет (http-ответ его не ослабляет), а запрет терял бы адреса сайтов,
   // которые так переадресуют. Проверка адреса и порта — на каждом шаге, как было.
-  const enRead = locale === 'en'
-    ? { guard: { ...(await enSiteGuard()), allowHttpDowngrade: true }, maxBytes: EN_SITE_READ_MAX_BYTES }
-    : null;
+  const siteRead = { guard: { ...(await enSiteGuard()), allowHttpDowngrade: true }, maxBytes: EN_SITE_READ_MAX_BYTES };
   let refusedRows = 0;
   let cappedBodies = 0;
 
@@ -937,7 +939,7 @@ export async function stepFindEmails(
           ? { companyName: body[item.i][companyIdx].trim() } : {}),
         ...(options?.reuseWebsiteDescription ? { includeDescription: true } : {}),
         ...(controller ? { signal: controller.signal } : {}),
-        ...(enRead ?? {}),
+        ...siteRead,
       });
       // Give an aborted crawler one second to return addresses from pages
       // already read. A broken fetch must not occupy the pool slot forever.
@@ -1006,7 +1008,7 @@ export async function stepFindEmails(
   await reportChain;
   if (refusedRows > 0 || cappedBodies > 0) {
     console.warn(
-      `[find_emails] защита чтения EN-джобы: строк, где отклонён хотя бы один адрес, — ${refusedRows} `
+      `[find_emails] защита чтения: строк, где отклонён хотя бы один адрес, — ${refusedRows} `
       + `из ${toProcess.length} (${EN_SITE_REFUSAL_KINDS}); на отклонённый адрес запрос не уходил, `
       + `страница считалась неоткрывшейся. Ответов, дочитанных до потолка `
       + `${EN_SITE_READ_MAX_BYTES / 1024 / 1024} МиБ, — ${cappedBodies}: разобраны их первые `
@@ -1193,18 +1195,27 @@ export async function stepRemoveSupportEmails(
    STEP: Check site availability
    ═══════════════════════════════════════════ */
 
-async function checkSite(url: string): Promise<boolean> {
+/**
+ * Сайт открывается. Под той же защитой чтения, что почтовый обход: каждый
+ * шаг редиректа проверяется, соединение идёт только на публичный адрес. Без
+ * неё по «живой/мёртвой» строке клиент узнавал, отвечает ли внутренний адрес
+ * сервера (аудит 26.10.2026). Отклонённый адрес — сайт «не открылся».
+ */
+async function checkSite(url: string, guard: WebsiteFetchGuard): Promise<boolean> {
   let normalized = url;
   if (!/^https?:\/\//i.test(normalized)) normalized = `https://${normalized}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SITE_CHECK_TIMEOUT);
   try {
-    const res = await fetch(normalized, {
+    const { res } = await fetchFollowingGuarded(normalized, {
       method: 'GET',
-      redirect: 'follow',
+      redirect: 'manual',
       signal: controller.signal,
       headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' },
-    });
+      // undici-опция маршрута: соединение только с проверенным публичным адресом.
+      ...(guard.directDispatcher ? { dispatcher: guard.directDispatcher } : {}),
+    } as RequestInit, guard, controller.signal);
+    await res.body?.cancel();
     return res.status >= 200 && res.status < 400;
   } catch { return false; }
   finally { clearTimeout(timeout); }
@@ -1253,10 +1264,11 @@ export async function stepSiteCheck(
     }
   }
 
+  const guard: WebsiteFetchGuard = { ...(await enSiteGuard()), allowHttpDowngrade: true };
   for (let batch = 0; batch < toCheck.length; batch += SITE_CHECK_BATCH) {
     if (isCancelled && await isCancelled()) throw new Error('Отменено');
     const chunk = toCheck.slice(batch, batch + SITE_CHECK_BATCH);
-    const results = await Promise.all(chunk.map(async (item) => ({ i: item.i, ok: await checkSite(item.url) })));
+    const results = await Promise.all(chunk.map(async (item) => ({ i: item.i, ok: await checkSite(item.url, guard) })));
     for (const r of results) { if (!r.ok) keep[r.i] = false; }
     await onProgress(Math.round(((batch + chunk.length) / toCheck.length) * 100));
   }
@@ -1340,7 +1352,8 @@ export async function stepEnrich(
    * колонка описания доезжает до превью базы английского кабинета. Потолок
    * тела и защита чтения — см. EN_SITE_READ_MAX_BYTES; защиту каждая строка
    * получает своей обёрткой (guardNotingRefusals), чтобы посчитать отказы.
-   * RU-джоба получает ровно прежний объект опций { timeout, signal }.
+   * RU-джоба получает прежние { timeout, signal } и — с 26.10.2026 — ту же
+   * защиту чтения (без неё клиент читал внутренние адреса сервера).
    */
   const enFetch = locale === 'en'
     ? { acceptLanguage: WEBSITE_ACCEPT_LANGUAGE_EN, textLanguage: 'en' as const, maxBytes: EN_SITE_READ_MAX_BYTES }
@@ -1348,7 +1361,12 @@ export async function stepEnrich(
 
   if (toProcess.length === 0) { await onProgress(100); return [newHeader, ...newBody]; }
 
-  const enGuard = locale === 'en' ? await enSiteGuard() : null;
+  // Защита чтения — у обоих рынков (аудит 26.10.2026, см. find_emails). Запрет
+  // редиректа https → http — решение по английскому рынку; RU-джоба, как и
+  // раньше, такой редирект проходит.
+  const siteGuard: WebsiteFetchGuard = locale === 'en'
+    ? await enSiteGuard()
+    : { ...(await enSiteGuard()), allowHttpDowngrade: true };
   const refusedRows = new Set<number>();
 
   let done = 0;
@@ -1405,7 +1423,7 @@ export async function stepEnrich(
         timeout: 15_000,
         signal,
         ...enFetch,
-        ...(enGuard ? { guard: guardNotingRefusals(enGuard, () => refusedRows.add(item.i)) } : {}),
+        guard: guardNotingRefusals(siteGuard, () => refusedRows.add(item.i)),
         ...(preserveEvidence ? { onExtractedPage: (page: EngWebsiteEvidencePage) => {
           if (evidencePages.length < 3) evidencePages.push({ ...page, text: page.text.slice(0, 6000),
             ...(page.text.length > 6000 ? { truncated: true } : {}) });
@@ -1445,7 +1463,7 @@ export async function stepEnrich(
   }
   if (refusedRows.size > 0) {
     console.warn(
-      `[stepEnrich] защита чтения EN-джобы: строк, где проверка адреса отклонила хотя бы один адрес, — `
+      `[stepEnrich] защита чтения: строк, где проверка адреса отклонила хотя бы один адрес, — `
       + `${refusedRows.size} из ${toProcess.length} (${EN_SITE_ADDRESS_CHECK_KINDS}); на отклонённый адрес `
       + `запрос не уходил, сайт без другого открывшегося адреса остался без описания. В этот счёт не входят `
       + `отказы правил редиректа (https → http, не на http/https, больше 10 шагов), отказ при соединении `

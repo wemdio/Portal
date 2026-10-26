@@ -1,15 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
-import { blockDemo } from '@/lib/auth/blockDemo';
+import { isInternalUser } from '@/lib/auth/internalGuard';
 import { withToolTrace } from '@/lib/toolTrace';
 
 const admin = supabaseAdmin!;
+
+/** Предел таблицы: база кампании «Рассылки» укладывается с запасом, мусор в базу не пустим. */
+const MAX_ROWS = 200_000;
+const MAX_COLUMNS = 200;
 
 /**
  * POST — положить готовую таблицу в конструктор баз без обработки: задача сразу
  * «завершена», без шагов, воркер её не берёт. Так база из «Рассылки» открывается
  * в конструкторе, как любая обработанная.
+ *
+ * Только сотрудники (аудит 26.10.2026): путь лежит в клиентском разделе
+ * middleware, и без проверки любой клиент складывал бы в базу таблицы любого
+ * размера в обход тарифа. Зовёт его только окно получателей «Рассылки».
  */
 export async function POST(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.base-constructor.import' }, async () => {
@@ -19,13 +26,25 @@ export async function POST(req: NextRequest) {
     const user = auth.user;
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-    const demo = await blockDemo(createAuthedSupabaseClient(token), user.id);
-    if (demo) return demo;
+    if (!(await isInternalUser(admin, user.id))) {
+      return NextResponse.json({ error: 'Доступ только для сотрудников' }, { status: 403 });
+    }
 
-    const body = await req.json();
-    const { data, file_name } = body as { data?: unknown; file_name?: unknown };
+    let body: { data?: unknown; file_name?: unknown };
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: 'Тело запроса должно быть JSON' }, { status: 400 });
+    }
+    const { data, file_name } = body;
     if (!Array.isArray(data) || data.length < 2 || !data.every((row) => Array.isArray(row))) {
       return NextResponse.json({ error: 'Нужна таблица: заголовок и хотя бы одна строка' }, { status: 400 });
+    }
+    if (data.length - 1 > MAX_ROWS || data.some((row) => (row as unknown[]).length > MAX_COLUMNS)) {
+      return NextResponse.json(
+        { error: `Таблица больше допустимого: до ${MAX_ROWS.toLocaleString('ru-RU')} строк и ${MAX_COLUMNS} колонок` },
+        { status: 413 },
+      );
     }
 
     const now = new Date().toISOString();

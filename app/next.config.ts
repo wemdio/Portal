@@ -35,8 +35,32 @@ const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const skipDuplicateCiTypecheck =
   semaphoreBranchCiRequestedTypecheckSkip || explicitlyPrecheckedBuildRequestedTypecheckSkip;
 
+/**
+ * Заголовки безопасности на все ответы (аудит 26.10.2026: портал не отдавал
+ * ни одного). Встраивать портал в чужие сайты нельзя — иначе страницу с
+ * кнопками можно спрятать под чужой интерфейс и подсунуть клик
+ * (кликджекинг). Разрешены свои домены и Telegram: мини-приложение портала в
+ * веб-версии Telegram открывается во фрейме. HSTS без includeSubDomains —
+ * поддомены могут жить без TLS.
+ */
+const SECURITY_HEADERS = [
+  {
+    key: 'Content-Security-Policy',
+    value:
+      "frame-ancestors 'self' https://polza-portal.ru https://*.polza-portal.ru " +
+      'https://outreachos.xyz https://*.outreachos.xyz https://web.telegram.org https://*.telegram.org',
+  },
+  { key: 'X-Content-Type-Options', value: 'nosniff' },
+  { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+  { key: 'Strict-Transport-Security', value: 'max-age=31536000' },
+];
+
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Без «X-Powered-By: Next.js» — лишняя подсказка, чем атаковать.
+  poweredByHeader: false,
+  async headers() {
+    return [{ source: '/:path*', headers: SECURITY_HEADERS }];
+  },
   typescript: {
     ignoreBuildErrors: skipDuplicateCiTypecheck,
   },
