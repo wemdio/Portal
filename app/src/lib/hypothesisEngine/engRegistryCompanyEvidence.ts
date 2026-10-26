@@ -40,7 +40,9 @@ const DIRECTORY_HOSTS = new Set(['linkedin.com', 'facebook.com', 'instagram.com'
   'scoriff.co.uk', 'businessmad.com', 'northdata.com', 'northdata.de', 'bloomberg.com', 'rocketreach.co',
   'apollo.io', 'signalhire.com', 'lusha.com', 'cbinsights.com', 'pitchbook.com', 'preqin.com', 'legal500.com',
   'chambers.com', 'vat-search.ie', 'solocheck.ie', 'societe.com', 'pappers.fr', 'infogreffe.fr', 'verif.com', 'bankofengland.co.uk', 'esma.europa.eu',
-  'eba.europa.eu',
+  'eba.europa.eu', 'ytj.fi', 'prh.fi', 'finder.fi', 'asiakastieto.fi', 'kauppalehti.fi', 'fonecta.fi', 'ares.gov.cz',
+  'justice.cz', 'czso.cz', 'kurzy.cz', 'firmy.cz', 'detail.cz', 'cro.ie', 'vision-net.ie', 'rik.ee', 'inforegister.ee',
+  'teatmik.ee', 'e-krediidiinfo.ee',
   'manageo.fr', 'proff.no', 'purehelp.no', '1881.no', 'gulesider.no', 'bizapedia.com', 'manta.com',
   'buzzfile.com', 'yelp.com', 'bbb.org', 'sophymarine.com', 'experian.com', 'ebay.com', 'amazon.com']);
 // Legal-form words: the register says «LTD», the company's own footer «Limited».
@@ -54,6 +56,9 @@ const LEGAL_FORM_PHRASES: readonly string[][] = [
   ['b', 'v'], ['n', 'v'], ['s', 'a'], ['a', 'g'], ['a', 's'], ['a', 'b'], ['s', 'e'], ['spa'], ['s', 'p', 'a'], ['srl'],
   ['s', 'r', 'l'], ['sl'], ['s', 'l'], ['dac'], ['vvag'], ['aktiengesellschaft'], ['kommanditgesellschaft'],
   ['gesellschaft', 'mit', 'beschränkter', 'haftung'],
+  // Czech, Estonian and Irish forms: «JetBrains s.r.o.», «Veriff OÜ», «Intercom R&D Unlimited Company».
+  ['spol', 's', 'r', 'o'], ['s', 'r', 'o'], ['sro'], ['v', 'o', 's'], ['k', 's'], ['oü'], ['ou'], ['unlimited', 'company'],
+  ['designated', 'activity', 'company'],
 ];
 
 export type HeEngRegistryResolutionReason = 'confirmed_registry' | 'confirmed_website' | 'invalid_website' |
@@ -140,9 +145,11 @@ function hasRegistryCountry(candidate: HeEngRegistryCandidate): boolean {
   // The adapter validates the record address; never infer country from the
   // discovery task. UK and French adapters supply validated domestic
   // registered offices; accepting their country does not claim a local team.
-  // The PRA lists state incorporation in the UK instead of an address.
+  // The PRA lists state incorporation in the UK instead of an address; the
+  // Finnish, Czech, Irish and Estonian registers hold only domestic companies.
   return (candidate.addressKind === 'business' ||
-      (['companies_house', 'france', 'pra'].includes(candidate.provider) && candidate.addressKind === 'registered')) &&
+      (['companies_house', 'france', 'pra', 'prh', 'czso', 'cro', 'ariregister'].includes(candidate.provider) &&
+        candidate.addressKind === 'registered')) &&
     text(candidate.address).length >= 5 &&
     heEngRegistryRecordValid(candidate.provider, candidate.recordId, country(candidate.country), candidate.sourceUrl);
 }
@@ -167,7 +174,8 @@ const CATALOG_LEGAL_FORMS: Readonly<Record<string, readonly string[]>> = {
   'united states': ['inc', 'llc', 'corp', 'corporation', 'co'],
   germany: ['gmbh', 'ag', 'se', 'gmbh & co. kg', 'kg'], austria: ['gmbh', 'ag'], switzerland: ['ag', 'sa', 'gmbh'],
   netherlands: ['bv', 'b.v.', 'nv', 'n.v.'], belgium: ['nv', 'bv', 'sa', 'srl'], luxembourg: ['sa', 's.a.', 'sarl'],
-  denmark: ['a/s', 'aps'], sweden: ['ab'], finland: ['oy', 'oyj'], ireland: ['ltd', 'limited', 'dac', 'plc'],
+  denmark: ['a/s', 'aps'], sweden: ['ab'], finland: ['oy', 'oyj', 'ab'], ireland: ['ltd', 'limited', 'dac', 'plc', 'unlimited company'],
+  czechia: ['s.r.o.', 'a.s.', 'spol. s r.o.'], estonia: ['oü', 'as'],
   spain: ['sa', 'sl', 's.a.', 's.l.'], italy: ['spa', 'srl', 's.p.a.', 's.r.l.'],
 };
 function catalogNameVariants(company: string, countryValue: string): string[] {
@@ -197,11 +205,14 @@ function brandScore(site: string, company: string): number {
   return label ? words.reduce((score, word) => score + (label.includes(word) ? word.length : 0), 0) : 0;
 }
 // Pages where UK/EU law puts the company number: legal notice, terms, privacy.
-const LEGAL_LINK = /\b(?:legal|impressum|imprint|mentions[\s-]*l[ée]gales|regulatory|company[\s-]*(?:information|details)|important[\s-]*information|terms|privacy)\b/i;
+// Finnish, Estonian and Czech pages that carry the company number: contact details
+// (yhteystiedot, kontaktid), company details (rekvisiidid), terms and privacy.
+const LEGAL_LINK = /\b(?:legal|impressum|imprint|mentions[\s-]*l[ée]gales|regulatory|company[\s-]*(?:information|details)|important[\s-]*information|terms|privacy|yhteystiedot|tietosuoja(?:seloste)?|k[äa]ytt[öo]ehdot|rekvisiidid|kontaktid|andmekaitse|privaatsus|kasutustingimused|podm[íi]nky|osobn[íi]ch|gdpr)\b/i;
 // Insurers sell «legal expenses» cover; those product pages are not legal notices.
 const LEGAL_PRODUCT = /\blegal[\s-]*(?:expenses?|cover|protection|services?|advice|aid|insurance|assistance)\b/i;
 function legalLinkRank(label: string): number {
-  return /\bterms\b/i.test(label) ? 1 : /\bprivacy\b/i.test(label) ? 2 : 0;
+  return /\b(?:terms|k[äa]ytt[öo]ehdot|kasutustingimused|podm[íi]nky)\b/i.test(label) ? 1
+    : /\b(?:privacy|tietosuoja(?:seloste)?|andmekaitse|privaatsus|osobn[íi]ch|gdpr)\b/i.test(label) ? 2 : 0;
 }
 /** Same-origin legal pages linked from the home page, legal notice first. */
 function legalLinks(html: string, baseUrl: string): string[] {
@@ -315,6 +326,12 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
     esma: 'lei|legal\\s+entity\\s+identifier',
     // The EBA register's key never appears on a site; the supervisor's reference is matched below.
     eba: '(?!)',
+    // National company numbers as sites label them: «Y-tunnus 0101138-5», «IČO: 26168685»,
+    // «Registered in Ireland No. 517689», «Registrikood 11694365».
+    prh: 'y-tunnus|business\\s+id|fo-nummer|org\\.?\\s*nr',
+    czso: 'ič\\s*\\([^)]{1,24}\\)|ičo|ič|ico|id\\.?\\s*no|company\\s+id|identifikační\\s+číslo|reg(?:istration)?\\.?\\s*(?:no|number)',
+    cro: `cro(?:\\s+(?:no|number))?|registered\\s+in\\s+(?:the\\s+republic\\s+of\\s+)?ireland(?:\\s*(?:no|number|nr))?|${UK_COMPANY_NUMBER_LABELS}`,
+    ariregister: 'registrikood|reg\\.?\\s*kood|reg\\.?\\s*nr|äriregistri\\s+kood|registry\\s+code|reg(?:istration|istry)?\\.?\\s*(?:code|no|number)',
   };
   const id = identifierKey(candidate.recordId);
   const digits = candidate.provider === 'companies_house' ? companiesHouseDigits(id) : id;
@@ -322,6 +339,9 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
   // A labelled registry identifier in the company's own legal footer is a
   // second identity fact. Arbitrary numbers in articles/testimonials are not.
   const end = '(?![\\p{L}\\p{N}]|[\\s.-]{1,3}\\d)';
+  // \b is ASCII-only: «IČ:» and «äriregistri kood» need letter-aware edges.
+  const unicodeLabel = ['czso', 'ariregister'].includes(candidate.provider);
+  const opening = unicodeLabel ? '(?<![\\p{L}\\p{N}])' : '\\b', closing = unicodeLabel ? '(?![\\p{L}\\p{N}])' : '\\b';
   // «Firm Reference Number (FRN) 202153» and «(FRN: 202153)» bracket the number.
   const gap = candidate.provider === 'pra' ? '(?:\\s*\\(frn\\))?[\\s:./#()-]{0,12}' : '[\\s:./#-]{0,12}';
   const registryNumber = candidate.provider === 'france' ? ([
@@ -331,7 +351,7 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
   ] as const).some(([namespace, label, pattern]) => {
     const matches = value.matchAll(new RegExp(`\\b${label}\\b[\\s:./#-]{0,12}(${pattern})${end}`, 'giu'));
     return [...matches].some(match => frenchIdentifierMatches(match[1], id, namespace));
-  }) : id.length >= 5 && [...value.matchAll(new RegExp(`\\b(?:${labels[candidate.provider]})\\b${gap}(${idPattern})${end}`, 'giu'))]
+  }) : id.length >= 5 && [...value.matchAll(new RegExp(`${opening}(?:${labels[candidate.provider]})${closing}${gap}(${idPattern})${end}`, 'giu'))]
     // A broker's or retailer's site prints its insurer's or lender's FRN as a
     // partner: «Policies are underwritten by …, FRN 955859». Unless the domain
     // carries the firm's own name, such a number names someone else.

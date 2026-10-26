@@ -3,6 +3,7 @@ import { sliceWholeChars, stripUnstorableJsonChars } from '../jsonbSafe';
 import { engCountryIso2, normalizeEngCountry } from './engCountries';
 import { HE_ENG_ESMA_MEMBER_STATES } from './engEsmaRegistry';
 import { HE_ENG_GLEIF_TERMS, HE_ENG_OSM_TAGS } from './engGlobalRegistryCatalog';
+import { HE_ENG_NACE_CLASSES, heEngNaceSources } from './engNaceRegistryCatalog';
 import type { HeEngRegistryPlan, HeEngRegistryProvider, HeEngRegistryTask } from './engPublicRegistryTypes';
 
 /** Closed catalogue: a source can only run a reviewed, sector-specific query. */
@@ -21,11 +22,15 @@ export const HE_ENG_REGISTRY_CATEGORIES: Readonly<Record<HeEngRegistryProvider, 
   esma: ['fund_managers'],
   // EBA register of PSD2 payment and e-money institutions in the EU/EEA (engEbaRegistry.ts).
   eba: ['payment_institutions'],
+  // National registers filing NACE classes (engNaceRegistryCatalog.ts): Finland,
+  // Czechia, Ireland and Estonia; a category is a NACE Rev. 2.1 class.
+  prh: HE_ENG_NACE_CLASSES, czso: HE_ENG_NACE_CLASSES, cro: HE_ENG_NACE_CLASSES, ariregister: HE_ENG_NACE_CLASSES,
 };
 
 type NationalProvider = Exclude<HeEngRegistryProvider, 'gleif' | 'osm' | 'esma' | 'eba'>;
 const PROVIDER_ISO: Readonly<Record<NationalProvider, string>> = {
   brreg: 'no', france: 'fr', companies_house: 'gb', fdic: 'us', nppes: 'us', fmcsa: 'us', pra: 'gb',
+  prh: 'fi', czso: 'cz', cro: 'ie', ariregister: 'ee',
 };
 /** Sources covering many countries: one slice per sector reads all allowed countries. */
 export const HE_ENG_GLOBAL_REGISTRY_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set(['gleif', 'osm', 'esma', 'eba']);
@@ -35,7 +40,10 @@ const EEA_REGISTRY_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set(['esm
 function providerCovers(provider: HeEngRegistryProvider, country: string): boolean {
   return !EEA_REGISTRY_PROVIDERS.has(provider) || Object.hasOwn(HE_ENG_ESMA_MEMBER_STATES, engCountryIso2(country) ?? '');
 }
-const MAX_TASKS = 120;
+// A plan over this throws and the base cannot start. Each NACE register adds a
+// slice per class of the brief for its own country: ten countries and five
+// broad hypotheses make about 140 slices; every sector in every country about 230.
+const MAX_TASKS = 300;
 const MAX_TASK_COUNTRIES = 40;
 // An EU register slice is read whole and paged within the 80-page safety limit
 // (2 000 firms); ten countries stay under it. ESMA holds about 3 200 managers in
@@ -54,55 +62,62 @@ const SECTORS: readonly Sector[] = [
   { match: /\b(?:software (?:vendors?|companies|developers?|providers?|products?|publishers?|publishing)|saas|it (?:services?|companies|consultanc(?:y|ies))|cloud (?:platform|software) vendors?)\b/i,
     // Standard software publishers are explicitly outside NAF 62.01Z.
     sources: { brreg: ['58.29', '62'], france: ['58.29A', '58.29B', '58.29C', '62.01Z', '62.02A'], companies_house: ['58290', '62012', '62020'],
-      gleif: ['software'], osm: ['software'] } },
+      gleif: ['software'], osm: ['software'], ...heEngNaceSources('software') } },
   { match: /\b(?:banks?|banking institutions|credit institutions|building societies)\b/i,
     // Custody specialists do not authorize scanning every retail/commercial bank.
     omit: /\b(?:custodian|custodial|custody|depositary|depository)[ -]+banks?\b/gi,
-    sources: { brreg: ['64'], france: ['64.19Z'], companies_house: ['64191', '64192'], fdic: ['banks'], gleif: ['banks'], osm: ['banks'], pra: ['banks'] } },
+    sources: { brreg: ['64'], france: ['64.19Z'], companies_house: ['64191', '64192'], fdic: ['banks'], gleif: ['banks'], osm: ['banks'], pra: ['banks'],
+      ...heEngNaceSources('banks') } },
   { match: /\b(?:fund (?:services?|administrators?|administration)|custodians?|depositar(?:y|ies)|transfer agents?|investor services?|mancos?)\b/i,
     // Third-party management companies are fund service providers; ESMA lists them.
-    sources: { brreg: ['66'], france: ['66.19B', '66.30Z'], companies_house: ['66190', '66300'], gleif: ['fund_services'], esma: ['fund_managers'] } },
+    sources: { brreg: ['66'], france: ['66.19B', '66.30Z'], companies_house: ['66190', '66300'], gleif: ['fund_services'], esma: ['fund_managers'],
+      ...heEngNaceSources('fund_services') } },
   { match: /\b(?:(?:asset|wealth|investment|fund) manag(?:ers?|ement)|investment advisers?|investment advisors?)\b/i,
-    sources: { brreg: ['66'], france: ['66.30Z'], companies_house: ['66300'], gleif: ['asset_management'], esma: ['fund_managers'] } },
+    sources: { brreg: ['66'], france: ['66.30Z'], companies_house: ['66300'], gleif: ['asset_management'], esma: ['fund_managers'],
+      ...heEngNaceSources('asset_management') } },
   { match: /\b(?:insurers?|reinsurers?|insurance (?:carriers?|companies))\b/i,
-    sources: { brreg: ['65'], france: ['65.12Z'], companies_house: ['65120'], gleif: ['insurance'], osm: ['insurance'], pra: ['insurers'] } },
+    sources: { brreg: ['65'], france: ['65.12Z'], companies_house: ['65120'], gleif: ['insurance'], osm: ['insurance'], pra: ['insurers'],
+      ...heEngNaceSources('insurance') } },
   // Licensed under PSD2: payment and e-money institutions and account information providers.
   { match: /\b(?:payments? (?:institutions?|companies|firms|providers?|processors?|platforms?|gateways?|service providers?|fintechs?)|psps?|e-?money (?:institutions?|issuers?|providers?)|electronic money (?:institutions?|issuers?)|(?:merchant|card|payment) acquir(?:ers?|ing (?:banks?|companies|providers?))|money (?:transfer|remittance) (?:operators?|companies|providers?|services?)|remittance (?:companies|providers?|operators?)|paytech (?:companies|firms|providers?)|account information (?:service )?providers?|open banking (?:providers?|platforms?|companies))\b/i,
     sources: { eba: ['payment_institutions'] } },
   { match: /\b(?:dentists?|dental (?:clinics?|practices?|groups?|offices?))\b/i,
-    sources: { brreg: ['86.23'], france: ['86.23Z'], companies_house: ['86230'], nppes: ['Dentist'], osm: ['dental'] } },
+    sources: { brreg: ['86.23'], france: ['86.23Z'], companies_house: ['86230'], nppes: ['Dentist'], osm: ['dental'], ...heEngNaceSources('dental') } },
   { match: /\bhospitals?\b/i,
     sources: { brreg: ['86.10'], france: ['86.10Z'], companies_house: ['86101'], nppes: ['General Acute Care Hospital'],
-      gleif: ['hospitals'], osm: ['hospitals'] } },
+      gleif: ['hospitals'], osm: ['hospitals'], ...heEngNaceSources('hospitals') } },
   { match: /\b(?:(?:medical|outpatient|healthcare|primary care) (?:clinics?|cent(?:er|re)s?|practices?)|physician groups)\b/i,
-    sources: { brreg: ['86.2'], france: ['86.21Z'], companies_house: ['86210'], nppes: ['Clinic/Center'], osm: ['clinics'] } },
+    sources: { brreg: ['86.2'], france: ['86.21Z'], companies_house: ['86210'], nppes: ['Clinic/Center'], osm: ['clinics'], ...heEngNaceSources('clinics') } },
   { match: /\b(?:clinical|medical|diagnostic) laborator(?:y|ies)\b/i,
     sources: { nppes: ['Clinical Medical Laboratory'], gleif: ['laboratories'], osm: ['laboratories'] } },
   { match: /\b(?:trucking|road (?:freight|haulage)|freight carriers?|haulage (?:companies|operators)|truck (?:fleets?|operators?))\b/i,
     sources: { brreg: ['49.41'], france: ['49.41A', '49.41B'], companies_house: ['49410'], fmcsa: ['freight_carriers'],
-      gleif: ['trucking'], osm: ['trucking'] } },
+      gleif: ['trucking'], osm: ['trucking'], ...heEngNaceSources('trucking') } },
   { match: /\b(?:construction (?:companies|contractors|firms)|building contractors|general contractors)\b/i,
-    sources: { brreg: ['41'], france: ['41.20B'], companies_house: ['41201', '41202'], gleif: ['construction'], osm: ['construction'] } },
+    sources: { brreg: ['41'], france: ['41.20B'], companies_house: ['41201', '41202'], gleif: ['construction'], osm: ['construction'],
+      ...heEngNaceSources('construction') } },
   { match: /\b(?:hotels?|hotel (?:groups?|chains?|operators?))\b/i,
-    sources: { brreg: ['55.10'], france: ['55.10Z'], companies_house: ['55100'], gleif: ['hotels'], osm: ['hotels'] } },
+    sources: { brreg: ['55.10'], france: ['55.10Z'], companies_house: ['55100'], gleif: ['hotels'], osm: ['hotels'],
+      ...heEngNaceSources('hotels') } },
   { match: /\b(?:machinery (?:manufacturers?|companies)|industrial equipment manufacturers?)\b/i,
-    sources: { brreg: ['28'], france: ['28.99B'], companies_house: ['28990'], gleif: ['machinery'] } },
-  // Sectors only the global sources cover: OpenStreetMap premises and, where
-  // such firms hold LEIs, GLEIF legal names.
+    sources: { brreg: ['28'], france: ['28.99B'], companies_house: ['28990'], gleif: ['machinery'], ...heEngNaceSources('machinery') } },
+  // Sectors the global sources cover (OpenStreetMap premises and, where such
+  // firms hold LEIs, GLEIF legal names) and, by NACE class, the national
+  // registers of Finland, Czechia, Ireland and Estonia.
   { match: /\binsurance (?:brokers?|broking|brokerages?|agenc(?:y|ies)|agents?)\b/i,
-    sources: { gleif: ['insurance_brokers'], osm: ['insurance'] } },
+    sources: { gleif: ['insurance_brokers'], osm: ['insurance'], ...heEngNaceSources('insurance_brokers') } },
   { match: /\b(?:law (?:firms?|offices?|practices?)|lawyers?|attorneys?|solicitors?|barristers?|legal (?:practices?|firms?))\b/i,
-    sources: { gleif: ['law_firms'], osm: ['law_firms'] } },
+    sources: { gleif: ['law_firms'], osm: ['law_firms'], ...heEngNaceSources('law_firms') } },
   { match: /\b(?:accounting (?:firms?|practices?|offices?)|accountants?|accountancy (?:firms?|practices?)|bookkeep(?:ers?|ing (?:firms?|services?))|tax (?:advis(?:ers?|ors?|ory firms?)|consultants?)|audit(?:ing)? firms?|auditors?|cpa firms?)\b/i,
-    sources: { gleif: ['accounting'], osm: ['accounting'] } },
+    sources: { gleif: ['accounting'], osm: ['accounting'], ...heEngNaceSources('accounting') } },
   { match: /\b(?:real estate (?:agenc(?:y|ies)|agents?|brokers?|brokerages?|offices?)|estate agen(?:ts?|cies|cy)|realtors?|letting agen(?:ts?|cies|cy)|property (?:managers?|management (?:companies|firms)))\b/i,
-    sources: { osm: ['real_estate_agencies'] } },
+    sources: { osm: ['real_estate_agencies'], ...heEngNaceSources('real_estate_agencies') } },
   { match: /\b(?:architects?|architecture (?:firms?|practices?|studios?|offices?)|architectural (?:firms?|practices?))\b/i,
-    sources: { osm: ['architects'] } },
+    sources: { osm: ['architects'], ...heEngNaceSources('architects') } },
   { match: /\b(?:engineering (?:firms?|consultanc(?:y|ies)|consultants?|offices?)|consulting engineers?)\b/i,
-    sources: { osm: ['engineering'] } },
+    sources: { osm: ['engineering'], ...heEngNaceSources('engineering') } },
   { match: /\b(?:veterinar(?:y|ians?) (?:clinics?|practices?|hospitals?)|veterinarians?|vet (?:clinics?|practices?)|animal (?:clinics?|hospitals?))\b/i,
-    sources: { osm: ['veterinary'] } },
+    sources: { osm: ['veterinary'], ...heEngNaceSources('veterinary') } },
   { match: /\b(?:pharmac(?:y|ies)|drugstores?|chemists?)\b/i,
     sources: { osm: ['pharmacies'] } },
   { match: /\b(?:(?:car|auto(?:mobile)?|vehicle|motor) dealer(?:s|ships?)?|dealerships?)\b/i,
@@ -114,11 +129,11 @@ const SECTORS: readonly Sector[] = [
   { match: /\b(?:restaurants?|caf(?:e|é)s?|bistros?|eateries|coffee shops?)\b/i,
     sources: { osm: ['restaurants'] } },
   { match: /\b(?:travel agen(?:ts?|cies|cy)|tour operators?)\b/i,
-    sources: { osm: ['travel_agencies'] } },
+    sources: { osm: ['travel_agencies'], ...heEngNaceSources('travel_agencies') } },
   { match: /\b(?:recruit(?:ment|ing) (?:agenc(?:y|ies)|firms?|companies)|staffing (?:agenc(?:y|ies)|firms?|companies)|employment agenc(?:y|ies)|headhunt(?:ers?|ing firms?)|executive search firms?)\b/i,
-    sources: { osm: ['recruitment'] } },
+    sources: { osm: ['recruitment'], ...heEngNaceSources('recruitment') } },
   { match: /\b(?:marketing|advertising|digital|creative|branding|pr|media) agenc(?:y|ies)\b/i,
-    sources: { osm: ['marketing_agencies'] } },
+    sources: { osm: ['marketing_agencies'], ...heEngNaceSources('marketing_agencies') } },
   { match: /\b(?:physiotherap(?:y|ists?)|physical therap(?:y|ists?)|physio (?:clinics?|practices?))\b/i,
     sources: { osm: ['physiotherapy'] } },
   { match: /\b(?:opticians?|optometrists?|optical (?:stores?|shops?)|eyewear (?:stores?|shops?))\b/i,

@@ -16,6 +16,8 @@ export const ESMA_RECORD = 'https://registers.esma.europa.eu/solr/esma_registers
 /** The EBA register's page of one payment or e-money institution; its entity type and code follow. */
 export const EBA_RECORD = 'https://euclid.eba.europa.eu/register/pir/view/';
 export const HE_ENG_EBA_ENTITY_TYPES: readonly string[] = ['PSD_PI', 'PSD_EMI', 'PSD_AISP'];
+/** The CRO open-data query for one company number (the datastore table id may change); the number is group 1. */
+export const HE_ENG_CRO_RECORD = /^https:\/\/opendata\.cro\.ie\/api\/3\/action\/datastore_search\?resource_id=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}&filters=%7B%22company_num%22%3A(\d{1,7})%7D$/;
 function engCountry(country: unknown): boolean {
   return typeof country === 'string' && ENG_COUNTRIES.some(item => item.value === country);
 }
@@ -51,6 +53,12 @@ export function heEngRegistryRecordValid(provider: unknown, id: unknown, country
     // («IE_CBI!C182347», «FT00128275»), on its page for the entity type.
     case 'eba': return engCountry(country) && /^[A-Za-z0-9][A-Za-z0-9_!.-]{3,29}$/.test(id) &&
       HE_ENG_EBA_ENTITY_TYPES.some(type => url.href === `${EBA_RECORD}${type}/${id}`);
+    // National registers by the company's own number on their public company page
+    // (Irish records: the CRO open-data query for that company number).
+    case 'prh': return country === 'finland' && /^\d{7}-\d$/.test(id) && url.href === `https://tietopalvelu.ytj.fi/yritys/${id}`;
+    case 'czso': return country === 'czechia' && /^\d{8}$/.test(id) && url.href === `https://ares.gov.cz/ekonomicke-subjekty?ico=${id}`;
+    case 'cro': return country === 'ireland' && /^\d{1,7}$/.test(id) && HE_ENG_CRO_RECORD.exec(url.href)?.[1] === id;
+    case 'ariregister': return country === 'estonia' && /^\d{8}$/.test(id) && url.href === `https://ariregister.rik.ee/eng/company/${id}`;
     // Global sources: the country comes from the record itself (GLEIF headquarters,
     // or the OpenStreetMap country boundary containing the premises).
     case 'gleif': return engCountry(country) && validLei(id) && url.href === `https://api.gleif.org/api/v1/lei-records/${id}`;

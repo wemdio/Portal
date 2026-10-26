@@ -2,9 +2,13 @@ import { isIP } from 'node:net';
 import { sliceWholeChars, stripUnstorableJsonChars } from '../jsonbSafe';
 import { ENG_COUNTRIES, engCountryIso2, normalizeEngCountry } from './engCountries';
 import { HE_ENG_OSM_TAGS, heEngGleifTerms } from './engGlobalRegistryCatalog';
+import { readHeEngAriregisterRegistryPage } from './engAriregisterRegistry';
+import { readHeEngCroRegistryPage } from './engCroRegistry';
+import { readHeEngCzsoRegistryPage } from './engCzsoRegistry';
 import { readHeEngEbaRegistryPage } from './engEbaRegistry';
 import { readHeEngEsmaRegistryPage } from './engEsmaRegistry';
 import { readHeEngPraRegistryPage } from './engPraRegistry';
+import { readHeEngPrhRegistryPage } from './engPrhRegistry';
 import { heEngRegistryTaskCountries, validateHeEngRegistryTask } from './engPublicRegistryPlan';
 import type { HeEngRegistryCandidate, HeEngRegistryPage, HeEngRegistryProvider, HeEngRegistryTask } from './engPublicRegistryTypes';
 
@@ -18,9 +22,10 @@ const OSM_REQUEST_TIMEOUT_MS = 60_000;
 // Helseforetak use SÆR; there is no HF organisation-form code in this API.
 const BRREG_COMPANY_FORMS = ['AS', 'ASA', 'ANS', 'DA', 'BA', 'SA', 'SE', 'SF', 'SPA', 'GFS', 'IKS', 'KS', 'SÆR', 'NUF'] as const;
 const US_STATES = new Set('AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY'.split(' '));
-// Whole-list sources have their own readers: engPraRegistry.ts, engEsmaRegistry.ts, engEbaRegistry.ts.
-type WholeListProvider = 'pra' | 'esma' | 'eba';
-const WHOLE_LIST_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set<WholeListProvider>(['pra', 'esma', 'eba']);
+// Sources with their own readers: engPraRegistry.ts, engEsmaRegistry.ts, engEbaRegistry.ts,
+// engPrhRegistry.ts, engCzsoRegistry.ts, engCroRegistry.ts, engAriregisterRegistry.ts.
+type WholeListProvider = 'pra' | 'esma' | 'eba' | 'prh' | 'czso' | 'cro' | 'ariregister';
+const WHOLE_LIST_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set<WholeListProvider>(['pra', 'esma', 'eba', 'prh', 'czso', 'cro', 'ariregister']);
 function wholeList(provider: HeEngRegistryProvider): provider is WholeListProvider { return WHOLE_LIST_PROVIDERS.has(provider); }
 const ENDPOINTS: Readonly<Record<Exclude<HeEngRegistryProvider, WholeListProvider>, string>> = {
   brreg: 'https://data.brreg.no/enhetsregisteret/api/enheter',
@@ -414,6 +419,10 @@ export async function readHeEngRegistryPage(task: HeEngRegistryTask, position: n
   if (task.provider === 'pra') return readHeEngPraRegistryPage(task, position, options);
   if (task.provider === 'esma') return readHeEngEsmaRegistryPage(task, position, options);
   if (task.provider === 'eba') return readHeEngEbaRegistryPage(task, position, options);
+  if (task.provider === 'prh') return readHeEngPrhRegistryPage(task, position, options);
+  if (task.provider === 'czso') return readHeEngCzsoRegistryPage(task, position, options);
+  if (task.provider === 'cro') return readHeEngCroRegistryPage(task, position, options);
+  if (task.provider === 'ariregister') return readHeEngAriregisterRegistryPage(task, position, options);
   const raw = await jsonResponse(task, position, options); const body = object(raw);
   let rows: unknown[]; let total: number | null = null;
   switch (task.provider) {
