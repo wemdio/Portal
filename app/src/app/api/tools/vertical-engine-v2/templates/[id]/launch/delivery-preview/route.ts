@@ -5,6 +5,7 @@ import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { buildVeContactDeliveryPreview } from '@/lib/verticalEngineV2/contactDeliveryPreview';
+import { attachVeSenderPool } from '@/lib/verticalEngineV2/senderTransport/senderPool';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -43,7 +44,8 @@ export async function POST(
         return jsonError('Некорректное тело запроса', 400, 'INVALID_BODY');
       }
 
-      const result = await buildVeContactDeliveryPreview(supabaseAdmin, supabaseInstantly, {
+      const presetId = stringField(body.preset_id);
+      const result = await attachVeSenderPool(supabaseAdmin, supabaseInstantly, await buildVeContactDeliveryPreview(supabaseAdmin, supabaseInstantly, {
         templateId,
         portalProjectId: stringField(body.portal_project_id),
         // Явный null — проект без периодов; отсутствующее поле даёт 400.
@@ -51,9 +53,9 @@ export async function POST(
           body.expected_portal_period_id === null ? null : stringField(body.expected_portal_period_id),
         targetContacts:
           typeof body.target_contacts === 'number' ? body.target_contacts : Number.NaN,
-        presetId: stringField(body.preset_id),
+        presetId,
         segmentationAuditId: stringField(body.segmentation_audit_id) || null,
-      });
+      }), { templateId, presetId });
       return NextResponse.json(result.body, { status: result.status });
     },
   );

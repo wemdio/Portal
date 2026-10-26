@@ -5,6 +5,7 @@ import type { VeContactSupplyStatus } from '@/lib/verticalEngineV2/contactSupply
 import { isVeRequestyBillingError } from '@/lib/verticalEngineV2/collectionErrors';
 import { veRequestyBillingWaitState } from '@/lib/verticalEngineV2/requestyBillingState';
 import { parseLaunchInfo } from '@/lib/verticalEngineV2/launchHandoff';
+import { senderOpenLabel } from '@/lib/verticalEngineV2/senderTransport/labels';
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
 import { useContactSupply } from './ContactSupplyPanel';
 import { ContactUploadNotice } from './ContactUploadNotice';
@@ -35,6 +36,7 @@ const count = (value: number) => value.toLocaleString('ru-RU');
 export function CampaignProgress({ template, title, required, headerAction, uploadMode = 'daily' }: CampaignProgressProps) {
   const supply = useContactSupply(template.id, required, null);
   const info = parseLaunchInfo((template as VeTemplate & { launch_info?: unknown }).launch_info);
+  const sender = info?.transport === 'sender';
   const plan = required ? supply.data?.plan : null;
   const metrics = required ? supply.data?.metrics : null;
   const stock = metrics ?? (required ? supply.data?.stock : null);
@@ -84,7 +86,7 @@ export function CampaignProgress({ template, title, required, headerAction, uplo
             </div>
             <div className="ve2-stat">
               <p className="ve2-stat-v">{count(stock.uploaded_today)}</p>
-              <p className="ve2-stat-k">Добавлено сегодня в Instantly</p>
+              <p className="ve2-stat-k">{sender ? 'Добавлено сегодня в «Рассылку»' : 'Добавлено сегодня в Instantly'}</p>
             </div>
             <div className="ve2-stat">
               <p className="ve2-stat-v">{count(stock.uploaded)}</p>
@@ -100,7 +102,7 @@ export function CampaignProgress({ template, title, required, headerAction, uplo
           {stock.uncertain > 0 ? (
             <StatusBox tone="info">
               Для {count(stock.uncertain)} контактов результат загрузки ещё не подтверждён.
-              Повторная загрузка заблокирована до автоматической сверки с Instantly.
+              Повторная загрузка заблокирована до автоматической сверки с {sender ? '«Рассылкой»' : 'Instantly'}.
             </StatusBox>
           ) : null}
           <p className={HE.faint}>
@@ -125,7 +127,9 @@ export function CampaignProgress({ template, title, required, headerAction, uplo
           target="_blank"
           rel="noreferrer"
         >
-          Открыть в Instantly: {campaign.campaign_name || `кампания ${index + 1}`}
+          {sender
+            ? senderOpenLabel(campaign.campaign_name || `кампания ${index + 1}`)
+            : <>Открыть в Instantly: {campaign.campaign_name || `кампания ${index + 1}`}</>}
         </a>
       ) : (
         <p key={campaign.campaign_id} className={HE.muted}>

@@ -7,12 +7,14 @@ import { StatusBox } from './ui';
 
 export type ContactUploadMode = 'daily' | 'all_ready';
 
-export function ContactUploadModePanel({ projectId, mode, disabled = false, onSaved, onPendingChange }: {
+export function ContactUploadModePanel({ projectId, mode, disabled = false, onSaved, onPendingChange, sender = false }: {
   projectId: string;
   mode: ContactUploadMode;
   disabled?: boolean;
   onSaved: (mode: ContactUploadMode) => void;
   onPendingChange?: (pending: boolean) => void;
+  /** Кампании идут через «Рассылку»: подписи — её. */
+  sender?: boolean;
 }) {
   const id = useId();
   const [draft, setDraft] = useState<ContactUploadMode | null>(null);
@@ -41,7 +43,7 @@ export function ContactUploadModePanel({ projectId, mode, disabled = false, onSa
   };
 
   return <section className="border-t border-[var(--ve2-line)] pt-5 space-y-3" aria-labelledby={`${id}-title`}>
-    <h3 id={`${id}-title`} className="ve2-h3">Загрузка контактов в Instantly</h3>
+    <h3 id={`${id}-title`} className="ve2-h3">{sender ? 'Загрузка контактов в кампании проекта' : 'Загрузка контактов в Instantly'}</h3>
     <fieldset className="space-y-3" disabled={busy || disabled} aria-describedby={`${id}-hint`}>
       <legend className="sr-only">Режим загрузки для всех кампаний проекта</legend>
       {([['all_ready', 'Все готовые контакты сразу'], ['daily', 'Дневными порциями']] as const).map(([value, label]) =>
@@ -52,7 +54,9 @@ export function ContactUploadModePanel({ projectId, mode, disabled = false, onSa
         </label>)}
     </fieldset>
     <p id={`${id}-hint`} className={HE.muted}>{selected === 'all_ready'
-      ? 'Для всех кампаний проекта, в пределах цели и свободного места. Отправку запускаете в Instantly.'
+      ? sender
+        ? 'Для всех кампаний проекта — и в «Рассылке», и в Instantly, — в пределах цели (в Instantly — и свободного места). Отправку запускаете там, где кампания.'
+        : 'Для всех кампаний проекта, в пределах цели и свободного места. Отправку запускаете в Instantly.'
       : 'Дневной лимит для всех кампаний проекта задаётся ниже.'}</p>
     {dirty ? <button type="button" className={HE.btnGhost} disabled={busy || disabled} onClick={() => void save()}>
       {busy ? 'Сохраняем…' : 'Применить режим загрузки'}
