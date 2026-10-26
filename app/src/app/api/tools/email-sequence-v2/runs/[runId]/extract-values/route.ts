@@ -7,6 +7,7 @@ import { extractCompanyNameFromValuesHeader, extractTextFromBriefFile } from '@/
 import { putMainS3Object } from '@/lib/mainS3Server';
 import { logError, logInfo } from '@/lib/loggerServer';
 import { blockDemo } from '@/lib/auth/blockDemo';
+import { pickEmailSequenceModel } from '@/lib/emailSequenceV2/models';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -104,7 +105,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
     return jsonError('Бриф пустой. Загрузите PDF/DOCX/TXT или вставьте текст.', 400);
   }
 
-  const model = modelOverride ?? run.values_model ?? 'gpt-5.2';
+  const model = pickEmailSequenceModel(modelOverride, run.values_model);
   const outputLanguage = normalizeOutputLanguage(languageOverride ?? run.output_language);
 
   await supabase

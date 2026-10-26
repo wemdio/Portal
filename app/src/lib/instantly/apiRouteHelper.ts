@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
+import { isInternalRole } from '@/lib/roles';
+import type { UserRole } from '@/types';
 import { InstantlyApiError } from './errors';
 
 export const dynamic = 'force-dynamic';
@@ -40,7 +42,7 @@ export function handleInstantlyError(err: unknown) {
 
 /**
  * Wraps an API handler with auth check, internal-role guard, and error handling.
- * Client users are rejected — they must use /api/client/* endpoints.
+ * Non-staff users are rejected — clients must use /api/client/* endpoints.
  */
 export function withAuth(
   handler: (req: NextRequest, user: { id: string; email?: string }, params?: Record<string, string>) => Promise<NextResponse>,
@@ -53,8 +55,10 @@ export function withAuth(
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return jsonError('Необходима авторизация', 401);
 
+    // Только сотрудники, а не «всё, кроме client»: аккаунт без роли проходил бы
+    // (аудит 26.10.2026). Та же граница, что у staff-проверки в middleware.
     const role = await fetchUserRole(user.id, token);
-    if (role === 'client') {
+    if (!isInternalRole(role as UserRole | null)) {
       return jsonError('Доступ запрещён. Используйте клиентский кабинет.', 403);
     }
 

@@ -22,6 +22,8 @@
  *   - любые ответы — первый ответ человека на наше первое касание; люди,
  *     написавшие сами, а не в ответ на рассылку, сюда не попадают;
  *   - целевые ответы — переданные клиенту лиды, по дате передачи;
+ *   - блокировки — диалоги кампании, где человек заблокировал аккаунт, по дате
+ *     блокировки (тот же счёт, что на дашборде кампании);
  *   - конверсия — любые ответы к доставленным.
  */
 
@@ -125,6 +127,8 @@ export interface ReportWeekRow {
   delivered: number;
   anyReplies: number;
   targetReplies: number;
+  /** В отчётах, собранных до 26.10.2026, поля нет. */
+  blocks?: number;
   /** Процент с одним знаком. null — делить не на что, в отчёте это прочерк. */
   conversion: number | null;
 }
@@ -132,13 +136,17 @@ export interface ReportWeekRow {
 export interface ReportLeadRow {
   /** Неделя передачи — строка раздела 1, к которой относится лид. */
   week: string;
+  /** Чат из файла базы, а если его там нет — название гипотезы, как в форме. */
   sourceChat: string;
   /** Заполняется руками. */
   criterion: '';
   nickname: string;
   /** Дата нашего первого сообщения человеку. */
   offerSentAt: string;
-  /** Название базы (гипотезы), из которой взят контакт. */
+  /**
+   * № гипотезы в разделе 3, из которой взят контакт. До 26.10.2026 здесь
+   * лежало название базы; пусто — касание человеку в базах не нашлось.
+   */
   offerNumber: string;
   quality: 'MQL';
   /** Дата передачи лида клиенту. */
@@ -146,8 +154,8 @@ export interface ReportLeadRow {
 }
 
 export interface ReportOfferRow {
-  /** Заполняется руками. */
-  offerNumber: '';
+  /** Порядковый номер гипотезы; на него ссылается «№ оффера» у лидов. */
+  offerNumber: string;
   offer: string;
   /** Чаты-источники гипотезы. Пусто — их не заполнили у базы. */
   channel: string;
@@ -375,6 +383,10 @@ function countWindow(input: ReportInput, prep: Prepared, fromMs: number, toMs: n
 
   const targetReplies = prep.handovers.filter((h) => inRange(h.at, fromMs, toMs)).length;
 
+  const blocks = input.dialogs
+    .filter((d) => d.can_send_changed_reason === 'tg_user_blocked_bot'
+      && inRange(ts(d.can_send_changed_at), fromMs, toMs)).length;
+
   return {
     chats,
     contacts,
@@ -382,6 +394,7 @@ function countWindow(input: ReportInput, prep: Prepared, fromMs: number, toMs: n
     delivered,
     anyReplies,
     targetReplies,
+    blocks,
     // Ноль отправленных — прочерк, а не «0%»: нулевая конверсия и отсутствие
     // рассылки в отчёте по договору читаются очень по-разному.
     conversion: delivered > 0 ? Math.round((anyReplies / delivered) * 1000) / 10 : null,
@@ -416,24 +429,10 @@ export function buildCampaignReport(input: ReportInput): CampaignReport {
   const weekOf = (at: number) => weeks.find((w) => inRange(at, ts(w.fromIso) ?? 0, ts(w.toIso) ?? 0))?.period ?? '';
 
   // Лиды — ровно те, кого посчитали «целевыми ответами», в порядке передачи.
-  const leads: ReportLeadRow[] = prep.handovers
+  const handed = prep.handovers
     .filter((h) => inRange(h.at, fromMs, toMs))
-    .map(({ dialog: d, at }) => {
-      const contact = prep.touchByUsername.get(usernameKey(d.tg_username));
-      const base = contact ? baseById.get(contact.base_id) : undefined;
-      const offerAt = ts(contact?.sent_at) ?? firstOutgoingAt(d);
-      return {
-        week: weekOf(at),
-        // Колонки «источник» в файлах баз обычно нет — тогда чаты гипотезы.
-        sourceChat: sourceChatOf(contact?.raw) || parseSourceChats(base?.source_chats).join(', '),
-        criterion: '' as const,
-        nickname: d.tg_username ? `@${d.tg_username.trim().replace(/^@/, '')}` : String(d.tg_user_id ?? ''),
-        offerSentAt: offerAt === null ? '' : formatDate(offerAt, tz),
-        offerNumber: base?.name ?? '',
-        quality: 'MQL' as const,
-        handedOverAt: formatDate(at, tz),
-      };
-    });
+    .map((h) => ({ ...h, contact: prep.touchByUsername.get(usernameKey(h.dialog.tg_username)) }));
+  const leadBaseIds = new Set(handed.map((h) => h.contact?.base_id));
 
   // По офферу считаем то же, что в разделе 1, но в разрезе базы.
   const dialogByUsername = new Map<string, ReportDialog>();
@@ -444,8 +443,12 @@ export function buildCampaignReport(input: ReportInput): CampaignReport {
   const handoverByDialog = new Map(prep.handovers.map((h) => [h.dialog, h.at]));
 
   // Только гипотезы, по которым в периоде что-то было: строки с нулями за
-  // давно отработанные базы раздел только засоряют.
-  const offers: ReportOfferRow[] = input.bases.filter((base) => prep.baseMoment.has(base.id)).map((base) => {
+  // давно отработанные базы раздел только засоряют. Гипотеза, давшая лида,
+  // остаётся, даже если рассылали её раньше: на неё ссылается раздел 2.
+  const offerBases = input.bases.filter((base) => prep.baseMoment.has(base.id) || leadBaseIds.has(base.id));
+  const offerNumberByBase = new Map(offerBases.map((base, i) => [base.id, String(i + 1)]));
+
+  const offers: ReportOfferRow[] = offerBases.map((base, i) => {
     let sent = 0;
     let replies = 0;
     let leadCount = 0;
@@ -461,26 +464,40 @@ export function buildCampaignReport(input: ReportInput): CampaignReport {
       if (inRange(handoverByDialog.get(d) ?? null, fromMs, toMs)) leadCount++;
     }
     return {
-      offerNumber: '' as const,
+      offerNumber: String(i + 1),
       offer: base.name,
       channel: parseSourceChats(base.source_chats).join('\n'),
       language: '' as const,
       status: '' as const,
       deadline: '' as const,
       comment: '' as const,
-      conclusions: `отправлено ${sent}, ответов ${replies}, лидов ${leadCount}`,
+      conclusions: `доставлено ${sent}, ответов ${replies}${sent > 0 ? ` (${percentText(replies, sent)})` : ''}, лидов ${leadCount}`,
+    };
+  });
+
+  const leads: ReportLeadRow[] = handed.map(({ dialog: d, at, contact }) => {
+    const base = contact ? baseById.get(contact.base_id) : undefined;
+    const offerAt = ts(contact?.sent_at) ?? firstOutgoingAt(d);
+    return {
+      week: weekOf(at),
+      // Колонки «источник» в файлах баз обычно нет — тогда гипотеза, как в
+      // форме: её чаты перечислены в разделе 3.
+      sourceChat: sourceChatOf(contact?.raw) || (base?.name ?? ''),
+      criterion: '' as const,
+      nickname: d.tg_username ? `@${d.tg_username.trim().replace(/^@/, '')}` : String(d.tg_user_id ?? ''),
+      offerSentAt: offerAt === null ? '' : formatDate(offerAt, tz),
+      offerNumber: (base && offerNumberByBase.get(base.id)) ?? '',
+      quality: 'MQL' as const,
+      handedOverAt: formatDate(at, tz),
     };
   });
 
   return { weeks, total, leads, offers };
 }
 
-/** «Гипотеза 3 — 4 чата, 120 контактов» для ячейки и копирования. */
-export function formatBaseCells(cells: ReportBaseCell[], field: 'chats' | 'contacts'): string[] {
-  return cells.map((b) => {
-    const value = b[field];
-    return `${b.base} — ${value === null ? 'не указаны' : value}`;
-  });
+/** «3,9%» — доля с одним знаком и запятой, как конверсия в разделе 1. */
+function percentText(part: number, whole: number): string {
+  return `${(Math.round((part / whole) * 1000) / 10).toFixed(1).replace('.', ',')}%`;
 }
 
 /** «03.08.2026» — как в форме отчёта. */

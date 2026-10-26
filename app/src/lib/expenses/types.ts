@@ -108,12 +108,69 @@ export interface VendorBreakdownItem {
 // у сторон только денежный минимум (сумма, валюта, рублёвый эквивалент).
 
 /**
- * Источники дохода: два банка и криптокошелёк.
+ * Источники дохода: два банка, криптокошелёк и ручной ввод (с 26.10.2026 —
+ * деньги из источников, которые не синкаются).
  *
- * Виртуальные карты и ручные записи сюда не входят — они бывают только на
- * расходной стороне.
+ * Виртуальные карты сюда не входят — они бывают только на расходной стороне.
  */
-export type IncomeSource = 'tochka' | 'tbank' | 'crypto_usdt';
+export type IncomeSource = 'tochka' | 'tbank' | 'crypto_usdt' | 'manual';
+
+// ─── Ручной ввод ───────────────────────────────────────────────────────────
+
+/**
+ * Способ получения ручного дохода («откуда»). В базе хранится сама подпись —
+ * витрина отдаёт её в `details` как есть (см. 20261026_0100_manual_incomes.sql).
+ */
+export const MANUAL_INCOME_CHANNELS = ['Наличные', 'На карту', 'На расчётный счёт', 'Крипта', 'Другое'] as const;
+
+/** Проект портала или сделка AMO, к которой привязана ручная запись. */
+export interface ManualEntryProject {
+  id: string;
+  name: string;
+}
+
+export interface ManualEntryDeal {
+  amoId: number;
+  /** null — сделки нет в зеркале AMO (удалена или ещё не синкнулась). */
+  name: string | null;
+  url: string | null;
+}
+
+/** Ручная запись в списке под графиками: и расход, и доход. */
+export interface ManualEntry {
+  id: string;
+  occurred_on: string;
+  amount: number | string;
+  currency: string;
+  /** Расход — кто платил, доход — кто принёс. */
+  payer: string;
+  comment: string | null;
+  /** Только у дохода: способ получения. */
+  channel?: string;
+  /** Только у расхода: вендор из разметки. */
+  vendor_id?: string | null;
+  project: ManualEntryProject | null;
+  deal: ManualEntryDeal | null;
+  created_by: string;
+  created_at: string;
+}
+
+/** Вариант в выборе проекта. */
+export interface ProjectOption {
+  id: string;
+  name: string;
+  client: string | null;
+  status: string;
+}
+
+/** Вариант в поиске сделки AMO. */
+export interface DealOption {
+  amoId: number;
+  name: string | null;
+  company: string | null;
+  pipeline: string | null;
+  status: string | null;
+}
 
 /** Строка витрины incomes_v. Контрагент — плательщик. */
 export interface IncomeRow {

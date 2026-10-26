@@ -9,6 +9,7 @@ import type { EmailSequenceV2RunRow } from '@/types';
 import { logError, logInfo } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { blockDemo } from '@/lib/auth/blockDemo';
+import { pickEmailSequenceModel } from '@/lib/emailSequenceV2/models';
 import {
   countChains,
   getBillingPeriodStart,
@@ -75,7 +76,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
     return jsonError('Сначала укажите сегмент базы (этап 2).', 400);
   }
 
-  const model = (body.model && body.model.trim()) || typedRun.writer_model || 'gpt-5.2';
+  const model = pickEmailSequenceModel(body.model, typedRun.writer_model);
   const outputLanguage = normalizeOutputLanguage(body.language ?? typedRun.output_language);
 
   let tariffUsage: Awaited<ReturnType<typeof getClientTariffUsage>> | null = null;

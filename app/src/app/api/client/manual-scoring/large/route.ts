@@ -33,7 +33,9 @@ export async function POST(req: NextRequest) {
   const s3Key = typeof body.s3_key === 'string' ? body.s3_key.trim() : '';
   const filename = typeof body.filename === 'string' ? body.filename.trim() : 'file';
   // Ключ обязан принадлежать этому клиенту (анти-spoofing).
-  if (!s3Key || !s3Key.startsWith(`large-score/${userId}/`)) {
+  // `..` отсекаем отдельно: префикс своей папки не защищает от ключа вида
+  // `large-score/<я>/../<чужой>/…`, если хранилище склеит сегменты.
+  if (!s3Key || !s3Key.startsWith(`large-score/${userId}/`) || s3Key.split('/').includes('..')) {
     return jsonError('Неверный ключ файла', 400);
   }
 

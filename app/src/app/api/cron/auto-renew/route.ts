@@ -19,7 +19,9 @@ export const dynamic = 'force-dynamic';
  */
 export async function GET(req: NextRequest) {
   const secret = new URL(req.url).searchParams.get('secret');
-  if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) {
+  // Без заданного CRON_SECRET — отказ, а не «пускать всех»: /api/cron/* минует
+  // проверку входа в middleware, и списание продлений мог бы дёрнуть кто угодно.
+  if (!process.env.CRON_SECRET || secret !== process.env.CRON_SECRET) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 

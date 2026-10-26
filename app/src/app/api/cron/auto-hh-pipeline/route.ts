@@ -33,7 +33,9 @@ export async function GET(req: NextRequest) {
   const headerSecret = req.headers.get('x-vercel-cron-secret') ?? req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
   const provided = querySecret ?? headerSecret;
 
-  if (process.env.CRON_SECRET && provided !== process.env.CRON_SECRET) {
+  // Без заданного CRON_SECRET — отказ: /api/cron/* минует проверку входа в
+  // middleware, и конвейер мог бы запустить кто угодно.
+  if (!process.env.CRON_SECRET || provided !== process.env.CRON_SECRET) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 

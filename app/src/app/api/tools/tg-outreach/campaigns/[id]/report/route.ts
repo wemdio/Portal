@@ -12,13 +12,11 @@
  *   - `?from&to` — собрать новый и сохранить; `&format=xlsx` сохранённое не плодит.
  */
 import { NextRequest, NextResponse } from 'next/server';
-import * as XLSX from 'xlsx';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
+import { buildReportWorkbook } from '@/lib/tgOutreach/reportWorkbook';
 import {
   buildCampaignReport,
-  formatBaseCells,
-  formatDate,
   type CampaignReport,
   type ReportContact,
   type ReportDialog,
@@ -70,7 +68,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
           .from('tg_outreach_campaigns').select('id, name').eq('id', campaignId).maybeSingle();
         const campName = (campRow as { name?: string } | null)?.name ?? 'campaign';
         if (url.searchParams.get('format') === 'xlsx') {
-          const buffer = buildWorkbook(row.report, campName, row.period_from, row.period_to);
+          const buffer = await buildReportWorkbook(row.report, campName, row.period_from, row.period_to, TZ_OFFSET_HOURS);
           const fileName = `otchet-${slug(campName)}-${row.period_from.slice(0, 10)}_${row.period_to.slice(0, 10)}.xlsx`;
           return new NextResponse(buffer, {
             headers: {
@@ -125,7 +123,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
       const { data: dialogRows } = await auth.supabase
         .from('tg_outreach_dialogs')
-        .select('id, tg_user_id, tg_username, status, messages, last_message_at, auto_forwarded_at, lead_marked_at')
+        .select('id, tg_user_id, tg_username, status, messages, last_message_at, auto_forwarded_at, lead_marked_at, can_send_changed_at, can_send_changed_reason')
         .eq('campaign_id', campaignId)
         .limit(20_000);
 
@@ -182,7 +180,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         });
       }
 
-      const buffer = buildWorkbook(report, camp.name, from, to);
+      const buffer = await buildReportWorkbook(report, camp.name, from, to, TZ_OFFSET_HOURS);
       const fileName = `otchet-${slug(camp.name)}-${from.slice(0, 10)}_${to.slice(0, 10)}.xlsx`;
       return new NextResponse(buffer, {
         headers: {
@@ -197,105 +195,4 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 /** Имя кампании в имя файла: кириллица и пробелы в Content-Disposition лишние. */
 function slug(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '') || 'campaign';
-}
-
-const SECTION_1_HEADER = [
-  'Период',
-  'Кол-во обработанных чатов',
-  'Кол-во подобранных контактов',
-  'Сообщений доставлено',
-  'Кол-во любых ответов',
-  'Кол-во целевых ответов (передано лидов)',
-  'Конверсия "Отправлено - ответ", %',
-];
-
-const SECTION_2_HEADER = [
-  'Чат/группа откуда взят контакт',
-  'Критерий отбора данного контакта',
-  'Никнейм',
-  'Дата отправки оффера',
-  '№ оффера',
-  'Качество лида',
-  'Дата передачи лида клиенту',
-];
-
-const SECTION_3_HEADER = [
-  '№ Оффера',
-  'Оффер',
-  'Канал/чат',
-  'Язык аудитории',
-  'Статус',
-  'Дедлайн',
-  'Комментарий/ссылки',
-  'Выводы с цифрами',
-];
-
-/**
- * Один лист, три раздела подряд — как в бумажной форме. Разделять по вкладкам
- * нельзя: отчёт подписывают целиком и сверяют глазами с приложением к договору.
- */
-function buildWorkbook(report: CampaignReport, campaignName: string, from: string, to: string): ArrayBuffer {
-  const fromMs = new Date(from).getTime();
-  const toMs = new Date(to).getTime();
-  const rows: Array<Array<string | number | null>> = [];
-
-  rows.push(['Форма Отчета к Договору оказания услуг']);
-  rows.push([`За период с «${formatDate(fromMs, TZ_OFFSET_HOURS)}» по «${formatDate(toMs - 1, TZ_OFFSET_HOURS)}»`]);
-  rows.push([`Кампания: ${campaignName}`]);
-  rows.push([]);
-
-  rows.push(['1. Рассылка и реакция']);
-  rows.push(SECTION_1_HEADER);
-  for (const w of [...report.weeks, report.total]) {
-    // Разбивку по гипотезам кладём в ту же ячейку после суммы, в одну строку:
-    // перенос строки без стиля переноса Excel всё равно покажет слитно.
-    const bases = w.bases ?? [];
-    const withBreakdown = (sum: string | number, field: 'chats' | 'contacts') =>
-      bases.length ? `${sum} (${formatBaseCells(bases, field).join('; ')})` : sum;
-    rows.push([
-      w.period,
-      withBreakdown(w.chats === null ? '—' : w.chats, 'chats'),
-      withBreakdown(w.contacts, 'contacts'),
-      w.delivered,
-      w.anyReplies, w.targetReplies,
-      w.conversion === null ? '—' : w.conversion,
-    ]);
-  }
-  rows.push([]);
-
-  rows.push(['2. Лиды']);
-  rows.push(SECTION_2_HEADER);
-  // Больше одной недели — лиды под заголовками недель, как строки раздела 1.
-  const byWeek = report.weeks.length > 1;
-  let currentWeek: string | null = null;
-  for (const l of report.leads) {
-    if (byWeek && l.week !== currentWeek) {
-      currentWeek = l.week ?? '';
-      rows.push([currentWeek]);
-    }
-    rows.push([l.sourceChat, l.criterion, l.nickname, l.offerSentAt, l.offerNumber, l.quality, l.handedOverAt]);
-  }
-  // Пустая строка под ручное дозаполнение, если лидов за период не было.
-  if (report.leads.length === 0) rows.push(['', '', '', '', '', '', '']);
-  rows.push([]);
-
-  rows.push(['3. План работ и Офферы']);
-  rows.push(SECTION_3_HEADER);
-  for (const o of report.offers) {
-    rows.push([o.offerNumber, o.offer, o.channel, o.language, o.status, o.deadline, o.comment, o.conclusions]);
-  }
-  if (report.offers.length === 0) rows.push(['', '', '', '', '', '', '', '']);
-
-  const sheet = XLSX.utils.aoa_to_sheet(rows);
-  sheet['!cols'] = [
-    { wch: 34 }, { wch: 26 }, { wch: 26 }, { wch: 22 },
-    { wch: 20 }, { wch: 20 }, { wch: 18 }, { wch: 30 },
-  ];
-
-  const book = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(book, sheet, 'Отчёт');
-  // Отдаём именно ArrayBuffer: Node-Buffer из xlsx типы Response телом не
-  // принимают, а копия среза избавляет от привязки к пулу Buffer'ов.
-  const bytes = XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }) as Uint8Array;
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
