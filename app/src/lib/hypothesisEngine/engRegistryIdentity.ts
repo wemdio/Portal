@@ -2,7 +2,7 @@ import { ENG_COUNTRIES } from './engCountries';
 import type { HeEngRegistryProvider } from './engPublicRegistryTypes';
 
 /** ISO 17442: an LEI is 18 characters plus two check digits, valid when mod 97 equals 1. */
-function validLei(id: string): boolean {
+export function validLei(id: string): boolean {
   if (!/^[A-Z0-9]{18}\d{2}$/.test(id)) return false;
   let remainder = 0;
   for (const char of id) {
@@ -11,6 +11,8 @@ function validLei(id: string): boolean {
   }
   return remainder === 1;
 }
+/** The public ESMA register query for one record; the query value follows. */
+export const ESMA_RECORD = 'https://registers.esma.europa.eu/solr/esma_registers_upreg/select?q=';
 function engCountry(country: unknown): boolean {
   return typeof country === 'string' && ENG_COUNTRIES.some(item => item.value === country);
 }
@@ -39,6 +41,9 @@ export function heEngRegistryRecordValid(provider: unknown, id: unknown, country
     // A PRA-authorised firm by its FCA firm reference number on the public FCA register.
     case 'pra': return country === 'united kingdom' && /^\d{6,7}$/.test(id) &&
       url.href === `https://register.fca.org.uk/s/search?q=${id}&type=Companies`;
+    // An ESMA-registered fund manager by its LEI, or by ESMA's own record id when it has none.
+    case 'esma': return engCountry(country) && (validLei(id) ? url.href === `${ESMA_RECORD}ae_lei:${id}`
+      : /^ae\d{1,9}$/.test(id) && url.href === `${ESMA_RECORD}id:${id}`);
     // Global sources: the country comes from the record itself (GLEIF headquarters,
     // or the OpenStreetMap country boundary containing the premises).
     case 'gleif': return engCountry(country) && validLei(id) && url.href === `https://api.gleif.org/api/v1/lei-records/${id}`;

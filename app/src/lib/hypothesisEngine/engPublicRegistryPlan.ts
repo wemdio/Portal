@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { sliceWholeChars, stripUnstorableJsonChars } from '../jsonbSafe';
 import { engCountryIso2, normalizeEngCountry } from './engCountries';
+import { HE_ENG_ESMA_MEMBER_STATES } from './engEsmaRegistry';
 import { HE_ENG_GLEIF_TERMS, HE_ENG_OSM_TAGS } from './engGlobalRegistryCatalog';
 import type { HeEngRegistryPlan, HeEngRegistryProvider, HeEngRegistryTask } from './engPublicRegistryTypes';
 
@@ -16,14 +17,20 @@ export const HE_ENG_REGISTRY_CATEGORIES: Readonly<Record<HeEngRegistryProvider, 
   osm: Object.keys(HE_ENG_OSM_TAGS),
   // Bank of England lists of PRA-authorised firms (engPraRegistry.ts).
   pra: ['insurers', 'banks'],
+  // ESMA register of AIF and UCITS managers in the EU/EEA (engEsmaRegistry.ts).
+  esma: ['fund_managers'],
 };
 
-type NationalProvider = Exclude<HeEngRegistryProvider, 'gleif' | 'osm'>;
+type NationalProvider = Exclude<HeEngRegistryProvider, 'gleif' | 'osm' | 'esma'>;
 const PROVIDER_ISO: Readonly<Record<NationalProvider, string>> = {
   brreg: 'no', france: 'fr', companies_house: 'gb', fdic: 'us', nppes: 'us', fmcsa: 'us', pra: 'gb',
 };
-/** Sources covering any country: one slice per sector reads all allowed countries. */
-export const HE_ENG_GLOBAL_REGISTRY_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set(['gleif', 'osm']);
+/** Sources covering many countries: one slice per sector reads all allowed countries. */
+export const HE_ENG_GLOBAL_REGISTRY_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set(['gleif', 'osm', 'esma']);
+/** A global source's countries; ESMA registers firms of the EU and the EEA only. */
+function providerCovers(provider: HeEngRegistryProvider, country: string): boolean {
+  return provider !== 'esma' || Object.hasOwn(HE_ENG_ESMA_MEMBER_STATES, engCountryIso2(country) ?? '');
+}
 const MAX_TASKS = 120;
 const MAX_TASK_COUNTRIES = 40;
 // OpenStreetMap maps premises, mostly small businesses, and never a headcount:
@@ -42,9 +49,10 @@ const SECTORS: readonly Sector[] = [
     omit: /\b(?:custodian|custodial|custody|depositary|depository)[ -]+banks?\b/gi,
     sources: { brreg: ['64'], france: ['64.19Z'], companies_house: ['64191', '64192'], fdic: ['banks'], gleif: ['banks'], osm: ['banks'], pra: ['banks'] } },
   { match: /\b(?:fund (?:services?|administrators?|administration)|custodians?|depositar(?:y|ies)|transfer agents?|investor services?|mancos?)\b/i,
-    sources: { brreg: ['66'], france: ['66.19B', '66.30Z'], companies_house: ['66190', '66300'], gleif: ['fund_services'] } },
+    // Third-party management companies are fund service providers; ESMA lists them.
+    sources: { brreg: ['66'], france: ['66.19B', '66.30Z'], companies_house: ['66190', '66300'], gleif: ['fund_services'], esma: ['fund_managers'] } },
   { match: /\b(?:(?:asset|wealth|investment|fund) manag(?:ers?|ement)|investment advisers?|investment advisors?)\b/i,
-    sources: { brreg: ['66'], france: ['66.30Z'], companies_house: ['66300'], gleif: ['asset_management'] } },
+    sources: { brreg: ['66'], france: ['66.30Z'], companies_house: ['66300'], gleif: ['asset_management'], esma: ['fund_managers'] } },
   { match: /\b(?:insurers?|reinsurers?|insurance (?:carriers?|companies))\b/i,
     sources: { brreg: ['65'], france: ['65.12Z'], companies_house: ['65120'], gleif: ['insurance'], osm: ['insurance'], pra: ['insurers'] } },
   { match: /\b(?:dentists?|dental (?:clinics?|practices?|groups?|offices?))\b/i,
@@ -181,9 +189,10 @@ export function createHeEngRegistryPlan(input: {
   for (const selected of [...selections].sort()) {
     const [provider, category] = selected.split(':') as [HeEngRegistryProvider, string];
     if (!HE_ENG_GLOBAL_REGISTRY_PROVIDERS.has(provider) || (provider === 'osm' && (range?.min ?? 0) >= OSM_MAX_MIN_EMPLOYEES)) continue;
-    for (let start = 0; start < countries.length; start += MAX_TASK_COUNTRIES) {
+    const covered = countries.filter(country => providerCovers(provider, country));
+    for (let start = 0; start < covered.length; start += MAX_TASK_COUNTRIES) {
       const task: HeEngRegistryTask = { id: '', provider, country: 'global', category,
-        countries: countries.slice(start, start + MAX_TASK_COUNTRIES), ...size };
+        countries: covered.slice(start, start + MAX_TASK_COUNTRIES), ...size };
       task.id = taskId(input.scopeKey, task);
       tasks.push(task);
     }
@@ -204,7 +213,7 @@ export function validateHeEngRegistryTask(task: HeEngRegistryTask): void {
     (HE_ENG_GLOBAL_REGISTRY_PROVIDERS.has(task.provider)
       ? task.country !== 'global' || !Array.isArray(task.countries) || !task.countries.length || task.countries.length > MAX_TASK_COUNTRIES ||
         task.countries.some((country, index) => typeof country !== 'string' || normalizeEngCountry(country) !== country ||
-          !engCountryIso2(country) || (index > 0 && task.countries![index - 1] >= country))
+          !engCountryIso2(country) || !providerCovers(task.provider, country) || (index > 0 && task.countries![index - 1] >= country))
       : task.countries !== undefined || normalizeEngCountry(task.country) !== task.country ||
         engCountryIso2(task.country) !== PROVIDER_ISO[task.provider as NationalProvider]) ||
     (task.minEmployees !== undefined && (!Number.isSafeInteger(task.minEmployees) || task.minEmployees < 0)) ||

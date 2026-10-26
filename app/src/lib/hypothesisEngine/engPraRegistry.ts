@@ -1,5 +1,7 @@
 import { sliceWholeChars, stripUnstorableJsonChars } from '../jsonbSafe';
 import type { HeEngRegistryCandidate, HeEngRegistryPage, HeEngRegistryTask } from './engPublicRegistryTypes';
+import { readHeEngGleifRegisteredAs, readHeEngRegistryText } from './engRegistryHttp';
+import { validLei } from './engRegistryIdentity';
 
 /**
  * The Bank of England's lists of PRA-authorised insurers, banks and building
@@ -34,46 +36,17 @@ const REQUEST_TIMEOUT_MS = 25_000;
 const CACHE_MS = 6 * 60 * 60_000;
 // A list this short means the file layout changed, not that the UK lost its banks.
 const MIN_FIRMS = 10;
-const HEADERS = { Accept: 'text/html,text/csv', 'User-Agent': 'Portal ENG public-company-discovery/1.0 (+https://app.outreachos.xyz)' };
 
 interface Options { signal?: AbortSignal; fetch?: typeof fetch; now?: () => number }
-interface Firm { frn: string; name: string; detail: string; kind: ListFile['kind'] }
+interface Firm { frn: string; name: string; detail: string; kind: ListFile['kind']; localRegistryId?: string }
 
 function fail(code: string): never { throw new Error(code); }
 function clean(raw: string | undefined, max = 500): string {
   return sliceWholeChars(stripUnstorableJsonChars(raw ?? '').replace(/[\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim(), 0, max);
 }
 
-/** Same rules as the JSON registries: fixed host, no redirects, bounded size and time. */
-async function readText(url: string, options: Options): Promise<string> {
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  if (options.signal?.aborted) fail('registry_aborted');
-  options.signal?.addEventListener('abort', onAbort, { once: true });
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const response = await (options.fetch ?? fetch)(url, { method: 'GET', headers: HEADERS, redirect: 'error', signal: controller.signal });
-    if (!response.ok) fail(`registry_http_${response.status}`);
-    if (!response.body) fail('registry_invalid_response');
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        size += value.byteLength;
-        if (size > MAX_BYTES) { await reader.cancel(); fail('registry_response_too_large'); }
-        chunks.push(value);
-      }
-    } finally { reader.releaseLock(); }
-    return Buffer.concat(chunks).toString('utf8');
-  } catch (error) {
-    if (options.signal?.aborted) return fail('registry_aborted');
-    if (controller.signal.aborted) return fail('registry_timeout');
-    if (error instanceof Error && /^registry_[a-z0-9_]+$/.test(error.message)) throw error;
-    return fail('registry_network_error');
-  } finally { clearTimeout(timer); options.signal?.removeEventListener('abort', onAbort); }
+function readText(url: string, options: Options): Promise<string> {
+  return readHeEngRegistryText(url, { ...options, accept: 'text/html,text/csv', maxBytes: MAX_BYTES, timeoutMs: REQUEST_TIMEOUT_MS });
 }
 
 /** The newest monthly file linked from the listing page («insurers-list-2610.csv» is October 2026). */
@@ -136,16 +109,24 @@ async function categoryFirms(category: string, options: Options): Promise<Firm[]
   // FRN order keeps a page boundary stable while the month's file stays the same.
   const sorted = [...firms.values()].sort((a, b) => Number(a.frn) - Number(b.frn));
   if (sorted.length < MIN_FIRMS) fail('registry_invalid_response');
+  // Banks and building societies come with their LEI; its GLEIF entry gives the
+  // Companies House number their legal pages print («Registered in England No. …»).
+  const leis = sorted.filter(firm => firm.kind !== 'insurer' && validLei(firm.detail)).map(firm => firm.detail);
+  if (leis.length) {
+    const registered = await readHeEngGleifRegisteredAs(leis, { ...options, maxBytes: MAX_BYTES, timeoutMs: REQUEST_TIMEOUT_MS });
+    for (const firm of sorted) firm.localRegistryId = registered.get(firm.detail);
+  }
   cache.set(category, { at: now, firms: sorted });
   return sorted;
 }
 
 function candidate(firm: Firm): HeEngRegistryCandidate {
-  const lei = firm.kind !== 'insurer' && /^[A-Z0-9]{18}\d{2}$/.test(firm.detail) ? `; LEI ${firm.detail}` : '';
+  const lei = firm.kind !== 'insurer' && validLei(firm.detail) ? `; LEI ${firm.detail}` : '';
   const classes = firm.kind === 'insurer' && firm.detail ? `; classes of business: ${firm.detail}` : '';
   return { provider: 'pra', recordId: firm.frn, company: firm.name, country: 'united kingdom',
     // The list states UK incorporation, not an address; see hasRegistryCountry.
-    address: 'United Kingdom', addressKind: 'registered', category: `PRA-authorised ${firm.kind}`, website: '', emails: [],
+    address: 'United Kingdom', addressKind: 'registered', category: `PRA-authorised ${firm.kind}`,
+    ...(firm.localRegistryId ? { localRegistryId: firm.localRegistryId } : {}), website: '', emails: [],
     description: clean(`${firm.kind === 'insurer' ? 'An insurer' : `A ${firm.kind}`} incorporated in the UK and authorised by the Prudential Regulation Authority (firm reference number ${firm.frn})${classes}${lei}. From the Bank of England list of PRA-regulated firms; website, employee count and services require verification.`, 1500),
     sourceUrl: `https://register.fca.org.uk/s/search?q=${firm.frn}&type=Companies` };
 }

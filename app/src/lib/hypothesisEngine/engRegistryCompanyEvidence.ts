@@ -39,7 +39,7 @@ const DIRECTORY_HOSTS = new Set(['linkedin.com', 'facebook.com', 'instagram.com'
   'thomsonlocal.com', '192.com', 'cylex-uk.co.uk', 'cylex.de', 'hackforddata.com', 'rooplex.co.uk',
   'scoriff.co.uk', 'businessmad.com', 'northdata.com', 'northdata.de', 'bloomberg.com', 'rocketreach.co',
   'apollo.io', 'signalhire.com', 'lusha.com', 'cbinsights.com', 'pitchbook.com', 'preqin.com', 'legal500.com',
-  'chambers.com', 'vat-search.ie', 'solocheck.ie', 'societe.com', 'pappers.fr', 'infogreffe.fr', 'verif.com', 'bankofengland.co.uk',
+  'chambers.com', 'vat-search.ie', 'solocheck.ie', 'societe.com', 'pappers.fr', 'infogreffe.fr', 'verif.com', 'bankofengland.co.uk', 'esma.europa.eu',
   'manageo.fr', 'proff.no', 'purehelp.no', '1881.no', 'gulesider.no', 'bizapedia.com', 'manta.com',
   'buzzfile.com', 'yelp.com', 'bbb.org', 'sophymarine.com', 'experian.com', 'ebay.com', 'amazon.com']);
 // Legal-form words: the register says «LTD», the company's own footer «Limited».
@@ -307,6 +307,8 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
       'fs\\s+register\\s+(?:number|no)', '(?:fca|pra)\\s+(?:firm\\s+)?(?:registration\\s+|register\\s+|reference\\s+)?(?:number|no|nr)',
       'financial\\s+conduct\\s+authority\\s+(?:registration\\s+|reference\\s+)?(?:number|no)',
       'under\\s+(?:firm\\s+)?(?:reference|registration)\\s+(?:number|no)'].join('|'),
+    // An ESMA record id is the firm's LEI when it has one; ESMA's own id never appears on a site.
+    esma: 'lei|legal\\s+entity\\s+identifier',
   };
   const id = identifierKey(candidate.recordId);
   const digits = candidate.provider === 'companies_house' ? companiesHouseDigits(id) : id;
@@ -371,7 +373,8 @@ const LOCAL_REGISTRY_LABELS = '(?:handelsregister|registernummer|registergericht
  * requires the legal name in the same block.
  */
 function localRegistryNumber(value: string, candidate: HeEngRegistryCandidate): boolean {
-  if (candidate.provider !== 'gleif' || !candidate.localRegistryId) return false;
+  // ESMA fund managers and PRA banks carry the same GLEIF number, looked up by their LEI.
+  if (!['gleif', 'esma', 'pra'].includes(candidate.provider) || !candidate.localRegistryId) return false;
   const chars = candidate.localRegistryId.normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
   if (chars.length < 5 || chars.length > 30) return false;
   // GLEIF keeps a Companies House number padded («01167327»); the site writes
