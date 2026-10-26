@@ -28,6 +28,9 @@ export interface VeCollectTask {
    * Снимок 2ГИС — задача-близнец Яндекс-задачи. Ставит только код, в схеме модели
    * её нет. Связь с Яндекс-задачей — `two_gis_pair_id` в состояниях, не здесь:
    * поле входит в ключ стратегии.
+   * Где читать — только veTwoGisQueryScope(two_gis_query) (collectionGeography.ts):
+   * region_codes/cities — копия, которую пишет лишь география брифа; у близнеца без
+   * брифа их нет, хотя geo («Москва») сужает чтение. Напрямую их не читать.
    */
   two_gis_query?: {
     from_queries: string[]; geo?: string; region_codes?: string[]; cities?: string[];
