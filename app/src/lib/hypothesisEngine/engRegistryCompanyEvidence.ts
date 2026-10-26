@@ -39,7 +39,7 @@ const DIRECTORY_HOSTS = new Set(['linkedin.com', 'facebook.com', 'instagram.com'
   'thomsonlocal.com', '192.com', 'cylex-uk.co.uk', 'cylex.de', 'hackforddata.com', 'rooplex.co.uk',
   'scoriff.co.uk', 'businessmad.com', 'northdata.com', 'northdata.de', 'bloomberg.com', 'rocketreach.co',
   'apollo.io', 'signalhire.com', 'lusha.com', 'cbinsights.com', 'pitchbook.com', 'preqin.com', 'legal500.com',
-  'chambers.com', 'vat-search.ie', 'solocheck.ie', 'societe.com', 'pappers.fr', 'infogreffe.fr', 'verif.com',
+  'chambers.com', 'vat-search.ie', 'solocheck.ie', 'societe.com', 'pappers.fr', 'infogreffe.fr', 'verif.com', 'bankofengland.co.uk', 'esma.europa.eu',
   'manageo.fr', 'proff.no', 'purehelp.no', '1881.no', 'gulesider.no', 'bizapedia.com', 'manta.com',
   'buzzfile.com', 'yelp.com', 'bbb.org', 'sophymarine.com', 'experian.com', 'ebay.com', 'amazon.com']);
 // Legal-form words: the register says «LTD», the company's own footer «Limited».
@@ -138,8 +138,9 @@ function hasRegistryCountry(candidate: HeEngRegistryCandidate): boolean {
   // The adapter validates the record address; never infer country from the
   // discovery task. UK and French adapters supply validated domestic
   // registered offices; accepting their country does not claim a local team.
+  // The PRA lists state incorporation in the UK instead of an address.
   return (candidate.addressKind === 'business' ||
-      (['companies_house', 'france'].includes(candidate.provider) && candidate.addressKind === 'registered')) &&
+      (['companies_house', 'france', 'pra'].includes(candidate.provider) && candidate.addressKind === 'registered')) &&
     text(candidate.address).length >= 5 &&
     heEngRegistryRecordValid(candidate.provider, candidate.recordId, country(candidate.country), candidate.sourceUrl);
 }
@@ -278,6 +279,8 @@ const UK_COMPANY_NUMBER_LABELS = '(?:company\\s+(?:registration\\s+|reg(?:istere
   + '|registered\\s+(?:in\\s+(?:england(?:\\s*(?:and|&)\\s*wales)?|wales|scotland|northern\\s+ireland)\\s*)?(?:company\\s+)?(?:number|no|nr)'
   + '|registered\\s+in\\s+(?:england(?:\\s*(?:and|&)\\s*wales)?|wales|scotland|northern\\s+ireland)(?=\\s*#)'
   + '|reg\\.?\\s*(?:number|no|nr)|under\\s+(?:registration\\s+)?(?:number|no)|crn)';
+// Wording that introduces a partner firm before its FRN on another firm's site.
+const PRA_THIRD_PARTY = /\b(?:underwritten|insured|provided|arranged|issued|administered|introduced|supplied|offered)\s+by\b|\bappointed\s+representatives?\b|\bintroducers?\b|\bcredit\s+brokers?\b|\blenders?\b|\bon\s+behalf\s+of\b|\bin\s+partnership\s+with\b|\bpanel\s+of\b/i;
 /**
  * A legal block names this entity. With `numberAlone` (the site's own footer) a
  * labelled registry number is enough by itself: the number is unique, and a
@@ -285,7 +288,7 @@ const UK_COMPANY_NUMBER_LABELS = '(?:company\\s+(?:registration\\s+|reg(?:istere
  * With `numberRequired` (a whole legal page) the name must come with the number.
  */
 function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
-  options: { numberAlone?: boolean; numberRequired?: boolean } = {}): boolean {
+  options: { numberAlone?: boolean; numberRequired?: boolean; brandSite?: boolean } = {}): boolean {
   const normalized = ` ${key(value)} `;
   const named = ` ${nameWords(value).join(' ')} `;
   const legalName = legalNameKey(candidate.company);
@@ -298,6 +301,16 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
     gleif: 'lei|legal\\s+entity\\s+identifier',
     // An OpenStreetMap element id never appears on a company site.
     osm: '(?!)',
+    // UK-regulated firms state their FCA firm reference number: «Firm Reference
+    // Number 202153», «(FRN: 202153)», «Financial Services Register No. 117659»,
+    // «FCA No. 202153», «under firm reference number 202153».
+    pra: ['firm\\s+reference\\s+(?:number|no|nr)(?:\\s+is)?', 'frn',
+      'financial\\s+services\\s+register[\\s,(]{1,4}(?:under\\s+)?(?:registration\\s+)?(?:number|no|nr|reference)(?:\\s+is)?',
+      'fs\\s+register\\s+(?:number|no)', '(?:fca|pra)\\s+(?:firm\\s+)?(?:registration\\s+|register\\s+|reference\\s+)?(?:number|no|nr)',
+      'financial\\s+conduct\\s+authority\\s+(?:registration\\s+|reference\\s+)?(?:number|no)',
+      'under\\s+(?:firm\\s+)?(?:reference|registration)\\s+(?:number|no)'].join('|'),
+    // An ESMA record id is the firm's LEI when it has one; ESMA's own id never appears on a site.
+    esma: 'lei|legal\\s+entity\\s+identifier',
   };
   const id = identifierKey(candidate.recordId);
   const digits = candidate.provider === 'companies_house' ? companiesHouseDigits(id) : id;
@@ -305,6 +318,8 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
   // A labelled registry identifier in the company's own legal footer is a
   // second identity fact. Arbitrary numbers in articles/testimonials are not.
   const end = '(?![\\p{L}\\p{N}]|[\\s.-]{1,3}\\d)';
+  // «Firm Reference Number (FRN) 202153» and «(FRN: 202153)» bracket the number.
+  const gap = candidate.provider === 'pra' ? '(?:\\s*\\(frn\\))?[\\s:./#()-]{0,12}' : '[\\s:./#-]{0,12}';
   const registryNumber = candidate.provider === 'france' ? ([
     ['siren', 'SIREN', '\\d(?:[\\s.-]*\\d){8}'],
     ['siret', 'SIRET', '\\d(?:[\\s.-]*\\d){13}'],
@@ -312,7 +327,12 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
   ] as const).some(([namespace, label, pattern]) => {
     const matches = value.matchAll(new RegExp(`\\b${label}\\b[\\s:./#-]{0,12}(${pattern})${end}`, 'giu'));
     return [...matches].some(match => frenchIdentifierMatches(match[1], id, namespace));
-  }) : id.length >= 5 && new RegExp(`\\b(?:${labels[candidate.provider]})\\b[\\s:./#-]{0,12}(${idPattern})${end}`, 'iu').test(value);
+  }) : id.length >= 5 && [...value.matchAll(new RegExp(`\\b(?:${labels[candidate.provider]})\\b${gap}(${idPattern})${end}`, 'giu'))]
+    // A broker's or retailer's site prints its insurer's or lender's FRN as a
+    // partner: «Policies are underwritten by …, FRN 955859». Unless the domain
+    // carries the firm's own name, such a number names someone else.
+    .some(match => candidate.provider !== 'pra' || options.brandSite ||
+      !PRA_THIRD_PARTY.test(value.slice(Math.max(0, match.index - 200), match.index)));
   if (registryNumber && options.numberAlone) return true;
   if (!legalName || !named.includes(` ${legalName} `)) return false;
   if (registryNumber || localRegistryNumber(value, candidate)) return true;
@@ -360,7 +380,8 @@ const LOCAL_REGISTRY_LABELS = '(?:handelsregister|registernummer|registergericht
  * requires the legal name in the same block.
  */
 function localRegistryNumber(value: string, candidate: HeEngRegistryCandidate): boolean {
-  if (candidate.provider !== 'gleif' || !candidate.localRegistryId) return false;
+  // ESMA fund managers and PRA banks carry the same GLEIF number, looked up by their LEI.
+  if (!['gleif', 'esma', 'pra'].includes(candidate.provider) || !candidate.localRegistryId) return false;
   const chars = candidate.localRegistryId.normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
   if (chars.length < 5 || chars.length > 30) return false;
   // GLEIF keeps a Companies House number padded («01167327»); the site writes
@@ -413,21 +434,22 @@ export function readHeEngRegistryOwnSiteFacts(
   // A legal page linked from the home page of this site (terms, privacy, legal
   // notice) names the entity with its number: «Acme Ltd, company number …».
   const legalText = options.legalPage ? $('body').text().replace(/\s+/g, ' ').slice(0, 200_000) : '';
-  const legalPageMatch = !!options.legalPage && (legalBlockIdentity(legalText, candidate, { numberRequired: true }) ||
-    nameWindows(legalText, candidate.company).some(window => legalBlockIdentity(window, candidate)));
+  const brandSite = brandScore(page.url, candidate.company) > 0;
+  const legalPageMatch = !!options.legalPage && (legalBlockIdentity(legalText, candidate, { numberRequired: true, brandSite }) ||
+    nameWindows(legalText, candidate.company).some(window => legalBlockIdentity(window, candidate, { brandSite })));
   // Many sites build the footer from a div named «footer»/«copyright», not the
   // <footer> element. A long block is a page wrapper, not a footer.
   const footerMatch = $('footer, [role="contentinfo"], [id*="footer"], [class*="footer"], [id*="copyright"], [class*="copyright"]')
     .slice(0, 16).toArray()
     .some(node => !$(node).is('body, html') && $(node).text().length <= 6_000 &&
-      legalBlockIdentity($(node).text(), candidate, { numberAlone: true }));
+      legalBlockIdentity($(node).text(), candidate, { numberAlone: true, brandSite }));
   const legalName = legalNameKey(candidate.company);
   const ownHeading = !!legalName && $('title, h1').slice(0, 8).toArray()
     .some(node => ` ${nameWords($(node).text()).join(' ')} `.includes(` ${legalName} `));
   // Contact/legal blocks only establish ownership if the page itself names the
   // legal entity. A directory article mentioning a firm is not its own website.
   const contactMatch = ownHeading && $('address, #contact, .contact, #legal, .legal, #imprint, .imprint').slice(0, 12).toArray()
-    .some(node => legalBlockIdentity($(node).text().slice(0, 20_000), candidate));
+    .some(node => legalBlockIdentity($(node).text().slice(0, 20_000), candidate, { brandSite }));
   const declared = [...new Map(matching.filter(item => item.employees && (item.identity || options.trustedWebsite))
     .map(item => [JSON.stringify(item.employees), item.employees])).values()];
   return { identity: footerMatch || legalPageMatch || contactMatch || matching.some(item => item.identity),

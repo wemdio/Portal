@@ -20,6 +20,7 @@ import {
   listVeInstantlyCustomTags,
 } from '@/lib/verticalEngineV2/launchClientProvisioning';
 import {
+  parseLaunchInfo,
   type VeLaunchPresetOption,
   type VeMailboxTagOption,
 } from '@/lib/verticalEngineV2/launchHandoff';
@@ -28,6 +29,8 @@ import {
   type VeInstantlyTagMapping,
 } from '@/lib/verticalEngineV2/launchPresets';
 import type { CustomTag } from '@/lib/instantly/types';
+import { attachVeSenderPool } from '@/lib/verticalEngineV2/senderTransport/senderPool';
+import { resolveVeLaunchTransport } from '@/lib/verticalEngineV2/senderTransport/transport';
 import {
   describePortalProjectTerm,
   LAUNCHABLE_PORTAL_PROJECT_STATUSES,
@@ -164,7 +167,7 @@ export async function GET(
 
       const { data: templateRow, error: templateErr } = await supabaseAdmin
         .from('ve_templates')
-        .select('base_id')
+        .select('base_id, launch_info')
         .eq('id', templateId)
         .maybeSingle();
       if (templateErr) return jsonError(templateErr.message, 500);
@@ -397,7 +400,7 @@ export async function GET(
         typeof projectRow.launch_preset_id === 'string' &&
         projectRow.launch_preset_id
       ) {
-        const boundPreview = await buildVeContactDeliveryPreview(
+        const boundPreview = await attachVeSenderPool(supabaseAdmin, supabaseInstantly, await buildVeContactDeliveryPreview(
           supabaseAdmin,
           supabaseInstantly,
           {
@@ -407,7 +410,11 @@ export async function GET(
             targetContacts: projectRow.target_contacts,
             presetId: projectRow.launch_preset_id,
           },
-        );
+        ), {
+          templateId,
+          presetId: projectRow.launch_preset_id,
+          recordedSender: parseLaunchInfo(templateRow.launch_info)?.transport === 'sender',
+        });
         const preview = boundPreview.body.preview;
         if (boundPreview.status === 200 && preview && typeof preview === 'object') {
           deliveryPlan = preview as Record<string, unknown>;
@@ -439,6 +446,8 @@ export async function GET(
         }
       }
 
+      // Куда пойдёт новый запуск — чтобы экран говорил верно ещё до обзора плана.
+      const { transport: launchTransport } = await resolveVeLaunchTransport(supabaseAdmin, projectRow.id);
       return NextResponse.json({
         presets,
         can_create_client: canCreateClient,
@@ -452,6 +461,7 @@ export async function GET(
           typeof projectRow.launch_preset_id === 'string' && projectRow.launch_preset_id
             ? projectRow.launch_preset_id
             : null,
+        ...(launchTransport === 'sender' ? { launch_transport: 'sender' } : {}),
       });
     },
   );

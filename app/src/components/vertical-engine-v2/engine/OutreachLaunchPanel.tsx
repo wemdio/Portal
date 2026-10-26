@@ -62,6 +62,12 @@ export function OutreachLaunchPanel({
     if (pending) setConfirmedKey(null);
   }, []);
   const [retry, setRetry] = useState(0);
+  /** Новая проверка без повтора упавших аудитов: способ отправки сменился после обзора. */
+  const [recheck, setRecheck] = useState(0);
+  // Отдельно от error: ту сбрасывает новая проверка, которую этот отказ и запускает.
+  const [transportNotice, setTransportNotice] = useState('');
+  /** Способ, на который сервер сменил отправку, — до нового обзора (подсказка шаблона о нём не знает). */
+  const [transportAfterChange, setTransportAfterChange] = useState<'instantly' | 'sender' | null>(null);
   const retryRequest = useRef(0);
   const idempotency = useRef<{ key: string; id: string } | null>(null);
   const onAuditRejected = useCallback(() => setPreflightState(null), []);
@@ -166,15 +172,16 @@ export function OutreachLaunchPanel({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [projectId, requestKey, preflightKey, retry]);
+  }, [projectId, requestKey, preflightKey, retry, recheck]);
   const start = async () => {
     if (!request || !preflight?.ready || confirmedKey !== confirmationKey || busy) return;
     if (idempotency.current?.key !== confirmationKey)
       idempotency.current = { key: confirmationKey, id: crypto.randomUUID() };
     setBusy(true);
     setError('');
+    setTransportNotice('');
     try {
-      const result = await veEnginePost<{ run?: VeOutreachRun; error?: string }>(
+      const result = await veEnginePost<{ run?: VeOutreachRun; error?: string; code?: string }>(
         `${VE_API}/projects/${projectId}/outreach/start`,
         {
           ...request,
@@ -193,6 +200,15 @@ export function OutreachLaunchPanel({
         },
       );
       if (!result.ok || !result.data.run) {
+        if (result.data.code === 'VE_LAUNCH_TRANSPORT_CHANGED') {
+          // Обзор показывал другой способ отправки: без новой проверки каждый повтор получил бы тот же отказ.
+          setPreflightState(null);
+          setConfirmedKey(null);
+          setRecheck((value) => value + 1);
+          setTransportAfterChange(preflight.transport === 'sender' ? 'instantly' : 'sender');
+          setTransportNotice(`${result.data.error ?? 'Способ отправки изменился.'} Обзор пересчитывается — проверьте его и подтвердите заново.`);
+          return;
+        }
         setError(result.data.error ?? 'Не удалось сохранить запуск');
         return;
       }
@@ -204,6 +220,10 @@ export function OutreachLaunchPanel({
     }
   };
   const preset = launch.presets?.find((p) => p.id === launch.presetId);
+  // До обзора — куда пойдёт новый запуск по настройкам проекта; обзор уточняет.
+  const sender = (preflight?.transport ?? transportAfterChange ?? launch.launchTransport) === 'sender';
+  // Ящики пресета в «Рассылке» одни на весь запуск; 0 рабочих — запуск откажет, не даём его начать.
+  const senderPoolEmpty = sender && !!preflight?.items.some((item) => item.preview?.sender_pool?.ready === 0);
   const selectionBlocked = !hypothesisIds.length || hypothesisIds.some((id) => !getVeLaunchSelectionState(snapshot, templates, id).ready);
   if (!first || selectionBlocked) return (
     <section className="space-y-3">
@@ -248,10 +268,11 @@ export function OutreachLaunchPanel({
         </fieldset>
       ) : null}
       <DeliveryPlanBlock launch={launch} disabled={busy} uploadMode={uploadMode} preparedPreview={preflight?.items[0]?.preview ?? null} />
-      <ContactUploadModePanel projectId={projectId} mode={uploadMode} disabled={busy}
+      <ContactUploadModePanel projectId={projectId} mode={uploadMode} disabled={busy} sender={sender}
         onSaved={onUploadModeSaved} onPendingChange={onUploadModePending} />
       {launch.presetId && rateTemplates.length ? <DeliveryRatePanel key={rateKey} projectId={projectId}
-        presetId={launch.presetId} templateIds={rateTemplates} disabled={busy} onReady={onRateReady} supplyOnly={uploadMode === 'all_ready'} /> : null}
+        presetId={launch.presetId} templateIds={rateTemplates} disabled={busy} onReady={onRateReady} supplyOnly={uploadMode === 'all_ready'}
+        hintReload={recheck} /> : null}
       <div className="border-t border-[var(--ve2-line)] pt-5 space-y-3">
         <h2 className="ve2-h2">Обзор запуска</h2>
         {!request ? (
@@ -280,7 +301,14 @@ export function OutreachLaunchPanel({
             ) : null}
           </div>
         ))}
-        {preflight?.ready ? (
+        {preflight?.ready && sender ? (
+          <p className={HE.muted}>
+            {uploadMode === 'all_ready'
+              ? 'Система создаст в «Рассылке» черновики кампаний и начнёт загружать весь готовый запас в пределах общей цели проекта. Новые готовые контакты будут добавляться автоматически.'
+              : 'Система создаст в «Рассылке» черновики кампаний и загрузит первую порцию контактов по плану. После запуска ежедневная дозаливка продолжится автоматически.'}
+            {' '}Проверьте черновики и запустите их на карточке кампании или в «Рассылке».
+          </p>
+        ) : preflight?.ready ? (
           <p className={HE.muted}>
             {uploadMode === 'all_ready'
               ? 'Система создаст кампании без отправки и начнёт загружать весь готовый запас в пределах общей цели проекта. Новые готовые контакты будут добавляться автоматически.'
@@ -288,6 +316,7 @@ export function OutreachLaunchPanel({
             {' '}Проверьте кампании и нажмите Start в Instantly.
           </p>
         ) : null}
+        {transportNotice ? <StatusBox tone="info">{transportNotice}</StatusBox> : null}
         {error ? <StatusBox tone="error">{error}</StatusBox> : null}
         {error || preflight?.items.some((i) => i.status === 'blocked') ? (
           <button type="button" className={HE.btnGhost} onClick={() => setRetry((v) => v + 1)} disabled={busy}>
@@ -309,10 +338,11 @@ export function OutreachLaunchPanel({
           className={HE.btnPrimary}
           disabled={
             busy || !preflight?.ready || !confirmationKey || confirmedKey !== confirmationKey || !preset?.mailbox_count
+            || senderPoolEmpty
           }
           onClick={() => void start()}
         >
-          {busy ? 'Сохраняем запрос…' : 'Подготовить кампании в Instantly'}
+          {busy ? 'Сохраняем запрос…' : sender ? 'Подготовить черновики в «Рассылке»' : 'Подготовить кампании в Instantly'}
         </button>
       </div>
     </section>

@@ -80,6 +80,28 @@ async function readProjectAndSettings(
   return { project: project as ProjectTransportRow, settings: settings ?? null };
 }
 
+/**
+ * Рынки, где новые запуски могут идти в «Рассылку», — для плашки над списком
+ * проектов. Выключатель окружения и ошибка чтения — пусто, то есть Instantly.
+ * Отдаём только режим, не значения окружения.
+ */
+export async function readVeSenderMarkets(
+  portalDb: SupabaseClient,
+  env: Record<string, string | undefined> = process.env,
+): Promise<Array<{ market: string; mode: 'pilot' | 'sender'; sender_uploads_enabled: boolean }>> {
+  if (killedByEnv(env)) return [];
+  try {
+    const { data, error } = await portalDb.from('ve_launch_transport_settings').select('market, mode, sender_uploads_enabled');
+    if (error) return [];
+    return ((data ?? []) as Array<{ market: unknown; mode: unknown; sender_uploads_enabled: unknown }>)
+      .filter((row) => typeof row.market === 'string' && (row.mode === 'pilot' || row.mode === 'sender'))
+      .map((row) => ({ market: row.market as string, mode: row.mode as 'pilot' | 'sender', sender_uploads_enabled: row.sender_uploads_enabled === true }))
+      .sort((left, right) => left.market.localeCompare(right.market));
+  } catch {
+    return [];
+  }
+}
+
 /** Куда пойдёт новый запуск проекта. Ошибка, нет строки или непонятное значение — Instantly. */
 export async function resolveVeLaunchTransport(
   portalDb: SupabaseClient,

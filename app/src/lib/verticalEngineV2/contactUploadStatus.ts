@@ -3,7 +3,13 @@ import { readContactDeliveryPages } from './contactDeliveryInventory';
 
 export interface VeContactUploadStatus {
   campaigns?: Array<{campaign_id: string; campaign_name: string; remote_status: number | null;
-    status_observed_at: string | null; leads_count: number}>;
+    status_observed_at: string | null; leads_count: number;
+    /** Только у кампаний «Рассылки» с запуском, назначенным там на время. */
+    scheduled_start_at?: string}>;
+  /** Только у запуска в «Рассылку»: все кампании запуска там (transport строки очереди). */
+  transport?: 'sender';
+  /** Только у запуска в «Рассылку»: запуск закрыт (отпущен, отменён) — запускать и подавать нечего. */
+  launch_closed?: true;
   blocked: null | { run_id: string; blocked_at: string; run_date: string; accepted: number; pending: number; uncertain: number };
 }
 
@@ -25,16 +31,30 @@ export async function loadContactUploadStatus(db: SupabaseClient, projectId: str
     .order('run_date', { ascending: false }).limit(1).maybeSingle();
   if (error) throw new Error('Не удалось проверить загрузку контактов');
   let campaigns: VeContactUploadStatus['campaigns'];
+  let sender = false;
+  let closed = false;
   if (templateId) {
     const {data: item, error: itemError} = await db.from('ve_launch_queue_items')
-      .select('id').eq('project_id', projectId).eq('template_id', templateId).maybeSingle();
+      .select('id, transport, status').eq('project_id', projectId).eq('template_id', templateId).maybeSingle();
     if (itemError) throw new Error('Не удалось прочитать состояние кампаний');
+    sender = item?.transport === 'sender';
+    closed = sender && !['prepared', 'queued', 'active', 'uncertain'].includes(String(item?.status));
     campaigns = item ? await readContactDeliveryPages('campaign display status', (from, to) =>
       db.from('ve_launch_queue_campaigns')
         .select('campaign_id, campaign_name, remote_status, status_observed_at, leads_count', {count: 'exact'})
         .eq('item_id', item.id).order('id', {ascending: true}).range(from, to)) : [];
+    if (sender && campaigns.length) {
+      // Назначенный в «Рассылке» запуск — только для подписи; не прочитали — карточка без него.
+      const { data: rows, error: scheduleError } = await db.from('sender_campaigns')
+        .select('id, scheduled_start_at').in('id', campaigns.map((campaign) => campaign.campaign_id));
+      const scheduled = new Map(scheduleError ? [] : ((rows ?? []) as Array<{ id: string; scheduled_start_at: string | null }>)
+        .filter((row) => typeof row.scheduled_start_at === 'string' && row.scheduled_start_at)
+        .map((row) => [row.id, row.scheduled_start_at as string]));
+      campaigns = campaigns.map((campaign) => (scheduled.has(campaign.campaign_id)
+        ? { ...campaign, scheduled_start_at: scheduled.get(campaign.campaign_id)! } : campaign));
+    }
   }
-  return { ...(campaigns ? {campaigns} : {}), blocked: data ? {
+  return { ...(campaigns ? {campaigns} : {}), ...(sender ? { transport: 'sender' as const, ...(closed ? { launch_closed: true as const } : {}) } : {}), blocked: data ? {
     run_id: data.id, blocked_at: data.upload_blocked_at, run_date: data.run_date,
     accepted: data.accepted_count, uncertain: data.uncertain_count,
     pending: Math.max(0, data.reserved_count - data.accepted_count - data.skipped_count - data.uncertain_count),

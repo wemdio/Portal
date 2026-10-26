@@ -7,6 +7,7 @@
 
 import { authFetch } from '@/lib/authFetch';
 import type { ClientBriefFields } from '@/lib/clientBrief';
+import type { VeSenderMarketView, VeSenderPoolSummary } from '@/lib/verticalEngineV2/senderTransport/labels';
 import type {
   VeBase,
   VeChain,
@@ -345,6 +346,8 @@ export interface VeCasePreviewResponse {
 
 export interface VeProjectsResponse {
   projects?: VeProject[];
+  /** Рынки, где новые запуски идут в «Рассылку»; нет поля — везде Instantly. */
+  launch_transport?: VeSenderMarketView[];
   error?: string;
 }
 
@@ -539,6 +542,8 @@ export interface VeDeliveryPlanPreviewDto {
   delivery_schedule_days?: number[] | null;
   /** Куда пойдут кампании запуска; запуск возвращает это значение обратно (expected_transport). */
   transport?: 'instantly' | 'sender';
+  /** Только у запуска в «Рассылку»: ящики пресета там; null — проверить не вышло. */
+  sender_pool?: VeSenderPoolSummary | null;
   /** Только без периода: карточка проекта для показа. */
   project_term?: Omit<VePortalProjectTermDto, 'issue'> | null;
 }

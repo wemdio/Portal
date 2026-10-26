@@ -485,6 +485,29 @@
     @media (min-width: 901px) and (max-width: 1180px) { .nav { gap: 18px; font-size: 13px; } }
     @media (min-width: 901px) and (max-width: 1040px) { .nav > a[href="#sources"] { display: none; } }
   </style>
+  <!-- Meta Pixel 2097360620990234 — поставлен по просьбе маркетолога 26.10.2026.
+       Код — как его выдаёт Meta, с одним отличием: <noscript> с картинкой перенесён в начало
+       <body> (он там, рядом с таким же пикселем Метрики). Причина та же, что описана ниже у
+       Метрики: в <head> внутри <noscript> разрешены только link/style/meta, а <img> обрывает
+       разбор head у посетителя с выключенными скриптами.
+       Событие Lead уходит из скрипта формы там же, где цель Метрики «pilot_request» —
+       только после ответа 2xx, то есть когда сервер заявку принял.
+       ВНИМАНИЕ: пиксель грузится сразу, без запроса согласия. Для посетителей из ЕС это
+       отдельное решение владельца (см. соседний комментарий про webvisor и ЕС). -->
+  <!-- Meta Pixel Code -->
+  <script>
+  !function(f,b,e,v,n,t,s)
+  {if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+  n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+  if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+  n.queue=[];t=b.createElement(e);t.async=!0;
+  t.src=v;s=b.getElementsByTagName(e)[0];
+  s.parentNode.insertBefore(t,s)}(window, document,'script',
+  'https://connect.facebook.net/en_US/fbevents.js');
+  fbq('init', '2097360620990234');
+  fbq('track', 'PageView');
+  </script>
+  <!-- End Meta Pixel Code -->
   <!-- Яндекс Метрика outreachos.xyz — счётчик 113695034 (отдельный от outreachos.pro, 110060586).
        Код — как его выдаёт Метрика, с двумя отличиями: без ecommerce:"dataLayer" (магазина нет)
        и webvisor:true — запись сессий включена.
@@ -510,6 +533,8 @@
   <!-- Пиксель Метрики для браузеров без JS — в начале body, не в head: <div> внутри
        <noscript> в head ломает разбор head, когда скрипты выключены. -->
   <noscript><div><img src="https://mc.yandex.ru/watch/113695034" style="position:absolute; left:-9999px;" alt="" /></div></noscript>
+  <noscript><img height="1" width="1" style="display:none" alt=""
+    src="https://www.facebook.com/tr?id=2097360620990234&amp;ev=PageView&amp;noscript=1" /></noscript>
   <header class="shell topbar">
     <a class="brand" href="#top" aria-label="Polza OutreachOS — на главную"><span class="brand-mark">Π</span><span>POLZA</span><span>OutreachOS</span></a>
     <nav class="nav" aria-label="Основное меню">
@@ -927,6 +952,7 @@
           if (!response.ok) throw new Error('HTTP ' + response.status);
           // Цель Метрики «pilot_request»: только когда сервер принял заявку (2xx).
           if (typeof window.ym === 'function') window.ym(113695034, 'reachGoal', 'pilot_request');
+          if (typeof window.fbq === 'function') window.fbq('track', 'Lead');
           message.textContent = 'Спасибо! Мы получили заявку и скоро с вами свяжемся.';
           message.style.display = 'block';
           button.textContent = 'Заявка отправлена';
@@ -949,6 +975,7 @@
       sentMessage.classList.add('is-shown');
       // Заявку, отправленную мимо скрипта, сервер уже принял (303 только после приёма).
       if (typeof window.ym === 'function') window.ym(113695034, 'reachGoal', 'pilot_request');
+      if (typeof window.fbq === 'function') window.fbq('track', 'Lead');
       try { history.replaceState(history.state, '', location.pathname + location.search); } catch (e) { /* #sent остаётся в адресе */ }
       var contactTitle = document.getElementById('contact-title');
       if (contactTitle) contactTitle.scrollIntoView();

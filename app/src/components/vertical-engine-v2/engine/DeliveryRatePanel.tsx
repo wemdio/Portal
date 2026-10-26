@@ -3,15 +3,20 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
 import type { DeliveryRateRow, DeliveryRateSnapshot } from '@/lib/verticalEngineV2/contactDeliveryRate';
+import { senderPaceWarning, senderPoolLine, type VeSenderPoolSummary } from '@/lib/verticalEngineV2/senderTransport/labels';
 import { VE_API, veEnginePost } from './api';
 import { HE } from './design';
 import { StatusBox } from './ui';
 
-type RateResponse = { rate: DeliveryRateRow | null; revision: number; snapshot: DeliveryRateSnapshot; bound: boolean; error?: string };
+type RateResponse = { rate: DeliveryRateRow | null; revision: number; snapshot: DeliveryRateSnapshot; bound: boolean; error?: string;
+  /** Только у запуска в «Рассылку»: темп выше — по почтам Instantly, отправляют ящики «Рассылки». */
+  transport?: 'sender'; sender_pool?: VeSenderPoolSummary | null };
 
-export function DeliveryRatePanel({ projectId, presetId, templateIds, disabled = false, onReady, supplyOnly = false }: {
+export function DeliveryRatePanel({ projectId, presetId, templateIds, disabled = false, onReady, supplyOnly = false, hintReload = 0 }: {
   projectId: string; presetId: string; templateIds: string[]; disabled?: boolean;
   onReady?: (revision: number | null) => void; supplyOnly?: boolean;
+  /** Сменился способ отправки: перечитать только подсказку о «Рассылке», не трогая принятый темп. */
+  hintReload?: number;
 }) {
   const id = useId();
   const [data, setData] = useState<RateResponse | null>(null);
@@ -51,6 +56,20 @@ export function DeliveryRatePanel({ projectId, presetId, templateIds, disabled =
     return () => controller.abort();
   }, [projectId, presetId, ids, reload]);
 
+  useEffect(() => {
+    if (!hintReload) return;
+    const controller = new AbortController();
+    const query = new URLSearchParams({ preset_id: presetId, template_ids: ids });
+    void authFetch(`${VE_API}/projects/${projectId}/delivery-rate?${query}`, { signal: controller.signal })
+      .then(async response => {
+        const result = await response.json() as RateResponse;
+        if (!response.ok || controller.signal.aborted) return;
+        setData(current => current ? { ...current, transport: result.transport, sender_pool: result.sender_pool } : current);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [projectId, presetId, ids, hintReload]);
+
   const invalidate = () => { setDirty(true); callback.current?.(null); };
   const manual = Number(limit);
   const valid = mode === 'auto' || (limit.trim() !== '' && Number.isSafeInteger(manual) && manual > 0 && manual <= 100_000);
@@ -68,7 +87,8 @@ export function DeliveryRatePanel({ projectId, presetId, templateIds, disabled =
       if (currentIdentity.current !== savingIdentity) return;
       if (!response.ok || !response.data.rate) throw new Error(response.data.error ?? 'Не удалось сохранить темп');
       const rate = response.data.rate;
-      setData({ ...data, rate, revision: rate.revision, snapshot: rate.snapshot }); setDirty(false);
+      // От текущего состояния, а не от снятого при клике: подсказка о «Рассылке» могла обновиться, пока шло сохранение.
+      setData(current => ({ ...(current ?? data), rate, revision: rate.revision, snapshot: rate.snapshot })); setDirty(false);
       // Pending changes for a bound project are applied by the worker before any new upload.
       callback.current?.(rate.revision);
     } catch (reason) {
@@ -101,6 +121,11 @@ export function DeliveryRatePanel({ projectId, presetId, templateIds, disabled =
         {snapshot.slow_ramp_mailboxes > 0 ? <p className={HE.muted}>На {snapshot.slow_ramp_mailboxes} почтах включён разгон, поэтому темп снижен.</p> : null}
       </>}
     </div> : busy ? <p role="status">Проверяем отправителей в Instantly…</p> : null}
+    {snapshot && data?.transport === 'sender' ? <div className="space-y-1">
+      <p className={HE.muted}>Темп считается по лимитам почт в Instantly, а отправлять будет «Рассылка». {senderPoolLine(data.sender_pool)}</p>
+      {!supplyOnly && senderPaceWarning(valid ? cap : snapshot.max_new_contacts, data.sender_pool)
+        ? <p className="text-sm text-amber-700">{senderPaceWarning(valid ? cap : snapshot.max_new_contacts, data.sender_pool)}</p> : null}
+    </div> : null}
     {data?.rate && !dirty ? <p role="status" className={HE.muted}>{data.rate.status === 'ready'
       ? 'Темп сохранён.' : data.rate.status === 'blocked'
         ? supplyOnly ? 'Расчёт добора отложен. Повторим автоматически.' : 'Загрузка отложена. Повторим расчёт автоматически.'
