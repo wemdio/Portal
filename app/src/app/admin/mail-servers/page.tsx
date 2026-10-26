@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, ChevronLeft, RefreshCw, Server } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import {
+  activeAlerts,
   freshness,
   ipClients,
   ipKind,
@@ -52,6 +53,7 @@ function ServerCard({ row, now }: { row: MailServerRow; now: Date }) {
   const s = r.server;
   const fresh = freshness(row.received_at, now);
   const down = Object.entries(s.services ?? {}).filter(([, v]) => v !== 'active');
+  const alerts = activeAlerts(r);
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4 sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
@@ -121,7 +123,7 @@ function ServerCard({ row, now }: { row: MailServerRow; now: Date }) {
         </div>
       )}
 
-      {(down.length > 0 || r.dnsbl.listed.length > 0 || r.alerts.length > 0) && (
+      {(down.length > 0 || r.dnsbl.listed.length > 0 || alerts.length > 0) && (
         <div className="rounded-lg border border-red-100 bg-red-50/60 p-2.5 text-xs text-red-800 space-y-1">
           {down.map(([name, state]) => (
             <div key={name}>Служба {name}: {state || 'не отвечает'}</div>
@@ -129,7 +131,7 @@ function ServerCard({ row, now }: { row: MailServerRow; now: Date }) {
           {r.dnsbl.listed.map((l) => (
             <div key={l.name + l.result}>В чёрном списке: {l.name} — {l.result}</div>
           ))}
-          {r.alerts.map((a) => (
+          {alerts.map((a) => (
             <div key={a.key}>
               {a.text || a.key}
               {a.since ? ` (с ${a.since.slice(0, 16).replace('T', ' ')} UTC)` : ''}

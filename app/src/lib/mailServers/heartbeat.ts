@@ -132,6 +132,14 @@ export function ipClients(ip: MailIp): string[] {
   return [...new Set(ip.domains.map((d) => d.tag).filter((t) => t && !t.toLowerCase().startsWith('пилот')))];
 }
 
+/**
+ * Тревоги бота без листингов доменов (ключи «bl:…»): чёрные списки страница показывает из
+ * отчёта dnsbl, иначе каждый листинг выводится дважды.
+ */
+export function activeAlerts(report: MailServerReport): MailAlert[] {
+  return report.alerts.filter((a) => !a.key.startsWith('bl:'));
+}
+
 export interface MailSummary {
   servers: number;
   silent: number;
@@ -149,7 +157,7 @@ export function summarize(rows: MailServerRow[], now: Date): MailSummary {
     const r = row.payload;
     if (freshness(row.received_at, now) === 'silent') s.silent += 1;
     s.ips += r.ips.length;
-    s.alerts += r.alerts.length;
+    s.alerts += activeAlerts(r).length;
     s.listed += r.dnsbl?.listed?.length ?? 0;
     for (const ip of r.ips) {
       for (const d of ip.domains) {
