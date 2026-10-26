@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { readContactDeliveryPages } from './contactDeliveryInventory';
+import { readVe2SendingSwitch } from '@/lib/sender/ve2SendingSwitch';
 
 export interface VeContactUploadStatus {
   campaigns?: Array<{campaign_id: string; campaign_name: string; remote_status: number | null;
@@ -10,6 +11,8 @@ export interface VeContactUploadStatus {
   transport?: 'sender';
   /** Только у запуска в «Рассылку»: запуск закрыт (отпущен, отменён) — запускать и подавать нечего. */
   launch_closed?: true;
+  /** Только у запуска в «Рассылку»: отправку кампаний Движка остановил администратор (этап 6). */
+  sending_stopped?: { at: string | null };
   blocked: null | { run_id: string; blocked_at: string; run_date: string; accepted: number; pending: number; uncertain: number };
 }
 
@@ -54,7 +57,10 @@ export async function loadContactUploadStatus(db: SupabaseClient, projectId: str
         ? { ...campaign, scheduled_start_at: scheduled.get(campaign.campaign_id)! } : campaign));
     }
   }
-  return { ...(campaigns ? {campaigns} : {}), ...(sender ? { transport: 'sender' as const, ...(closed ? { launch_closed: true as const } : {}) } : {}), blocked: data ? {
+  // Выключатель отправки — только для подписи и кнопки; не прочитали — карточка без него (запуск всё равно откажет).
+  const sendingSwitch = sender ? await readVe2SendingSwitch(db) : null;
+  const sendingStopped = sendingSwitch?.state === 'stopped' ? { sending_stopped: { at: sendingSwitch.changedAt } } : {};
+  return { ...(campaigns ? {campaigns} : {}), ...(sender ? { transport: 'sender' as const, ...(closed ? { launch_closed: true as const } : {}), ...sendingStopped } : {}), blocked: data ? {
     run_id: data.id, blocked_at: data.upload_blocked_at, run_date: data.run_date,
     accepted: data.accepted_count, uncertain: data.uncertain_count,
     pending: Math.max(0, data.reserved_count - data.accepted_count - data.skipped_count - data.uncertain_count),

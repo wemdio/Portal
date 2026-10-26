@@ -128,6 +128,38 @@ export function isFreeProvider(domain: string): boolean {
   return FREE_PROVIDERS.has(domain.toLowerCase());
 }
 
+// ─── 5a. Placeholder Address on Free Mail ──────────────────────────────────
+
+// The Mail.ru group accepts any mailbox: all 19 950 mail.ru, bk.ru, inbox.ru,
+// list.ru and internet.ru addresses in our exports came out catch_all
+// (26.10.2026), so SMTP cannot reject a made-up one. Directories and site
+// templates are full of them — info@mail.ru, 00000@mail.ru, ivanov@mail.ru,
+// ivan@gmail.com — and they went into bases as ready contacts. A free mailbox
+// has one owner, so a role name, a placeholder word, one repeated character or
+// a plain sequence there is never a company's address. Company domains are not
+// judged by form: mail@, ooo@ and 111@ there are real mailboxes.
+const FREE_MAIL_PLACEHOLDERS = new Set([
+  'mail','email','e-mail','pochta','no','net','none','nomail','no-mail','no_mail',
+  'noemail','no-email','no_email','unknown','example','sample','test','demo',
+  'user','username','name','login','your','yourname','youremail','your-email','your_email',
+  'ivan','ivanov','ivan.ivanov','ivanov.ivan','ivanivanov','ivanovivan',
+]);
+
+const PLACEHOLDER_RUNS = [
+  '0123456789','1234567890','9876543210','abcdefghijklmnopqrstuvwxyz',
+  'qwertyuiop','asdfghjkl','zxcvbnm',
+];
+
+export function isFreeMailPlaceholder(email: string): boolean {
+  const at = email.lastIndexOf('@');
+  const local = email.substring(0, at).toLowerCase();
+  const domain = email.substring(at + 1).toLowerCase();
+  if (at <= 0 || !isFreeProvider(domain)) return false;
+  if (new Set(local).size === 1 || isRole(local) || FREE_MAIL_PLACEHOLDERS.has(local)) return true;
+  if (local === domain.split('.')[0]) return true;
+  return local.length >= 3 && PLACEHOLDER_RUNS.some((run) => run.startsWith(local));
+}
+
 // ─── 6. Typo Correction ────────────────────────────────────────────────────
 
 const COMMON_DOMAINS = [

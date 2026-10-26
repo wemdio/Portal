@@ -5,7 +5,6 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { readDeliveryRate, previewDeliveryRate, saveDeliveryRate } from '@/lib/verticalEngineV2/contactDeliveryRateService';
 import { DeliveryRateError, type DeliveryRateRow } from '@/lib/verticalEngineV2/contactDeliveryRate';
-import { resolveVeLaunchTransport } from '@/lib/verticalEngineV2/senderTransport/transport';
 import { readVeSenderPoolForPreset } from '@/lib/verticalEngineV2/senderTransport/senderPool';
 export const dynamic='force-dynamic';
 export const maxDuration=60;
@@ -16,16 +15,17 @@ const display=(row:DeliveryRateRow|null)=>row?{preset_id:row.preset_id,template_
 /**
  * Отправляет ли «Рассылка» письма этих шаблонов. Есть записанные запуски —
  * по ним (идущие не переезжают; шаблон без запуска в уже идущем наборе ничего
- * не решает). Ни одного — темп для нового запуска: куда он пойдёт. Ошибка
+ * не решает). Ни одного — темп для нового запуска: способ, который выбрал
+ * специалист (этап 7; параметр transport=sender, иначе Instantly). Ошибка
  * чтения — нет, как у Instantly.
  */
-async function sendsThroughSender(projectId:string,templateIds:string[]):Promise<boolean> {
+async function sendsThroughSender(projectId:string,templateIds:string[],chosen:string|null):Promise<boolean> {
  const {data,error}=await supabaseAdmin!.from('ve_launch_queue_items').select('template_id, transport')
   .eq('project_id',projectId).in('template_id',templateIds);
  if(error)return false;
  const rows=(data??[]) as Array<{template_id:string;transport:unknown}>;
  if(rows.length)return rows.some(row=>row.transport==='sender');
- return (await resolveVeLaunchTransport(supabaseAdmin!,projectId)).transport==='sender';
+ return chosen==='sender';
 }
 export async function GET(req:NextRequest,{params}:{params:Promise<{id:string}>}) {
  const auth=await requireInternalToolAuth(req); if('error' in auth)return auth.error;
@@ -39,7 +39,7 @@ export async function GET(req:NextRequest,{params}:{params:Promise<{id:string}>}
   const result=await previewDeliveryRate(supabaseAdmin,supabaseInstantly,{projectId:id,presetId,templateIds,
    policy:matching??{mode:'auto',manual_limit:null}});
   // Темп считается по почтам Instantly; если эти письма отправляет «Рассылка» — рядом её ящики (только показ).
-  const sender=await sendsThroughSender(id,templateIds)?{transport:'sender' as const,sender_pool:await readVeSenderPoolForPreset(supabaseAdmin,
+  const sender=await sendsThroughSender(id,templateIds,req.nextUrl.searchParams.get('transport'))?{transport:'sender' as const,sender_pool:await readVeSenderPoolForPreset(supabaseAdmin,
    supabaseInstantly,presetId,result.snapshot.sequence_steps).catch(()=>null)}:{};
   return NextResponse.json({rate:display(matching),revision:saved?.revision??0,snapshot:result.snapshot,bound:result.bound,...sender});
  } catch(error) {

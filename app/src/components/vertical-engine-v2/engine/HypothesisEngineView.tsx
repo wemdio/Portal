@@ -10,7 +10,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowRight, ChevronDown, Plus, X } from 'lucide-react';
 import type { VeProject } from '@/lib/verticalEngineV2/types';
-import { senderMarketBannerLines } from '@/lib/verticalEngineV2/senderTransport/labels';
 import {
   VE_API,
   veEngineCall,
@@ -22,6 +21,7 @@ import {
 import { HE, Spinner, StatusDot } from './design';
 import { matchesVeSearch } from './SearchableSelect';
 import { ProjectDetail } from './ProjectDetail';
+import { SenderSwitchPanel } from './SenderSwitchPanel';
 import { ProjectStatusBadge, StatusBox, formatDate, prettyHost, prettyProjectName } from './ui';
 
 /** Правильная русская плюрализация (проект / проекта / проектов). */
@@ -54,7 +54,6 @@ export function VeEngineWorkspace({
   onProjectOpenChange?: (open: boolean) => void;
 } = {}) {
   const [projects, setProjects] = useState<VeProject[]>([]);
-  const [senderMarkets, setSenderMarkets] = useState<string[]>([]);
   const [listLoading, setListLoading] = useState(true);
   const [projectQuery, setProjectQuery] = useState('');
   const visibleProjects = projects.filter((project) =>
@@ -75,7 +74,6 @@ export function VeEngineWorkspace({
         const { data } = await veEngineCall<VeProjectsResponse>(`${VE_API}/projects`);
         if (!cancelled) {
           setProjects(Array.isArray(data.projects) ? data.projects : []);
-          setSenderMarkets(senderMarketBannerLines(Array.isArray(data.launch_transport) ? data.launch_transport : []));
         }
       } finally {
         if (!cancelled) setListLoading(false);
@@ -152,11 +150,8 @@ export function VeEngineWorkspace({
               <StatusBox tone="error">{errorMsg}</StatusBox>
             </div>
           ) : null}
-          {senderMarkets.length ? (
-            <div className="mb-5">
-              <StatusBox tone="info">{senderMarkets.map((line) => <span key={line} className="block">{line}</span>)}</StatusBox>
-            </div>
-          ) : null}
+          {/* Выключатели Движка → «Рассылка» (этап 6; бывшая плашка рынков этапа 4). */}
+          <SenderSwitchPanel />
 
           <div className="ve2-home-grid">
             <section className="min-w-0">

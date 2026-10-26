@@ -11,6 +11,13 @@ import { CreateClientPresetInline, DeliveryPlanBlock, useTemplateLaunch } from '
 import { getVeLaunchSelectionState } from './launchSelection';
 import { DeliveryRatePanel } from './DeliveryRatePanel';
 import { ContactUploadModePanel, type ContactUploadMode } from './ContactUploadModePanel';
+import { LaunchTransportSwitch } from './LaunchTransportSwitch';
+import {
+  veLaunchTransportSwitchView,
+  veSenderRefusal,
+  veSenderRefusalText,
+  type VeSenderOption,
+} from '@/lib/verticalEngineV2/senderTransport/labels';
 
 type PreflightItem = VeOutreachLaunchRequest['items'][number] & {
   status: 'ready' | 'working' | 'blocked';
@@ -21,9 +28,11 @@ type PreflightItem = VeOutreachLaunchRequest['items'][number] & {
 interface Preflight {
   ready: boolean;
   items: PreflightItem[];
-  /** Куда пойдут кампании; запуск возвращает это обратно. */
+  /** Эхо выбора специалиста (expected_transport); нет поля — Instantly. */
   transport?: 'instantly' | 'sender';
   error?: string;
+  /** Отказ всего обзора: VE_LAUNCH_SENDER_DISABLED / VE_LAUNCH_TRANSPORT_UNAVAILABLE — у переключателя. */
+  code?: string;
 }
 export function OutreachLaunchPanel({
   projectId,
@@ -36,6 +45,8 @@ export function OutreachLaunchPanel({
   onPresetChange,
   uploadMode,
   onUploadModeSaved,
+  senderOption,
+  onSenderOptionReload,
 }: {
   projectId: string;
   snapshot: VeOutreachSetupResponse;
@@ -47,6 +58,14 @@ export function OutreachLaunchPanel({
   onPresetChange: (presetId: string) => void;
   uploadMode: ContactUploadMode;
   onUploadModeSaved: (mode: ContactUploadMode) => void;
+  /**
+   * Можно ли выбрать «Рассылку» для нового автоаутрича проекта (GET /outreach,
+   * без писем — их проверяет обзор по каждой гипотезе). Нет — переключателя
+   * нет, только Instantly.
+   */
+  senderOption?: VeSenderOption | null;
+  /** Перечитать доступность «Рассылки» (опрос проекта) — для «Повторить проверку», когда её не прочитали. */
+  onSenderOptionReload?: () => void;
 }) {
   const firstPreparation = snapshot.preparations.find(
     (p) => p.hypothesis_id === hypothesisIds[0],
@@ -56,18 +75,39 @@ export function OutreachLaunchPanel({
   const [confirmedKey, setConfirmedKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  /** Ошибка проверки обзора (не старта): показываем рядом с «Повторить проверку» и только пока проверка возможна. */
+  const [preflightError, setPreflightError] = useState('');
   const [uploadModePending, setUploadModePending] = useState(false);
   const onUploadModePending = useCallback((pending: boolean) => {
     setUploadModePending(pending);
     if (pending) setConfirmedKey(null);
   }, []);
   const [retry, setRetry] = useState(0);
-  /** Новая проверка без повтора упавших аудитов: способ отправки сменился после обзора. */
+  /** Новая проверка без повтора упавших аудитов: «Повторить проверку» доступности «Рассылки». */
   const [recheck, setRecheck] = useState(0);
-  // Отдельно от error: ту сбрасывает новая проверка, которую этот отказ и запускает.
-  const [transportNotice, setTransportNotice] = useState('');
-  /** Способ, на который сервер сменил отправку, — до нового обзора (подсказка шаблона о нём не знает). */
-  const [transportAfterChange, setTransportAfterChange] = useState<'instantly' | 'sender' | null>(null);
+  /**
+   * Где создать кампании этого запуска — выбор специалиста (этап 7), по
+   * умолчанию Instantly. Панель пересоздаётся для каждого состава гипотез —
+   * выбор тоже. Экран выбор не меняет никогда, даже при отказе «Рассылки».
+   */
+  const [choice, setChoice] = useState<'instantly' | 'sender'>('instantly');
+  /** Отказ сервера «Рассылке» (обзор или старт) — у переключателя, пока специалист не сменит выбор. */
+  const [senderRefusal, setSenderRefusal] = useState<{ message: string; retryable: boolean; option: VeSenderOption | null | undefined } | null>(null);
+  /**
+   * Старт ушёл, ответа нет: ключ согласования именно того запроса. Повтор безопасен
+   * только тем же запросом (сервер отвечает на повтор по ключу запуска раньше любых
+   * проверок); другой запрос — уже не повтор, и замок к нему не относится.
+   */
+  const [unansweredKey, setUnansweredKey] = useState<string | null>(null);
+  /** Последний senderOption — отказ запоминает, при каком ответе проекта пришёл (в замыканиях он мог устареть). */
+  const latestSenderOption = useRef<VeSenderOption | null | undefined>(senderOption);
+  useEffect(() => { latestSenderOption.current = senderOption; }, [senderOption]);
+  // Более новый ответ проекта снимает прежний отказ: без повтора — всегда (можно — проверим заново,
+  // нельзя — покажем нынешнюю причину); «не удалось проверить» — когда ответ проекта точный «нельзя».
+  const refusalStale = senderRefusal !== null && senderOption != null && senderOption !== senderRefusal.option
+    && (!senderRefusal.retryable || (!senderOption.allowed && !senderOption.retryable));
+  const activeRefusal = refusalStale ? null : senderRefusal;
+  const senderSwitch = veLaunchTransportSwitchView({ choice, option: senderOption, refusal: activeRefusal?.message ?? null });
   const retryRequest = useRef(0);
   const idempotency = useRef<{ key: string; id: string } | null>(null);
   const onAuditRejected = useCallback(() => setPreflightState(null), []);
@@ -79,12 +119,15 @@ export function OutreachLaunchPanel({
     onAuditRejected,
   );
   const openForm = launch.openForm;
+  // По id, не по объекту: опрос проекта заменяет объекты шаблонов, а openForm
+  // каждый раз перечитывает доступность «Рассылки» (здесь она — из senderOption).
+  const firstId = first?.id ?? null;
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (first) openForm();
+      if (firstId) openForm();
     }, 0);
     return () => clearTimeout(timer);
-  }, [first, openForm]);
+  }, [firstId, openForm]);
   useEffect(() => {
     onPresetChange(launch.presetId);
   }, [launch.presetId, onPresetChange]);
@@ -123,16 +166,30 @@ export function OutreachLaunchPanel({
       expected_portal_period_id: launch.expectedPortalPeriodId,
       target_contacts: launch.targetContacts,
       items,
+      // Только «Рассылка»: у Instantly запрос (и его хеш у повторов) прежний.
+      ...(choice === 'sender' ? { expected_transport: 'sender' as const } : {}),
     };
-  }, [snapshot, hypothesisIds, templates, launch.presetId, launch.portalProjectId, launch.expectedPortalPeriodId, launch.targetContacts, rateRevision, uploadModePending]);
+  }, [snapshot, hypothesisIds, templates, launch.presetId, launch.portalProjectId, launch.expectedPortalPeriodId, launch.targetContacts, rateRevision, uploadModePending, choice]);
   const requestKey = request ? JSON.stringify(request) : '';
   const preflightKey = requestKey ? `${uploadMode}/${requestKey}` : '';
-  const preflight = preflightState?.key === preflightKey ? preflightState.result : null;
-  const confirmationKey = preflight?.ready
-    ? preflightKey + JSON.stringify(preflight.items.map((i) => i.segmentation_audit_id)) + (preflight.transport ?? '')
+  // Выбрана «Рассылка», а она закрыта: обзор не запрашиваем и прежний не показываем —
+  // кроме повтора старта без ответа тем же запросом.
+  const senderBlocked = senderSwitch.blocked;
+  const rawPreflight = preflightState?.key === preflightKey ? preflightState.result : null;
+  const rawConfirmationKey = rawPreflight?.ready
+    ? preflightKey + JSON.stringify(rawPreflight.items.map((i) => i.segmentation_audit_id)) + (rawPreflight.transport ?? '')
     : '';
+  const replayPending = unansweredKey !== null && unansweredKey === rawConfirmationKey;
+  const preflight = !senderBlocked || replayPending ? rawPreflight : null;
+  const confirmationKey = preflight ? rawConfirmationKey : '';
+  // Пока ждём повтора того же запроса, выбор держим. «Рассылку» тем временем закрыли — выбор
+  // открыт (можно Instantly); принятый запуск сервер при новом старте назовёт сам.
+  const switchLocked = busy || (replayPending && !senderBlocked);
+  const blockedForStart = senderBlocked && !replayPending;
+  const UNANSWERED_TEXT = 'Ответ о запуске не получен. Повторное нажатие безопасно: используем тот же запрос.';
+  const shownError = error || (!senderBlocked ? preflightError : '') || (replayPending && !busy ? UNANSWERED_TEXT : '');
   useEffect(() => {
-    if (!requestKey) return;
+    if (!requestKey || senderBlocked) return;
     const input = JSON.parse(requestKey) as VeOutreachLaunchRequest;
     let cancelled = false,
       inFlight = false;
@@ -149,17 +206,24 @@ export function OutreachLaunchPanel({
         if (cancelled) return;
         if (!result.ok) {
           setPreflightState(null);
-          setError(result.data.error ?? 'Не удалось проверить запуск');
           clearInterval(timer);
+          // Отказ «Рассылке» — по коду, не по статусу: причина у переключателя, не «Повторить проверку» аудитов.
+          const refusal = input.expected_transport === 'sender' ? veSenderRefusal(result.data) : null;
+          if (refusal) {
+            setPreflightError('');
+            setSenderRefusal({ ...refusal, option: latestSenderOption.current });
+            return;
+          }
+          setPreflightError(result.data.error ?? 'Не удалось проверить запуск');
           return;
         }
-        setError('');
+        setPreflightError('');
         setPreflightState({ key: preflightKey, result: result.data });
         if (result.data.ready || result.data.items.some((i) => i.status === 'blocked')) clearInterval(timer);
       } catch {
         if (!cancelled) {
           setPreflightState(null);
-          setError('Не удалось проверить запуск. Повторите проверку');
+          setPreflightError('Не удалось проверить запуск. Повторите проверку');
           clearInterval(timer);
         }
       } finally {
@@ -172,14 +236,15 @@ export function OutreachLaunchPanel({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [projectId, requestKey, preflightKey, retry, recheck]);
+  }, [projectId, requestKey, preflightKey, retry, recheck, senderBlocked]);
+  // Обзор — именно выбранного способа (нет поля — Instantly).
+  const preflightMatchesChoice = (preflight?.transport ?? 'instantly') === choice;
   const start = async () => {
-    if (!request || !preflight?.ready || confirmedKey !== confirmationKey || busy) return;
+    if (!request || !preflight?.ready || !preflightMatchesChoice || blockedForStart || confirmedKey !== confirmationKey || busy) return;
     if (idempotency.current?.key !== confirmationKey)
       idempotency.current = { key: confirmationKey, id: crypto.randomUUID() };
     setBusy(true);
     setError('');
-    setTransportNotice('');
     try {
       const result = await veEnginePost<{ run?: VeOutreachRun; error?: string; code?: string }>(
         `${VE_API}/projects/${projectId}/outreach/start`,
@@ -194,34 +259,52 @@ export function OutreachLaunchPanel({
               segmentation_audit_id,
             }),
           ),
-          ...(preflight.transport === 'sender' ? { expected_transport: 'sender' } : {}),
+          // expected_transport уже в request — только для «Рассылки».
           idempotency_key: idempotency.current.id,
           confirmed_customer_approval: true,
         },
       );
+      setUnansweredKey(null);
       if (!result.ok || !result.data.run) {
-        if (result.data.code === 'VE_LAUNCH_TRANSPORT_CHANGED') {
-          // Обзор показывал другой способ отправки: без новой проверки каждый повтор получил бы тот же отказ.
-          setPreflightState(null);
-          setConfirmedKey(null);
-          setRecheck((value) => value + 1);
-          setTransportAfterChange(preflight.transport === 'sender' ? 'instantly' : 'sender');
-          setTransportNotice(`${result.data.error ?? 'Способ отправки изменился.'} Обзор пересчитывается — проверьте его и подтвердите заново.`);
+        const refusal = request.expected_transport === 'sender' ? veSenderRefusal(result.data) : null;
+        if (refusal) {
+          // Выбор не меняем, причина — у переключателя. 409: обзор и согласование этого выбора
+          // больше не годятся; 503: оставляем — «Повторить проверку» повторит.
+          setSenderRefusal({ ...refusal, option: latestSenderOption.current });
+          if (!refusal.retryable) {
+            setPreflightState(null);
+            setConfirmedKey(null);
+          }
           return;
         }
-        setError(result.data.error ?? 'Не удалось сохранить запуск');
+        setError(veSenderRefusalText(result.data.error ?? 'Не удалось сохранить запуск', result.data.code));
         return;
       }
       onStarted(result.data.run);
     } catch {
-      setError('Ответ о запуске не получен. Повторное нажатие безопасно: используем тот же запрос');
+      // Текст — из ключа (shownError): виден, пока жив тот же запрос.
+      setUnansweredKey(confirmationKey);
+      setError('');
     } finally {
       setBusy(false);
     }
   };
+  /** Специалист выбрал, где создать кампании: новый запрос — новый обзор и новое согласование. */
+  const selectTransport = (transport: 'instantly' | 'sender') => {
+    if (switchLocked) return;
+    setChoice(transport);
+    setSenderRefusal(null);
+    setError('');
+    setPreflightError('');
+    setConfirmedKey(null);
+  };
+  /** «Повторить проверку» после 503: тот же запрос, новая проверка без повтора аудитов. */
+  const retrySenderCheck = () => {
+    setSenderRefusal(null);
+    setRecheck((value) => value + 1);
+  };
   const preset = launch.presets?.find((p) => p.id === launch.presetId);
-  // До обзора — куда пойдёт новый запуск по настройкам проекта; обзор уточняет.
-  const sender = (preflight?.transport ?? transportAfterChange ?? launch.launchTransport) === 'sender';
+  const sender = choice === 'sender';
   // Ящики пресета в «Рассылке» одни на весь запуск; 0 рабочих — запуск откажет, не даём его начать.
   const senderPoolEmpty = sender && !!preflight?.items.some((item) => item.preview?.sender_pool?.ready === 0);
   const selectionBlocked = !hypothesisIds.length || hypothesisIds.some((id) => !getVeLaunchSelectionState(snapshot, templates, id).ready);
@@ -267,17 +350,22 @@ export function OutreachLaunchPanel({
           <CreateClientPresetInline launch={launch} templateId={first.id} />
         </fieldset>
       ) : null}
+      <LaunchTransportSwitch choice={choice} view={senderSwitch} busy={switchLocked} onChange={selectTransport}
+        onRetry={activeRefusal?.retryable ? retrySenderCheck
+          : !activeRefusal && senderOption?.retryable && onSenderOptionReload ? onSenderOptionReload : undefined} />
       <DeliveryPlanBlock launch={launch} disabled={busy} uploadMode={uploadMode} preparedPreview={preflight?.items[0]?.preview ?? null} />
       <ContactUploadModePanel projectId={projectId} mode={uploadMode} disabled={busy} sender={sender}
         onSaved={onUploadModeSaved} onPendingChange={onUploadModePending} />
       {launch.presetId && rateTemplates.length ? <DeliveryRatePanel key={rateKey} projectId={projectId}
         presetId={launch.presetId} templateIds={rateTemplates} disabled={busy} onReady={onRateReady} supplyOnly={uploadMode === 'all_ready'}
-        hintReload={recheck} /> : null}
+        hintReload={recheck} transport={choice} /> : null}
       <div className="border-t border-[var(--ve2-line)] pt-5 space-y-3">
         <h2 className="ve2-h2">Обзор запуска</h2>
         {!request ? (
           <p className={HE.muted}>{uploadModePending ? 'Примените выбранный режим загрузки.' : 'Выберите клиента, проект и цель контактов, затем примените темп.'}</p>
-        ) : !preflight && !error ? (
+        ) : blockedForStart ? (
+          <p className={HE.muted}>Обзор не строится: «Рассылку» сейчас выбрать нельзя — причина выше, в «Где создать кампании».</p>
+        ) : !preflight && !error && !preflightError ? (
           <p role="status">Проверяем аудиторию и настройки отправки…</p>
         ) : null}
         {preflight?.items.map((item) => (
@@ -316,9 +404,9 @@ export function OutreachLaunchPanel({
             {' '}Проверьте кампании и нажмите Start в Instantly.
           </p>
         ) : null}
-        {transportNotice ? <StatusBox tone="info">{transportNotice}</StatusBox> : null}
-        {error ? <StatusBox tone="error">{error}</StatusBox> : null}
-        {error || preflight?.items.some((i) => i.status === 'blocked') ? (
+        {shownError ? <StatusBox tone="error">{shownError}</StatusBox> : null}
+        {/* Пока «Рассылка» закрыта, проверка не идёт — кнопка ничего бы не сделала. */}
+        {!senderBlocked && (error || preflightError || preflight?.items.some((i) => i.status === 'blocked')) ? (
           <button type="button" className={HE.btnGhost} onClick={() => setRetry((v) => v + 1)} disabled={busy}>
             Повторить проверку
           </button>
@@ -338,7 +426,7 @@ export function OutreachLaunchPanel({
           className={HE.btnPrimary}
           disabled={
             busy || !preflight?.ready || !confirmationKey || confirmedKey !== confirmationKey || !preset?.mailbox_count
-            || senderPoolEmpty
+            || senderPoolEmpty || blockedForStart || !preflightMatchesChoice
           }
           onClick={() => void start()}
         >

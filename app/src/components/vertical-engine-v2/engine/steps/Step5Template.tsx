@@ -31,6 +31,7 @@ import {
   type VeDeliveryPlanBindingDto,
   type VeDeliveryPlanPreviewDto,
   type VeJobSummary,
+  type VeLaunchTransportOptionResponse,
   type VePortalProjectOptionDto,
 } from '../api';
 import { HE, StatusDot } from '../design';
@@ -39,11 +40,17 @@ import { ContactSupplyPanel, useContactSupply, type ContactSupplyController } fr
 import { OperatorText, StatusBox, formatDate } from '../ui';
 import { ContactUploadNotice } from '../ContactUploadNotice';
 import {
+  parseVeSenderOption,
   senderCreateCampaignsLabel,
   senderOpenLabel,
   senderPaceWarning,
   senderPoolLine,
+  veLaunchTransportSwitchView,
+  veSenderRefusal,
+  veSenderRefusalText,
+  type VeSenderOption,
 } from '@/lib/verticalEngineV2/senderTransport/labels';
+import { LaunchTransportSwitch } from '../LaunchTransportSwitch';
 import {
   SegmentationAuditPanel,
   useSegmentationAudit,
@@ -312,8 +319,6 @@ interface VeLaunchPresetsResponse {
   delivery_plan_binding?: VeDeliveryPlanBindingDto | null;
   /** Why the bound plan cannot deliver now (closed period, project card). */
   delivery_plan_issue?: string | null;
-  /** Только когда новый запуск проекта пойдёт в «Рассылку»; нет поля — Instantly. */
-  launch_transport?: 'sender';
   error?: string;
 }
 
@@ -443,23 +448,41 @@ export function useTemplateLaunch(
   const [presetId, setPresetId] = useState('');
   const [canCreateClient, setCanCreateClient] = useState(false);
   /**
-   * Куда пойдёт новый запуск, ещё до обзора плана (обзор потом уточняет):
-   * сразу при показе шаблона и заново при загрузке настроек. По шаблону — чтобы
-   * подсказка другого шаблона не пережила смену.
+   * Где создать кампании нового запуска — выбор специалиста (этап 7), по
+   * умолчанию Instantly. По шаблону: выбор другого шаблона не переживает смену.
+   * Экран выбор не меняет никогда, даже при отказе «Рассылки».
    */
-  const [transportHint, setTransportHint] = useState<{ templateId: string; transport: 'instantly' | 'sender' } | null>(null);
-  const launchTransport = templateId && transportHint?.templateId === templateId ? transportHint.transport : 'instantly';
+  const [choice, setChoice] = useState<{ templateId: string; transport: 'instantly' | 'sender' } | null>(null);
+  const launchTransport: 'instantly' | 'sender' = templateId && choice?.templateId === templateId ? choice.transport : 'instantly';
+  /**
+   * Можно ли выбрать «Рассылку» — только GET launch-transport (он же проверяет
+   * письма шаблона). null — не предлагаем: нет поля, ошибка или ответа нет.
+   */
+  const [senderOptionState, setSenderOptionState] = useState<{ templateId: string; option: VeSenderOption | null } | null>(null);
+  const senderOption = templateId && senderOptionState?.templateId === templateId ? senderOptionState.option : null;
+  /** Отказ сервера «Рассылке» (обзор или запуск) — у переключателя, пока специалист не сменит выбор. */
+  const [senderRefusalState, setSenderRefusalState] = useState<{ templateId: string; message: string; retryable: boolean } | null>(null);
+  const senderRefusal = templateId && senderRefusalState?.templateId === templateId ? senderRefusalState : null;
+  const senderSwitch = veLaunchTransportSwitchView({ choice: launchTransport, option: senderOption, refusal: senderRefusal?.message ?? null });
+  /** Последний запрос доступности: ответ на более ранний (или другого шаблона) отбрасывается. */
+  const senderOptionRequest = useRef(0);
+  const loadSenderOption = useCallback((id: string) => {
+    const request = ++senderOptionRequest.current;
+    // Прежнее значение остаётся до ответа: переключатель не мигает при повторном открытии.
+    void veEngineCall<VeLaunchTransportOptionResponse>(`${VE_API}/templates/${id}/launch-transport`)
+      .then((response) => {
+        if (request !== senderOptionRequest.current) return;
+        setSenderOptionState({ templateId: id, option: response?.ok ? parseVeSenderOption(response.data?.sender) : null });
+      })
+      .catch(() => {
+        if (request === senderOptionRequest.current) setSenderOptionState({ templateId: id, option: null });
+      });
+  }, []);
   useEffect(() => {
     if (!templateId) return;
-    let cancelled = false;
-    void veEngineCall<{ transport?: unknown }>(`${VE_API}/templates/${templateId}/launch-transport`)
-      .then((response) => {
-        if (cancelled || !response?.ok) return;
-        setTransportHint({ templateId, transport: response.data?.transport === 'sender' ? 'sender' : 'instantly' });
-      })
-      .catch(() => undefined);
-    return () => { cancelled = true; };
-  }, [templateId]);
+    loadSenderOption(templateId);
+    return () => { senderOptionRequest.current += 1; };
+  }, [loadSenderOption, templateId]);
   const [mailboxTagOptions, setMailboxTagOptions] = useState<VeMailboxTagOption[]>([]);
   const [portalProjects, setPortalProjects] = useState<VePortalProjectOptionDto[] | null>(null);
   const [portalProjectId, setPortalProjectId] = useState('');
@@ -469,7 +492,7 @@ export function useTemplateLaunch(
   const [deliveryPreview, setDeliveryPreview] = useState<VeDeliveryPlanPreviewDto | null>(null);
   const [deliveryPreviewState, setDeliveryPreviewState] = useState<DeliveryPreviewState>('idle');
   const [deliveryPreviewError, setDeliveryPreviewError] = useState<string | null>(null);
-  /** Пересчитать обзор без смены полей: способ отправки сменился между обзором и запуском. */
+  /** Пересчитать обзор без смены полей: «Повторить проверку» доступности «Рассылки». */
   const [previewReload, setPreviewReload] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -516,6 +539,9 @@ export function useTemplateLaunch(
     if (!templateId) return;
     setFormOpen(true);
     setSubmitError(null);
+    // Доступность «Рассылки» — заново при каждом открытии: страница могла
+    // открыться до «Разрешить выбор» или до выключения подачи.
+    loadSenderOption(templateId);
     // Polling replaces template objects; load settings only once for this identity.
     if (settingsLoad.current?.templateId === templateId) return;
     const request = { templateId, active: true };
@@ -553,7 +579,6 @@ export function useTemplateLaunch(
         const list = response.data.presets ?? [];
         setPresets(list);
         setCanCreateClient(response.data.can_create_client === true);
-        setTransportHint({ templateId: request.templateId, transport: response.data.launch_transport === 'sender' ? 'sender' : 'instantly' });
         setMailboxTagOptions(response.data.mailbox_tag_options ?? []);
 
         const boundDeliveryPlan = response.data.delivery_plan ?? null;
@@ -621,12 +646,29 @@ export function useTemplateLaunch(
         setDeliveryPreviewState('error');
         setDeliveryPreviewError('Не удалось загрузить проекты Portal и план выполнения.');
       });
-  }, [clearDeliveryPreview, templateId]);
+  }, [clearDeliveryPreview, loadSenderOption, templateId]);
 
   const selectPreset = useCallback((id: string) => {
     setPresetId(id);
     clearDeliveryPreview();
   }, [clearDeliveryPreview]);
+
+  /** Специалист выбрал, где создать кампании: прежний обзор и отказ к новому выбору не относятся. */
+  const selectTransport = useCallback((transport: 'instantly' | 'sender') => {
+    if (!templateId) return;
+    setChoice({ templateId, transport });
+    setSenderRefusalState(null);
+    setSubmitError(null);
+    clearDeliveryPreview();
+  }, [clearDeliveryPreview, templateId]);
+
+  /** «Повторить проверку»: заново доступность «Рассылки» и обзор. */
+  const retrySenderCheck = useCallback(() => {
+    if (!templateId) return;
+    setSenderRefusalState(null);
+    loadSenderOption(templateId);
+    setPreviewReload((value) => value + 1);
+  }, [loadSenderOption, templateId]);
 
   const selectPortalProject = useCallback((id: string) => {
     setPortalProjectId(id);
@@ -649,6 +691,11 @@ export function useTemplateLaunch(
     setLoadError(null);
   }, [clearDeliveryPreview]);
 
+  // Записанный запуск: план — только показ, его способ знает запись; обзор — без выбора.
+  const previewTransport: 'instantly' | 'sender' = recorded ? 'instantly' : launchTransport;
+  // Выбрана «Рассылка», а она закрыта: повтор обзора дал бы тот же отказ.
+  const previewSenderBlocked = previewTransport === 'sender' && senderSwitch.blocked;
+
   useEffect(() => {
     const periodId = expectedPortalPeriodId;
     if (
@@ -659,7 +706,8 @@ export function useTemplateLaunch(
       periodId === undefined ||
       !segmentationAuditId ||
       targetContacts === null ||
-      activePeriodIssue
+      activePeriodIssue ||
+      previewSenderBlocked
     ) {
       return;
     }
@@ -675,16 +723,28 @@ export function useTemplateLaunch(
         target_contacts: targetContacts,
         preset_id: presetId,
         segmentation_audit_id: segmentationAuditId,
+        // Только «Рассылка»: у Instantly тело запроса прежнее.
+        ...(previewTransport === 'sender' ? { expected_transport: 'sender' as const } : {}),
       })
         .then(({ ok, data }) => {
           if (cancelled) return;
+          const refusal = !ok && previewTransport === 'sender' ? veSenderRefusal(data) : null;
+          if (refusal) {
+            // Выбор не меняем: причина — у переключателя, дальше решает специалист.
+            setDeliveryPreview(null);
+            setDeliveryPreviewState('idle');
+            setDeliveryPreviewError(null);
+            setSenderRefusalState({ templateId: template.id, ...refusal });
+            return;
+          }
           const preview = data.preview ?? null;
           if (
             !ok ||
             !isValidDeliveryPreview(preview) ||
             preview.portal_project_id !== portalProjectId ||
             (preview.portal_period_id ?? null) !== periodId ||
-            preview.target_contacts !== targetContacts
+            preview.target_contacts !== targetContacts ||
+            (preview.transport ?? 'instantly') !== previewTransport
           ) {
             setDeliveryPreview(null);
             setDeliveryPreviewState('error');
@@ -694,8 +754,6 @@ export function useTemplateLaunch(
           setDeliveryPreview(preview);
           setDeliveryPreviewState('ready');
           setDeliveryPreviewError(null);
-          // Обзор знает способ отправки точнее подсказки — подсказка догоняет его.
-          if (preview.transport) setTransportHint({ templateId: template.id, transport: preview.transport === 'sender' ? 'sender' : 'instantly' });
         })
         .catch(() => {
           if (cancelled) return;
@@ -716,6 +774,8 @@ export function useTemplateLaunch(
     portalProjectId,
     presetId,
     previewReload,
+    previewSenderBlocked,
+    previewTransport,
     segmentationAuditId,
     targetContacts,
     template,
@@ -728,7 +788,9 @@ export function useTemplateLaunch(
       targetContacts !== null &&
       deliveryPreview.portal_project_id === portalProjectId &&
       (deliveryPreview.portal_period_id ?? null) === expectedPortalPeriodId &&
-      deliveryPreview.target_contacts === targetContacts,
+      deliveryPreview.target_contacts === targetContacts &&
+      // Новый запуск — обзор именно выбранного способа (нет поля — Instantly).
+      (recorded !== null || (deliveryPreview.transport ?? 'instantly') === launchTransport),
   );
 
   const submit = useCallback(
@@ -741,11 +803,13 @@ export function useTemplateLaunch(
         !segmentationAuditId ||
         !deliveryPlanReady ||
         !deliveryPreview ||
-        (deliveryPreview.transport === 'sender' && deliveryPreview.sender_pool?.ready === 0) ||
+        senderSwitch.blocked ||
+        (launchTransport === 'sender' && deliveryPreview.sender_pool?.ready === 0) ||
         submitting
       ) {
         return;
       }
+      const transport = launchTransport;
       setSubmitting(true);
       setSubmitError(null);
       veEnginePost<VeLaunchResponse>(`${VE_API}/templates/${template.id}/launch`, {
@@ -755,7 +819,8 @@ export function useTemplateLaunch(
         portal_project_id: deliveryPreview.portal_project_id,
         expected_portal_period_id: deliveryPreview.portal_period_id,
         target_contacts: deliveryPreview.target_contacts,
-        ...(deliveryPreview.transport === 'sender' ? { expected_transport: 'sender' } : {}),
+        // Только «Рассылка»: у Instantly тело запроса прежнее.
+        ...(transport === 'sender' ? { expected_transport: 'sender' } : {}),
       })
         .then(({ ok, data }) => {
           if (data.code === 'TEMPLATE_LAUNCH_UNCERTAIN' || data.code === 'TEMPLATE_LAUNCH_IN_PROGRESS') {
@@ -771,15 +836,15 @@ export function useTemplateLaunch(
               onSegmentationRejected('incomplete');
               return;
             }
-            if (data.code === 'VE_LAUNCH_TRANSPORT_CHANGED') {
-              // Старый обзор показывал другой способ отправки — без пересчёта
-              // каждый повтор получил бы тот же отказ. До нового обзора подписи —
-              // по способу, на который сервер сменил отправку.
-              clearDeliveryPreview();
-              setPreviewReload((value) => value + 1);
-              setTransportHint({ templateId: template.id, transport: deliveryPreview.transport === 'sender' ? 'instantly' : 'sender' });
+            const refusal = transport === 'sender' ? veSenderRefusal(data) : null;
+            if (refusal) {
+              // Выбор не меняем, причина — у переключателя. 409: обзор этого выбора
+              // больше не годится; 503: обзор оставляем — «Повторить проверку» повторит.
+              setSenderRefusalState({ templateId: template.id, ...refusal });
+              if (!refusal.retryable) clearDeliveryPreview();
+              return;
             }
-            setSubmitError(data.error ?? 'Не удалось отправить в запуск');
+            setSubmitError(veSenderRefusalText(data.error ?? 'Не удалось отправить в запуск', data.code));
             return;
           }
           setRecorded(data.launch);
@@ -789,8 +854,13 @@ export function useTemplateLaunch(
         .catch(() => setSubmitError('Не удалось отправить в запуск'))
         .finally(() => setSubmitting(false));
     },
-    [clearDeliveryPreview, deliveryPlanReady, deliveryPreview, onSegmentationRejected, presets, template, presetId, submitting],
+    [
+      clearDeliveryPreview, deliveryPlanReady, deliveryPreview, launchTransport, onSegmentationRejected, presets, template, presetId,
+      senderSwitch.blocked, submitting,
+    ],
   );
+  // Повторить проверку можно, когда «Рассылку» не удалось проверить; на отказ 409 ответ — выбрать Instantly.
+  const senderCanRetry = senderSwitch.blocked && (senderRefusal ? senderRefusal.retryable : true);
 
   return {
     recorded,
@@ -805,7 +875,14 @@ export function useTemplateLaunch(
     mailboxTagOptions,
     portalProjects,
     portalProjectId,
+    /** Выбор специалиста: где создать кампании нового запуска (по умолчанию Instantly). */
     launchTransport,
+    senderOption,
+    senderRefusal: senderRefusal?.message ?? null,
+    senderSwitch,
+    senderCanRetry,
+    selectTransport,
+    retrySenderCheck,
     selectedPortalProject,
     activePortalPeriod,
     projectTerm,
@@ -816,7 +893,8 @@ export function useTemplateLaunch(
     changeTargetContacts,
     deliveryPlanLocked,
     deliveryPreview,
-    deliveryPreviewState,
+    // Обзор, прерванный закрытием «Рассылки», не «считается» дальше: эффект его отменил.
+    deliveryPreviewState: previewSenderBlocked && deliveryPreviewState === 'loading' ? 'idle' as const : deliveryPreviewState,
     deliveryPreviewError,
     deliveryPlanReady,
     activePeriodIssue,
@@ -1361,9 +1439,9 @@ function LaunchSection({
 }) {
   const recorded = launch.recorded ?? (audit.phase === 'launch_succeeded' ? audit.launchInfo : null);
   const selectedPreset = launch.presets?.find((preset) => preset.id === launch.presetId) ?? null;
-  // До обзора плана — куда пойдёт новый запуск по настройкам; обзор уточняет.
-  const sender = (launch.deliveryPreview?.transport ?? launch.launchTransport) === 'sender';
-  const senderPoolEmpty = launch.deliveryPreview?.transport === 'sender' && launch.deliveryPreview.sender_pool?.ready === 0;
+  // Где создать кампании нового запуска — выбор специалиста (по умолчанию Instantly).
+  const sender = launch.launchTransport === 'sender';
+  const senderPoolEmpty = sender && launch.deliveryPreview?.transport === 'sender' && launch.deliveryPreview.sender_pool?.ready === 0;
   if (recorded) {
     return <div className="space-y-3">
       <PreparedCampaigns info={recorded} warnings={launch.warnings} />
@@ -1384,6 +1462,13 @@ function LaunchSection({
       <SegmentationAuditPanel audit={audit} />
       {audit.canLaunch && audit.auditId ? (
         <div className={`space-y-3 px-4 py-3 ${HE.infoPanel}`}>
+          <LaunchTransportSwitch
+            choice={launch.launchTransport}
+            view={launch.senderSwitch}
+            busy={launch.submitting}
+            onChange={launch.selectTransport}
+            onRetry={launch.senderCanRetry ? launch.retrySenderCheck : undefined}
+          />
           {sender ? (
             <p className="text-sm font-medium text-gray-800">
               Запуск в «Рассылку»: кампании будут созданы <b>черновиками</b>, получатели загрузятся из проверенной раскладки.
@@ -1463,6 +1548,7 @@ function LaunchSection({
                     !selectedPreset ||
                     selectedPreset.mailbox_count === 0 ||
                     senderPoolEmpty ||
+                    launch.senderSwitch.blocked ||
                     !launch.deliveryPlanReady || !supply.approved
                   }
                   className={HE.btnPrimary}
@@ -1547,11 +1633,11 @@ export function Step5Template(props: {
     segmentationAudit.auditId,
     handleSegmentationRejected,
   );
-  // Записанный запуск знает, куда ушёл; до него — обзор плана, до обзора — настройки проекта.
+  // Записанный запуск знает, куда ушёл; до него — выбор специалиста (по умолчанию Instantly).
   const recordedLaunch = launch.recorded ?? segmentationAudit.launchInfo;
   const launchToSender = recordedLaunch
     ? recordedLaunch.transport === 'sender'
-    : (launch.deliveryPreview?.transport ?? launch.launchTransport) === 'sender';
+    : launch.launchTransport === 'sender';
   const supplyContext = launch.deliveryPlanReady && launch.deliveryPreview && segmentationAudit.auditId ? {
     preset_id: launch.presetId, portal_project_id: launch.deliveryPreview.portal_project_id,
     expected_portal_period_id: launch.deliveryPreview.portal_period_id,

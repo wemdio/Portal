@@ -55,6 +55,7 @@ import { VE_CAMPAIGN_SENDING_SETTINGS } from './contactDeliveryRate';
 import { loadVeContactDeliveryRows } from './contactDeliveryInventory';
 import { loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow } from './projectExclusions';
 import { withVeDeliveryCompanyIdentity } from './projectExclusionDelivery';
+import { isVeTwoGisRow } from './twoGisQuarantine';
 import {
   claimProjectCampaignLinks,
   describeOwnershipConflicts,
@@ -64,7 +65,12 @@ import {
   loadPortalProjectTerm,
 } from './portalDeliveryTerm';
 import { rollbackVeSenderReservation } from './senderTransport/senderRecovery';
-import { resolveVeLaunchTransport, transportExpectationIssue, type VeLaunchTransport } from './senderTransport/transport';
+import {
+  resolveRequestedVeLaunchTransport,
+  transportOf,
+  type VeLaunchTransport,
+  type VeSenderAvailabilityScope,
+} from './senderTransport/transport';
 import type { VeSenderLaunchPlan } from './senderTransport/senderLaunch';
 
 export type VeLaunchLocale = 'ru' | 'en';
@@ -228,8 +234,14 @@ export interface VeTemplateLaunchInput {
   expectedPortalPeriodId: string | null;
   /** Exact specialist-confirmed integer; legacy range strings are never parsed. */
   targetContacts: number;
-  /** Способ отправки из обзора запуска; нет — Instantly. Должен совпасть с переключателем. */
+  /** Способ отправки, выбранный специалистом (этап 7); нет — Instantly. «Рассылку» проверяют выключатели. */
   expectedTransport?: VeLaunchTransport;
+  /**
+   * accepted — гипотеза уже принятого автоаутрича: для «Рассылки» нужно только
+   * разрешение (запасной выключатель, США, режим рынка); выключенная подача или
+   * остановленная отправка запуск не отменяют. Нет — новый запуск.
+   */
+  senderScope?: VeSenderAvailabilityScope;
 }
 
 export interface VeTemplateLaunchOutcome {
@@ -494,6 +506,19 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     'id' | 'project_id' | 'vertical_id' | 'hypothesis_id' | 'filename' | 'columns' | 'data' | 'source'
   >;
 
+  // Способ отправки — выбор специалиста (этап 7), до любой записи. Instantly —
+  // без чтения выключателей; «Рассылка» — только если её разрешают сейчас.
+  const transportDecision = await resolveRequestedVeLaunchTransport(
+    portalDb, base.project_id, expectedTransport, process.env, input.senderScope ?? 'new',
+  );
+  if (!transportDecision.ok) {
+    return { status: transportDecision.status, body: { error: transportDecision.error, code: transportDecision.code } };
+  }
+  // Повторный запуск (force) — тем же способом, что прежний: очередь способа не меняет.
+  if (existingLaunch && transportOf(existingLaunch.transport) !== transportDecision.transport) {
+    return conflict('VE_LAUNCH_TRANSPORT_MISMATCH', 'Прежний запуск этого шаблона шёл другим способом отправки — повторите его тем же способом.');
+  }
+
   const collectionInfo = baseRow.collect_info as { collection_mode?: string } | null;
   let approvedSupplyWorkspace: string | null = null;
   if (collectionInfo?.collection_mode === 'preview') {
@@ -592,6 +617,14 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     leadCount: leads.length,
     classification,
   }).map((group) => ({ segment: group.segment, leadIdx: group.leadIndices }));
+  // 2ГИС (R1): выдача закрыта — помеченные строки не попадают в резерв запуска.
+  if (audience.rows.some((row) => isVeTwoGisRow(row))) {
+    groups = groups.map((group) => ({ ...group, leadIdx: group.leadIdx.filter((index) => !isVeTwoGisRow(audience.rows[index])) }))
+      .filter((group) => group.leadIdx.length > 0);
+    if (groups.length === 0) {
+      return { status: 400, body: { code: 'VE_TWO_GIS_CONTACTS_HELD', error: 'Все контакты базы — из справочника организаций, их выдача пока закрыта.' } };
+    }
+  }
 
   // 6. Пресет — только после fail-closed аудита. До этой точки нет ни одного
   //    внешнего Instantly-вызова и тем более мутаций кампаний.
@@ -615,12 +648,6 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     return conflict('SUPPLY_WORKSPACE_CHANGED', 'Workspace пресета изменился после согласования. Проверьте клиентский аккаунт.');
   }
   const instantlyRequestOptions = { accountId: instantlyAccountId };
-  // Куда пойдёт запуск — решает переключатель «Рассылки» сейчас, и это должно
-  // совпасть с обзором, который видел специалист. Только чтение.
-  const transportDecision = await resolveVeLaunchTransport(portalDb, base.project_id);
-  const transportIssue = transportExpectationIssue(transportDecision, expectedTransport);
-  if (transportIssue) return { status: transportIssue.status, body: { error: transportIssue.error, code: transportIssue.code } };
-
   // Client-scoped blocklist is the safety boundary for shared Instantly
   // workspaces. Read it fail-closed before the launch reservation and before
   // any remote campaign mutation, then preserve segmentation by filtering the

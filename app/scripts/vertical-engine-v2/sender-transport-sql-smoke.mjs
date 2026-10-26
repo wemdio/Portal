@@ -1,5 +1,5 @@
 /** Executable PostgreSQL smoke for VE2 launches through «Рассылка» (migrations
- * 20261024_0020, 20261024_0030, 20261024_0070, 20261026_0010); never connects to Portal/prod.
+ * 20261024_0020, 20261024_0030, 20261024_0070, 20261026_0010, 20261026_0020, 20261026_0040); never connects to Portal/prod.
  *
  * Run from app/: node scripts/vertical-engine-v2/sender-transport-sql-smoke.mjs
  * Supply PGLITE_MODULE when @electric-sql/pglite is installed outside this repo.
@@ -383,6 +383,171 @@ try {
   check(await kinds() === '', 'a fresh status change is left to the press that made it', await kinds());
   await card(`updated_at = now() - interval '3 minutes'`);
   check(await kinds() === 'render:rejected', 'a card whose text lags its status is redrawn', await kinds());
+
+  // ── Выключатели (этап 6) ──
+  await db.exec(`
+    alter table public.sender_campaigns add column if not exists status text not null default 'draft',
+      add column if not exists updated_at timestamptz not null default now(),
+      add column if not exists started_at timestamptz,
+      add column if not exists scheduled_start_at timestamptz,
+      add column if not exists scheduled_start_error text;
+    alter table public.sender_recipients add column if not exists status text not null default 'active';
+  `);
+  const killSwitches = `begin; ${migration('20261026_0020_ve_sender_kill_switches.sql')} commit;`;
+  await db.exec(killSwitches);
+  const sendingFlag = async () => (await one('select sending_enabled from public.ve_sender_global_settings')).sending_enabled;
+  check(await sendingFlag() === true, 'sending switch is seeded on');
+  await rows('update public.ve_sender_global_settings set sending_enabled = false');
+  await db.exec(killSwitches);
+  check(await sendingFlag() === false, 're-applying the migration does not turn sending back on');
+  await rows('update public.ve_sender_global_settings set sending_enabled = true');
+  const columns6 = await rows(`select table_name, column_name from information_schema.columns
+    where (table_name = 've_launch_transport_settings' and column_name = 'mode_before_stop')
+       or (table_name = 'sender_project_lead_settings' and column_name in ('disabled_at', 'updated_by', 'note'))`);
+  check(columns6.length === 4, 'stage 6 adds mode_before_stop and lead card who/when columns', JSON.stringify(columns6));
+  await expectError('mode_before_stop accepts only pilot/sender', `update public.ve_launch_transport_settings set mode_before_stop = 'instantly'`, [], /check/);
+  const privileges6 = await one(`select
+      has_function_privilege('authenticated', 'public.ve_sender_pause_running(text)', 'execute') as auth_pause,
+      has_function_privilege('authenticated', 'public.ve_sender_resume_finish(uuid,text,uuid,text)', 'execute') as auth_finish,
+      has_function_privilege('anon', 'public.ve_sender_resume_claim(uuid)', 'execute') as anon_claim,
+      has_function_privilege('service_role', 'public.ve_sender_pause_running(text)', 'execute') as service_pause,
+      has_table_privilege('authenticated', 'public.ve_sender_global_settings', 'select') as auth_settings,
+      has_table_privilege('authenticated', 'public.ve_sender_sending_pauses', 'select') as auth_pauses,
+      has_table_privilege('service_role', 'public.ve_sender_sending_pauses', 'update') as service_pauses`);
+  check(!privileges6.auth_pause && !privileges6.auth_finish && !privileges6.anon_claim && privileges6.service_pause
+    && !privileges6.auth_settings && !privileges6.auth_pauses && privileges6.service_pauses,
+    'kill switch tables and functions are service_role only', JSON.stringify(privileges6));
+
+  const campaign6 = async (name, kind, status, extra = {}) => (await one(`insert into public.sender_campaigns
+      (name, source_kind, status, scheduled_start_at, scheduled_start_error, updated_at)
+    values ($1, $2, $3, $4, $5, coalesce($6::timestamptz, now())) returning id`,
+    [name, kind, status, extra.at ?? null, extra.error ?? null, extra.updatedAt ?? null])).id;
+  const recipient6 = async (campaign, status = 'active') => (await one(
+    `insert into public.sender_recipients(campaign_id, email, status) values ($1, 'r@x.ru', $2) returning id`, [campaign, status])).id;
+  const message6 = async (campaign, recipient, status) => rows(
+    `insert into public.sender_messages(campaign_id, recipient_id, step_no, status) values ($1, $2, 1, $3)`, [campaign, recipient, status]);
+  const statusOf = async (id) => (await one('select status, scheduled_start_at, scheduled_start_error from public.sender_campaigns where id = $1', [id]));
+
+  const draft6 = await campaign6('ve2 draft', 've2', 'draft');
+  await rows(`update public.sender_campaigns set status = 'running' where id = $1`, [draft6]);
+  check((await statusOf(draft6)).status === 'running', 'a ve2 campaign starts while sending is on');
+  await rows(`update public.sender_campaigns set status = 'paused' where id = $1`, [draft6]);
+  await rows('update public.ve_sender_global_settings set sending_enabled = false');
+  await expectError('while sending is stopped a ve2 campaign cannot start', `update public.sender_campaigns set status = 'running' where id = $1`, [draft6], /VE2_SENDING_STOPPED/);
+  await expectError('…nor be inserted running', `insert into public.sender_campaigns(name, source_kind, status) values ('x', 've2', 'running')`, [], /VE2_SENDING_STOPPED/);
+  const manual6 = await campaign6('folder', 'manual', 'draft');
+  await rows(`update public.sender_campaigns set status = 'running' where id = $1`, [manual6]);
+  check((await statusOf(manual6)).status === 'running', 'folder and manual campaigns start while ve2 sending is stopped');
+  await rows('delete from public.ve_sender_global_settings');
+  await rows(`update public.sender_campaigns set status = 'running' where id = $1`, [draft6]);
+  check((await statusOf(draft6)).status === 'running', 'no switch row means sending is on');
+  await rows(`insert into public.ve_sender_global_settings (id, sending_enabled) values (true, true)`);
+
+  // Пауза: только идущие ve2, письма в очереди — отменить, «в отправке» — не трогать, назначенные — снять.
+  const runningA = draft6;
+  const recipientA = await recipient6(runningA);
+  await message6(runningA, recipientA, 'scheduled');
+  await message6(runningA, recipientA, 'sending');
+  const runningB = await campaign6('ve2 B', 've2', 'running');
+  const recipientB = await recipient6(runningB);
+  await message6(runningB, recipientB, 'scheduled');
+  const later6 = new Date(Date.now() + 86_400_000).toISOString();
+  const draftC = await campaign6('ve2 C', 've2', 'draft', { at: later6 });
+  const pausedD = await campaign6('ve2 D', 've2', 'paused', { error: 'запускается', updatedAt: '2020-01-01T00:00:00Z' });
+  const recipientM = await recipient6(manual6);
+  await message6(manual6, recipientM, 'scheduled');
+  await rows('update public.ve_sender_global_settings set sending_enabled = false');
+  const stop = (await one(`select public.ve_sender_pause_running('smoke') as r`)).r;
+  const messageStatuses = await rows(`select c.name, m.status from public.sender_messages m join public.sender_campaigns c on c.id = m.campaign_id
+    where c.id = any($1::uuid[]) order by c.name, m.status`, [[runningA, runningB, manual6]]);
+  check(stop.paused === 2 && stop.unscheduled === 2 && stop.canceled_messages === 2 && stop.still_running === 0
+    && (await statusOf(runningA)).status === 'paused' && (await statusOf(runningB)).status === 'paused'
+    && (await statusOf(manual6)).status === 'running',
+    'the stop pauses only running ve2 campaigns', JSON.stringify(stop));
+  check(JSON.stringify(messageStatuses.map((m) => `${m.name}:${m.status}`)) === JSON.stringify(['folder:scheduled', 've2 B:canceled', 've2 draft:canceled', 've2 draft:sending']),
+    '…cancels their queued letters, keeps letters already in sending and other campaigns', JSON.stringify(messageStatuses));
+  const cAfter = await statusOf(draftC);
+  const dAfter = await statusOf(pausedD);
+  const pauseRows = await rows(`select campaign_id, action, prior_status, prior_scheduled_start_at, prior_scheduled_start_error
+    from public.ve_sender_sending_pauses order by action, prior_status`);
+  check(cAfter.scheduled_start_at === null && dAfter.scheduled_start_error === null && pauseRows.length === 4
+    && new Date(pauseRows.find((r) => r.campaign_id === pausedD).prior_scheduled_start_at).toISOString() === '2020-01-01T00:00:00.000Z'
+    && new Date(pauseRows.find((r) => r.campaign_id === draftC).prior_scheduled_start_at).toISOString() === later6,
+    '…clears scheduled starts and «запускается» marks, remembering them', JSON.stringify(pauseRows));
+  const again = (await one(`select public.ve_sender_pause_running('smoke') as r`)).r;
+  check(again.paused === 0 && again.unscheduled === 0, 'a second stop finds nothing more to pause', JSON.stringify(again));
+
+  // Продолжение: занять строку, без людей — только нетронутые.
+  const pauseOf = async (campaign, action) => (await one(
+    'select id from public.ve_sender_sending_pauses where campaign_id = $1 and action = $2', [campaign, action])).id;
+  const pauseA = await pauseOf(runningA, 'paused');
+  const claimA = (await one('select public.ve_sender_resume_claim($1) as r', [pauseA])).r;
+  const claimAgain = (await one('select public.ve_sender_resume_claim($1) as r', [pauseA])).r;
+  check(claimA.claimed && claimA.untouched && claimA.action === 'paused' && claimA.active_recipients === 1 && claimAgain.claimed === false,
+    'a pause row is claimed by one resume at a time and reports the campaign untouched', JSON.stringify({ claimA, claimAgain }));
+  await rows('update public.ve_sender_global_settings set sending_enabled = true');
+  check((await one(`select public.ve_sender_resume_finish($1, 'raw_running', null, 'x') as r`, [pauseA])).r === 'skip',
+    'the direct «идёт» is refused while the campaign has active recipients');
+  await rows(`update public.sender_recipients set status = 'replied' where campaign_id = $1`, [runningA]);
+  check((await one(`select public.ve_sender_resume_finish($1, 'raw_running', null, 'идёт') as r`, [pauseA])).r === 'done'
+    && (await statusOf(runningA)).status === 'running'
+    && (await one('select resumed_at is not null as closed from public.ve_sender_sending_pauses where id = $1', [pauseA])).closed,
+    '…and done, closing the row, when there is nobody to queue');
+  const pauseB = await pauseOf(runningB, 'paused');
+  await rows(`update public.sender_campaigns set updated_at = now() + interval '1 second' where id = $1`, [runningB]);
+  await rows('update public.ve_sender_sending_pauses set resume_claimed_until = null where id = $1', [pauseB]);
+  check((await one('select public.ve_sender_resume_claim($1) as r', [pauseB])).r.untouched === false,
+    'a campaign touched after the stop is reported as touched');
+  check((await one(`select public.ve_sender_resume_finish($1, 'close', null, 'оставлена на паузе') as r`, [pauseB])).r === 'done'
+    && (await one(`select public.ve_sender_resume_finish($1, 'close', null, 'again') as r`, [pauseB])).r === 'skip',
+    'closing a row works once');
+  const pauseC = await pauseOf(draftC, 'unscheduled');
+  const pauseD = await pauseOf(pausedD, 'unscheduled');
+  check((await one(`select public.ve_sender_resume_finish($1, 'restore_schedule', null, 'ok') as r`, [pauseC])).r === 'done'
+    && new Date((await statusOf(draftC)).scheduled_start_at).toISOString() === later6,
+    'a future scheduled start comes back as it was');
+  const restoredD = (await one(`select public.ve_sender_resume_finish($1, 'restore_schedule', null, 'ok') as r`, [pauseD])).r;
+  const restoredAt = new Date((await statusOf(pausedD)).scheduled_start_at).getTime();
+  check(restoredD === 'done' && Math.abs(restoredAt - Date.now()) < 60_000, 'a past or interrupted start comes back as «now»', String(restoredAt));
+  // Выключатели, переключённые не панелью (psql): «когда» — сейчас, «кто» — неизвестно.
+  await rows(`update public.ve_sender_global_settings set sending_changed_at = '2020-01-01T00:00:00Z', sending_changed_by = $1`, [USER]);
+  await rows('update public.ve_sender_global_settings set sending_enabled = false');
+  const psqlStop = await one('select sending_changed_at, sending_changed_by from public.ve_sender_global_settings');
+  check(new Date(psqlStop.sending_changed_at) > new Date('2026-01-01') && psqlStop.sending_changed_by === null,
+    'a psql stop records its own time and an unknown author', JSON.stringify(psqlStop));
+  await rows(`update public.ve_sender_global_settings set sending_enabled = true, sending_changed_at = '2026-10-26T12:00:00Z', sending_changed_by = $1`, [USER]);
+  const panelResume = await one('select sending_changed_at, sending_changed_by from public.ve_sender_global_settings');
+  check(new Date(panelResume.sending_changed_at).toISOString() === '2026-10-26T12:00:00.000Z' && panelResume.sending_changed_by === USER,
+    'a panel write keeps its own who and when', JSON.stringify(panelResume));
+  await rows(`update public.sender_project_lead_settings set enabled = true, disabled_at = '2020-01-01T00:00:00Z', updated_by = $1`, [USER]);
+  await rows('update public.sender_project_lead_settings set enabled = false');
+  const psqlCards = await one('select disabled_at, updated_by from public.sender_project_lead_settings');
+  check(new Date(psqlCards.disabled_at) > new Date('2026-01-01') && psqlCards.updated_by === null,
+    'lead cards switched off by psql record the moment', JSON.stringify(psqlCards));
+  await rows('update public.sender_project_lead_settings set enabled = true');
+  await rows(`update public.ve_launch_transport_settings set updated_at = '2020-01-01T00:00:00Z', updated_by = $1 where market = 'ru'`, [USER]);
+  await rows(`update public.ve_launch_transport_settings set sender_uploads_enabled = false where market = 'ru'`);
+  const psqlUploads = await one(`select updated_at, updated_by from public.ve_launch_transport_settings where market = 'ru'`);
+  check(new Date(psqlUploads.updated_at) > new Date('2026-01-01') && psqlUploads.updated_by === null,
+    'uploads switched off by psql record the moment', JSON.stringify(psqlUploads));
+  await rows(`update public.ve_launch_transport_settings set sender_uploads_enabled = true where market = 'ru'`);
+  await expectError('unknown resume mode is refused', `select public.ve_sender_resume_finish($1, 'other', null, 'x')`, [pauseD], /unknown resume mode/);
+
+  // ── Выбор специалиста при запуске (этап 7) ──
+  const choiceMigration = `begin; ${migration('20261026_0040_ve_launch_transport_choice.sql')} commit;`;
+  await db.exec(choiceMigration);
+  await db.exec(choiceMigration);
+  const marketsAfter = await rows('select market, mode, mode_before_stop from public.ve_launch_transport_settings order by market');
+  check(marketsAfter.every((row) => row.mode === 'instantly' && row.mode_before_stop === null),
+    'the choice migration changes no market (applied twice)', JSON.stringify(marketsAfter));
+  await rows(`update public.ve_launch_transport_settings set mode = 'choice' where market = 'ru'`);
+  await rows(`update public.ve_launch_transport_settings set mode = 'instantly', mode_before_stop = 'choice' where market = 'ru'`);
+  check((await one(`select mode_before_stop from public.ve_launch_transport_settings where market = 'ru'`)).mode_before_stop === 'choice',
+    'ru accepts the choice mode and remembers it before «только Instantly»');
+  await rows(`update public.ve_launch_transport_settings set mode = 'instantly', mode_before_stop = null where market = 'ru'`);
+  await expectError('US cannot get the choice', `update public.ve_launch_transport_settings set mode = 'choice' where market = 'us'`, [], /us_instantly/);
+  await expectError('US cannot remember a sender mode', `update public.ve_launch_transport_settings set mode_before_stop = 'choice' where market = 'us'`, [], /us_instantly/);
+  await expectError('unknown modes stay refused', `update public.ve_launch_transport_settings set mode = 'other' where market = 'ru'`, [], /mode_check/);
 } finally {
   await db.close();
 }

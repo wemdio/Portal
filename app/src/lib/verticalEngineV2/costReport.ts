@@ -32,7 +32,8 @@ const RESEARCH = new Set(['site_profile', 'competitors', 'brand_cloud', 'hypothe
 const CONSTRUCTOR_NO_AI_SEARCH = new Set([
   'find_emails', 'enrich_descriptions', 'split_emails', 'dedup_email', 'validate_emails', 'cap_emails_per_company',
 ]);
-const INLINE_SOURCES = new Set(['companies_directory', 'pdl', 'funded', 'eng_hiring']);
+// two_gis — снимок без дочерней джобы (как реестр), и в R1, и в R3.
+const INLINE_SOURCES = new Set(['companies_directory', 'pdl', 'funded', 'eng_hiring', 'two_gis']);
 const CHILD_NO_AI_SEARCH = new Set(['hh_live', 'yandex_maps', 'google_maps']);
 const number = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 const object = (value: unknown): Record<string, unknown> | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;

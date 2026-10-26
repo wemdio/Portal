@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { readVe2SendingSwitch } from '@/lib/sender/ve2SendingSwitch';
 
 /**
  * Куда идут запуски VE2: Instantly или своя «Рассылка» (решение владельца
@@ -11,10 +12,10 @@ import type { SupabaseClient } from '@supabase/supabase-js';
  */
 
 export type VeLaunchTransport = 'instantly' | 'sender';
-export type VeLaunchTransportMode = 'instantly' | 'pilot' | 'sender';
+export type VeLaunchTransportMode = 'instantly' | 'pilot' | 'sender' | 'choice';
 
 /** Откуда взялось решение — для журнала запуска. */
-export type VeLaunchTransportSource = 'env_kill' | 'market' | 'override' | 'default' | 'error';
+export type VeLaunchTransportSource = 'env_kill' | 'market' | 'override' | 'default' | 'error' | 'requested';
 
 /** Запасной выключатель: переменная окружения главнее настроек в базе. */
 export const VE2_SENDER_LAUNCHES_DISABLED_ENV = 'VE2_SENDER_LAUNCHES_DISABLED';
@@ -29,6 +30,7 @@ export function transportOf(value: unknown): VeLaunchTransport {
  * (это и есть аварийный выключатель); pilot — «Рассылка» только проектам с
  * переопределением 'sender'; sender — всем, кроме переопределённых в 'instantly'.
  */
+/** @deprecated Этап 7: способ отправки выбирает специалист — resolveRequestedVeLaunchTransport. Оставлено для старых проверок. */
 export function decideVeLaunchTransport(input: {
   killed: boolean;
   mode: unknown;
@@ -49,7 +51,8 @@ export function decideVeLaunchTransport(input: {
   return { transport: 'instantly', source: 'default' };
 }
 
-function killedByEnv(env: Record<string, string | undefined>): boolean {
+/** Включён ли запасной выключатель в окружении этого процесса (только да/нет, без значения). */
+export function killedByEnv(env: Record<string, string | undefined>): boolean {
   const value = String(env[VE2_SENDER_LAUNCHES_DISABLED_ENV] ?? '').trim().toLowerCase();
   return value === '1' || value === 'true' || value === 'yes';
 }
@@ -103,6 +106,7 @@ export async function readVeSenderMarkets(
 }
 
 /** Куда пойдёт новый запуск проекта. Ошибка, нет строки или непонятное значение — Instantly. */
+/** @deprecated Этап 7: способ отправки выбирает специалист — resolveRequestedVeLaunchTransport. Оставлено для старых проверок. */
 export async function resolveVeLaunchTransport(
   portalDb: SupabaseClient,
   veProjectId: string,
@@ -125,6 +129,7 @@ export async function resolveVeLaunchTransport(
  * смена канала. Ошибка чтения настроек при ожидаемой «Рассылке» — 503:
  * «способ изменился» было бы неправдой.
  */
+/** @deprecated Этап 7: способ отправки выбирает специалист — resolveRequestedVeLaunchTransport. Оставлено для старых проверок. */
 export function transportExpectationIssue(
   resolved: { transport: VeLaunchTransport; source: VeLaunchTransportSource },
   expected: unknown,
@@ -137,6 +142,151 @@ export function transportExpectationIssue(
     return { status: 503, code: 'VE_LAUNCH_TRANSPORT_UNAVAILABLE', error: 'Не удалось проверить способ отправки. Повторите.' };
   }
   return { status: 409, code: 'VE_LAUNCH_TRANSPORT_CHANGED', error: 'Способ отправки изменился — обновите обзор запуска.' };
+}
+
+// ─── Выбор специалиста при запуске (этап 7, решение владельца 26.10.2026) ─────
+//
+// Способ отправки запуска — тот, что выбрал специалист; по умолчанию Instantly.
+// Instantly разрешён всегда и выключатели при этом даже не читаются: запуск или
+// автоаутрич в Instantly не может встать из-за переключения «Рассылки».
+// «Рассылку» разрешают выключатели администратора; не разрешили — отказ с
+// причиной, а не тихая подмена на Instantly.
+
+/**
+ * offered — показывать ли специалисту вариант «Рассылка» вообще (нет — экран
+ * как раньше, только Instantly); allowed — можно ли выбрать его сейчас.
+ */
+export type VeSenderLaunchAvailability =
+  | { allowed: true; offered: true }
+  | {
+    allowed: false;
+    offered: boolean;
+    status: 409 | 503;
+    code: 'VE_LAUNCH_SENDER_DISABLED' | 'VE_LAUNCH_TRANSPORT_UNAVAILABLE';
+    reason: string;
+  };
+
+/**
+ * new — новый выбор (обзор, запуск, приём автоаутрича): нужны и разрешение, и
+ * включённые подача и отправка. accepted — уже принятый запуск автоаутрича:
+ * только разрешение (запасной выключатель, США, режим рынка, проект); при
+ * выключенной подаче или остановленной отправке его гипотезы ждут, а не
+ * останавливаются навсегда (так обещает панель этапа 6).
+ */
+export type VeSenderAvailabilityScope = 'new' | 'accepted';
+
+const SENDER_UNKNOWN: VeSenderLaunchAvailability = {
+  allowed: false, offered: true, status: 503, code: 'VE_LAUNCH_TRANSPORT_UNAVAILABLE',
+  reason: 'Не удалось проверить, доступна ли «Рассылка». Повторите.',
+};
+
+/** Можно ли запустить в «Рассылку». null у выключателей — не прочитали: не знаем, значит нельзя. */
+export function veSenderLaunchAvailability(input: {
+  killed: boolean;
+  market: string | null;
+  mode: unknown;
+  modeBeforeStop?: unknown;
+  override: unknown;
+  sendingEnabled: boolean | null;
+  uploadsEnabled: boolean | null;
+}, scope: VeSenderAvailabilityScope = 'new'): VeSenderLaunchAvailability {
+  const off = (offered: boolean, reason: string): VeSenderLaunchAvailability => ({
+    allowed: false, offered, status: 409, code: 'VE_LAUNCH_SENDER_DISABLED', reason,
+  });
+  if (input.killed) return off(false, 'Запуски в «Рассылку» выключены запасным выключателем в настройках портала — только Instantly.');
+  if ((input.market ?? 'ru') !== 'ru') return off(false, 'Для США — только Instantly.');
+  if (input.override === 'instantly') return off(false, 'Проект оставлен на Instantly.');
+  const modeAllows = input.mode === 'choice' || input.mode === 'sender' || (input.mode === 'pilot' && input.override === 'sender');
+  if (!modeAllows) {
+    if (input.mode === 'pilot') return off(false, 'Пилот «Рассылки» идёт на других проектах — этот запускается в Instantly.');
+    // Выбор был и его временно сняли «только Instantly» — вариант виден, но недоступен.
+    const stopped = input.mode === 'instantly' && ['choice', 'sender', 'pilot'].includes(String(input.modeBeforeStop ?? ''));
+    return off(stopped, stopped
+      ? 'Администратор временно оставил новые запуски только в Instantly.'
+      : 'Выбор «Рассылки» не включён — новые запуски только в Instantly.');
+  }
+  if (scope === 'accepted') return { allowed: true, offered: true };
+  if (input.sendingEnabled === null || input.uploadsEnabled === null) return SENDER_UNKNOWN;
+  if (!input.sendingEnabled) return off(true, 'Отправка кампаний Движка в «Рассылке» остановлена администратором.');
+  if (!input.uploadsEnabled) return off(true, 'Подача контактов в «Рассылку» выключена администратором.');
+  return { allowed: true, offered: true };
+}
+
+/** То же по базе: проект, рынок, выключатели этапа 6. Не бросает: сбой чтения — «не знаем». */
+export async function readVeSenderLaunchAvailability(
+  portalDb: SupabaseClient,
+  veProjectId: string,
+  env: Record<string, string | undefined> = process.env,
+  scope: VeSenderAvailabilityScope = 'new',
+): Promise<VeSenderLaunchAvailability> {
+  if (killedByEnv(env)) {
+    return veSenderLaunchAvailability({ killed: true, market: null, mode: null, override: null, sendingEnabled: null, uploadsEnabled: null }, scope);
+  }
+  try {
+    const { data: project, error } = await portalDb.from('ve_projects')
+      .select('market, launch_transport_override').eq('id', veProjectId).maybeSingle();
+    if (error || !project) return SENDER_UNKNOWN;
+    const row = project as ProjectTransportRow;
+    const market = row.market ?? 'ru';
+    const { data: settings, error: settingsError } = await portalDb.from('ve_launch_transport_settings')
+      .select('mode, mode_before_stop, sender_uploads_enabled').eq('market', market).maybeSingle();
+    if (settingsError) return SENDER_UNKNOWN;
+    const marketRow = settings as { mode: unknown; mode_before_stop: unknown; sender_uploads_enabled: unknown } | null;
+    const sending = scope === 'new' ? await readVe2SendingSwitch(portalDb) : null;
+    return veSenderLaunchAvailability({
+      killed: false,
+      market,
+      mode: marketRow?.mode ?? null,
+      modeBeforeStop: marketRow?.mode_before_stop ?? null,
+      override: row.launch_transport_override,
+      sendingEnabled: sending === null ? true : sending.state === 'unknown' ? null : sending.state === 'enabled',
+      uploadsEnabled: marketRow ? marketRow.sender_uploads_enabled === true : false,
+    }, scope);
+  } catch {
+    return SENDER_UNKNOWN;
+  }
+}
+
+export type VeRequestedTransport =
+  | { ok: true; transport: VeLaunchTransport; source: VeLaunchTransportSource }
+  | { ok: false; status: number; code: string; error: string };
+
+/**
+ * Способ отправки запуска по выбору специалиста. Не выбрано или Instantly —
+ * Instantly без чтения настроек; «Рассылка» — только если её разрешают
+ * выключатели прямо сейчас.
+ */
+export async function resolveRequestedVeLaunchTransport(
+  portalDb: SupabaseClient,
+  veProjectId: string,
+  requested: unknown,
+  env: Record<string, string | undefined> = process.env,
+  scope: VeSenderAvailabilityScope = 'new',
+): Promise<VeRequestedTransport> {
+  if (requested !== undefined && requested !== null && requested !== 'instantly' && requested !== 'sender') {
+    return { ok: false, status: 400, code: 'VE_LAUNCH_TRANSPORT_INVALID', error: 'Некорректный способ отправки' };
+  }
+  if (requested !== 'sender') return { ok: true, transport: 'instantly', source: 'requested' };
+  const availability = await readVeSenderLaunchAvailability(portalDb, veProjectId, env, scope);
+  if (!availability.allowed) return { ok: false, status: availability.status, code: availability.code, error: availability.reason };
+  return { ok: true, transport: 'sender', source: 'requested' };
+}
+
+/** Для экрана: показывать ли «Рассылку», можно ли выбрать и почему нет (без кодов ответа). */
+export interface VeSenderOptionView {
+  offered: boolean;
+  allowed: boolean;
+  reason: string | null;
+  /** Не прочитали выключатели — повтор проверки может помочь (экран предлагает «Повторить проверку»). */
+  retryable?: true;
+}
+
+export function veSenderOptionView(availability: VeSenderLaunchAvailability, letterIssue?: string | null): VeSenderOptionView {
+  if (!availability.allowed) {
+    return { offered: availability.offered, allowed: false, reason: availability.reason, ...(availability.status === 503 ? { retryable: true as const } : {}) };
+  }
+  if (letterIssue) return { offered: true, allowed: false, reason: letterIssue };
+  return { offered: true, allowed: true, reason: null };
 }
 
 /** Можно ли подавать контакты в кампании «Рассылки» проекта. Ошибка — нельзя. */

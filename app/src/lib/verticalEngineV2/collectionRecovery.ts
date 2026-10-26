@@ -24,6 +24,7 @@ import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAl
 import { isVeAudienceScopeEnabled } from './audienceScope';
 import { veAutomaticAudienceReviewRows } from './audienceReviewHold';
 import { needsLegacyFintechAudienceRefresh, needsLegacyRetailAudienceRefresh, readVeCollectionAudienceSnapshot, veAudienceNicheProfile, veSourceDiscoveryIsExistingOnly, type VeSourceAudienceHypothesis } from './sourceAudience';
+import { isVeTwoGisTask, veTwoGisTwinKeys, withoutVeTwoGisRows } from './twoGisQuarantine';
 
 export interface VeCollectionContinuation {
   available: boolean;
@@ -129,7 +130,8 @@ export function getVeCollectionContinuation(base: Record<string, unknown>, curre
     || !Number.isSafeInteger(target.round) || Number(target.round) < 1 || checkpoint?.completed_round !== target.round) {
     return unavailable('invalid_checkpoint', 'Сохранённый этап не готов к продолжению. Требуется проверка состояния базы.');
   }
-  const tasks = records(info.tasks);
+  // Близнеца 2ГИС эта версия не читает: он не продолжение, не удержание и не задача плана.
+  const tasks = records(info.tasks).filter((task) => !isVeTwoGisTask(task));
   // An operator repair is a one-off source correction, never a grant of more
   // work when someone later presses the ordinary Continue button.
   if (info.geography_repair !== undefined) {
@@ -169,7 +171,10 @@ export function getVeCollectionContinuation(base: Record<string, unknown>, curre
   if (record(info.known_website_source)?.continuation_only === true) {
     return unavailable('sources_exhausted', 'Проверка доступных официальных сайтов завершена. Проверенные контакты сохранены.');
   }
-  const reserve = readVeRelevanceReserve(info.relevance_reserve);
+  // R1 (2ГИС): строки справочника в резерве — не «незавершённая проверка». Ключи — по всем
+  // задачам: `tasks` выше уже без two_gis.
+  const reserve = withoutVeTwoGisRows(readVeRelevanceReserve(info.relevance_reserve),
+    veTwoGisTwinKeys(records(info.tasks) as Array<{ task?: VeCollectTask | null }>));
   // The specialist raised the "addresses per company" limit. The addresses the
   // previous one held back are validated and waiting in the reserve, but only a
   // normal round can return them: their company names still need preparing.

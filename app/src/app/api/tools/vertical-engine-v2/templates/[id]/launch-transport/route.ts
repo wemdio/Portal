@@ -2,16 +2,20 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { resolveVeLaunchTransport } from '@/lib/verticalEngineV2/senderTransport/transport';
+import { veSenderTemplateIssue } from '@/lib/verticalEngineV2/senderTransport/senderLaunchPlan';
+import { readVeSenderLaunchAvailability, veSenderOptionView } from '@/lib/verticalEngineV2/senderTransport/transport';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 type Context = { params: Promise<{ id: string }> };
 
 /**
- * GET — куда пойдёт новый запуск шаблона: Instantly или «Рассылка». Только
- * для подписей экрана до обзора плана: запуск проверяет способ сам. Ошибка —
- * Instantly, как у самого решения.
+ * GET — можно ли выбрать «Рассылку» для нового запуска шаблона (этап 7:
+ * способ выбирает специалист, по умолчанию Instantly). transport — для
+ * открытых до выкладки вкладок: всегда Instantly. sender: offered — показывать
+ * ли вариант, allowed — можно ли выбрать сейчас, reason — почему нет. Письма,
+ * которые «Рассылка» не примет (больше 5 писем, лишние варианты), — тоже
+ * причина. Сам запуск проверяет всё ещё раз.
  */
 export async function GET(req: NextRequest, { params }: Context) {
   return withToolTrace({ request: req, operation: 'tools.vertical-engine-v2.launch-transport.get' }, async () => {
@@ -22,13 +26,20 @@ export async function GET(req: NextRequest, { params }: Context) {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(templateId)) {
       return NextResponse.json({ error: 'Шаблон не найден' }, { status: 404 });
     }
+    const unknown = { offered: true, allowed: false, reason: 'Не удалось проверить, доступна ли «Рассылка». Повторите.' };
     const { data: template, error: templateError } = await supabaseAdmin.from('ve_templates')
-      .select('base_id').eq('id', templateId).maybeSingle();
-    if (templateError || !template?.base_id) return NextResponse.json({ transport: 'instantly' });
+      .select('base_id, letters').eq('id', templateId).maybeSingle();
+    if (templateError) return NextResponse.json({ transport: 'instantly', sender: unknown });
+    if (!template?.base_id) return NextResponse.json({ error: 'Шаблон не найден' }, { status: 404 });
     const { data: base, error: baseError } = await supabaseAdmin.from('ve_bases')
       .select('project_id').eq('id', template.base_id).maybeSingle();
-    if (baseError || !base?.project_id) return NextResponse.json({ transport: 'instantly' });
-    const { transport } = await resolveVeLaunchTransport(supabaseAdmin, base.project_id);
-    return NextResponse.json({ transport });
+    if (baseError) return NextResponse.json({ transport: 'instantly', sender: unknown });
+    if (!base?.project_id) return NextResponse.json({ error: 'Шаблон не найден' }, { status: 404 });
+    const availability = await readVeSenderLaunchAvailability(supabaseAdmin, base.project_id);
+    const letterIssue = availability.allowed ? veSenderTemplateIssue((template as { letters?: unknown }).letters) : null;
+    return NextResponse.json({
+      transport: 'instantly',
+      sender: veSenderOptionView(availability, letterIssue ? `${letterIssue.error} Этот шаблон можно запустить через Instantly.` : null),
+    });
   });
 }
