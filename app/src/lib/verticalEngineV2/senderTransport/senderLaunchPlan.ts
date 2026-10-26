@@ -3,7 +3,8 @@ import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
 import type { CampaignStepInput } from '@/lib/sender/campaignOps';
 import { PLACEHOLDER_RE } from '@/lib/sender/templateVars';
 import { MAX_VARIANTS } from '@/lib/sender/variants';
-import type { VeLaunchSequence } from '../launchHandoff';
+import { buildLaunchSequence, type VeLaunchSequence } from '../launchHandoff';
+import type { VeChainLetter } from '../types';
 
 /**
  * Запуск VE2 в «Рассылку»: как пресет и письма запуска становятся настройками
@@ -142,6 +143,26 @@ export function veSenderSyntaxIssue(steps: readonly CampaignStepInput[]): VeSend
     }
   }
   return null;
+}
+
+/**
+ * Письма шаблона против ограничений «Рассылки» — до любого запуска и без
+ * контактов: длина цепочки, число вариантов, темы и запись переменных. Не
+ * подходят — «Рассылку» для этого шаблона не предлагаем, Instantly работает.
+ * Сегментные условия на это не влияют (они выбирают письма, а не их число);
+ * сам запуск проверяет ещё раз по каждой группе.
+ */
+export function veSenderTemplateIssue(letters: unknown): VeSenderRefusal | null {
+  let sequence: VeLaunchSequence | null;
+  try {
+    sequence = buildLaunchSequence(Array.isArray(letters) ? letters as VeChainLetter[] : null, { segmentWhen: null });
+  } catch (error) {
+    return refuse('VE_SENDER_TEMPLATE_UNSUPPORTED', error instanceof Error ? error.message : 'Письма шаблона не собрались');
+  }
+  if (!sequence) return refuse('VE_SENDER_TEMPLATE_UNSUPPORTED', 'У шаблона нет писем для запуска');
+  const mapped = veSequenceToSenderSteps(sequence);
+  if (!mapped.ok) return mapped;
+  return veSenderSyntaxIssue(mapped.steps);
 }
 
 /**

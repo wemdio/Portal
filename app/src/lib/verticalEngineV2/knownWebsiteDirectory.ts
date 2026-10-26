@@ -3,6 +3,7 @@ import { readVeCollectionAudienceSnapshot, veAudienceNicheProfile, veSourceDisco
 import { readVeAudienceScope } from './audienceScope';
 import { VE_COLLECTION_ROUND_CEILING } from './collectionTarget';
 import { validVeAdaptiveCollection, type VeAdaptiveCollection } from './adaptiveCollection';
+import { isVeTwoGisTask, veCountedPlanTasks } from './twoGisQuarantine';
 
 export const VE_KNOWN_WEBSITE_CATALOG = 'adult-platforms-2026-10-19' as const;
 /** Public official-page discovery hints reviewed 2026-10-08. These are NOT
@@ -24,6 +25,7 @@ export const VE_KNOWN_ADULT_WEBSITES = [
 interface SourceState {
   source: VeCollectTask['source']; task: VeCollectTask; status: 'pending' | 'dispatched' | 'done' | 'failed';
   child_job_id: string | null; rows: number; harvest?: unknown[]; exhausted?: boolean; unavailable?: boolean;
+  note?: string; two_gis_pair_id?: string;
 }
 export interface VeKnownWebsiteSourceReceipt {
   catalog: typeof VE_KNOWN_WEBSITE_CATALOG; previous_task?: SourceState; previous_construct?: unknown;
@@ -62,13 +64,16 @@ export function veKnownWebsiteAudienceEligible(info: SourceInfo): boolean {
  * zero-row source. Never remove a child receipt, live cursor or unconsumed
  * harvest. The complete retired state is archived, not reconstructed. */
 function replacementIndex(info: SourceInfo): number | null {
-  if (!info.plan || !info.tasks?.length || info.tasks.length > 6
+  // Близнецы two_gis вне потолка плана; индекс добавления — реальная длина info.tasks,
+  // иначе запись ниже перезаписала бы близнеца.
+  const counted = veCountedPlanTasks(info.tasks ?? []).length;
+  if (!info.plan || !info.tasks?.length || counted > 6
     || info.plan.tasks.length !== info.tasks.length) return null;
   const newPlan = info.target_progress?.candidates_processed === 0 && info.target_progress.round === 1 && !info.construct;
   const i = info.tasks.findIndex((state) => ['companies_directory', 'yandex_maps'].includes(state.source)
     && !state.child_job_id && state.rows === 0 && !state.harvest?.length
     && ((newPlan && state.status === 'pending') || (state.status === 'done' && (state.exhausted || state.unavailable))));
-  return i >= 0 ? i : newPlan && info.tasks.length < 4 ? info.tasks.length : null;
+  return i >= 0 ? i : newPlan && counted < 4 ? info.tasks.length : null;
 }
 
 export function canAddVeKnownWebsiteSource(info: SourceInfo): boolean {
@@ -98,8 +103,13 @@ export function addVeKnownWebsiteSource(info: SourceInfo): boolean {
   info.known_website_source = { catalog: VE_KNOWN_WEBSITE_CATALOG,
     ...(info.tasks![index] ? { previous_task: structuredClone(info.tasks![index]) } : {}),
     ...(info.construct ? { previous_construct: structuredClone(info.construct) } : {}) };
+  const replaced = info.tasks![index];
   info.tasks = [...info.tasks!];
   info.tasks[index] = { source: task.source, task, status: 'pending', child_job_id: null, rows: 0 };
+  // Близнец заменённой Яндекс-задачи остался без пары: закрыт как недоступный, не failed; harvest сохраняется.
+  if (replaced?.two_gis_pair_id) info.tasks = info.tasks.map((state): SourceState => isVeTwoGisTask(state)
+    && state.two_gis_pair_id === replaced.two_gis_pair_id
+    ? { ...state, status: 'done', unavailable: true, child_job_id: null, note: 'Пара близнеца заменена официальными сайтами платформ' } : state);
   info.plan = { tasks: info.tasks.map((s) => s.task) };
   return true;
 }

@@ -11,12 +11,22 @@ import { StatusBox } from './ui';
 type RateResponse = { rate: DeliveryRateRow | null; revision: number; snapshot: DeliveryRateSnapshot; bound: boolean; error?: string;
   /** Только у запуска в «Рассылку»: темп выше — по почтам Instantly, отправляют ящики «Рассылки». */
   transport?: 'sender'; sender_pool?: VeSenderPoolSummary | null };
+/** Подсказка о «Рассылке» отдельно от расчёта: её перечитывают, не трогая принятый темп. */
+type SenderHint = { identity: string; transport?: 'sender'; sender_pool?: VeSenderPoolSummary | null };
 
-export function DeliveryRatePanel({ projectId, presetId, templateIds, disabled = false, onReady, supplyOnly = false, hintReload = 0 }: {
+export function DeliveryRatePanel({
+  projectId, presetId, templateIds, disabled = false, onReady, supplyOnly = false, hintReload = 0, transport,
+}: {
   projectId: string; presetId: string; templateIds: string[]; disabled?: boolean;
   onReady?: (revision: number | null) => void; supplyOnly?: boolean;
-  /** Сменился способ отправки: перечитать только подсказку о «Рассылке», не трогая принятый темп. */
+  /** Перечитать только подсказку о «Рассылке», не трогая принятый темп. */
   hintReload?: number;
+  /**
+   * Способ отправки запуска: выбор специалиста (новый запуск) или способ
+   * идущего. Нет — как скажет сервер по записанным запускам. Ни в ключ, ни в
+   * основной расчёт не входит: смена способа не сбрасывает принятый темп.
+   */
+  transport?: 'instantly' | 'sender';
 }) {
   const id = useId();
   const [data, setData] = useState<RateResponse | null>(null);
@@ -56,19 +66,28 @@ export function DeliveryRatePanel({ projectId, presetId, templateIds, disabled =
     return () => controller.abort();
   }, [projectId, presetId, ids, reload]);
 
+  const [hint, setHint] = useState<SenderHint | null>(null);
   useEffect(() => {
-    if (!hintReload) return;
+    if (!hintReload && transport !== 'sender') return;
     const controller = new AbortController();
-    const query = new URLSearchParams({ preset_id: presetId, template_ids: ids });
+    // transport=sender — только отсюда: сервер берёт его, когда записанных запусков нет.
+    const query = new URLSearchParams({ preset_id: presetId, template_ids: ids, ...(transport === 'sender' ? { transport: 'sender' } : {}) });
+    const hintIdentity = `${projectId}/${presetId}/${ids}`;
     void authFetch(`${VE_API}/projects/${projectId}/delivery-rate?${query}`, { signal: controller.signal })
       .then(async response => {
         const result = await response.json() as RateResponse;
         if (!response.ok || controller.signal.aborted) return;
-        setData(current => current ? { ...current, transport: result.transport, sender_pool: result.sender_pool } : current);
+        setHint({ identity: hintIdentity, transport: result.transport, sender_pool: result.sender_pool });
       })
       .catch(() => undefined);
     return () => controller.abort();
-  }, [projectId, presetId, ids, hintReload]);
+  }, [projectId, presetId, ids, hintReload, transport]);
+  // Свежая подсказка этого набора — главнее подсказки из расчёта.
+  const senderSource = hint?.identity === identity ? hint : data;
+  const showSender = (transport ?? senderSource?.transport) === 'sender';
+  // Сервер прислал ящики «Рассылки» — sender_pool есть (null — проверить не вышло); иначе ещё не знаем.
+  const senderPoolKnown = senderSource?.transport === 'sender';
+  const senderPool = senderPoolKnown ? senderSource?.sender_pool : undefined;
 
   const invalidate = () => { setDirty(true); callback.current?.(null); };
   const manual = Number(limit);
@@ -121,10 +140,11 @@ export function DeliveryRatePanel({ projectId, presetId, templateIds, disabled =
         {snapshot.slow_ramp_mailboxes > 0 ? <p className={HE.muted}>На {snapshot.slow_ramp_mailboxes} почтах включён разгон, поэтому темп снижен.</p> : null}
       </>}
     </div> : busy ? <p role="status">Проверяем отправителей в Instantly…</p> : null}
-    {snapshot && data?.transport === 'sender' ? <div className="space-y-1">
-      <p className={HE.muted}>Темп считается по лимитам почт в Instantly, а отправлять будет «Рассылка». {senderPoolLine(data.sender_pool)}</p>
-      {!supplyOnly && senderPaceWarning(valid ? cap : snapshot.max_new_contacts, data.sender_pool)
-        ? <p className="text-sm text-amber-700">{senderPaceWarning(valid ? cap : snapshot.max_new_contacts, data.sender_pool)}</p> : null}
+    {snapshot && showSender ? <div className="space-y-1">
+      <p className={HE.muted}>Темп считается по лимитам почт в Instantly, а отправлять будет «Рассылка».{senderPoolKnown
+        ? ` ${senderPoolLine(senderPool)}` : ''}</p>
+      {!supplyOnly && senderPaceWarning(valid ? cap : snapshot.max_new_contacts, senderPool)
+        ? <p className="text-sm text-amber-700">{senderPaceWarning(valid ? cap : snapshot.max_new_contacts, senderPool)}</p> : null}
     </div> : null}
     {data?.rate && !dirty ? <p role="status" className={HE.muted}>{data.rate.status === 'ready'
       ? 'Темп сохранён.' : data.rate.status === 'blocked'

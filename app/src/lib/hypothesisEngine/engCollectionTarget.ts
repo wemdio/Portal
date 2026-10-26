@@ -128,8 +128,11 @@ export function createHeEngCollectionPool(
  */
 export const HE_ENG_UNVERIFIED_SITE_EMAIL = 'site';
 // Registries whose records never carry an address (engPublicRegistries, engPraRegistry,
-// engEsmaRegistry, engEbaRegistry). A new registry stays out until it is listed.
-const SITE_ONLY_REGISTRIES = new Set(['france', 'fdic', 'nppes', 'companies_house', 'gleif', 'pra', 'esma', 'eba']);
+// engEsmaRegistry, engEbaRegistry, the NACE registers of Finland, Czechia,
+// Ireland and Estonia, Wikidata, and the US lists of the SEC, IRS and NCES).
+// A new registry stays out until it is listed.
+const SITE_ONLY_REGISTRIES = new Set(['france', 'fdic', 'nppes', 'companies_house', 'gleif', 'pra', 'esma', 'eba',
+  'prh', 'czso', 'cro', 'ariregister', 'wikidata', 'sec_companies', 'sec_advisers', 'irs', 'nces']);
 
 export function heEngUnverifiedSiteEmail(status: unknown, row: HeEngCollectionRow): boolean {
   if (typeof status !== 'string' || status.trim().toLowerCase() !== 'unknown') return false;

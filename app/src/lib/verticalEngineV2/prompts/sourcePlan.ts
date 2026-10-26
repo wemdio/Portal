@@ -21,9 +21,18 @@ import { readVeAudienceScope, veAudienceScopeText, type VeAudienceScope } from '
 import { readVeCollectionGeography, type VeCollectionGeography } from '../collectionGeography';
 
 export interface VeCollectTask {
-  source: 'companies_directory' | 'hh_live' | 'yandex_maps' | 'google_maps' | 'pdl' | 'funded' | 'eng_hiring' | 'known_websites';
+  source: 'companies_directory' | 'hh_live' | 'yandex_maps' | 'google_maps' | 'pdl' | 'funded' | 'eng_hiring' | 'known_websites' | 'two_gis';
   /** Code-owned discovery hints, intentionally absent from the LLM schema. */
   known_websites?: { catalog: 'adult-platforms-2026-10-19' };
+  /**
+   * Снимок 2ГИС — задача-близнец Яндекс-задачи. Ставит только код, в схеме модели
+   * её нет. Связь с Яндекс-задачей — `two_gis_pair_id` в состояниях, не здесь:
+   * поле входит в ключ стратегии.
+   */
+  two_gis_query?: {
+    from_queries: string[]; geo?: string; region_codes?: string[]; cities?: string[];
+    collection_geography?: VeCollectionGeography;
+  };
   /** Что и зачем собираем, 1 строка. */
   rationale: string;
   directory_filters?: {

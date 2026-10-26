@@ -26,8 +26,8 @@ interface PreparationProgressProps {
   pauseDisabledReason?: string;
   prepareDisabled?: boolean;
   approved?: boolean;
-  /** Новый запуск проекта пойдёт в «Рассылку» — подсказка одобренной базы говорит о ней. */
-  launchToSender?: boolean;
+  /** «Рассылку» можно выбрать при запуске (этап 7) — подсказка одобренной базы говорит о выборе. */
+  senderChoice?: boolean;
   actionNotice?: PreparationActionNotice | null;
 }
 
@@ -428,8 +428,8 @@ export function getPreparationPresentation(props: PreparationProgressProps): Pre
   } else if (paused && state.canContinue) {
     guidance = { action: 'continue', title: 'Подготовка на паузе', next: 'Продолжите, когда эта база понадобится. Работа начнётся с сохранённого этапа.' };
   } else if (state.tone === 'ok' && props.approved) {
-    guidance = { action: 'launch', title: 'База и письма одобрены', next: props.launchToSender
-      ? 'Перейдите к запуску этой базы. Система подготовит черновики в «Рассылке»; запустите их на карточке кампании или в самой «Рассылке».'
+    guidance = { action: 'launch', title: 'База и письма одобрены', next: props.senderChoice
+      ? 'Перейдите к запуску этой базы. Кампании будут созданы в Instantly на паузе или черновиками в «Рассылке» — выберите при запуске.'
       : 'Перейдите к запуску этой базы. Система подготовит кампанию в Instantly; отправку вы включите там сами.' };
   } else if (state.tone === 'ok') {
     guidance = { action: 'review', title: 'База и письма готовы', next: 'Скачайте контакты или проверьте базу и письма для запуска. После проверки одобрите базу.' };

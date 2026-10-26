@@ -7,6 +7,7 @@ import {
   senderCampaignHint,
   senderCampaignStartable,
   senderCampaignStateLabel,
+  senderSendingStoppedNote,
   senderStartButtonLabel,
   senderStartReport,
 } from '@/lib/verticalEngineV2/senderTransport/labels';
@@ -22,6 +23,8 @@ export function ContactUploadNotice({ templateId }: { templateId: string }) {
   const [queued, setQueued] = useState(false);
   const [sender, setSender] = useState(false);
   const [launchClosed, setLaunchClosed] = useState(false);
+  // Отправку кампаний Движка остановил администратор (этап 6): запуск отсюда и в «Рассылке» откажет.
+  const [sendingStopped, setSendingStopped] = useState<VeContactUploadStatus['sending_stopped'] | null>(null);
   const [starting, setStarting] = useState(false);
   const [startReport, setStartReport] = useState<string[] | null>(null);
   // Отдельно от error: ту сбрасывает каждый удачный опрос, а отказ запуска должен остаться виден.
@@ -34,6 +37,7 @@ export function ContactUploadNotice({ templateId }: { templateId: string }) {
     setCampaigns(data.campaigns ?? []);
     setSender(data.transport === 'sender');
     setLaunchClosed(data.launch_closed === true);
+    setSendingStopped(data.transport === 'sender' && data.sending_stopped ? data.sending_stopped : null);
     if (data.blocked) setQueued(false);
   }, []);
 
@@ -107,9 +111,10 @@ export function ContactUploadNotice({ templateId }: { templateId: string }) {
     }
   }
 
-  const startable = sender && !launchClosed ? (campaigns ?? []).filter(senderCampaignStartable).length : 0;
+  const startable = sender && !launchClosed && !sendingStopped ? (campaigns ?? []).filter(senderCampaignStartable).length : 0;
   if (!blocked && !queued && !error && !startError && !campaigns?.length) return null;
   return <div className="space-y-2" aria-live="polite">
+    {sender && sendingStopped && campaigns?.length ? <p className="font-medium">{senderSendingStoppedNote(sendingStopped.at)}</p> : null}
     {campaigns?.map(campaign => <div key={campaign.campaign_id} className="space-y-1">
       <p className="font-medium">{campaigns.length > 1 ? `${campaign.campaign_name}: ` : ''}{sender
         ? senderCampaignStateLabel(campaign.remote_status, launchClosed)
@@ -122,6 +127,8 @@ export function ContactUploadNotice({ templateId }: { templateId: string }) {
       <p className={HE.muted}>Загружено через Portal: {campaign.leads_count.toLocaleString('ru-RU')} контактов.
         {campaign.status_observed_at ? ` Последняя проверка: ${new Date(campaign.status_observed_at).toLocaleString('ru-RU')}.` : ''}</p>
       {sender ? (launchClosed ? <p className={HE.muted}>{SENDER_CLOSED_LAUNCH_HINT}</p>
+        // Пока отправка остановлена, подсказка «запустите» не к месту; про письма (−1) — остаётся.
+        : sendingStopped && campaign.remote_status !== -1 ? null
         : senderCampaignHint(campaign) ? <p className={HE.muted}>{senderCampaignHint(campaign)}</p> : null)
         : campaign.remote_status === 0 || campaign.remote_status === 2 ? <p className={HE.muted}>
         Проверьте кампанию и нажмите Start в Instantly. Portal сам отправку не включает; после Start продолжит дозагрузку по плану.</p> : null}

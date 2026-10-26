@@ -9,6 +9,7 @@ import { parseExactNonNegativeContactCount } from './contactDeliveryPreview';
 import { loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows, readContactDeliveryPages } from './contactDeliveryInventory';
 import { loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow } from './projectExclusions';
 import { createVeDeliveryIdentityResolver, veDeliveryPolicyRow } from './projectExclusionDelivery';
+import { isVeTwoGisLead, isVeTwoGisRow } from './twoGisQuarantine';
 import { buildSegmentationLaunchGroups } from './segmentationAudit';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
@@ -188,7 +189,8 @@ async function loadSupplyContext(portalDb: SupabaseClient, instantlyDb: Supabase
     ? Math.min(BUFFER_WORKDAYS * settings.dailyCapacity, Math.max(0, plan.remainingContacts - (uploadAllReady ? 0 : outstanding)))
     : plan.days.slice(0, BUFFER_WORKDAYS).reduce((sum, day) => sum + day.quota, 0);
   const campaignItems = new Map(campaigns.map((campaign) => [campaign.id, campaign.item_id]));
-  const readyCandidates = rows.filter(row => row.status === 'ready' || row.status === 'reserved');
+  // 2ГИС (R1): как в превью — помеченные строки резерва не запас (payload есть только при правилах исключений).
+  const readyCandidates = rows.filter(row => (row.status === 'ready' || row.status === 'reserved') && !isVeTwoGisLead(row.lead_payload));
   const policyRows = exclusions.inns.length + exclusions.domains.length > 0
     ? await createVeDeliveryIdentityResolver(portalDb, projectId)(readyCandidates) : readyCandidates.map(veDeliveryPolicyRow);
   const excludedRows = new Set(readyCandidates.filter((_, index) => policyRows[index]
@@ -362,6 +364,8 @@ export async function runProjectContactSupply(input: {
       const allowed = group.leadIndices.filter((index) => {
         const email = validation.snapshot.audience.leads[index].email.trim().toLowerCase();
         return !context.blocked.has(email) && !context.existingEmails.has(email)
+          // 2ГИС (R1): выдача закрыта — в поставку не идут (payload поставки признака не несёт).
+          && !isVeTwoGisRow(validation.snapshot.audience.rows[index])
           && !matchVeProjectExclusion(veProjectExclusionRow(validation.snapshot.audience.rows[index], email), exclusions);
       });
       if (!allowed.length) continue;

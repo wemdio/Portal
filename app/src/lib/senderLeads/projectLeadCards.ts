@@ -772,7 +772,11 @@ interface CardEvent {
   lead_verdict_source: string | null;
 }
 
-async function handleEvent(deps: ProjectLeadCardDeps & { env: NodeJS.ProcessEnv; now: () => Date }, event: CardEvent): Promise<void> {
+async function handleEvent(
+  deps: ProjectLeadCardDeps & { env: NodeJS.ProcessEnv; now: () => Date },
+  event: CardEvent,
+  cardsEnabled: boolean,
+): Promise<void> {
   const { db, instantlyDb } = deps;
   let card = await loadCard(db, event.recipient_id);
   if (!card || card.status !== event.status) return;
@@ -854,8 +858,9 @@ async function handleEvent(deps: ProjectLeadCardDeps & { env: NodeJS.ProcessEnv;
         await giveUp(`за 7 суток не вышло — ${card.blocked_reason ?? 'причина не сохранена'}`);
         break;
       }
-      // Передачу выключили — ждём включения, письмо само не ставим.
+      // Передачу или карточки лидов выключили — ждём включения, письмо само не ставим.
       if (!handoffEnabled(deps.env)) { await patchCard({ next_attempt_at: later }); return; }
+      if (!cardsEnabled) { await patchCard({ next_attempt_at: later, blocked_reason: 'Карточки лидов выключены администратором' }); return; }
       const { data: project, error: projectError } = await db.from('projects').select('specialist_user_id').eq('id', card.project_id).maybeSingle();
       if (projectError) throw new Error(`projects: ${projectError.message}`);
       const specialist = (project as { specialist_user_id?: string | null } | null)?.specialist_user_id;
@@ -986,7 +991,7 @@ export async function runSenderProjectLeadCardsPass(input: ProjectLeadCardDeps):
   if (eventsError) throw new Error(`sender_project_lead_card_events: ${eventsError.message}`);
   for (const event of (events ?? []) as CardEvent[]) {
     try {
-      await handleEvent(deps, event);
+      await handleEvent(deps, event, enabled);
       result.events += 1;
     } catch (err) {
       log('warn', `Карточка лида ${event.recipient_id}: шаг не выполнен: ${errorText(err)}`);

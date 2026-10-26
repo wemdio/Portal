@@ -15,6 +15,7 @@ import {
   isDisposable,
   isRole,
   isFreeProvider,
+  isFreeMailPlaceholder,
   suggestTypo,
   type ValidationResult,
   type DomainInfo,
@@ -613,13 +614,14 @@ function validationAddress(rawEmail: string): string {
  * Every validation path calls this. An address with a conclusive SMTP verdict
  * from the last EMAIL_VALIDATION_CACHE_TTL_DAYS (sharedCache.ts) is answered
  * without a probe; a new conclusive verdict is kept. Unknown is never kept.
+ * A placeholder on free mail skips the cache: its kept catch_all must not win.
  */
 export async function validateEmail(
   rawEmail: string,
   domainCache: Map<string, DomainInfo>,
 ): Promise<ValidationResult> {
   const email = validationAddress(rawEmail);
-  if (checkSyntax(email).valid) {
+  if (checkSyntax(email).valid && !isFreeMailPlaceholder(email)) {
     const cached = await cachedValidation(email);
     if (cached) return cached;
   }
@@ -658,6 +660,17 @@ async function validateEmailBySmtp(
       is_free: freeFlag, is_role: roleFlag, is_disposable: true, is_catch_all: false,
       did_you_mean: null, mx_found: false, smtp_code: 0,
       details: { step: 'disposable' },
+    };
+  }
+
+  // info@mail.ru, 00000@mail.ru: no SMTP answer can reject such an address
+  // (the Mail.ru group accepts any mailbox), so it is judged by form (shared.ts).
+  if (isFreeMailPlaceholder(email)) {
+    return {
+      result: 'invalid', quality: 'bad',
+      is_free: true, is_role: roleFlag, is_disposable: false, is_catch_all: false,
+      did_you_mean: null, mx_found: false, smtp_code: 0,
+      details: { step: 'placeholder', error: 'Шаблонный адрес на бесплатной почте' },
     };
   }
 

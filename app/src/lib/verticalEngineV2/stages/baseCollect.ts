@@ -140,6 +140,8 @@ import { veSavedRelevanceScope } from '../collectionRecovery';
 import { addVeKnownWebsiteSource, VE_KNOWN_ADULT_WEBSITES, VE_KNOWN_WEBSITE_CATALOG, veKnownWebsiteAudienceEligible, type VeKnownWebsiteSourceReceipt } from '../knownWebsiteDirectory';
 import { cleanVeCompanyNames, type VeCompanyNameCheckpoint } from '../companyNameCleanup';
 import { recoverVeSavedEmails, needsVeSavedEmailReview, hasPendingVeSavedEmailRecovery, type VeSavedEmailRecoveryState } from '../savedEmailRecovery';
+import { isVeTwoGisRow, isVeTwoGisTask, veCountedPlanTasks, veTwoGisImportMarker, veTwoGisInputMarkers, veTwoGisTwinKeys,
+  VE_TWO_GIS_ROW_FIELD, withoutVeTwoGisRows } from '../twoGisQuarantine';
 import { singleVeSavedEmail } from '../savedEmailReviewEligibility';
 import { companyNameSource, isCompanyNameReady, VE_COMPANY_NAME_FIELD, type VeCompanyNameCleanupSummary } from '../companyNames';
 import { prepareSegmentationAudience } from '../segmentationAudit';
@@ -588,7 +590,8 @@ async function estimatePlanDirectorySegment(
   excludeInns: Iterable<string> = [],
 ): Promise<NonNullable<VeCollectInfo['estimate']>> {
   const slices = plan.tasks.map(veDirectoryPopulationSlice).filter((slice) => slice !== null);
-  const unsized = veUnsizedSourceLabels(plan.tasks);
+  // Близнец two_gis в R1 не источник: в подписи «без размера рынка» его нет (R3 даст ему метку).
+  const unsized = veUnsizedSourceLabels(plan.tasks.filter((task) => !isVeTwoGisTask(task)));
   const provenance = { version: 2 as const, population_method: 'plan_union' as const,
     population_as_of: new Date().toISOString(), population_filters: directoryEstimateScope(plan),
     ...(unsized.length ? { unsized_sources: unsized } : {}) };
@@ -689,6 +692,10 @@ export interface VeCollectTaskState {
   hit_ceiling?: boolean;
   /** Пометка задачи для UI (например, «реестр исчерпан»). */
   note?: string;
+  /** Связь Яндекс-задачи и её близнеца `two_gis`: один id в обоих состояниях. */
+  two_gis_pair_id?: string;
+  /** Курсор и отсрочка близнеца `two_gis`; форму задаёт модуль 2ГИС, здесь — только перенос. */
+  two_gis?: { version: 1 } & Record<string, unknown>;
 }
 
 /** Состояние фазы CONSTRUCT в collect_info (обогащение конструктором баз). */
@@ -957,9 +964,13 @@ function usesExistingSourceContacts(info: VeCollectInfo): boolean {
 
 function retainDeferredSourceRows(info: VeCollectInfo): void {
   if (!info.search_policy || !usesExistingSourceContacts(info)) return;
+  // R1 (2ГИС): строки справочника в отложенные не копируем. Фильтр — до дедупа:
+  // dedupUnifiedRows дописывает приватные поля дубля в первую строку.
+  const twoGisTwinKeys = veTwoGisTwinKeys(info.tasks);
   info.search_policy.deferred_rows = dedupUnifiedRows([
     ...info.search_policy.deferred_rows,
-    ...(info.tasks ?? []).flatMap((task) => taggedHarvest(task).filter((row) => !hasExistingSourceContact(row))),
+    ...(info.tasks ?? []).flatMap((task) => withoutVeTwoGisRows(taggedHarvest(task), twoGisTwinKeys)
+      .filter((row) => !hasExistingSourceContact(row))),
   ]);
 }
 
@@ -2285,6 +2296,20 @@ async function dispatchTask(
     return;
   }
 
+  if (task.source !== 'hh_live' && task.source !== 'google_maps') {
+    // Источник, которого эта версия не знает (two_gis после отката и любой
+    // будущий), раньше проваливался в живой парсер Google Maps через прокси.
+    // failed повалил бы базу и не переоткрылся бы: закрываем, как недоступный каталог;
+    // harvest и rows остаются. Запись — у вызывающего, вне try: ошибка save() здесь
+    // попала бы в catch DISPATCH и сделала бы задачу failed.
+    state.status = 'done';
+    state.unavailable = true;
+    state.note = 'Источник недоступен в этой версии';
+    state.child_job_id = null;
+    delete state.error;
+    return;
+  }
+
   // Дочерним джобам парсеров обязателен владелец (user_id NOT NULL).
   if (!project.created_by) {
     throw new Error('ve_projects.created_by пуст — дочерней джобе парсера некому принадлежать');
@@ -2306,7 +2331,7 @@ async function dispatchTask(
       progress_percent: 0,
       config,
     });
-  } else {
+  } else if (task.source === 'google_maps') {
     const q = task.maps_query;
     if (!q?.queries?.length) throw new Error('google_maps: в задаче нет maps_query.queries');
     const inputLines = buildGoogleInputLines(q);
@@ -2925,7 +2950,9 @@ async function dispatchConstructJob(input: {
   reservedId?: string;
 }): Promise<{ bcJobId: string; locale: 'ru' | 'en'; construct: VeConstructInfo }> {
   const { ctx, ownerId, projectName, baseLabel, market, reservedId } = input;
-  const rows = projectAllowedRows(ctx, input.rows);
+  // R1 (2ГИС): строки справочника конструктору не отдаём. Резерв из одних таких строк
+  // уходит пустым завершённым результатом (ниже), кандидаты возвращаются в резерв непроверенными.
+  const rows = withoutVeTwoGisRows(projectAllowedRows(ctx, input.rows));
   if (!ownerId) {
     throw new Error('ve_projects.created_by пуст — джобе конструктора некому принадлежать');
   }
@@ -3210,7 +3237,8 @@ function veRowAcquisitionAllowed(info: VeCollectInfo, row: VeUnifiedRow): boolea
   // Old deferred source rows lack attribution. Keep them, but do not buy a
   // new lookup that could silently reopen a held strategy. Saved reviews and
   // immutable constructor inputs do not use this new-acquisition guard.
-  return !(info.tasks ?? []).some((task) => veTaskAcquisitionDeferred(info, task));
+  // Отложенный ключ близнеца 2ГИС (партии R3 в completed) старые строки не держит.
+  return !(info.tasks ?? []).some((task) => !isVeTwoGisTask(task) && veTaskAcquisitionDeferred(info, task));
 }
 
 function automaticReviewRows<T extends Record<string, unknown>>(info: VeCollectInfo, rows: T[]): T[] {
@@ -3306,16 +3334,21 @@ async function prepareAdaptiveCandidates(ctx: VeStageContext, base: VeAutoBase, 
 export function beginAdaptiveBatch(base: VeAutoBase, info: VeCollectInfo, id: string, rows: VeUnifiedRow[]): void {
   const policy = info.adaptive_collection;
   if (!policy || policy.pending || !rows.length) return;
-  const sourceKey = candidateSourceKey(rows[0]) ?? policy.active_source ?? 'saved';
+  const twoGisTwinKeys = veTwoGisTwinKeys(info.tasks);
+  // Активным мог остаться близнец 2ГИС (откат с R3): партию строк без своего ключа ему не приписываем.
+  const active = policy.active_source && !twoGisTwinKeys.has(policy.active_source) ? policy.active_source : undefined;
+  const sourceKey = candidateSourceKey(rows[0]) ?? active ?? 'saved';
   const source = info.tasks?.find((task) => veSourceStrategyKey(task.task) === sourceKey)?.source ?? 'saved';
   // The batch is measured before the per-company limit, so the baseline must be
   // too: addresses already held back in the reserve are not new. Without them
   // every batch "found" all old over-limit addresses again (6b475d8c: 16 of 16,
   // f1bb9ccf: 5 of 5) and a dry source never looked poor.
   const overCap = readVeRelevanceReserve(info.relevance_reserve).filter((row) => Boolean(row[VE_COMPANY_CAP_FIELD]));
+  // Выдача 2ГИС в этой версии закрыта: помеченные строки не входят в базу сравнения.
+  // Флаг two_gis_closed не пишем — нет поля значит «закрыта»; false пишет только R3.
   policy.pending = { id, source_key: sourceKey, source, candidates: rows.length,
-    ready_before: veReadyContactKeys([...prepareSegmentationAudience({ rows: Array.isArray(base.data) ? base.data : [],
-      columns: base.columns ?? [], source: 'auto' }).rows, ...overCap]),
+    ready_before: veReadyContactKeys(withoutVeTwoGisRows([...prepareSegmentationAudience({ rows: Array.isArray(base.data) ? base.data : [],
+      columns: base.columns ?? [], source: 'auto' }).rows, ...overCap], twoGisTwinKeys)),
     started_at: policy.last_completed_at ?? policy.started_at };
 }
 
@@ -3342,6 +3375,8 @@ export function safeAlternativeTask(candidate: VeCollectTask, original: VeCollec
       // licenceGroups — отраслевой охват, как ОКВЭД: рубрика карт заменяет его так же.
       .some(([key, value]) => !['okvedCodes', 'licenceGroups', 'nameTerms', 'hasEmail', 'includeIp', ...SIZE_FILTER_KEYS].includes(key) && value !== undefined)
       || original.maps_query?.geo || original.pdl_filters?.countries?.length || original.pdl_filters?.sizes?.length
+      // Близнец 2ГИС без Яндекс-пары как исходная задача: его география тоже граница.
+      || original.two_gis_query?.geo || original.two_gis_query?.region_codes?.length || original.two_gis_query?.cities?.length
       || original.funded_filters || original.eng_hiring_query
       // Запрос вакансий — сигнал найма, а не граница рынка: по всей России
       // (area 113 или пусто) он ничего не сужает. 9f82e79d стояла на 5
@@ -3386,7 +3421,9 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
     || target.candidates_processed >= target.max_candidates) return;
   const tasks = info.tasks ?? [];
   const consumed = buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []);
-  const available = tasks.filter((task) => !veTaskAcquisitionDeferred(info, task) && task.status !== 'failed' && (task.status !== 'done'
+  // Близнеца 2ГИС эта версия не читает: он не выбирается и не держит active_source
+  // (нижний блок уведёт с него на живой источник); в состоянии остаётся для R3.
+  const available = tasks.filter((task) => !isVeTwoGisTask(task) && !veTaskAcquisitionDeferred(info, task) && task.status !== 'failed' && (task.status !== 'done'
     || isVeRenewableSourceTask(task)
     || (task.harvest ?? []).some((row) => (!usesExistingSourceContacts(info) || hasExistingSourceContact(row))
       && !baseRowMatchesExclusion(consumed, row))));
@@ -3408,8 +3445,12 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
     await persistCollectInfo(ctx, base.id, info);
     return;
   }
-  if (!boundedSourceContinuation(info) && policy.replan_needed && policy.replan_attempts < 2 && tasks.length < VE_PLAN_MAX_TASKS) {
-    const original = tasks.find((task) => veSourceStrategyKey(task.task) === policy.active_source) ?? tasks[0];
+  if (!boundedSourceContinuation(info) && policy.replan_needed && policy.replan_attempts < 2 && veCountedPlanTasks(tasks).length < VE_PLAN_MAX_TASKS) {
+    const active = tasks.find((task) => veSourceStrategyKey(task.task) === policy.active_source);
+    // Активным мог остаться близнец 2ГИС (откат с R3): ограничения берём у его Яндекс-задачи
+    // (та же география и запросы); без пары — сам близнец, его география проверяется в safeAlternativeTask.
+    const original = (active && isVeTwoGisTask(active) && tasks.find((task) => !isVeTwoGisTask(task)
+      && !!task.two_gis_pair_id && task.two_gis_pair_id === active.two_gis_pair_id)) || active || tasks[0];
     if (!original) return;
     policy.replan_attempts += 1;
     // Save before paying: a retry/redeploy cannot reset the replan allowance.
@@ -3417,11 +3458,14 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
     try {
       // Прежний план показываем без порогов размера: иначе модель повторяет
       // их как «ограничение гипотезы», хотя их придумал планировщик.
-      const previous = JSON.stringify(tasks.map((task) => veTaskWithoutSizeFilters(task.task)));
+      // Близнецов two_gis и их партии модель не видит: схема плана этот источник не
+      // принимает, повтор отверг бы ответ, а попытка уже засчитана.
+      const twoGisTwinKeys = veTwoGisTwinKeys(tasks);
+      const previous = JSON.stringify(veCountedPlanTasks(tasks).map((task) => veTaskWithoutSizeFilters(task.task)));
       const rules = 'Не меняй целевую аудиторию, обязательные признаки и географию гипотезы. Пороги выручки и штата ставь, только если размер компании прямо назван в тексте гипотезы. Не повторяй прежние задачи. Живые парсеры не добавляй.';
       const feedback = planExhausted
         ? `Источники плана исчерпаны, а цель базы не набрана. Предложи ДРУГОЙ срез того же рынка: соседние или более общие коды ОКВЭД, готовый каталог Яндекс Карт или другой запрос. ${rules} Предыдущий план (без порогов размера): ${previous}`
-        : `Предыдущие партии дали низкий выход. Предложи ДРУГОЙ источник из готовых каталогов или другой запрос/срез. ${rules} Предыдущий план (без порогов размера): ${previous}. Результаты последних партий (расходы оценочные): ${JSON.stringify(policy.completed.slice(-6))}`;
+        : `Предыдущие партии дали низкий выход. Предложи ДРУГОЙ источник из готовых каталогов или другой запрос/срез. ${rules} Предыдущий план (без порогов размера): ${previous}. Результаты последних партий (расходы оценочные): ${JSON.stringify(policy.completed.filter((batch) => batch.source !== 'two_gis' && !twoGisTwinKeys.has(batch.source_key)).slice(-6))}`;
       const replacement = await buildPlan(job, ctx, vertical, usage, market, base.hypothesis_id ?? null, feedback, info.audience_snapshot, info.collection_geography);
       if (replacement.sliceProbe?.outcome === 'rejected') throw new Error('alternative_slice_rejected');
       const known = new Set(tasks.map((task) => veSourceStrategyKey(task.task)));
@@ -3592,9 +3636,11 @@ async function prefetchBufferedPreviewBatches(args: {
     || target.round >= target.max_rounds
     || (pipeline.batches.length >= PREVIEW_IN_FLIGHT && pipeline.batches.every((batch) => batch.inserted))
     || info.tasks?.some((task) => task.status === 'failed')) return;
+  // R1 (2ГИС): строки справочника в новые пачки не идут; фильтр — до дедупа.
+  const twoGisTwinKeys = veTwoGisTwinKeys(info.tasks);
   const buffered = dedupUnifiedRows(interleaveTaskHarvests((info.tasks ?? [])
     .filter((task) => task.status === 'done')
-    .map((task) => taggedHarvest(task).filter((row) => normalizeCompanyForDedup(row.company) !== ''))));
+    .map((task) => withoutVeTwoGisRows(taggedHarvest(task), twoGisTwinKeys).filter((row) => normalizeCompanyForDedup(row.company) !== ''))));
   const excluded = await loadOtherBaseExclusionKeys(ctx, base.project_id, base.id, base.hypothesis_id);
   // Use the same immutable acquisition receipts as the ordinary harvest path.
   addAcquisitionReceipts(excluded, info.target_checkpoint?.seen_rows ?? [], buffered);
@@ -3698,6 +3744,50 @@ async function importConstructRows(ctx: VeStageContext, bcJobId: string): Promis
   return { rows, emailStatuses, emailsFound, validCount, hasDescription: idxByKey.has('description') };
 }
 
+/** R1 (2ГИС): результат конструктора по строке справочника не идёт в шлюз (там
+ * платный поиск по имени), а остаётся в резерве непроверенным, с признаком.
+ * Сетка теряет приватные поля — признак берём у строк пачки (inputs). */
+function holdVeTwoGisConstructRows<T extends VeUnifiedRow>(rows: T[], statuses: Array<string | null> | null,
+  inputs: ReadonlyArray<object>, twinKeys: ReadonlySet<string>): { rows: T[]; statuses: Array<string | null> | null; held: Array<Record<string, unknown>> } {
+  const markers = veTwoGisInputMarkers(inputs, twinKeys);
+  const held: Array<Record<string, unknown>> = [];
+  const keep = rows.map((row, index) => {
+    const marker = veTwoGisImportMarker(row, markers, twinKeys);
+    if (marker) held.push({ ...row, ...(statuses?.[index] ? { _email_status: statuses[index] } : {}),
+      [VE_TWO_GIS_ROW_FIELD]: marker, _relevance_unchecked: true });
+    return !marker;
+  });
+  return held.length ? { rows: rows.filter((_, index) => keep[index]),
+    statuses: statuses ? statuses.filter((_, index) => keep[index]) : null, held } : { rows, statuses, held };
+}
+
+/** R1 (2ГИС): партия близнеца вне конвейера, у которой нет отметки конструктора (R3 оборвался
+ * между записью партии и вставкой или между вставкой и записью). Отметка не доказывает, что
+ * дочерней джобы нет, поэтому её читаем — только на этом пути. Есть джоба — принимаем её:
+ * импорт держит строки, итог раунда снимает партию. Нет — снимаем партию (только pending и
+ * construct_rows). Пишет вызывающий; 'dropped' — ещё и будит базу заново.
+ * Пачки конвейера здесь не трогаем: preparePreviewBatches отправляет невставленную пачку с тем же
+ * id — RPC вернёт уже вставленную джобу, а без неё dispatchConstructJob без строк справочника
+ * создаст пустую завершённую: job_ids указывают только на реальные джобы. */
+async function settleVeTwoGisReservation(ctx: VeStageContext, info: VeCollectInfo,
+  twinKeys: ReadonlySet<string>): Promise<'dropped' | 'adopted' | null> {
+  const pending = info.adaptive_collection?.pending;
+  if (info.preview_pipeline || !pending || info.construct?.bc_job_id
+    || !(isVeTwoGisTask(pending) || twinKeys.has(pending.source_key))) return null;
+  const existing = await readConstructJobStatus(ctx, pending.id);
+  if (existing) {
+    // dispatched_at — момент приёма: started_at партии бывает старше 6-часового таймаута ожидания.
+    info.construct = { bc_job_id: pending.id, status: 'dispatched', dispatched_at: new Date().toISOString(), progress: existing.progress };
+    stageLog(ctx, `[base_collect] 2gis: партия близнеца ${pending.id} — дочерняя джоба уже есть, принята`);
+    return 'adopted';
+  }
+  delete info.adaptive_collection!.pending;
+  info.adaptive_collection!.last_completed_at = new Date().toISOString();
+  if (info.search_policy) delete info.search_policy.construct_rows;
+  stageLog(ctx, `[base_collect] 2gis: партия близнеца ${pending.id} без конструктора снята`);
+  return 'dropped';
+}
+
 /**
  * Запись конструктора пережила свой раунд: раунд закрыт (completed_round ===
  * round), а construct всё ещё dispatched. У 3cfcfbbd задача d0abb3ea
@@ -3722,9 +3812,14 @@ async function settleStaleConstruct(ctx: VeStageContext, base: VeAutoBase, info:
   const reserve = readVeRelevanceReserve(info.relevance_reserve);
   const known = new Set([...reserve, ...(Array.isArray(base.data) ? base.data as Array<Record<string, unknown>> : [])]
     .map(veRelevanceRowKey));
+  // R1 (2ГИС): признак — по строкам пачки этой записи (до их удаления ниже).
+  const twoGisTwinKeys = veTwoGisTwinKeys(info.tasks);
+  const twoGisMarkers = veTwoGisInputMarkers(info.search_policy?.construct_rows ?? [], twoGisTwinKeys);
   const moved = (imported?.rows ?? []).flatMap((row, index) => {
     const status = imported!.emailStatuses[index];
-    const saved: Record<string, unknown> = { ...row, ...(status ? { _email_status: status } : {}), _relevance_unchecked: true };
+    const twoGis = veTwoGisImportMarker(row, twoGisMarkers, twoGisTwinKeys);
+    const saved: Record<string, unknown> = { ...row, ...(status ? { _email_status: status } : {}),
+      ...(twoGis ? { [VE_TWO_GIS_ROW_FIELD]: twoGis } : {}), _relevance_unchecked: true };
     if (!cell(row.description)) delete saved.description;
     return known.has(veRelevanceRowKey(saved)) ? [] : [saved];
   });
@@ -3964,9 +4059,11 @@ async function checkCollectedRelevance(args: {
     }
     const geography = readVeCollectionGeography(info.collection_geography)?.required;
     const evidenceRows = args.evidenceRows ? projectAllowedRows(ctx, args.evidenceRows) : [];
+    // R1 (2ГИС): харвест близнеца и помеченные строки географии — не наблюдения.
     if (geography) evidenceRows.push(...veRelevanceGeographySourceRows(storedRows, [
-      ...readVeRelevanceSourceRows(info.relevance_reserve).filter((row) => row._ve_geography_source === true),
-      ...(info.tasks ?? []).flatMap((state) => state.harvest ?? []),
+      ...withoutVeTwoGisRows(readVeRelevanceSourceRows(info.relevance_reserve).filter((row) => row._ve_geography_source === true),
+        veTwoGisTwinKeys(info.tasks)),
+      ...(info.tasks ?? []).filter((state) => !isVeTwoGisTask(state)).flatMap((state) => state.harvest ?? []),
     ]));
     const gate = await findIrrelevantRows({
       rows: storedRows,
@@ -4178,11 +4275,16 @@ async function resumeSavedPreviewValidation(
     if (pruned) { finalRows.push(pruned); finalEmailStatuses.push(status); }
   }
   if (finalEmailStatuses.some((status) => status === null)) throw new Error('Saved preview email verdicts are incomplete');
-  stageLog(ctx, `[base_collect] продолжаем проверку сохранённых ${finalRows.length} строк; источники и конструктор не перезапускаются`);
-  const gate = await checkCollectedRelevance({ ctx, job, base, info, finalRows, finalEmailStatuses, market, usage,
+  // R1 (2ГИС): строки справочника в шлюз не идут, а остаются в резерве непроверенными.
+  // У пайплайна строк пачки уже может не быть — признак берём и из source_rows.
+  const twoGis = holdVeTwoGisConstructRows(finalRows, finalEmailStatuses,
+    [...(info.search_policy?.construct_rows ?? []), ...readVeRelevanceSourceRows(info.relevance_reserve)], veTwoGisTwinKeys(info.tasks));
+  stageLog(ctx, `[base_collect] продолжаем проверку сохранённых ${twoGis.rows.length} строк; источники и конструктор не перезапускаются`);
+  const gate = await checkCollectedRelevance({ ctx, job, base, info, finalRows: twoGis.rows, finalEmailStatuses: twoGis.statuses, market, usage,
     previousRelevanceCheckpoint: previous?.result?.relevance_checkpoint });
   const seenKeys = addAcquisitionReceipts(buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []), info.target_checkpoint?.seen_rows ?? [], info.tasks?.flatMap((task) => task.harvest ?? []) ?? []);
-  const hasBufferedCandidates = (info.tasks ?? []).some((task) => !veTaskAcquisitionDeferred(info, task) && task.status === 'done'
+  // Харвест близнеца 2ГИС в карантине: кандидатов не даёт.
+  const hasBufferedCandidates = (info.tasks ?? []).some((task) => !isVeTwoGisTask(task) && !veTaskAcquisitionDeferred(info, task) && task.status === 'done'
     && (task.harvest ?? []).some((row) => {
       if (!allowedByProject(ctx, row)) return false;
       const fresh = pruneBaseRowAgainstExclusion(keys, row);
@@ -4200,7 +4302,7 @@ async function resumeSavedPreviewValidation(
     relevance_recovery: true,
   };
   return completeTargetRound({
-    ctx, job, base, info, progress: target, candidates: [], rows: [...priorReady, ...gate.storedRows],
+    ctx, job, base, info, progress: target, candidates: [], rows: [...priorReady, ...gate.storedRows, ...twoGis.held],
     columns: [...new Set([...(base.columns ?? []), ...VE_AUTO_COLLECT_COLUMNS, ...(imported.hasDescription ? ['description'] : [])])],
     stats, hasBufferedCandidates,
     validationError: gate.relevanceCoverageComplete ? null : gate.relevanceError ?? 'Проверка релевантности завершилась не полностью', usage,
@@ -4214,7 +4316,9 @@ async function reviewSavedRelevance(
 ): Promise<VeStageResult> {
   const automatic = info.relevance_review_requested === true && job.payload?.review_relevance !== true;
   let savedReserve = retainProjectExclusions(ctx, readVeRelevanceReserve(info.relevance_reserve));
-  const reviewReserve = automatic ? automaticReviewRows(info, savedReserve) : savedReserve;
+  // R1 (2ГИС): строки справочника держим, как удержание аудитории, — и в ручном разборе.
+  const twoGisTwinKeys = veTwoGisTwinKeys(info.tasks);
+  const reviewReserve = withoutVeTwoGisRows(automatic ? automaticReviewRows(info, savedReserve) : savedReserve, twoGisTwinKeys);
   const selectedRows = reviewReserve === savedReserve ? null : new Set(reviewReserve);
   const heldReserve = selectedRows ? savedReserve.filter((row) => !selectedRows.has(row)) : [];
   let emailRecoveryError: string | null = null;
@@ -4237,8 +4341,8 @@ async function reviewSavedRelevance(
   }
   const { rows, evidenceRows, companies } = buildVeRelevanceReviewBatch({
     ...veSavedRelevanceScope(info, base.hypothesis_id),
-    reserve: automatic ? automaticReviewRows(info, savedReserve) : savedReserve,
-    ready: projectAllowedRows(ctx, Array.isArray(base.data) ? base.data : []),
+    reserve: withoutVeTwoGisRows(automatic ? automaticReviewRows(info, savedReserve) : savedReserve, twoGisTwinKeys),
+    ready: withoutVeTwoGisRows(projectAllowedRows(ctx, Array.isArray(base.data) ? base.data : []), twoGisTwinKeys),
     source: projectAllowedRows(ctx, readVeRelevanceSourceRows(info.relevance_reserve)), automatic,
     allowPaidSearch: !usesExistingSourceContacts(info),
     triage: isVeRelevanceTriageEnabled(job.project_id),
@@ -4287,7 +4391,7 @@ async function reviewSavedRelevance(
     relevance_recovery: true,
   };
   const seenKeys = addAcquisitionReceipts(buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []), info.target_checkpoint?.seen_rows ?? [], info.tasks?.flatMap((task) => task.harvest ?? []) ?? []);
-  const hasBufferedCandidates = automatic && (info.tasks ?? []).some((task) => !veTaskAcquisitionDeferred(info, task) && task.status === 'done'
+  const hasBufferedCandidates = automatic && (info.tasks ?? []).some((task) => !isVeTwoGisTask(task) && !veTaskAcquisitionDeferred(info, task) && task.status === 'done'
     && (task.harvest ?? []).some((row) => allowedByProject(ctx, row) && pruneBaseRowAgainstExclusion(seenKeys, row) !== null));
   return completeTargetRound({ ctx, job, base, info, progress: target, candidates: [], rows: mergeVeRelevanceRows(savedReserve, gate?.storedRows ?? []),
     columns: base.columns ?? [...VE_AUTO_COLLECT_COLUMNS], stats, hasBufferedCandidates,
@@ -4378,18 +4482,20 @@ async function applyVeContactCapToFinishedBase(
     overCapKeys.has(veRelevanceRowKey(row)) || row[VE_COMPANY_CAP_FIELD]
       ? { ...row, [VE_COMPANY_CAP_FIELD]: { limit } } : row);
   const readyRows = prepareSegmentationAudience({ rows: kept, columns, source: 'auto' }).rows;
-  const belowTarget = readyRows.length < target.ready_target;
+  // R1 (2ГИС): выдача закрыта — строки справочника в цель не идут (в data остаются).
+  const targetReady = withoutVeTwoGisRows(readyRows, veTwoGisTwinKeys(info.tasks));
+  const belowTarget = targetReady.length < target.ready_target;
   // С лимитом засчитывается каждая готовая строка; прежние поля состава
   // (адресов больше, чем засчитано) после капа устарели.
-  const next = withVeTargetComposition({ ...target, ready_rows: readyRows.length,
-    status: belowTarget ? 'limited' : 'target_reached' }, countVeTargetContacts(readyRows, { limit, mode: 'preview' }), readyRows.length);
+  const next = withVeTargetComposition({ ...target, ready_rows: targetReady.length,
+    status: belowTarget ? 'limited' : 'target_reached' }, countVeTargetContacts(targetReady, { limit, mode: 'preview' }), targetReady.length);
   if (belowTarget) {
     // Кап — это то, что случилось с базой ПОСЛЕДНИМ, а не причина, по которой
     // сбор остановился. Раньше эта строка затирала причину целиком, и карточка
     // сообщала специалисту, будто базу остановил лимит адресов, хотя у неё
     // кончился реестр, упёрся предел раундов или перестал окупаться добор.
     // После прогона капа по проекту так «переобъяснились» 44 базы из 54.
-    const capNote = `${VE_CAP_REASON_MARK} ${limit} адресов на компанию: в готовой базе ${readyRows.length} `
+    const capNote = `${VE_CAP_REASON_MARK} ${limit} адресов на компанию: в готовой базе ${targetReady.length} `
       + `из ${target.ready_target} контактов, остальные проверенные адреса сохранены в резерве.`;
     // Свою же заметку срезаем перед пересборкой: кап применяют повторно (сначала
     // 3, потом 5), и иначе текст рос бы с каждым прогоном.
@@ -4405,7 +4511,7 @@ async function applyVeContactCapToFinishedBase(
     company_contact_cap: { limit, over_cap_rows: capped.overCap.length,
       companies: new Set(kept.map(veContactLimitKey)).size, applied_at: new Date().toISOString() },
     stats: { ...(info.stats ?? { tasks_total: 0, tasks_done: 0, tasks_failed: 0, rows_total: 0,
-      excluded_existing_bases: 0, excluded_during_fetch: 0 }), launchable_rows: readyRows.length },
+      excluded_existing_bases: 0, excluded_during_fetch: 0 }), launchable_rows: targetReady.length },
   };
   saved.relevance_summary = summarizeVeRelevanceReserve(reserveRows);
   ctx.signal?.throwIfAborted();
@@ -4413,7 +4519,7 @@ async function applyVeContactCapToFinishedBase(
   // parallel collection or launch must never be overwritten by this projection.
   const { data: written, error } = await ctx.supabase.from('ve_bases')
     .update({ collect_info: collectInfoForStorage(saved), data: kept, columns, row_count: kept.length,
-      sample_rows: readyRows.slice(0, SAMPLE_ROWS), contact_cap_applied: limit, updated_at: new Date().toISOString() })
+      sample_rows: targetReady.slice(0, SAMPLE_ROWS), contact_cap_applied: limit, updated_at: new Date().toISOString() })
     .eq('id', base.id).eq('status', 'analyzed').select('id').maybeSingle();
   if (error) throw new VeRelevanceCheckpointError(`Contact cap save: ${error.message}`);
   if (!written) throw new VePreviewCheckpointConflict('Base changed while the contact limit was applied');
@@ -4469,6 +4575,9 @@ async function readVeContactLimit(ctx: VeStageContext, job: VeJob, base: VeAutoB
 
 /** Источник ещё может дать кандидатов без нового плана. */
 function veTaskCanSupply(task: VeCollectTaskState, info: VeCollectInfo): boolean {
+  // Близнеца 2ГИС эта версия не читает: он не источник, в каком бы состоянии ни был.
+  // R3 заменяет это жёсткое правило своим предикатом отсрочки, а не дополняет его.
+  if (isVeTwoGisTask(task)) return false;
   return task.status === 'dispatched' || (!veTaskAcquisitionDeferred(info, task)
     && (task.status === 'pending' || isVeRenewableSourceTask(task)));
 }
@@ -4544,7 +4653,7 @@ async function widenExhaustedPlan(
     policy.note = `${lead}: открыта вторая очередь — ` + (sizeBasis
       ? 'пороги размера ослаблены, компании без данных о штате и выручке тоже берём.'
       : 'тот же ОКВЭД без порогов размера, которых нет в гипотезе.');
-  } else if (policy.replan_attempts < 2 && tasks.length < VE_PLAN_MAX_TASKS) {
+  } else if (policy.replan_attempts < 2 && veCountedPlanTasks(tasks).length < VE_PLAN_MAX_TASKS) {
     policy.replan_needed = true;
     policy.replan_reason = 'plan_exhausted';
     policy.note = `${lead}: подбираем новый срез того же рынка.`;
@@ -4579,6 +4688,8 @@ async function completeTargetRound(args: {
     ? { ...args.progress, ready_target: VE_PREVIEW_READY_TARGET } : args.progress;
   info.ready_target = progress.ready_target;
   const tasks = (info.tasks ?? []).filter((task) => continuationSourceAllowed(info, task));
+  // Ключи близнецов 2ГИС — по всем задачам: continuationSourceAllowed может скрыть близнеца, а его строки остаются.
+  const twoGisTwinKeys = veTwoGisTwinKeys(info.tasks);
   const reviewOnly = job.payload?.review_relevance === true;
   const prior = info.target_checkpoint;
   const validationRetry = info.validation_retry === true || !!info.company_name_recovery || info.relevance_review_requested === true;
@@ -4647,9 +4758,12 @@ async function completeTargetRound(args: {
   const previousSource = readVeRelevanceSourceRows(info.relevance_reserve);
   const sourceRows = mergeVeRelevanceRows(previousSource.filter((row) => row._ve_geography_source !== true),
     args.candidates.map((row) => ({ ...row, _ve_source_candidate: true })));
+  // R1 (2ГИС): строки географии — без получателей из справочника и без харвеста близнеца:
+  // производная строка признака не несёт и попала бы в знаменатель оценки рынка.
   if (readVeCollectionGeography(info.collection_geography)?.required) sourceRows.push(...veRelevanceGeographySourceRows(
-    sourceRows, [...previousSource.filter((row) => row._ve_geography_source === true),
-      ...(info.tasks ?? []).flatMap((state) => state.harvest ?? [])],
+    withoutVeTwoGisRows(sourceRows, twoGisTwinKeys), [
+      ...withoutVeTwoGisRows(previousSource.filter((row) => row._ve_geography_source === true), twoGisTwinKeys),
+      ...(info.tasks ?? []).filter((state) => !isVeTwoGisTask(state)).flatMap((state) => state.harvest ?? [])],
   ));
   info.relevance_reserve = { version: 1, rows: reserveRows, source_rows: sourceRows };
   info.relevance_summary = summarizeVeRelevanceReserve(reserveRows);
@@ -4667,30 +4781,31 @@ async function completeTargetRound(args: {
   // Старая задача карт тоже продолжаема: следующий раунд читает её запросы
   // из готового каталога (sourceRenewal).
   const renewableDirectory = tasks.some((task) => !veTaskAcquisitionDeferred(info, task) && isVeRenewableSourceTask(task));
-  const exhausted = !args.hasBufferedCandidates && tasks.length > 0 && tasks.every((task) =>
-    (task.source === 'companies_directory' || !!task.catalog) && task.status === 'done' && task.exhausted && !task.hit_ceiling,
+  // Близнец 2ГИС (эта версия его не читает) не держит план открытым — ни закрытый, ни отложенный pending.
+  const exhausted = !args.hasBufferedCandidates && veCountedPlanTasks(tasks).length > 0 && tasks.every((task) => isVeTwoGisTask(task)
+    || ((task.source === 'companies_directory' || !!task.catalog) && task.status === 'done' && task.exhausted && !task.hit_ceiling),
   );
   // A saved-only review does not retry sources: their old failure remains in
   // task history but must not invalidate a now-confirmed saved audience.
   const taskError = reviewOnly ? undefined : tasks.find((task) => task.status === 'failed');
   const pipeline = info.preview_pipeline;
   const pendingBatches = pipeline?.batches.filter((batch) => batch.id !== pipeline.active_batch_id) ?? [];
-  const pendingSources = tasks.some((task) => task.status === 'dispatched'
-    || (task.status === 'pending' && !veTaskAcquisitionDeferred(info, task)));
+  const pendingSources = tasks.some((task) => !isVeTwoGisTask(task) && (task.status === 'dispatched'
+    || (task.status === 'pending' && !veTaskAcquisitionDeferred(info, task))));
   const existingFirst = usesExistingSourceContacts(info);
   const discoveryPaused = info.source_contact_budget?.paused === true;
-  const pendingDiscovery = !existingFirst && !discoveryPaused && (tasks.some((task) => task.status === 'done' && !veTaskAcquisitionDeferred(info, task)
+  const pendingDiscovery = !existingFirst && !discoveryPaused && (tasks.some((task) => !isVeTwoGisTask(task) && task.status === 'done' && !veTaskAcquisitionDeferred(info, task)
     && !task.task.widened && hasPendingVeSourceContacts((task.harvest ?? []).filter((row) =>
       allowedByProject(ctx, row) && pruneBaseRowAgainstExclusion(freshKeys, row) !== null), info.source_contact_recovery))
-    || hasPendingVeSourceContacts((info.search_policy?.deferred_rows ?? []).filter((row) =>
-      allowedByProject(ctx, row) && veRowAcquisitionAllowed(info, row) && pruneBaseRowAgainstExclusion(freshKeys, row) !== null), info.source_contact_recovery));
+    || hasPendingVeSourceContacts((info.search_policy?.deferred_rows ?? []).filter((row) => !isVeTwoGisRow(row, twoGisTwinKeys)
+      && allowedByProject(ctx, row) && veRowAcquisitionAllowed(info, row) && pruneBaseRowAgainstExclusion(freshKeys, row) !== null), info.source_contact_recovery));
   // Цифры для честной причины остановки: сколько поисков куплено, сколько они
   // дали сайтов и сколько из этих сайтов дошло до готового контакта.
   const discoveryChecked = Object.values(info.source_contact_recovery?.checked ?? {});
   const discoverySites = discoveryChecked.filter((entry) => entry.website.trim().length > 0).length;
   const discoveryContacts = countVeSourceDiscoveryContacts(contactRows);
   const pendingRequestedReview = args.continueRequestedReview === true
-    && reserveRows.some((row) => needsVeRelevanceReview(row) || needsVeSavedEmailReview(row));
+    && withoutVeTwoGisRows(reserveRows, twoGisTwinKeys).some((row) => needsVeRelevanceReview(row) || needsVeSavedEmailReview(row));
   const finish = (readyCount: number, nameError?: string) => {
     const phaseError = args.validationError ?? nameError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null);
     const result = finishCollectionRound(progress, {
@@ -4760,14 +4875,16 @@ async function completeTargetRound(args: {
   info.company_name_cleanup = { status: 'partial', companies: nameCompanies.size, checked: namesChecked, failed: nameCompanies.size - namesChecked,
     error: 'Очистка названий завершилась не полностью' };
   const pendingReady = prepareSegmentationAudience({ rows: pendingRows, columns, source: 'auto' }).rows;
-  const pendingCount = countVeTargetContacts(pendingReady, { limit: contactLimit, mode: progress.mode });
+  // R1 (2ГИС): промежуточная цель — как итоговая, без строк справочника.
+  const pendingTargetReady = withoutVeTwoGisRows(pendingReady, twoGisTwinKeys);
+  const pendingCount = countVeTargetContacts(pendingTargetReady, { limit: contactLimit, mode: progress.mode });
   info.target_progress = withVeTargetComposition(finish(pendingCount.counted, 'Очистка названий завершилась не полностью'),
-    pendingCount, pendingReady.length);
+    pendingCount, pendingTargetReady.length);
   info.target_checkpoint = checkpoint;
   info.stats = stats;
   await persistCollectInfo(ctx, base.id, info, {
     data: pendingRows, columns,
-    sample_rows: pendingReady.slice(0, SAMPLE_ROWS),
+    sample_rows: pendingTargetReady.slice(0, SAMPLE_ROWS),
     row_count: pendingRows.length,
   });
   ctx.signal?.throwIfAborted();
@@ -4783,17 +4900,19 @@ async function completeTargetRound(args: {
   const readyRows = prepareSegmentationAudience({ rows: cleaned.rows, columns, source: 'auto' }).rows;
   // Цель считает охват компаний. Без лимита специалиста в неё идут не больше
   // трёх адресов одной компании; сама база при этом хранит все адреса.
-  const targetCount = countVeTargetContacts(readyRows, { limit: contactLimit, mode: progress.mode });
+  // R1 (2ГИС): выдача закрыта — строки справочника в data остаются (исключения), но не в цели.
+  const targetReady = withoutVeTwoGisRows(readyRows, twoGisTwinKeys);
+  const targetCount = countVeTargetContacts(targetReady, { limit: contactLimit, mode: progress.mode });
   const targetRows = targetCount.counted;
   if (isVeRequestyBillingError(cleaned.summary.error)) {
     // Names already paid for are durable in job.result. Save their projection
     // and the exact round count, retaining company_name_recovery so the same
     // job resumes only missing names after the provider becomes available.
     info.target_progress = withVeTargetComposition({ ...progress, status: 'collecting', ready_rows: targetRows,
-      candidates_processed: stats.rows_total }, targetCount, readyRows.length);
+      candidates_processed: stats.rows_total }, targetCount, targetReady.length);
     delete info.target_progress.reason;
     await persistCollectInfo(ctx, base.id, info, {
-      data: cleaned.rows, columns, row_count: cleaned.rows.length, sample_rows: readyRows.slice(0, SAMPLE_ROWS),
+      data: cleaned.rows, columns, row_count: cleaned.rows.length, sample_rows: targetReady.slice(0, SAMPLE_ROWS),
     });
     throw new Error(cleaned.summary.error!);
   }
@@ -4805,10 +4924,10 @@ async function completeTargetRound(args: {
     // Resume only missing names. Preserve paid classification/SMTP and the
     // successful name batches, with a durable cap across worker restarts.
     info.target_progress = withVeTargetComposition({ ...progress, status: 'collecting', ready_rows: targetRows,
-      candidates_processed: stats.rows_total }, targetCount, readyRows.length);
+      candidates_processed: stats.rows_total }, targetCount, targetReady.length);
     delete info.target_progress.reason;
     await persistCollectInfo(ctx, base.id, info, {
-      data: cleaned.rows, columns, row_count: cleaned.rows.length, sample_rows: readyRows.slice(0, SAMPLE_ROWS),
+      data: cleaned.rows, columns, row_count: cleaned.rows.length, sample_rows: targetReady.slice(0, SAMPLE_ROWS),
     });
     ctx.signal?.throwIfAborted();
     const nextNameAttempts = nameAttempts + Number(!cleaned.rateLimit?.deferred);
@@ -4826,13 +4945,15 @@ async function completeTargetRound(args: {
     throw new VeRelevanceRetryScheduled(base.id, { ...args.usage });
   }
   if (pipeline && cleaned.summary.status === 'complete') {
-    if (readyRows.length > 0 && !pipeline.first_ready_at) pipeline.first_ready_at = new Date().toISOString();
+    if (targetReady.length > 0 && !pipeline.first_ready_at) pipeline.first_ready_at = new Date().toISOString();
     if (targetRows >= progress.ready_target && !pipeline.target_reached_at) pipeline.target_reached_at = new Date().toISOString();
   }
   let next = finish(targetRows, cleaned.summary.error);
   const reviewablePending = reserveRows.some((row) => isVeAcceptedEmailStatus(row._email_status)
     && (row._ve_relevance as { status?: unknown } | undefined)?.status === 'needs_review');
-  const automaticReserve = automaticReviewRows(info, reserveRows);
+  // R1 (2ГИС): фильтр — здесь, не внутри automaticReviewRows: у resumeSavedPreviewValidation
+  // база с одними строками справочника на разбор иначе упала бы в «Saved constructor result is unavailable».
+  const automaticReserve = withoutVeTwoGisRows(automaticReviewRows(info, reserveRows), twoGisTwinKeys);
   const pendingAutomaticEmails = hasPendingVeSavedEmailRecovery(automaticReserve, info.saved_email_recovery);
   const emailValidationCanContinue = pendingAutomaticEmails && args.validationError === 'Проверка email завершилась не полностью';
   const reviewEligible = !reviewOnly && (!args.validationError || emailValidationCanContinue) && !taskError
@@ -4840,7 +4961,7 @@ async function completeTargetRound(args: {
   const triageEnabled = isVeRelevanceTriageEnabled(job.project_id);
   const reviewScope = veSavedRelevanceScope(info, base.hypothesis_id);
   const automaticBatch = reviewEligible ? buildVeRelevanceReviewBatch({ ...reviewScope,
-    reserve: automaticReserve, ready: cleaned.rows, source: projectAllowedRows(ctx, readVeRelevanceSourceRows(info.relevance_reserve)), automatic: true,
+    reserve: automaticReserve, ready: withoutVeTwoGisRows(cleaned.rows, twoGisTwinKeys), source: projectAllowedRows(ctx, readVeRelevanceSourceRows(info.relevance_reserve)), automatic: true,
     allowPaidSearch: !existingFirst, triage: triageEnabled,
   }) : null;
   // A saved-review pass that leaves its own selection byte-identical cannot
@@ -4889,18 +5010,29 @@ async function completeTargetRound(args: {
   if (info.adaptive_collection?.pending && !continueSavedReview && !args.validationError && !taskError
     && cleaned.summary.status === 'complete' && !pipeline?.error && pendingBatches.length === 0) {
     const finishedAt = new Date().toISOString();
-    const spend = await readVeBatchSpend(ctx.supabase, job.project_id, base.id, info.adaptive_collection.pending.started_at, finishedAt);
-    completedAdaptive = finishVeAdaptiveBatch(info.adaptive_collection, [...readyRows, ...projectAllowedRows(ctx, overCapRows)], spend, finishedAt,
-      targetCount.perCompany);
+    const adaptiveBatch = info.adaptive_collection.pending;
+    if (isVeTwoGisTask(adaptiveBatch) || twoGisTwinKeys.has(adaptiveBatch.source_key)) {
+      // Партию близнеца 2ГИС (откат с R3) эта версия не меряет: снимаем без записи в completed;
+      // last_completed_at — чтобы её расходы не легли на следующую партию.
+      completedAdaptive = { ...info.adaptive_collection, pending: undefined, last_completed_at: finishedAt };
+    } else {
+      const spend = await readVeBatchSpend(ctx.supabase, job.project_id, base.id, adaptiveBatch.started_at, finishedAt);
+      const batchRows = [...readyRows, ...projectAllowedRows(ctx, overCapRows)];
+      // Закрыта ли выдача 2ГИС, решено при открытии партии (нет флага — закрыта), как и для ready_before.
+      completedAdaptive = finishVeAdaptiveBatch(info.adaptive_collection,
+        adaptiveBatch.two_gis_closed === false ? batchRows : withoutVeTwoGisRows(batchRows, twoGisTwinKeys), spend, finishedAt,
+        targetCount.perCompany);
+    }
   }
   const admissionPolicy = completedAdaptive ?? info.adaptive_collection;
-  const hasDeferredAcquisition = !!admissionPolicy && tasks.some((task) =>
-    veAdaptiveSourceDeferred(admissionPolicy, veSourceStrategyKey(task.task)) !== null);
+  const hasDeferredAcquisition = !!admissionPolicy && tasks.some((task) => !isVeTwoGisTask(task)
+    && veAdaptiveSourceDeferred(admissionPolicy, veSourceStrategyKey(task.task)) !== null);
   // Only after existing stock and in-flight work are drained may a deficit buy
   // search. This transition is durable together with ready rows and counters.
   // An outage is not stock exhaustion; never switch phases to hide an error.
   const consumedExisting = buildBaseExclusionKeysFromRows([...seen.values()]);
-  const existingBuffered = tasks.some((task) => !veTaskAcquisitionDeferred(info, task) && task.status === 'done' && (task.harvest ?? []).some((row) =>
+  // Харвест близнеца 2ГИС в карантине и никогда не расходуется: свободную фазу он не держит.
+  const existingBuffered = tasks.some((task) => !isVeTwoGisTask(task) && !veTaskAcquisitionDeferred(info, task) && task.status === 'done' && (task.harvest ?? []).some((row) =>
     allowedByProject(ctx, row) && hasExistingSourceContact(row) && pruneBaseRowAgainstExclusion(freshKeys, row) !== null
       && !baseRowMatchesExclusion(consumedExisting, row)));
   // Предел берём у итога раунда: холостой раунд его сдвигает (finishCollectionRound).
@@ -4911,8 +5043,9 @@ async function completeTargetRound(args: {
     && !pendingSources && !pendingBatches.length && (acquisitionLimited || (!renewableDirectory && !existingBuffered))) {
     info.search_policy!.phase = 'paid';
     const canAcquirePaid = stats.rows_total < progress.max_candidates && progress.round < next.max_rounds
-      && (tasks.some((task) => task.existing_contacts_only && !veTaskAcquisitionDeferred(info, task))
-        || hasPendingVeSourceContacts(info.search_policy!.deferred_rows.filter((row) => veRowAcquisitionAllowed(info, row)), info.source_contact_recovery));
+      && (tasks.some((task) => !isVeTwoGisTask(task) && task.existing_contacts_only && !veTaskAcquisitionDeferred(info, task))
+        || hasPendingVeSourceContacts(info.search_policy!.deferred_rows.filter((row) => !isVeTwoGisRow(row, twoGisTwinKeys)
+          && veRowAcquisitionAllowed(info, row)), info.source_contact_recovery));
     // The directory's previous exhaustion referred to its site/email lanes,
     // not to the full original audience. Other sources keep their cursor.
     for (const task of tasks) if (canAcquirePaid && task.existing_contacts_only && !veTaskAcquisitionDeferred(info, task)) {
@@ -4925,7 +5058,8 @@ async function completeTargetRound(args: {
       delete task.excluded_during_fetch;
       delete task.already_seen_during_fetch;
     }
-    const saved = buildVeRelevanceReviewBatch({ ...reviewScope, reserve: reserveRows, ready: cleaned.rows,
+    const saved = buildVeRelevanceReviewBatch({ ...reviewScope, reserve: withoutVeTwoGisRows(reserveRows, twoGisTwinKeys),
+      ready: withoutVeTwoGisRows(cleaned.rows, twoGisTwinKeys),
       source: projectAllowedRows(ctx, readVeRelevanceSourceRows(info.relevance_reserve)), automatic: true, triage: triageEnabled });
     continueSavedReview = saved.rows.length > 0;
     if (continueSavedReview) info.relevance_review_requested = true;
@@ -4967,8 +5101,9 @@ async function completeTargetRound(args: {
       next = { ...next, status: 'collecting', round: progress.round + 1 }; delete next.reason;
     }
   }
-  stats.launchable_rows = readyRows.length;
-  next = withVeTargetComposition(next, targetCount, readyRows.length);
+  // R1 (2ГИС): счётчики, превью и анализ — без закрытых строк; data их хранит.
+  stats.launchable_rows = targetReady.length;
+  next = withVeTargetComposition(next, targetCount, targetReady.length);
   info.target_progress = next;
   if (cleaned.summary.status === 'complete') {
     delete info.company_name_recovery;
@@ -4986,12 +5121,13 @@ async function completeTargetRound(args: {
   }
   // An economic hold is not source/market exhaustion. Drain saved work first,
   // then stop without opening a new slice or resetting a daily supply budget.
-  const deferredSources = info.adaptive_collection ? [...new Set(tasks.map((task) => veSourceStrategyKey(task.task)))].flatMap((key) => {
+  const deferredSources = info.adaptive_collection ? [...new Set(tasks.filter((task) => !isVeTwoGisTask(task))
+    .map((task) => veSourceStrategyKey(task.task)))].flatMap((key) => {
     const verdict = veAdaptiveSourceDeferred(info.adaptive_collection!, key);
     return verdict ? [verdict] : [];
   }) : [];
   const acquirableStock = tasks.some((task) => veTaskCanSupply(task, info)
-    || (!veTaskAcquisitionDeferred(info, task) && task.status === 'done' && (task.harvest ?? []).some((row) =>
+    || (!isVeTwoGisTask(task) && !veTaskAcquisitionDeferred(info, task) && task.status === 'done' && (task.harvest ?? []).some((row) =>
       allowedByProject(ctx, row) && (!usesExistingSourceContacts(info) || hasExistingSourceContact(row))
       && pruneBaseRowAgainstExclusion(freshKeys, row) !== null && !baseRowMatchesExclusion(consumedExisting, row))));
   const economicHold = deferredSources.length > 0 && !acquirableStock && !pendingDiscovery
@@ -5014,7 +5150,9 @@ async function completeTargetRound(args: {
   // Правило узкого рынка уже расширило срез или завершило базу в этом раунде.
   let marketDecided = economicHold;
   if (info.estimate) {
-    const sourceRows = readVeRelevanceSourceRows(info.relevance_reserve);
+    // R1 (2ГИС): строки справочника не входят в знаменатель; числитель (targetRows, targetCount.companies)
+    // уже без них — targetCount считается по targetReady.
+    const sourceRows = withoutVeTwoGisRows(readVeRelevanceSourceRows(info.relevance_reserve), twoGisTwinKeys);
     const candidateCompanies = new Set(sourceRows.map(veRelevanceCompanyKey));
     // Компании реестра — строки с ИНН: остальные источники ИНН не отдают. Они
     // уже вычтены из остатка среза; компании карт и вакансий в нём не лежат.
@@ -5095,7 +5233,7 @@ async function completeTargetRound(args: {
     && (next.status === 'collecting' || emptyRound)) {
     // Живой источник — задача, которая ещё может читать, или непросмотренные
     // строки в её выдаче. Исчерпанные источники в решение не входят.
-    const liveKeys = tasks.filter((task) => task.status !== 'failed' && (veTaskCanSupply(task, info)
+    const liveKeys = tasks.filter((task) => task.status !== 'failed' && !isVeTwoGisTask(task) && (veTaskCanSupply(task, info)
       || (task.harvest ?? []).some((row) => allowedByProject(ctx, row) && pruneBaseRowAgainstExclusion(freshKeys, row) !== null
         && !baseRowMatchesExclusion(consumedExisting, row))))
       .map((task) => veSourceStrategyKey(task.task));
@@ -5190,9 +5328,9 @@ async function completeTargetRound(args: {
   const idleRounds = info.idle_rounds;
   const status = next.status === 'collecting' ? 'collecting'
     : next.status === 'error' ? 'failed'
-      : next.mode === 'preview' && readyRows.length > 0 && !info.geography_repair?.preserve_analysis ? 'analyzing' : 'analyzed';
+      : next.mode === 'preview' && targetReady.length > 0 && !info.geography_repair?.preserve_analysis ? 'analyzing' : 'analyzed';
   await persistCollectInfo(ctx, base.id, info, {
-    data: cleaned.rows, columns, sample_rows: readyRows.slice(0, SAMPLE_ROWS), row_count: cleaned.rows.length,
+    data: cleaned.rows, columns, sample_rows: targetReady.slice(0, SAMPLE_ROWS), row_count: cleaned.rows.length,
     status, error: next.status === 'error' ? next.reason?.slice(0, 500) : null,
   });
   if (limitChanged) {
@@ -5572,6 +5710,17 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     await persistCollectInfo(ctx, baseId, info);
   }
   const tasks = (info.tasks ?? []).filter((task) => continuationSourceAllowed(info, task));
+  // Ключи близнецов 2ГИС — по всем задачам: строки скрытого близнеца тоже надо узнать.
+  const twoGisTwinKeys = veTwoGisTwinKeys(info.tasks);
+  // R1 (2ГИС): партию близнеца без отметки конструктора (вне конвейера) конструктору не отдаём —
+  // см. settleVeTwoGisReservation. После снятия будим базу заново: смена страниц, выбор
+  // источника и DISPATCH на этом тике пропущены из-за pending, и пустой раунд засчитался бы холостым.
+  const twoGisReservation = await settleVeTwoGisReservation(ctx, info, twoGisTwinKeys);
+  if (twoGisReservation) await persistCollectInfo(ctx, baseId, info);
+  if (twoGisReservation === 'dropped') {
+    await requeueSelf(ctx, job, 1_000);
+    return { result: { waiting: true, base_id: baseId, two_gis_reservation_dropped: true }, ...usage };
+  }
 
   // Ключи компаний других баз проекта: нужны реестру ещё на DISPATCH
   // (исключение на выборке — продолжение больших сегментов) и повторно на
@@ -5687,8 +5836,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   retainDeferredSourceRows(info);
 
   // Other pending sources are alternatives, not children we must await.
-  const waiting = tasks.filter((t) => t.status === 'dispatched' || (t.status === 'pending' && !veTaskAcquisitionDeferred(info, t)
-    && (!info.adaptive_collection?.active_source || veSourceStrategyKey(t.task) === info.adaptive_collection.active_source)));
+  // Близнец 2ГИС дочерней джобы не имеет: ждать нечего (R1 его не читает, R3 пропускает отложенного).
+  const waiting = tasks.filter((t) => !isVeTwoGisTask(t) && (t.status === 'dispatched' || (t.status === 'pending' && !veTaskAcquisitionDeferred(info, t)
+    && (!info.adaptive_collection?.active_source || veSourceStrategyKey(t.task) === info.adaptive_collection.active_source))));
   if (waiting.length > 0 && !info.preview_pipeline) {
     await requeueSelf(ctx, job);
     return {
@@ -5705,10 +5855,12 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // целиком. Строки без компании и строки-мусор, чья компания схлопывается в
   // пустой ключ («ООО», «—», «»), выбрасываем до мёрджа — все они делили бы
   // один пустой ключ «|» (дедуп ниже их тоже отбрасывает, это первая линия).
+  // R1 (2ГИС): строки справочника не идут в обработку. Фильтр — до дедупа:
+  // dedupUnifiedRows дописывает приватные поля дубля в первую строку.
   const interleaved = projectAllowedRows(ctx, dedupUnifiedRows(
     interleaveTaskHarvests(
-      [...done.map((t) => taggedHarvest(t).filter((r) => normalizeCompanyForDedup(r.company) !== '')),
-        ...(!existingFirst && info.search_policy ? [info.search_policy.deferred_rows] : [])],
+      [...done.map((t) => withoutVeTwoGisRows(taggedHarvest(t), twoGisTwinKeys).filter((r) => normalizeCompanyForDedup(r.company) !== '')),
+        ...(!existingFirst && info.search_policy ? [withoutVeTwoGisRows(info.search_policy.deferred_rows, twoGisTwinKeys)] : [])],
     ),
   ));
 
@@ -5840,7 +5992,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
 
   if (merged.length === 0 && !hasDispatchedConstruct && target && info.adaptive_collection && !info.adaptive_collection.pending
     && !info.preview_pipeline?.error && !failed.length && waiting.length === 0 && target.ready_rows < target.ready_target) {
-    const nextSources = tasks.filter((task) => task.status === 'pending' && !veTaskAcquisitionDeferred(info, task)
+    const nextSources = tasks.filter((task) => task.status === 'pending' && !isVeTwoGisTask(task) && !veTaskAcquisitionDeferred(info, task)
       && veSourceStrategyKey(task.task) !== info.adaptive_collection!.active_source
       && !veAdaptiveSourceDry(info.adaptive_collection!.completed, veSourceStrategyKey(task.task)));
     const nextKey = clinicSourceKeys(info, nextSources.map((task) => veSourceStrategyKey(task.task)), market, base.hypothesis_id)[0];
@@ -6140,10 +6292,16 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     }
   }
 
+  // R1 (2ГИС): шлюз проверил бы строку справочника с платным поиском по имени — держим
+  // её в резерве непроверенной. Сетка конструктора теряет приватные поля: признак — у строк пачки (merged).
+  const twoGisHeld = target ? holdVeTwoGisConstructRows(finalRows, finalEmailStatuses, merged, twoGisTwinKeys) : null;
+  if (twoGisHeld?.held.length) { finalRows = twoGisHeld.rows; finalEmailStatuses = twoGisHeld.statuses; }
+
   if (finalRows.length === 0) {
     if (target) return await completeTargetRound({
-      ctx, job, base, info, progress: target, candidates: merged, rows: [],
-      columns: finalColumns, stats, hasBufferedCandidates: kept.length > merged.length,
+      ctx, job, base, info, progress: target, candidates: merged, rows: twoGisHeld?.held ?? [],
+      // R1 (2ГИС): kept уже без строк справочника — партию сравниваем без них же.
+      columns: finalColumns, stats, hasBufferedCandidates: kept.length > withoutVeTwoGisRows(merged, twoGisTwinKeys).length,
       validationError: info.construct?.status === 'done' ? null : 'Проверка email завершилась не полностью', usage,
     });
     if (isRefill) {
@@ -6220,8 +6378,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     relevance_coverage_complete: relevanceCoverageComplete,
   };
   if (target) return await completeTargetRound({
-    ctx, job, base, info, progress: target, candidates: merged, rows: storedRows,
-    columns: finalColumns, stats: statsWithQuality, hasBufferedCandidates: kept.length > merged.length,
+    ctx, job, base, info, progress: target, candidates: merged, rows: twoGisHeld?.held.length ? [...storedRows, ...twoGisHeld.held] : storedRows,
+    columns: finalColumns, stats: statsWithQuality, hasBufferedCandidates: kept.length > withoutVeTwoGisRows(merged, twoGisTwinKeys).length,
     validationError: !relevanceCoverageComplete ? relevanceError ?? 'Проверка релевантности завершилась не полностью'
       : !hasCompleteEmailValidation ? 'Проверка email завершилась не полностью' : null,
     usage,

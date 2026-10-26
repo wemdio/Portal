@@ -1124,6 +1124,7 @@ const COLLECT_SOURCE_LABELS: Record<string, string> = {
   yandex_maps: 'яндекс.карты',
   google_maps: 'google maps',
   gmaps: 'google maps',
+  two_gis: 'Справочник организаций',
 };
 
 function collectSourceLabel(source: string | undefined): string {

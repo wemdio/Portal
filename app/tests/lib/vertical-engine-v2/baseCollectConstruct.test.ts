@@ -5021,6 +5021,34 @@ describe('base_collect: старая задача карт продолжает�
     expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks![0].harvest).toHaveLength(2);
     expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
   });
+
+  it('источник, которого эта версия не читает (two_gis после отката, неизвестный), закрывается как недоступный, а не уходит в Google Maps', async () => {
+    const twin = { source: 'two_gis' as const, rationale: 'Снимок 2ГИС по запросам Яндекс-задачи',
+      two_gis_query: { from_queries: REALTY_MAPS.maps_query.queries, geo: REALTY_MAPS.maps_query.geo } };
+    const unknown = { source: 'future_source', rationale: 'Источник будущей версии', maps_query: REALTY_MAPS.maps_query } as unknown as
+      NonNullable<VeCollectInfo['plan']>['tasks'][number];
+    // Строка справочника из harvest близнеца (R3) остаётся в задаче и не идёт в конструктор.
+    const twinRow = unifiedRow({ company: 'АН Справочный', website: 'spravka-an.test', email: 'info@spravka-an.test',
+      address: 'Казань, Республика Татарстан', source_detail: 'справочник организаций' });
+    for (const task of [twin, unknown]) {
+      // Активным оставлен сам источник — как после отката с R3.
+      const info: VeCollectInfo = { collection_mode: 'preview', target_progress: createCollectionTarget('preview'),
+        adaptive_collection: { ...newVeAdaptiveCollection(), active_source: veSourceStrategyKey(task) },
+        plan: { tasks: [task] }, tasks: [{ source: task.source, status: 'pending', child_job_id: null, task,
+          ...(task === twin ? { rows: 1, harvest: [twinRow], two_gis_pair_id: 'pair-1' } : { rows: 0 }) }] };
+      const db = seed(info);
+      await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+      const base = db.getRows('ve_bases')[0];
+      const state = (base.collect_info as VeCollectInfo).tasks![0];
+      expect(state).toMatchObject({ status: 'done', unavailable: true, note: 'Источник недоступен в этой версии', child_job_id: null });
+      expect(state.error).toBeUndefined();
+      expect(base.status).not.toBe('failed');
+      expect(db.getRows('google_maps_jobs')).toHaveLength(0);
+      expect(db.getRows('parser_jobs')).toHaveLength(0);
+      expect(db.getRows('base_constructor_jobs')).toHaveLength(0);
+      if (task === twin) expect(state.harvest).toEqual([twinRow]);
+    }
+  });
 });
 
 describe('base_collect: круг повторной отправки одних и тех же компаний', () => {

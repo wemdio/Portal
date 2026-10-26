@@ -168,7 +168,7 @@ async function fullValidate(
   const status: AutoPipelineEmailValidationStatus = (() => {
     if (result.result === 'invalid') {
       const step = (result.details as { step?: string }).step;
-      if (step === 'syntax') return 'invalid_syntax';
+      if (step === 'syntax' || step === 'placeholder') return 'invalid_syntax';
       if (step === 'mx') return 'no_mx';
       if (result.smtp_code >= 500) return 'smtp_reject';
       return 'smtp_reject';
