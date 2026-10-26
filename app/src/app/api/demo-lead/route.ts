@@ -8,6 +8,7 @@ import {
   type DemoLeadData,
   type DemoLeadPageLang,
 } from '@/lib/demoLead/notify';
+import { LEAD_SPAM_LABEL, leadSpamReasons } from '@/lib/demoLead/spam';
 import { enqueueOutreachOsRegistration } from '@/lib/outreachOsLeads/process';
 
 export const dynamic = 'force-dynamic';
@@ -56,6 +57,12 @@ export const dynamic = 'force-dynamic';
  * clients keep getting JSON. Signs that an AI agent sent the lead (agentHints) go to
  * the Telegram alert — and so into the General/AMO copy built from leadAlertText —
  * but demo_leads does not store them.
+ *
+ * Spam (lib/demoLead/spam.ts, since 2026-10-26): a lead with spam signs is still stored
+ * and still alerted, with a «🚫 Спам» title and the reasons, but it is not enqueued to
+ * lib/outreachOsLeads, so no AMO deal and no General copy. The answer to the caller is
+ * the usual success. demo_leads has no spam mark; to re-check a stored row, pass its
+ * name/email/company/message/phone/telegram to leadSpamReasons (nulls as '').
  */
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -389,11 +396,13 @@ async function handleLead(req: NextRequest): Promise<NextResponse> {
   // Awaited best-effort (never throws) — serverless can freeze after the response,
   // so don't fire-and-forget the notify.
   const agent = agentHints(req, email);
+  const spam = leadSpamReasons({ name, email, company, message, phone, telegram });
   const alert: DemoLeadData = {
     name, email, phone: phone || null, telegram: telegram || null,
     company: company || null, message: message || null, source, referrer,
     ...(lang ? { pageLang: lang } : {}),
     ...(agent ? { agentHints: agent } : {}),
+    ...(spam.length ? { spamReasons: spam.map((r) => LEAD_SPAM_LABEL[r]) } : {}),
     ...(utm
       ? {
           utm,
@@ -404,8 +413,10 @@ async function handleLead(req: NextRequest): Promise<NextResponse> {
       : {}),
   };
   await sendDemoLeadTelegramAlert(alert);
-  // Копия в General «Продажи Polza» и сделка в нашей AMO (lib/outreachOsLeads).
-  if (supabaseAdmin) {
+  // Копия в General «Продажи Polza» и сделка в нашей AMO (lib/outreachOsLeads) — не для спама.
+  if (spam.length) {
+    console.info(`[demo-lead] spam (${spam.join(', ')}): alerted, no AMO deal`);
+  } else if (supabaseAdmin) {
     try {
       await enqueueOutreachOsRegistration(supabaseAdmin, {
         source: source || 'landing', email, name: name || null, company: company || null, tgHtml: leadAlertText(alert),
