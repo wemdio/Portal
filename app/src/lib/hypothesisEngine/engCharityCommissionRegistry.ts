@@ -7,7 +7,7 @@ import type { HeEngRegistryCandidate, HeEngRegistryPage, HeEngRegistryTask } fro
 import { discardHeEngRegistryBulkFile, heEngRegistryBackgroundList, heEngRegistryCacheFile, openHeEngRegistryZipEntry,
   ownHeEngRegistryText, readHeEngRegistryBulkFile, type HeEngRegistryBuildOptions } from './engRegistryBulkFile';
 import { HeEngRegistryRetryError } from './engRegistryRetry';
-import { heEngListedWebsite, heEngUsdAmount, heEngWebsiteNamesOrganisation, heEngWebsiteOfParentFederation } from './engSecAdviserRegistry';
+import { heEngListedWebsite, heEngSiteEmail, heEngSiteHost, heEngUsdAmount, heEngWebsiteNamesOrganisation, heEngWebsiteOfParentFederation } from './engSecAdviserRegistry';
 
 /**
  * Registered charities in England and Wales from the Charity Commission's
@@ -96,28 +96,9 @@ async function download(name: string, options: HeEngRegistryBuildOptions): Promi
   return readHeEngRegistryBulkFile(`${BASE}${name}.zip`, heEngRegistryCacheFile(`ccew-${name}.zip`), { fetch: options.fetch, now: options.now,
     maxBytes: MAX_ZIP_BYTES, maxAgeMs: FILE_MAX_AGE_MS, timeoutMs: 10 * 60_000 });
 }
-function siteHost(site: string): string {
-  try { return new URL(site).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; }
-}
 /** A UK postcode as typed, with its slips: «SW1A 1AA.», «N1 9GU UK», «S017 1BJ» (a zero for the O of SO17). */
 function ukPostcode(typed: string): string {
   return UK_POSTCODE.exec(` ${typed.toUpperCase().replace(/^([A-Z])0(?=\d)/, '$1O')} `)?.[1] ?? '';
-}
-// Role mailboxes: on the parent domain only these are the organisation's.
-const ROLE_MAILBOX = /^(?:info|office|enquir(?:y|ies)|admin|hello|contact|mail|general|reception|secretary|clerk|team|support|accounts|finance|fundraising|donations?)@/;
-/**
- * The register's e-mail when it is on the charity's own website host or, for a
- * role mailbox, that host's parent domain: cclp@hermes.cam.ac.uk and
- * jd123@cam.ac.uk are people's university mailboxes, not cclp.group.cam.ac.uk's.
- */
-function ownEmail(raw: string, site: string): string {
-  const email = raw.trim().toLowerCase();
-  const at = email.lastIndexOf('@');
-  if (!site || at < 1 || !/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,63}$/.test(email)) return '';
-  const mailHost = email.slice(at + 1); const host = siteHost(site);
-  // The parent must still be the charity's registrable domain, not a public suffix.
-  return host && heCompanySiteIdentity(mailHost)?.registrable === heCompanySiteIdentity(site)?.registrable &&
-    (mailHost === host || (host.endsWith(`.${mailHost}`) && ROLE_MAILBOX.test(email))) ? email : '';
 }
 
 async function parse(files: { charity: string; classification: string; partb: string }): Promise<Charity[]> {
@@ -139,7 +120,7 @@ async function parse(files: { charity: string; classification: string; partb: st
     names.set(key, (names.get(key) ?? 0) + 1);
     const typed = cell('charity_contact_postcode', 12);
     const site = heEngListedWebsite(cell('charity_contact_web', 2048), { home: true });
-    const host = site ? siteHost(site) : '';
+    const host = site ? heEngSiteHost(site) : '';
     if (host) {
       const shared = hosts.get(host); const code = typed.toUpperCase().replace(/\s+/g, '');
       if (!shared) hosts.set(host, { charities: 1, postcode: code });
@@ -163,7 +144,7 @@ async function parse(files: { charity: string; classification: string; partb: st
     // Copies: the list must not keep the parsed file text alive.
     kept.set(number, { number: ownHeEngRegistryText(number), organisation: ownHeEngRegistryText(cell('organisation_number', 12)), name: ownHeEngRegistryText(name),
       type: ownHeEngRegistryText(type || 'charity with a company number'), address: ownHeEngRegistryText(`${[...lines, postcode].filter(Boolean).join(', ')}, United Kingdom`),
-      website: ownHeEngRegistryText(website), email: ownHeEngRegistryText(ownEmail(cell('charity_contact_email', 254), website)),
+      website: ownHeEngRegistryText(website), email: ownHeEngRegistryText(heEngSiteEmail(cell('charity_contact_email', 254), website)),
       income: amount(cell('latest_income', 20)), period: ownHeEngRegistryText(cell('latest_acc_fin_period_end_date', 10)), employees: null, employeeYear: null,
       company: ownHeEngRegistryText(/^[A-Z0-9]{6,8}$/.test(company) ? company : ''), activities: ownHeEngRegistryText(cell('charity_activities', 400)),
       grantMaker: false, uniqueName: false });
@@ -175,7 +156,7 @@ async function parse(files: { charity: string; classification: string; partb: st
   const byHost = new Map<string, Charity[]>();
   for (const charity of kept.values()) {
     charity.uniqueName = names.get(heEngCharityNameKey(charity.name)) === 1;
-    const host = charity.website ? siteHost(charity.website) : '';
+    const host = charity.website ? heEngSiteHost(charity.website) : '';
     if (host) byHost.set(host, [...(byHost.get(host) ?? []), charity]);
   }
   for (const [host, group] of byHost) {

@@ -1,7 +1,8 @@
 /**
  * Activity classes for the national business registers that file NACE codes:
  * Finland (TOL 2025), Czechia (CZ-NACE 2025), Ireland (NACE Rev. 2, older
- * companies NACE Rev. 1.1) and Estonia (EMTAK 2025 and 2008). One closed list
+ * companies NACE Rev. 1.1), Estonia (EMTAK 2025 and 2008), Sweden (SNI 2025)
+ * and Germany's energy market register (NACE groups, engMastrRegistry.ts). One closed list
  * per sector in NACE Rev. 2.1 classes; a register on an older revision reads
  * the classes they replaced. Like every registry category, a class only chooses
  * candidates; the company is admitted by its own site, size and company check.
@@ -48,7 +49,7 @@ const REV11: Readonly<Record<string, readonly string[]>> = {
 export function heEngNaceRev2Classes(code: string): readonly string[] { return REV2[code] ?? [code]; }
 export function heEngNaceRev11Classes(code: string): readonly string[] { return REV11[code] ?? []; }
 /** The registry categories of one sector, for each NACE register. */
-export function heEngNaceSources(sector: string): Record<'prh' | 'czso' | 'cro' | 'ariregister', readonly string[]> {
+export function heEngNaceSources(sector: string): Record<'prh' | 'czso' | 'cro' | 'ariregister' | 'scb' | 'mastr', readonly string[]> {
   const classes = HE_ENG_NACE_SECTOR_CLASSES[sector] ?? [];
-  return { prh: classes, czso: classes, cro: classes, ariregister: classes };
+  return { prh: classes, czso: classes, cro: classes, ariregister: classes, scb: classes, mastr: classes };
 }
