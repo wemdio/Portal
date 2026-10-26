@@ -15,6 +15,38 @@ persistent write.
 Database/role creation and grants are infrastructure operations and are
 intentionally not performed by these scripts.
 
+## VE2 user (`twogis_ve2`)
+
+The Vertical Engine v2 worker reads this database as its own role, so it can
+never take OutreachOS or parser connections (`twogis_runtime` has 12 in total).
+`003_ve2_access.sql` creates `twogis_ve2`: read-only, at most 2 connections,
+short timeouts, SELECT on `cards`, `card_subcategories`, `dataset_snapshots`
+and `facet_subcategories`. Run it as `postgres` in `2gis_dataset`; it is safe
+to re-run and sets no password.
+
+- **Password.** Set it only as a SCRAM verifier, in a session with
+  `SET log_statement = 'none'` and `SET pg_stat_statements.track_utility = off`.
+  Production logs DDL and tracks utility statements, so a plain
+  `ALTER ROLE … PASSWORD` would land in the server log and in
+  `pg_stat_statements`. The plain password lives only in the worker's
+  `.env.twogis-ve2` (mode 0600, never committed, never printed).
+- **pg_hba.** main-postgres needs two lines placed before
+  `host all all 127.0.0.1/32 trust`:
+
+  ```
+  host  2gis_dataset  twogis_ve2  172.16.0.0/12  scram-sha-256
+  host  all           twogis_ve2  all            reject
+  ```
+
+  Then run `SELECT pg_reload_conf();` and check `pg_hba_file_rules`. Without
+  these lines the role could also log into the main `postgres` database, where
+  PUBLIC has CONNECT. The file is `/etc/postgresql/pg_hba.conf` inside the
+  container, not on a mount, so recreating main-postgres drops the lines and
+  they must be added again. health-check alerts when they are missing.
+- **Rollback.** Restore the saved pg_hba copy and reload, then in `2gis_dataset`
+  run `DROP OWNED BY twogis_ve2;`, then `DROP ROLE twogis_ve2;`, then delete
+  `.env.twogis-ve2`.
+
 ## Install the schema
 
 Run only after independently checking the target URL:
