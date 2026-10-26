@@ -18,7 +18,7 @@ interface Props {
   title: string;
   subtitle?: string;
   /** 'wide' — форма кампании, 'md' — выбор ящиков. */
-  size?: 'md' | 'wide';
+  size?: 'md' | 'wide' | 'xl';
   onClose: () => void;
   footer?: ReactNode;
   children: ReactNode;
@@ -35,14 +35,16 @@ export function SenderModal({ title, subtitle, size = 'md', onClose, footer, chi
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 backdrop-blur-sm sm:items-center"
+      className={`fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 backdrop-blur-sm sm:items-center ${
+        size === 'xl' ? 'pt-24' : ''
+      }`}
       role="dialog"
       aria-modal="true"
       aria-label={title}
     >
       <div
-        className={`my-auto flex max-h-[90vh] w-full flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-xl ${
-          size === 'wide' ? 'max-w-3xl' : 'max-w-xl'
+        className={`my-auto flex w-full ${size === 'xl' ? 'max-h-[calc(100vh-8rem)]' : 'max-h-[90vh]'} flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-xl ${
+          size === 'xl' ? 'max-w-[min(96vw,88rem)]' : size === 'wide' ? 'max-w-3xl' : 'max-w-xl'
         }`}
       >
         <div className="flex items-start justify-between gap-4 border-b border-zinc-200 px-5 py-4">

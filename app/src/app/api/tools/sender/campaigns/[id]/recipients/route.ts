@@ -11,7 +11,7 @@ import { withToolTrace } from '@/lib/toolTrace';
 export const dynamic = 'force-dynamic';
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 15;
 
 const STATUS_LABELS: Record<string, string> = {
   active: 'в работе',

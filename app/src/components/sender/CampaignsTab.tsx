@@ -561,7 +561,7 @@ function ActionsMenu({ items }: { items: MenuItem[] }) {
         <MoreHorizontal className="h-4 w-4" />
       </button>
       {open ? (
-        <div className="absolute right-0 z-20 mt-1 w-48 overflow-hidden rounded-lg border border-zinc-200 bg-white py-1 shadow-lg">
+        <div role="menu" className="sender-actions-menu absolute right-0 z-20 mt-1 w-48 overflow-hidden rounded-lg border border-zinc-200 bg-white py-1 shadow-lg">
           {items.map((item) => {
             const Icon = item.icon;
             return (
