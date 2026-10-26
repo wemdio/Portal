@@ -5913,6 +5913,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     } catch (e) {
       ctx.signal?.throwIfAborted();
       if (e instanceof VeRelevanceCheckpointError || (e instanceof Error && e.name === 'VeWorkerShutdownError')) throw e;
+      // Оплата и лимит запросов провайдера — не сбой источника, как и в реплане: задача остаётся
+      // pending, джоба ждёт пополнения Requesty или окна лимита. Раньше задача становилась failed
+      // и роняла базу (17.09: две базы на «yandex_maps: Requesty 429» при подборе рубрик каталога).
+      if (e instanceof VeLlmRateLimitError || isVeProviderBillingError(e)) throw e;
       if ((state.source === 'companies_directory' && isVeTransientDirectoryError(e))
         || (state.source === 'yandex_maps' && isVeTransientCatalogError(e))) throw e;
       state.status = 'failed';
