@@ -55,6 +55,11 @@ import { addVeKnownWebsiteSource, VE_KNOWN_ADULT_WEBSITES } from '@/lib/vertical
 import { finalizeVeTwoGisTwins, pairVeTwoGisStates, veCountedPlanTasks, veTwoGisTwinKeys, VE_TWO_GIS_PAIR_LOST_NOTE, withVeTwoGisTwins } from '@/lib/verticalEngineV2/twoGisQuarantine';
 import { applyVeCollectionGeographyToPlan, veTwoGisQueryScope } from '@/lib/verticalEngineV2/collectionGeography';
 import { veCanWidenPlan } from '@/lib/verticalEngineV2/planWidening';
+import { mapTwoGisRow, veTwoGisAddress, veTwoGisCompanyName, veTwoGisSiteDomain, veTwoGisSiteKind, veTwoGisWebsite,
+  veTwoGisWebsiteHost } from '@/lib/verticalEngineV2/twoGisRows';
+import { buildVeTwoGisPageQuery, nextVeTwoGisCursor, readVeTwoGisPage, readVeTwoGisPageWith } from '@/lib/verticalEngineV2/twoGisPage';
+import { VeTwoGisSnapshotError, VeTwoGisUnavailableError } from '@/lib/verticalEngineV2/twoGisSource';
+import type { PoolClient } from 'pg';
 import { createHash } from 'node:crypto';
 import { createMockSupabase as createRawMockSupabase, type MockSupabaseClient, type MockSupabaseSeed } from '@/../tests/helpers/mockSupabase';
 import { capVeContactsPerCompany, normalizeVeMaxEmailsPerCompany } from '@/lib/verticalEngineV2/companyContactCap';
@@ -101,7 +106,7 @@ import { recoverVeSavedEmails, resumeVeSavedEmailRecovery, hasPendingVeSavedEmai
   type VeSavedEmailRecoveryState } from '@/lib/verticalEngineV2/savedEmailRecovery';
 import { createVeJobShutdown, VeWorkerShutdownError } from '@/lib/verticalEngineV2/workerLiveness';
 import { normalizeVeSourceContacts, VE_CONFIRMED_WEBSITE_MARK } from '@/lib/verticalEngineV2/sourceContacts';
-import { veAcquisitionReceipt } from '@/lib/verticalEngineV2/collectionIdentity';
+import { veAcquisitionReceipt, veCompanyWebsiteKey } from '@/lib/verticalEngineV2/collectionIdentity';
 import { buildVeSeenCompanies } from '@/lib/verticalEngineV2/seenCompanies';
 import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
 import { planVeJobFailure } from '@/lib/verticalEngineV2/jobRetry';
@@ -4577,6 +4582,139 @@ describe('base_collect: план кончился раньше цели', () => 
     expect(addVeKnownWebsiteSource(replaced)).toBe(true);
     expect(replaced.tasks!.map((state) => state.source)).toEqual(['known_websites', 'two_gis']);
     expect(replaced.tasks![1]).toMatchObject({ status: 'done', unavailable: true, two_gis_pair_id: 'p' });
+  });
+
+  it('2ГИС: сайт, название и строка карточки; страница — параметры, курсор и исходы чтения без исключений для одной базы', async () => {
+    // Ключ домена: весь хост на конструкторе, иначе домен по tldts; мусор — null.
+    for (const [raw, domain, kind] of [['https://www.Romashka.RU/about?x=1', 'romashka.ru', 'own'], ['shop.romashka.ru', 'romashka.ru', 'own'],
+      ['acme.tilda.ws', 'acme.tilda.ws', 'builder'], ['shop.acme.tilda.ws', 'shop.acme.tilda.ws', 'builder'],
+      ['acme.wixsite.com', 'acme.wixsite.com', 'builder'], ['school5.gosuslugi.ru', 'school5.gosuslugi.ru', 'builder'],
+      ['acme.nethouse.ru', 'acme.nethouse.ru', 'builder'], ['tilda.ws', 'tilda.ws', 'catalog'], ['info2gis.tilda.ws', 'info2gis.tilda.ws', 'catalog'],
+      ['company.2gis.biz', '2gis.biz', 'catalog'], ['кафе.рф', 'xn--80akn5b.xn--p1ai', 'own'], ['http://old.example.ru', 'example.ru', 'own'],
+      ['http://www.www.romashka.ru', 'romashka.ru', 'own'], ['www.www.tilda.ws', 'tilda.ws', 'catalog'],
+      ['не сайт', null, null], ['127.0.0.1', null, null]] as const) {
+      expect([raw, veTwoGisSiteDomain(raw), veTwoGisSiteKind(raw)]).toEqual([raw, domain, kind]);
+    }
+    expect(veTwoGisWebsiteHost('https://www.Кафе.РФ/menu')).toBe('xn--80akn5b.xn--p1ai');
+    expect(veTwoGisWebsiteHost('http://www.www.romashka.ru')).toBe('romashka.ru'); // CHECK host !~ '^www\.' в ve2
+    // Название — до первой запятой вне «», "", “”, „“, () и []; апостроф — не кавычка.
+    for (const [name, company] of [['Ромашка, мебельная фабрика', 'Ромашка'], ['«Рога, копыта», ООО', '«Рога, копыта»'],
+      ['ООО "Альфа, Бета", склад', 'ООО "Альфа, Бета"'], ['Сервис (ремонт, продажа), магазин', 'Сервис (ремонт, продажа)'],
+      ['ООО “Альфа, Бета”, склад', 'ООО “Альфа, Бета”'], ['„Альфа, Бета“, склад', '„Альфа, Бета“'],
+      ['Альфа[ремонт, продажа], склад', 'Альфа[ремонт, продажа]'], ['О’КЕЙ, гипермаркет', 'О’КЕЙ'],
+      ['Ромашка, мебельная фабрика, склад', 'Ромашка'], ['«А, Б», цех, склад', '«А, Б»'],
+      ['  Просто название  ', 'Просто название'], [', склад', ', склад'], ['', '']] as const) expect(veTwoGisCompanyName(name)).toBe(company);
+    expect([veTwoGisWebsite('old.example.ru', 'http'), veTwoGisWebsite('example.ru', 'https')]).toEqual(['http://old.example.ru', 'example.ru']);
+    expect([veTwoGisAddress('Москва', '77'), veTwoGisAddress('Химки', '50'), veTwoGisAddress('Казань', null), veTwoGisAddress('', '16')])
+      .toEqual(['Москва', 'Химки, Московская область', 'Казань', 'Республика Татарстан']);
+    // Строка: без телефона, почты, рубрики и полного адреса; метка — только ссылка на карточку.
+    const card = { card_id: '7000000000000008', registrable_domain: 'old-site.ru', host: 'www.Old-Site.ru', site_scheme: 'http' as const,
+      region_code: '50', name: 'Старый сайт, агентство', city_name: 'Химки', phone: '+7 900 000-00-00', email: 'secret@card.test',
+      geometry_name: 'ул. Тестовая, 1', post_code: '141400' };
+    const mapped = mapTwoGisRow(card, 7);
+    expect(mapped).toEqual({ company: 'Старый сайт', website: 'http://old-site.ru', email: '', phone: '', vacancy_title: '',
+      address: 'Химки, Московская область', category: '', employees: '', revenue: '', inn: '', source_detail: 'справочник организаций',
+      _ve_two_gis: { card_id: '7000000000000008', snapshot_id: 7 } });
+    expect(Object.keys(mapped).sort()).toEqual([...VE_AUTO_COLLECT_COLUMNS, '_ve_two_gis'].sort());
+    expect(mapTwoGisRow({ ...card, site_scheme: 'https' }, 7).website).toBe('old-site.ru');
+    expect(JSON.stringify(mapped)).not.toMatch(/Тестовая|141400|secret@|900/);
+    // http-only сайт — та же компания, что голый хост и https://www. других источников (дедуп, исключения).
+    const siteKey = veCompanyWebsiteKey({ company: mapped.company, website: 'old-site.ru' });
+    expect(siteKey).not.toBeNull();
+    for (const website of [mapped.website, 'https://www.old-site.ru/']) {
+      expect(veCompanyWebsiteKey({ company: mapped.company, website })).toBe(siteKey);
+    }
+
+    // Страница: параметры по географии, всегда горячие карточки, контакты карточки не читаются.
+    const allow = { nonCompany: false, privateRubric: true, ipName: false, government: true };
+    const input = { flag: { snapshot_id: 7, features_version: 1 }, rubrics: ['Агентства недвижимости', 'Риелторы', 'Риелторы'],
+      after: '', scope: {}, allow, limit: 500 };
+    for (const [scope, geoAll, regions, cities] of [[{}, true, [], []], [{ region_codes: ['77', '50'] }, false, ['77', '50'], []],
+      [{ cities: ['Орёл', 'Г. Химки'] }, false, [], ['орел', 'химки']],
+      [{ region_codes: ['16'], cities: ['Казань'] }, false, ['16'], ['казань']]] as const) {
+      const query = buildVeTwoGisPageQuery({ ...input, scope: scope as { region_codes?: string[]; cities?: string[] } });
+      expect(query.values).toEqual(['', geoAll, regions, cities, false, true, false, true, 500, 'Агентства недвижимости', 'Риелторы']);
+      expect(query.text).toContain('WHERE cf.hot');
+      expect(query.text).toContain('SELECT DISTINCT ON (cf.registrable_domain)');
+      expect(query.text.match(/FROM public\.card_subcategories cs/g)).toHaveLength(2);
+      expect(query.text).not.toMatch(/\bc\.(?:phone|email|website|vkontakte|instagram|lat|lon|geometry_name|post_code)\b/);
+      expect(query.text).toMatch(/\$2::boolean OR cf\.region_code = ANY\(\$3::text\[\]\) OR cf\.city_key = ANY\(\$4::text\[\]\)/);
+      // Порядок и пределы, на которых стоит правило курсора: без них карточки теряются или повторяются.
+      expect([...query.text.matchAll(/WHERE cs\.value = (\$\d+) AND cs\.card_id > \$1::text ORDER BY cs\.card_id LIMIT 20000\)/g)]
+        .map((match) => match[1])).toEqual(['$10', '$11']);
+      expect(query.text).toMatch(/\) u ORDER BY u\.card_id LIMIT 20000\)/);
+      expect(query.text).toMatch(/ORDER BY cf\.registrable_domain, cf\.card_id\)/);
+      expect(query.text).toMatch(/FROM hits ORDER BY hits\.card_id LIMIT \$9::int\)/);
+      expect(query.text).toMatch(/ORDER BY p\.card_id NULLS LAST$/); // курсор полной страницы — её последняя строка
+      expect(query.text).toMatch(/\(\$5::boolean OR NOT cf\.is_non_company\) AND \(\$6::boolean OR NOT cf\.is_private_rubric\)\s+AND \(\$7::boolean OR NOT cf\.is_ip_name\) AND \(\$8::boolean OR NOT cf\.is_government\)/);
+    }
+    expect(buildVeTwoGisPageQuery({ ...input, allow: { nonCompany: false, privateRubric: false, ipName: true, government: true } })
+      .values.slice(4, 8)).toEqual([false, false, true, true]);
+    for (const rubrics of [[], [' '], Array.from({ length: 9 }, (_, i) => `Рубрика ${i}`)]) {
+      expect(() => buildVeTwoGisPageQuery({ ...input, rubrics })).toThrow();
+    }
+    for (const limit of [0, 501, 1.5]) expect(() => buildVeTwoGisPageQuery({ ...input, limit })).toThrow();
+    // Ошибка кода вызывающего — не сбой базы: отказ до транзакции, без паузы всем.
+    for (const [bad, message] of [[{ rubrics: [] }, /^2ГИС: страница принимает 1–8 рубрик, передано 0$/],
+      [{ limit: 0 }, /^2ГИС: размер страницы 0 вне 1–500$/]] as const) {
+      const rejected = readVeTwoGisPage({ ...input, ...bad });
+      await expect(rejected).rejects.toThrow(message);
+      await expect(rejected).rejects.not.toBeInstanceOf(VeTwoGisUnavailableError);
+    }
+    // Курсор: полная страница — с последней карточки; неполная — с конца окна; исчерпано — неполная страница неполного окна.
+    const ids = (...values: string[]) => values.map((card_id) => ({ card_id }));
+    expect(nextVeTwoGisCursor('a', { rows: ids('b', 'c'), windowIds: 20_000, windowLast: 'z' }, 2)).toEqual({ cursor: 'c', exhausted: false });
+    expect(nextVeTwoGisCursor('a', { rows: ids('b', 'c'), windowIds: 50, windowLast: 'z' }, 2)).toEqual({ cursor: 'c', exhausted: false });
+    expect(nextVeTwoGisCursor('a', { rows: ids('b'), windowIds: 50, windowLast: 'z' }, 2)).toEqual({ cursor: 'z', exhausted: true });
+    expect(nextVeTwoGisCursor('a', { rows: ids('b'), windowIds: 20_000, windowLast: 'z' }, 2)).toEqual({ cursor: 'z', exhausted: false });
+    expect(nextVeTwoGisCursor('a', { rows: [], windowIds: 0, windowLast: null }, 2)).toEqual({ cursor: 'a', exhausted: true });
+    expect(() => nextVeTwoGisCursor('a', { rows: [], windowIds: 3, windowLast: 'a' }, 2)).toThrow();
+
+    // Чтение внутри транзакции: импорт и устаревший флаг — значения, глобальная рассинхронизация — VeTwoGisSnapshotError.
+    const fake = (state: Record<string, unknown> | null, locked = true, page: Array<Record<string, unknown>> = []) => {
+      const calls: Array<{ text: string; values?: unknown[] }> = [];
+      return { calls, client: { query: (async (text: string, values?: unknown[]) => {
+        calls.push({ text, values });
+        if (text.startsWith('SET LOCAL')) return { rows: [] };
+        if (text.includes('pg_try_advisory_xact_lock_shared')) return { rows: [{ locked }] };
+        if (text.includes('FROM ve2.build_state')) return { rows: state ? [state] : [] };
+        return { rows: page };
+      }) as unknown as PoolClient['query'] } };
+    };
+    const built = { snapshot_id: '7', features_version: 1, current_snapshot_id: '7', table_features_version: 1 };
+    const importing = fake(built, false);
+    expect(await readVeTwoGisPageWith(importing.client, input)).toEqual({ kind: 'import' });
+    expect(importing.calls.map((call) => call.text)).toEqual(['SET LOCAL enable_hashagg = off',
+      'SELECT pg_try_advisory_xact_lock_shared(hashtext($1)) AS locked']);
+    expect(importing.calls[1].values).toEqual(['portal:2gis-dataset:snapshot-import']);
+    const stale = fake(built);
+    expect(await readVeTwoGisPageWith(stale.client, { ...input, flag: { snapshot_id: 7, features_version: 2 } }))
+      .toEqual({ kind: 'stale', build: { snapshotId: 7, featuresVersion: 1 } });
+    expect(stale.calls).toHaveLength(3); // без запроса страницы
+    const staleSnapshot = fake(built);
+    expect(await readVeTwoGisPageWith(staleSnapshot.client, { ...input, flag: { snapshot_id: 6, features_version: 1 } }))
+      .toEqual({ kind: 'stale', build: { snapshotId: 7, featuresVersion: 1 } });
+    expect(staleSnapshot.calls).toHaveLength(3);
+    for (const broken of [null, { ...built, current_snapshot_id: '8' }, { ...built, current_snapshot_id: null },
+      { ...built, table_features_version: 2 }, { ...built, table_features_version: null }]) {
+      const reader = fake(broken);
+      await expect(readVeTwoGisPageWith(reader.client, input)).rejects.toBeInstanceOf(VeTwoGisSnapshotError);
+      expect(reader.calls.some((call) => call.text.includes('card_subcategories'))).toBe(false);
+    }
+    const pageRow = (card_id: string) => ({ window_ids: 120, window_last: '7000000000000099', card_id, registrable_domain: `${card_id}.ru`,
+      host: `${card_id}.ru`, site_scheme: card_id.endsWith('2') ? 'http' : 'https', region_code: '77', name: 'Название', city_name: 'Москва' });
+    const short = fake(built, true, [pageRow('7000000000000001'), pageRow('7000000000000002')]);
+    const shortPage = await readVeTwoGisPageWith(short.client, { ...input, limit: 3 });
+    expect(shortPage).toMatchObject({ kind: 'page', cursor: '7000000000000099', exhausted: true, windowIds: 120 });
+    expect(shortPage.kind === 'page' && shortPage.rows.map((row) => [row.card_id, row.site_scheme])).toEqual([
+      ['7000000000000001', 'https'], ['7000000000000002', 'http']]);
+    expect(short.calls[3].values?.slice(0, 9)).toEqual(['', true, [], [], false, true, false, true, 3]);
+    const fullPage = await readVeTwoGisPageWith(fake(built, true, [pageRow('7000000000000001'), pageRow('7000000000000002')]).client,
+      { ...input, limit: 2, after: '7000000000000000' });
+    expect(fullPage).toMatchObject({ kind: 'page', cursor: '7000000000000002', exhausted: false });
+    const empty = await readVeTwoGisPageWith(fake(built, true, [{ window_ids: 0, window_last: null, card_id: null }]).client,
+      { ...input, after: '7000000000000500' });
+    expect(empty).toEqual({ kind: 'page', rows: [], cursor: '7000000000000500', exhausted: true, windowIds: 0 });
   });
 
   it('analyzed-база с исчерпанным реестром с порогами продолжается и открывает расширенный срез', async () => {

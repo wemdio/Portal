@@ -4,6 +4,7 @@ import type { VeCollectTask, VeSourcePlan } from './prompts/sourcePlan';
 import { veSourceStrategyKey } from './adaptiveCollection';
 import { veCompanyIdentityKey } from './collectionIdentity';
 import { veTwoGisQueryScope } from './collectionGeography';
+import { isVeTwoGisSourceDetail, VE_TWO_GIS_ROW_FIELD } from './twoGisMarker';
 
 /**
  * Совместимое чтение 2ГИС (план 26.10.2026, шаг R1). Сам источник появится
@@ -27,8 +28,7 @@ import { veTwoGisQueryScope } from './collectionGeography';
  * внутренняя страховка baseCollect (harvest, deferred_rows, source_rows), вне его он не известен.
  * Модуль только серверный: adaptiveCollection тянет node:crypto.
  */
-export const VE_TWO_GIS_SOURCE_DETAIL = 'справочник организаций';
-export const VE_TWO_GIS_ROW_FIELD = '_ve_two_gis';
+export { isVeTwoGisSourceDetail, VE_TWO_GIS_ROW_FIELD, VE_TWO_GIS_SOURCE_DETAIL } from './twoGisMarker';
 
 /** Null-safe: collectionRecovery и sourceAudience читают задачи из jsonb как есть. */
 export const isVeTwoGisTask = (task: { source?: unknown } | null | undefined) => task?.source === 'two_gis';
@@ -122,11 +122,6 @@ export function retireVeOrphanTwoGisTwins(states: VeTwoGisPairState[] | undefine
 export function veTwoGisTwinKeys(states: ReadonlyArray<{ task?: VeCollectTask | null } | null> | null | undefined): Set<string> {
   return new Set((states ?? []).flatMap((state) => state?.task && isVeTwoGisTask(state.task) ? [veSourceStrategyKey(state.task)] : []));
 }
-
-/** Нормализация дописывает строки («\nСайт в источнике: …»), дедуп склеивает ячейку построчно
- * (mergeVeSourceFactText: «яндекс.карты\nсправочник организаций»): метка — любая строка. */
-export const isVeTwoGisSourceDetail = (value: unknown) => typeof value === 'string'
-  && value.split('\n').some((line) => line.trim() === VE_TWO_GIS_SOURCE_DETAIL);
 
 /** Null-safe, как veProjectExclusionRow: строки аудитории и payload бывают пустыми. */
 export function isVeTwoGisRow(row: object | null | undefined, twinKeys?: ReadonlySet<string>): boolean {

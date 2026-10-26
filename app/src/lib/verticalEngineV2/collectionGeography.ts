@@ -11,6 +11,8 @@ const record = (value: unknown): Record<string, unknown> => value && typeof valu
 const clean = (value: string) => value.trim().replace(/\s+/g, ' ');
 const key = (value: string) => clean(value).toLocaleLowerCase('ru').replace(/ё/g, 'е')
   .replace(/^(?:г\.\s*|г\s+|город\s+)/u, '').replace(/\s+обл\.?$/u, ' область');
+/** Ключ места: тот же, по которому сверяется география брифа (город 2ГИС в ve2.card_features — им же). */
+export const veGeographyNameKey = (value: string) => key(value);
 const EMPTY = /^(?:[-—–_.\s]+|нет|не знаю|не указано|неизвестно|n\/?a|без ограничений|нет ограничений|весь мир|worldwide|global)$/iu;
 
 export function readVeCollectionGeography(value: unknown): VeCollectionGeography | null {

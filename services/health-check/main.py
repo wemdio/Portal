@@ -3567,8 +3567,9 @@ async def check_ve2_sender() -> list[str]:
 
 # ── 2ГИС → VE2 (план docs/reports/2026-10-26-2gis-ve2-plan.md, шаг «Мон») ─────
 # Свой пользователь VE2 в базе 2ГИС (twogis_ve2, Ш3) и модуль 2ГИС воркера (R3).
-# 1) строки pg_hba для twogis_ve2: файл живёт в контейнере main-postgres и
-#    пропадает при его пересоздании — тогда роль войдёт и в основную базу;
+# 1) строки pg_hba для twogis_ve2 и, пока у сборщика Ш5 включён вход, для
+#    twogis_ve2_builder: файл живёт в контейнере main-postgres и пропадает при
+#    его пересоздании — тогда роль войдёт и в основную базу;
 # 2) twogis_ve2 занят (не idle) всеми своими соединениями 3 цикла подряд,
 #    инстанс у предела;
 # 3) ve_twogis_source_status (R2): пауза или серия ошибок, пока mode ≠ off.
@@ -3585,30 +3586,53 @@ async def _twogis_ve2_recovered(conn, prefix: str) -> None:
 async def _check_twogis_ve2(conn) -> list[str]:
     problems: list[str] = []
     role = await conn.fetchrow("SELECT oid, rolconnlimit FROM pg_roles WHERE rolname = 'twogis_ve2'")
-    if role is None:
+    # Сборщик Ш5 создаётся без входа; вход включают только на окно сборки.
+    builder_login = await conn.fetchval("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'twogis_ve2_builder'")
+    if role is None and not builder_login:
+        await _twogis_ve2_recovered(conn, "builder-hba")
         return []  # Ш3 ещё не сделан или откачен: проверять нечего.
 
-    # 1. pg_hba: запрет для twogis_ve2 должен стоять раньше первой общей строки host.
+    # 1. pg_hba: запрет для роли должен стоять раньше первой общей строки host.
     rules = await conn.fetch(
         "SELECT line_number, type, database, user_name, auth_method, error FROM pg_hba_file_rules ORDER BY line_number"
     )
     first_general = next((r["line_number"] for r in rules if r["type"] == "host"
                           and "all" in (r["user_name"] or []) and r["auth_method"] != "reject"), None)
-    reject = next((r["line_number"] for r in rules if r["type"] == "host" and r["auth_method"] == "reject"
-                   and "twogis_ve2" in (r["user_name"] or []) and "all" in (r["database"] or [])), None)
-    hba_ok = reject is not None and (first_general is None or reject < first_general) and not any(r["error"] for r in rules)
-    if hba_ok:
-        await _twogis_ve2_recovered(conn, "hba")
+    rules_broken = any(r["error"] for r in rules)
+
+    def hba_ok(user: str) -> bool:
+        reject = next((r["line_number"] for r in rules if r["type"] == "host" and r["auth_method"] == "reject"
+                       and user in (r["user_name"] or []) and "all" in (r["database"] or [])), None)
+        return reject is not None and (first_general is None or reject < first_general) and not rules_broken
+
+    if role is not None:
+        if hba_ok("twogis_ve2"):
+            await _twogis_ve2_recovered(conn, "hba")
+        else:
+            loaded = await conn.fetchval("SELECT pg_conf_load_time()")
+            key = f"twogis-ve2:hba:{loaded.isoformat()}:{_repeat_bucket(loaded, TWOGIS_VE2_REPEAT_MINUTES)}"
+            if await _claim_job_alert(conn, key):
+                problems.append(
+                    "🔓 <b>pg_hba main-postgres</b>: нет строк для <code>twogis_ve2</code> выше общих правил "
+                    "(пересоздан контейнер?). Пользователь VE2 сейчас может войти и в основную базу.\n"
+                    "Вернуть две строки из <code>app/scripts/2gis-dataset/README.md</code> («VE2 user»), "
+                    "затем <code>SELECT pg_reload_conf();</code>"
+                )
+    if not builder_login or hba_ok("twogis_ve2_builder"):
+        await _twogis_ve2_recovered(conn, "builder-hba")
     else:
         loaded = await conn.fetchval("SELECT pg_conf_load_time()")
-        key = f"twogis-ve2:hba:{loaded.isoformat()}:{_repeat_bucket(loaded, TWOGIS_VE2_REPEAT_MINUTES)}"
+        key = f"twogis-ve2:builder-hba:{loaded.isoformat()}:{_repeat_bucket(loaded, TWOGIS_VE2_REPEAT_MINUTES)}"
         if await _claim_job_alert(conn, key):
             problems.append(
-                "🔓 <b>pg_hba main-postgres</b>: нет строк для <code>twogis_ve2</code> выше общих правил "
-                "(пересоздан контейнер?). Пользователь VE2 сейчас может войти и в основную базу.\n"
-                "Вернуть две строки из <code>app/scripts/2gis-dataset/README.md</code> («VE2 user»), "
-                "затем <code>SELECT pg_reload_conf();</code>"
+                "🔓 <b>pg_hba main-postgres</b>: нет строк для <code>twogis_ve2_builder</code> выше общих правил, "
+                "а вход сборщику включён. Сборщик Ш5 сейчас может войти и в основную базу.\n"
+                "Вернуть две строки из <code>app/scripts/2gis-dataset/README.md</code> («Builder login»), "
+                "затем <code>SELECT pg_reload_conf();</code> — или, если окно Ш5 закрыто, "
+                "<code>ALTER ROLE twogis_ve2_builder NOLOGIN;</code>"
             )
+    if role is None:
+        return problems
 
     # 2. Соединения: twogis_ve2 занят всеми своими соединениями 3 цикла подряд; инстанс у предела.
     # Простаивающие (idle) не считаем: пул может держать их между тиками, а зависнуть
@@ -3653,8 +3677,12 @@ async def _check_twogis_ve2(conn) -> list[str]:
     paused = fresh and status["paused_until"] is not None and status["paused_until"] > now
     failing = fresh and status["error_since"] is not None and (status["consecutive_errors"] >= 3
                                                              or status["last_error_kind"] == "role_limit")
-    if status is None or status["mode"] == "off" or not (paused or failing):
+    if status is None or status["mode"] == "off" or (fresh and not (paused or failing)):
         await _twogis_ve2_recovered(conn, "status")
+        return problems
+    if not (paused or failing):
+        # Строка устарела (чтений не было 15 мин): состояние неизвестно, а не исправно —
+        # ключ эпизода остаётся, и напоминание идёт раз в сутки, а не после каждой паузы.
         return problems
     anchor = status["error_since"] or status["paused_until"]
     kind = status["last_error_kind"] or "pause"
@@ -3663,9 +3691,18 @@ async def _check_twogis_ve2(conn) -> list[str]:
         what = {"role_limit": "упёрся в лимит соединений роли", "connect": "не подключается", "timeout": "тайм-ауты",
                 "snapshot": "снимок 2ГИС сменился", "other": "ошибки чтения"}.get(kind, "пауза чтения")
         until = f", пауза до {_msk(status['paused_until'])}" if paused else ""
+        if kind == "snapshot":
+            # Смена снимка паузы не ставит: близнец на первом же чтении закрывается (3b: retire).
+            tail = ("Близнецы баз закрываются на первом чтении, пока <code>ve2.card_features</code> не на текущем "
+                    "снимке. Нужна пересборка Ш5 (<code>004_ve2_features.sql</code>: prepare "
+                    "<code>-v new_build=1</code> → сборщик → index → swap) и новые snapshot_id/features_version "
+                    "в <code>ve_twogis_source_settings</code>; <code>reads_enabled = false</code> лишь заставит "
+                    "новых близнецов ждать, а не закрываться.")
+        else:
+            tail = ("Базы ждут, не останавливаются; выключить чтение: "
+                    "<code>update ve_twogis_source_settings set reads_enabled = false where market = 'ru'</code>")
         problems.append(f"🗺 <b>2ГИС VE2</b>: {what} — {status['consecutive_errors']} подряд с {_msk(anchor)}{until}. "
-                        "Базы ждут, не останавливаются; выключить чтение: "
-                        "<code>update ve_twogis_source_settings set reads_enabled = false where market = 'ru'</code>")
+                        + tail)
     return problems
 
 
