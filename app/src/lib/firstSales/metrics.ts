@@ -15,8 +15,9 @@
  *      по этапу AMO вовсе: этап «Встреча проведена» засорён, см. `meetings.ts`.
  *
  * Режимов два (переключатель на экране с 26.09.2026, см. `cohort` в params.ts):
- * «по когорте» — продажи, встречи и деньги считаются по дате события, чья бы
- * сделка ни была; «без когорты» — только по сделкам, заведённым в периоде.
+ * «по когорте» — квал (с 26.10.2026), продажи, встречи и деньги считаются по
+ * дате события, чья бы сделка ни была; «без когорты» — только по сделкам,
+ * заведённым в периоде.
  * Расчёт один на оба режима: `computeFirstSalesSeries(..., { cohort })`.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -243,6 +244,28 @@ export function isQualifiedInWindow(lead: FirstSalesLeadRow, from: Date, to: Dat
 }
 
 /**
+ * Квал с учётом режима счёта (см. `cohort` в params.ts).
+ *
+ * «По когорте» (с 26.10.2026, просьба Дмитрия) — по дате ПЕРВОЙ
+ * квалификации, когда бы сделку ни завели: апрельская сделка, впервые
+ * ставшая квалом в октябре, — квал октября. Раньше режим этого не делал, и
+ * за 17–23.10 дашборд показывал 17 при 25 впервые квалифицированных — разница
+ * читалась как ошибка. Повторный перевод в «Лид квалифицирован» (сделка уже
+ * была квалом весной) квалом не делает: first_qualified_at — первый раз.
+ *
+ * «Без когорты» — как раньше: заведена в периоде И квалифицирована в нём же.
+ */
+export function isQualifiedForMode(
+  lead: FirstSalesLeadRow,
+  from: Date,
+  to: Date,
+  cohort: boolean,
+): boolean {
+  if (!cohort) return isQualifiedInWindow(lead, from, to);
+  return inWindow(lead.first_qualified_at, from, to) && lead.history_complete;
+}
+
+/**
  * Продажа — сделка, закрытая в плюс внутри окна.
  *
  * Именно это продажи называют продажей, и именно это сходится с деньгами:
@@ -383,7 +406,8 @@ export function computeFirstSalesSeries(
    * все три прохода ниже, а не вторая копия расчёта: иначе два режима рано
    * или поздно разошлись бы не только тем, чем должны.
    *
-   * Лиды и квал сюда не смотрят: они и так считаются по дате создания.
+   * Лиды сюда не смотрят: они и так считаются по дате создания. Квал
+   * различает режимы сам — см. isQualifiedForMode.
    */
   const eventsCount = (lead: FirstSalesLeadRow): boolean => cohort || createdInCohort(lead);
 
@@ -493,24 +517,19 @@ export function computeFirstSalesSeries(
       bump(bucketKey(new Date(lead.created_at as string), groupBy), 'leads');
       if (isLeadMagnet(lead.name)) totals.leadMagnets += 1;
       if (resolved.key === NO_SOURCE_KEY) totals.noSourceLeads += 1;
+    }
 
-      // «Дошёл до квала» кладётся в корзину по дате СОЗДАНИЯ, а не по дате
-      // достижения этапа; first_qualified_at проверяется только на то, что
-      // квал случился внутри того же периода (с 11.09.2026, см.
-      // isQualifiedInWindow). Это когортная семантика — «из пришедших в этот день/
-      // неделю/месяц скольких сумели квалифицировать», та же логика, что и у
-      // «леды». Отличается от meetings/sales ниже, которые по спеке
-      // кладутся по дате самого этапа («сколько встреч случилось в этот
-      // день», независимо от того, когда лид пришёл). Оба взгляда осмыслены,
-      // но соседствуют в одном SeriesBucket — при чтении графика это стоит
-      // держать в голове: столбец qualified отвечает на другой вопрос, чем
-      // столбцы meetings/sales в той же строке.
-      if (isQualifiedInWindow(lead, from, to)) {
-        totals.qualified += 1;
-        breakdown.qualified += 1;
-        manager.qualified += 1;
-        bump(bucketKey(new Date(lead.created_at as string), groupBy), 'qualified');
-      }
+    // Квал — по режиму (isQualifiedForMode). «По когорте» он, как встречи и
+    // продажи, кладётся в корзину по дате самой квалификации: «сколько стало
+    // квалами в этот день». «Без когорты» — по дате СОЗДАНИЯ: «из пришедших в
+    // этот день/неделю/месяц скольких сумели квалифицировать в том же
+    // периоде» (с 11.09.2026, см. isQualifiedInWindow).
+    if (isQualifiedForMode(lead, from, to, cohort)) {
+      totals.qualified += 1;
+      breakdown.qualified += 1;
+      manager.qualified += 1;
+      const bucketAt = cohort ? lead.first_qualified_at : lead.created_at;
+      bump(bucketKey(new Date(bucketAt as string), groupBy), 'qualified');
     }
 
     // Договор — по дате достижения этапа. Сделка с неполной историей
@@ -742,15 +761,16 @@ export async function fetchFirstSalesLeads(
   const fromIso = from.toISOString();
   const toIso = to.toISOString();
 
-  // Берём сделки с ЛЮБОЙ активностью в окне: созданы, дошли до встречи,
-  // до договора или оплачены. Иначе встреча июльской сделки, пришедшей в июне,
-  // в июльское окно не попадёт.
+  // Берём сделки с ЛЮБОЙ активностью в окне: созданы, квалифицированы, дошли
+  // до встречи, до договора или оплачены. Иначе встреча июльской сделки,
+  // пришедшей в июне, в июльское окно не попадёт.
   const { data, error } = await db
     .from('amo_lead_stage_dates_v')
     .select(STAGE_DATE_COLUMNS)
     .eq('pipeline_id', pipelineId)
     .or(
       `and(created_at.gte.${fromIso},created_at.lte.${toIso}),` +
+        `and(first_qualified_at.gte.${fromIso},first_qualified_at.lte.${toIso}),` +
         `and(first_meeting_at.gte.${fromIso},first_meeting_at.lte.${toIso}),` +
         `and(first_contract_at.gte.${fromIso},first_contract_at.lte.${toIso}),` +
         `and(won_at.gte.${fromIso},won_at.lte.${toIso})`,

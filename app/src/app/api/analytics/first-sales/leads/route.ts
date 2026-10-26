@@ -8,7 +8,7 @@ import {
   isContractInWindow,
   isSaleInWindow,
   isLeadInWindow,
-  isQualifiedInWindow,
+  isQualifiedForMode,
   meetingsByDeal,
 } from '@/lib/firstSales/metrics';
 import { fetchTaskMeetings } from '@/lib/firstSales/meetings';
@@ -84,7 +84,7 @@ export async function GET(req: NextRequest) {
         createdInCohort: isLeadInWindow(lead, cohortFrom, cohortTo),
         hits: {
           lead: isLeadInWindow(lead, from, to),
-          qualified: isQualifiedInWindow(lead, from, to),
+          qualified: isQualifiedForMode(lead, from, to, cohort),
           meetings: meetings.get(lead.amo_id) ?? 0,
           sale: isSaleInWindow(lead, from, to),
           contract: isContractInWindow(lead, from, to),
@@ -92,9 +92,9 @@ export async function GET(req: NextRequest) {
         },
       }))
       // В списке — сделки, созданные в периоде, и сделки, заведённые раньше,
-      // если в периоде по ним что-то случилось (встреча, договор, продажа,
-      // деньги). Квал не проверяем: он засчитывается только сделке,
-      // созданной в окне (isQualifiedInWindow).
+      // если в периоде по ним что-то случилось (квал, встреча, договор,
+      // продажа, деньги). Квал старой сделке засчитывается только «по
+      // когорте» (isQualifiedForMode), без когорты её отсекает createdInCohort.
       //
       // История решения: 08.09.2026 список резали строго по дате создания —
       // старая сделка в нём читалась как сломанный фильтр периода. Это
@@ -112,7 +112,10 @@ export async function GET(req: NextRequest) {
       // быть в таблице столбца 15 сентября.
       .filter(({ hits, createdInCohort }) => (
         (cohort || createdInCohort)
-        && (hits.lead || hits.meetings > 0 || hits.contract || hits.sale || hits.money > 0)
+        && (
+          hits.lead || hits.qualified || hits.meetings > 0
+          || hits.contract || hits.sale || hits.money > 0
+        )
       ));
 
     // Старые сделки при обрезке не теряем: их мало, и именно они объясняют
