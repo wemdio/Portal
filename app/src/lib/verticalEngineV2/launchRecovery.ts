@@ -10,6 +10,7 @@ import { buildLaunchSequence, type VeTemplateLaunchCampaign } from './launchHand
 import { launchMailboxScopesEqual } from './launchPortfolio';
 import { loadVeContactDeliveryRows, readContactDeliveryPages } from './contactDeliveryInventory';
 import { withVeDeliveryCompanyIdentity } from './projectExclusionDelivery';
+import { isVeTwoGisRow } from './twoGisQuarantine';
 import { estimatedBundleRunDays } from './launchTemplate';
 import { buildSegmentationLaunchGroups, stableJson } from './segmentationAudit';
 import { validateStoredAuditSnapshot, type StoredAuditValidationInput } from './stages/segmentationAudit';
@@ -120,7 +121,10 @@ export async function prepareBoundContactDeliveryRecovery(input: {
     const sequence = buildLaunchSequence(input.template.letters, { segmentWhen: group.segment });
     if (!sequence) blocked('Цепочка писем исходного запуска больше не подтверждена.');
     return { segment: group.segment,
-      leadIndices: group.leadIndices.filter((index) => allowedEmails.has(audience.leads[index].email.trim().toLowerCase())),
+      // 2ГИС (R1): как запуск — помеченные строки в резерв не идут. Пустую группу оставляем:
+      // кампания сопоставляется с сегментом по подписи цепочки.
+      leadIndices: group.leadIndices.filter((index) => allowedEmails.has(audience.leads[index].email.trim().toLowerCase())
+        && !isVeTwoGisRow(audience.rows[index])),
       signature: sequenceSignature(buildCampaignPayloadFromPreset({ preset,
         sequence: { name: 'Recovery', steps: sequence.steps } }).sequences),
     };

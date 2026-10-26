@@ -8,6 +8,7 @@ import { buildContactDeliveryPlan } from './contactDeliveryPlanner';
 import { loadContactDeliverySettings } from './contactDeliveryConfig';
 import { filterVeProjectExcludedRows, loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow, type VeProjectExclusions } from './projectExclusions';
 import { createVeDeliveryIdentityResolver, veDeliveryPolicyRow } from './projectExclusionDelivery';
+import { isVeTwoGisLead, isVeTwoGisRow } from './twoGisQuarantine';
 import { ContactDeliveryAnalyticsUnavailableError, loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows } from './contactDeliveryInventory';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
@@ -317,7 +318,9 @@ export async function buildVeContactDeliveryPreview(
   const policyAudience = filterVeProjectExcludedRows(policyCandidates, exclusions);
   const allowedRows = new Set(policyAudience.kept);
   const candidateLeads = filterBlockedLeads(
-    currentValidation.snapshot.audience.leads.filter((_, index) => allowedRows.has(policyCandidates[index])),
+    // 2ГИС (R1): как и запуск, не обещаем закрытые к выдаче контакты.
+    currentValidation.snapshot.audience.leads.filter((_, index) => allowedRows.has(policyCandidates[index])
+      && !isVeTwoGisRow(policyCandidates[index])),
     blockedEmails,
   ).kept;
   let readyRemaining: number;
@@ -334,7 +337,10 @@ export async function buildVeContactDeliveryPreview(
     const prospective = candidateLeads.filter((lead) => !existingEmails.has(lead.email.trim().toLowerCase())).length;
     prospectiveReady = prospective;
     const activeRows = new Set(inventory.activeCampaignRowIds);
-    const readyCandidates = rows.filter((row) => row.status === 'ready' && !blockedEmails.has(row.email_normalized));
+    // 2ГИС (R1): помеченные строки резерва guard снимет при загрузке — в запас не считаем.
+    // Payload читается только при правилах исключений; без него проверка ничего не меняет.
+    const readyCandidates = rows.filter((row) => row.status === 'ready' && !blockedEmails.has(row.email_normalized)
+      && !isVeTwoGisLead(row.lead_payload));
     const identities = exclusions.inns.length + exclusions.domains.length > 0
       ? await createVeDeliveryIdentityResolver(portalDb, base.project_id)(readyCandidates) : readyCandidates.map(veDeliveryPolicyRow);
     const readyRows = readyCandidates.filter((_, index) => !identities[index] || !matchVeProjectExclusion(identities[index], exclusions));

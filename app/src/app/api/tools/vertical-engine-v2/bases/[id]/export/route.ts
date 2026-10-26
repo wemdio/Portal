@@ -14,6 +14,7 @@ import { VE_PREVIEW_READY_TARGET } from '@/lib/verticalEngineV2/collectionTarget
 import { projectCompanyNames, VE_COMPANY_NAME_FIELD } from '@/lib/verticalEngineV2/companyNames';
 import { readVeRelevanceReserve, VE_COMPANY_CAP_FIELD } from '@/lib/verticalEngineV2/relevanceReserve';
 import { filterVeProjectExcludedRows, loadVeProjectExclusions, veProjectExclusionRow } from '@/lib/verticalEngineV2/projectExclusions';
+import { isVeTwoGisRow, withoutVeTwoGisRows } from '@/lib/verticalEngineV2/twoGisQuarantine';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -124,9 +125,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       const columns = Array.isArray(base.columns)
         ? (base.columns as unknown[]).filter((c): c is string => typeof c === 'string')
         : [];
-      const rows = Array.isArray(base.data)
+      // 2ГИС (R1): выдача закрыта — помеченные строки не выгружаются ни в одном режиме.
+      const rows = withoutVeTwoGisRows(Array.isArray(base.data)
         ? (base.data as unknown[]).filter(isRecord)
-        : [];
+        : []);
       // row_count>0, но data пуст/не массив (битая запись) — тот же 409:
       // row_count здесь только счётчик, экспортировать по факту нечего.
       if (rows.length === 0 && mode !== 'review') {
@@ -139,7 +141,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       let projectUnidentifiedCount = 0;
       if (mode === 'review') {
         const info = isRecord(base.collect_info) ? base.collect_info : null;
-        const reserve = readVeRelevanceReserve(info?.relevance_reserve);
+        const reserve = withoutVeTwoGisRows(readVeRelevanceReserve(info?.relevance_reserve));
         if (reserve.length === 0) return jsonError('В базе нет сохранённых кандидатов для уточнения', 409);
         const sourceColumns = columns.filter((column) => !column.startsWith('_'));
         exportColumns = [...sourceColumns, 'Статус проверки', 'Причина', 'Подтверждение'];
@@ -221,7 +223,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           const email = normalizeBlockedEmail(lead.email);
           if (!email || blockedEmails.has(email)) return;
           const row = validation.snapshot.audience.rows[leadIndex];
-          if (!row) return;
+          // Аудит пересобран из исходной data, не из отфильтрованных rows: проверяем здесь.
+          if (!row || isVeTwoGisRow(row)) return;
           exportRows.push({
             ...veProjectExclusionRow(row, lead.email),
             _ve_segment: validation.assignments.get(leadIndex) ?? '',

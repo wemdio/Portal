@@ -4,6 +4,7 @@ import { withVeTargetComposition } from './collectionTarget';
 import { collectionRoundLimit } from './collectionTarget';
 import { veSourceStrategyKey } from './adaptiveCollection';
 import { applyVeCollectionGeographyToPlan, readVeCollectionGeography, type VeCollectionGeography } from './collectionGeography';
+import { isVeTwoGisTask, veTwoGisTwinKeys, withoutVeTwoGisRows } from './twoGisQuarantine';
 import type { VeCollectInfo, VeCollectTaskState } from './stages/baseCollect';
 
 type Row = Record<string, unknown>;
@@ -153,6 +154,9 @@ export function planVeCollectionGeographyRepair(
   const retired: number[] = [];
   const tasks: VeCollectTaskState[] = [];
   states.forEach((state, index) => {
+    // R1: ветки two_gis в географии нет — близнеца не пересчитать; уходит в retired, как не-free
+    // источник с прогрессом; полное состояние — в previous_tasks.
+    if (isVeTwoGisTask(state)) { retired.push(index); return; }
     const changed = veGeographyRepairHash(state.task) !== veGeographyRepairHash(corrected[index]);
     // These buffers were collected without the explicit geographic contract.
     // Their exact inputs and previous verdicts survive in previous_tasks.
@@ -187,13 +191,15 @@ export function planVeCollectionGeographyRepair(
       initial_round: target.round, initial_candidates: target.candidates_processed },
     preserve_analysis: !!base.analysis && typeof base.analysis === 'object', preparation_stale: true,
     resume_policy: 'explicit_bounded_only' };
-  const counted = countVeTargetContacts(kept, { limit: normalizeVeMaxEmailsPerCompany(base.max_emails_per_company), mode: 'preview' });
+  // R1 (2ГИС): выдача закрыта — строки справочника в цель не идут (в data остаются).
+  const countedRows = withoutVeTwoGisRows(kept, veTwoGisTwinKeys(states));
+  const counted = countVeTargetContacts(countedRows, { limit: normalizeVeMaxEmailsPerCompany(base.max_emails_per_company), mode: 'preview' });
   const next: VeGeographyRepairInfo = { ...info, collection_geography: required, geography_repair: receipt,
     tasks, plan: { ...info.plan, tasks: tasks.map((state) => state.task) },
     target_progress: withVeTargetComposition({ ...target, ready_rows: counted.counted,
       status: counted.counted >= target.ready_target ? 'target_reached' : 'limited',
       reason: 'География проверенных контактов исправлена. Автоматическое продолжение не включено.' },
-    counted, kept.length) };
+    counted, countedRows.length) };
   // Hold unreviewed candidates, but preserve every paid cache and source lineage.
   delete next.relevance_reserve;
   delete next.relevance_summary;

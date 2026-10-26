@@ -55,6 +55,7 @@ import { VE_CAMPAIGN_SENDING_SETTINGS } from './contactDeliveryRate';
 import { loadVeContactDeliveryRows } from './contactDeliveryInventory';
 import { loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow } from './projectExclusions';
 import { withVeDeliveryCompanyIdentity } from './projectExclusionDelivery';
+import { isVeTwoGisRow } from './twoGisQuarantine';
 import {
   claimProjectCampaignLinks,
   describeOwnershipConflicts,
@@ -592,6 +593,14 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     leadCount: leads.length,
     classification,
   }).map((group) => ({ segment: group.segment, leadIdx: group.leadIndices }));
+  // 2ГИС (R1): выдача закрыта — помеченные строки не попадают в резерв запуска.
+  if (audience.rows.some((row) => isVeTwoGisRow(row))) {
+    groups = groups.map((group) => ({ ...group, leadIdx: group.leadIdx.filter((index) => !isVeTwoGisRow(audience.rows[index])) }))
+      .filter((group) => group.leadIdx.length > 0);
+    if (groups.length === 0) {
+      return { status: 400, body: { code: 'VE_TWO_GIS_CONTACTS_HELD', error: 'Все контакты базы — из справочника организаций, их выдача пока закрыта.' } };
+    }
+  }
 
   // 6. Пресет — только после fail-closed аудита. До этой точки нет ни одного
   //    внешнего Instantly-вызова и тем более мутаций кампаний.

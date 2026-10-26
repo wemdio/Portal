@@ -17,6 +17,7 @@
  * чтение сайтов заведомо мелких компаний под «крупную» гипотезу.
  */
 import { veSourceStrategyKey, type VeAdaptiveCollection } from './adaptiveCollection';
+import { veCountedPlanTasks } from './twoGisQuarantine';
 import type { VeCollectTask, VeSourcePlan } from './prompts/sourcePlan';
 
 /** Не больше двух автоматических расширений на базу: вторая очередь и новый срез. */
@@ -149,7 +150,8 @@ export function veCanWidenPlan(tasks: VeCollectTask[], policy: Pick<VeAdaptiveCo
       .filter((variant): variant is VeCollectTask => variant !== null);
     return variants.length > 0 && variants.every((variant) => !known.has(veSourceStrategyKey(variant)));
   });
-  return secondQueue || ((policy?.replan_attempts ?? 0) < 2 && tasks.length < VE_PLAN_MAX_TASKS);
+  // Близнецы two_gis вне потолка плана.
+  return secondQueue || ((policy?.replan_attempts ?? 0) < 2 && veCountedPlanTasks(tasks).length < VE_PLAN_MAX_TASKS);
 }
 
 /** Класс ОКВЭД из кода группы или подгруппы: «86.23» → «86». Прочее — как есть. */

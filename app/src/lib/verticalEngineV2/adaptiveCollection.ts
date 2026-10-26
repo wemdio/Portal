@@ -21,7 +21,7 @@ export const veSourceStrategyKey = (task: VeCollectTask) => {
   const filters = task.source === 'companies_directory' ? { ...task.directory_filters, includeIp: task.directory_filters?.includeIp ?? false }
     : task.source === 'hh_live' ? task.hh_query : task.source === 'pdl' ? task.pdl_filters
       : task.source === 'funded' ? task.funded_filters : task.source === 'eng_hiring' ? task.eng_hiring_query
-        : task.source === 'known_websites' ? task.known_websites : task.maps_query;
+        : task.source === 'known_websites' ? task.known_websites : task.source === 'two_gis' ? task.two_gis_query : task.maps_query;
   return createHash('sha256').update(JSON.stringify(stable({ source: task.source, filters }))).digest('hex');
 };
 export const veReadyContactKeys = (rows: Array<Record<string, unknown>>) => [...new Set(rows.map((row) => String(row.email ?? '').trim().toLowerCase()).filter(Boolean))]
@@ -41,7 +41,10 @@ export interface VeAdaptiveCollection {
   /** Повод перепланирования: низкий выход или исчерпанный план. */
   replan_reason?: 'low_yield' | 'plan_exhausted';
   /** Private baseline: never return recipient hashes through project polling. */
-  pending?: { id: string; source_key: string; source: string; candidates: number; ready_before: string[]; started_at: string };
+  pending?: { id: string; source_key: string; source: string; candidates: number; ready_before: string[]; started_at: string;
+    /** Выдача строк 2ГИС при открытии партии: false пишет только R3 при открытой выдаче.
+     * Нет поля — закрыта: помеченные строки не входят ни в ready_before, ни в итог партии. */
+    two_gis_closed?: boolean };
   last_completed_at?: string;
 }
 export function validVeAdaptiveCollection(state: VeAdaptiveCollection): boolean {
