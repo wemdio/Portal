@@ -84,6 +84,12 @@ export interface DemoLeadData {
    * «🤖 Похоже на ИИ-агента … (не доказательство)» line; absent — no line.
    */
   agentHints?: DemoLeadAgentHints | null;
+  /**
+   * demo-lead only: why the lead looks like spam (lib/demoLead/spam.ts LEAD_SPAM_LABEL,
+   * fixed strings). Non-empty — the title reads «🚫 Спам», a «Почему спам» line follows,
+   * and the route sends no AMO deal and no General copy.
+   */
+  spamReasons?: string[] | null;
 }
 
 /** Telegram rejects sendMessage text longer than this, counted after entity parsing. */
@@ -115,11 +121,12 @@ function cleanHost(raw?: string | null): string {
   return /^[a-z0-9.-]{1,253}$/.test(host) ? host : '';
 }
 
-/** Headline: a registration is a sign-up notice, not a "новый лид". */
-function titleLine(source?: string | null, cabinet?: 'eng' | 'ru' | null): string {
+/** Headline: a registration is a sign-up notice, not a "новый лид"; spam says so first. */
+function titleLine(source?: string | null, cabinet?: 'eng' | 'ru' | null, spam = false): string {
   if (source === 'register') {
     return cabinet ? `✅ <b>Новая регистрация — ${CABINET_LABEL[cabinet]}</b>` : '✅ <b>Новая регистрация</b>';
   }
+  if (spam) return `🚫 <b>Спам — ${esc(sourceLabel(source))}</b>`;
   return `🎯 <b>Новый лид — ${esc(sourceLabel(source))}</b>`;
 }
 
@@ -190,7 +197,10 @@ const NO_CUTS: AlertCuts = { url: Infinity, message: Infinity, value: Infinity }
 function renderLeadAlert(data: DemoLeadData, cuts: AlertCuts): string {
   const value = (text: string) => esc(clip(text, cuts.value));
   const url = (text: string) => esc(clip(text, Math.min(cuts.url, cuts.value)));
-  const lines: string[] = [titleLine(data.source, data.signupCabinet), ''];
+  const spam = data.spamReasons?.filter(Boolean) ?? [];
+  const lines: string[] = [titleLine(data.source, data.signupCabinet, spam.length > 0), ''];
+  // Fixed labels from lib/demoLead/spam.ts, so the TG_TEXT_MAX cuts never reach this line.
+  if (spam.length) lines.push(`<b>Почему спам:</b> ${esc(spam.join(' · '))}. <i>Сделка в AMO не создана.</i>`, '');
   const signupHost = data.source === 'register' ? cleanHost(data.signupHost) : '';
   if (signupHost) lines.push(`<b>Сайт:</b> ${signupHost}`);
   lines.push(

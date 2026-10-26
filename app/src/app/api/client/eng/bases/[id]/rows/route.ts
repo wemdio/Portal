@@ -26,6 +26,7 @@ import {
 } from '@/lib/hypothesisEngine/launchHandoff';
 import { projectMarket } from '@/lib/hypothesisEngine/market';
 import { selectHeEngEmailRows } from '@/lib/hypothesisEngine/engEmailPolicy';
+import { HE_ENG_UNVERIFIED_SITE_EMAIL } from '@/lib/hypothesisEngine/engCollectionTarget';
 import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -58,6 +59,8 @@ interface EngReadyToSend {
   flagged: number;
   /** Не прошли проверку почты. */
   failed: number;
+  /** Адрес с сайта компании, который почтовый сервер не дал проверить: в базе, но не в этой отправке. */
+  unverified: number;
   /** Прошли проверку, но в ячейке не один годный адрес. */
   unusable: number;
   /** Повтор адреса, который уже посчитан. */
@@ -101,6 +104,7 @@ function countReadyToSend(input: {
   let checked = 0;
   let flagged = 0;
   let failed = 0;
+  let unverified = 0;
   const passed: Array<Record<string, unknown>> = [];
   for (const row of rows) {
     if (!emailColumn || String(row[emailColumn] ?? '').trim() === '') continue;
@@ -109,6 +113,8 @@ function countReadyToSend(input: {
     checked += 1;
     if (isAutoBase && row._low_relevance === true) {
       flagged += 1;
+    } else if (verdict === 'rejected' && row._email_unverified === HE_ENG_UNVERIFIED_SITE_EMAIL) {
+      unverified += 1;
     } else if (verdict === 'rejected') {
       failed += 1;
     } else {
@@ -136,6 +142,7 @@ function countReadyToSend(input: {
     checked,
     flagged,
     failed,
+    unverified,
     unusable,
     repeated,
     blocked: filtered.blockedCount,

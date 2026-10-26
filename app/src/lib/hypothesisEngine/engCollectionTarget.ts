@@ -115,14 +115,38 @@ export function createHeEngCollectionPool(
   return { version: 1, max_emails_per_company: cap, candidates_processed: 0, rows: [], rounds: [] };
 }
 
+/**
+ * Owner decision 2026-10-26: an address the company published on its own site
+ * whose mail server refused verification (validator «unknown», e.g. Microsoft
+ * 365 or Mimecast) stays in the base after the checked ones, marked
+ * `_email_unverified: 'site'`, and is never sent with them. Registry rows
+ * bring an address of their own (engPublicRegistries), so only rows whose
+ * address can come from the site crawl alone qualify, and only on the
+ * company's own domain: its catalogue site or the current site found for it.
+ */
+export const HE_ENG_UNVERIFIED_SITE_EMAIL = 'site';
+
+export function heEngUnverifiedSiteEmail(status: unknown, row: HeEngCollectionRow): boolean {
+  if (typeof status !== 'string' || status.trim().toLowerCase() !== 'unknown') return false;
+  if (typeof row.source_detail !== 'string' || !row.source_detail.trim() || row.source_detail.startsWith('eng_registry')) return false;
+  const email = typeof row.email === 'string' ? row.email.trim().toLowerCase() : '';
+  const at = email.lastIndexOf('@');
+  const domain = at > 0 && !/[\s,;]/.test(email) ? heCompanySiteIdentity(email.slice(at + 1))?.registrable : undefined;
+  const proof = row._eng_company_qualification as { currentWebsite?: unknown } | null | undefined;
+  return !!domain && [row.website, proof?.currentWebsite].some((site) => heCompanySiteIdentity(site)?.registrable === domain);
+}
+
 /** Constructor rows have exactly one email per row; do not split unverified cells. */
-function contact(row: HeEngCollectionRow): { email: string; status: 'ok' | 'catch_all' } | null {
+function contact(row: HeEngCollectionRow): { email: string; status: 'ok' | 'catch_all' | 'unknown' } | null {
   const email = typeof row.email === 'string' ? row.email.trim().toLowerCase() : '';
   const status = typeof row._email_status === 'string' ? row._email_status.trim().toLowerCase() : '';
-  if (!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(email) ||
-      (status !== 'ok' && status !== 'catch_all') || row._low_relevance === true) return null;
-  return { email, status };
+  if (!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(email) || row._low_relevance === true) return null;
+  if (status === 'ok' || status === 'catch_all') return { email, status };
+  return heEngUnverifiedSiteEmail(status, row) ? { email, status: 'unknown' } : null;
 }
+
+/** Keep order: ok, then catch-all, then an unverified address from the company's own site. */
+const STATUS_RANK = { ok: 2, catch_all: 1, unknown: 0 } as const;
 
 function companyKey(row: HeEngCollectionRow, email: string, rootSites: ReadonlySet<string>): string {
   const site = heCompanySiteIdentity(row.website);
@@ -139,7 +163,8 @@ function companyKey(row: HeEngCollectionRow, email: string, rootSites: ReadonlyS
  * Caller has already checked company fit, countries, DNC and source ownership.
  * This helper does not replace those checks. It enforces the final email gate,
  * deduplication and one company cap across ALL completed rounds. OK addresses
- * outrank catch-all globally, including a later OK verdict for the same email.
+ * outrank catch-all globally, including a later OK verdict for the same email,
+ * and both outrank an unverified address from the company's own site.
  */
 export function partitionHeEngCollectionRows(
   rows: readonly HeEngCollectionRow[],
@@ -150,7 +175,7 @@ export function partitionHeEngCollectionRows(
   const candidates = rows.flatMap((row) => {
     const parsed = contact(row);
     return parsed ? [{ row, ...parsed }] : [];
-  }).sort((a, b) => Number(b.status === 'ok') - Number(a.status === 'ok'));
+  }).sort((a, b) => STATUS_RANK[b.status] - STATUS_RANK[a.status]);
   const rootSites = new Set(candidates.flatMap(({ row }) => {
     const site = heCompanySiteIdentity(row.website);
     return site && site.host === site.registrable ? [site.host] : [];
@@ -165,7 +190,11 @@ export function partitionHeEngCollectionRows(
     if (count >= cap) continue;
     emails.add(candidate.email);
     companies.set(key, count + 1);
-    accepted.push({ ...candidate.row, email: candidate.email, _email_status: candidate.status });
+    // A later check can turn the address ok or catch-all: the marker follows the status.
+    const row: HeEngCollectionRow = { ...candidate.row, email: candidate.email, _email_status: candidate.status };
+    if (candidate.status === 'unknown') row._email_unverified = HE_ENG_UNVERIFIED_SITE_EMAIL;
+    else delete row._email_unverified;
+    accepted.push(row);
     if (accepted.length === HE_ENG_READY_CONTACT_TARGET + HE_ENG_RESERVE_CONTACT_MAX) break;
   }
   return {

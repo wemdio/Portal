@@ -221,7 +221,7 @@ import { createHeEngRegistryWave, heEngRegistrySourceTasks, runHeEngRegistryWave
 
 import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
 import { readHeCollectCountries } from '../engCountries';
-import { readHeEngEmailPolicy, selectHeEngEmailRows } from '../engEmailPolicy';
+import { readHeEngEmailPolicy, selectHeEngCollectRows } from '../engEmailPolicy';
 import { heEngPdlPlanForCache, prioritizeHeEngPdlNameSlices, type HeEngPdlNamePriority } from '../engPdlNamePriority';
 import { withHeEngCollectionCommitLock } from '../engCollectionLocks';
 import {
@@ -6032,18 +6032,20 @@ export interface HeImportCapResult<T> {
  *
  * Без ENG-политики у каждой компании остаётся минимум одна строка. Для
  * подтверждённого ENG-клиента до капа снимаются все недопущенные адреса:
- * компания без ok/catch_all не занимает лимит, результат может быть пустым.
+ * компания без ok/catch_all и без непроверяемого адреса со своего сайта
+ * (selectHeEngCollectRows) не занимает лимит, результат может быть пустым.
  */
 export function capImportedRows<T extends HeUnifiedRow>(input: {
   rows: T[];
   emailStatuses: Array<string | null>;
   contactCap: number;
   companyCap: number;
-  /** Confirmed ENG clients keep only ok/catch_all, with ok first, before either cap. */
+  /** Confirmed ENG clients keep ok, catch-all, then unverified own-site addresses, before either cap. */
   allowCatchAll?: boolean;
 }): HeImportCapResult<T> {
   const selected = input.allowCatchAll
-    ? selectHeEngEmailRows(input.rows.map((row, i) => ({ row, _email_status: input.emailStatuses[i] ?? null })))
+    ? selectHeEngCollectRows(input.rows.map((row, i) => ({ row, _email_status: input.emailStatuses[i] ?? null })),
+      (item) => ({ status: item._email_status, row: item.row }))
     : null;
   const rows = selected ? selected.map(({ row }) => row) : input.rows;
   const emailStatuses = selected ? selected.map(({ _email_status }) => _email_status) : input.emailStatuses;
@@ -6943,7 +6945,8 @@ async function finishHeEngTargetRound(
     const freshKeys = await loadOtherBaseExclusionKeys({ ...ctx, supabase: paidCheckpointDb(ctx) },
       job.project_id, baseId, 'us', blockedDomains);
     const checked = (items: readonly Record<string, unknown>[]) => {
-      const eligible = selectHeEngEmailRows(items).filter((row) => !!scope && heEngCompanyQualified(row, scope));
+      const eligible = selectHeEngCollectRows(items, (row) => ({ status: row._email_status, row }))
+        .filter((row) => !!scope && heEngCompanyQualified(row, scope));
       return heRecheckImportedRows({ rows: eligible as HeUnifiedRow[], emailStatuses: eligible.map((row) => cell(row._email_status)),
         keys: freshKeys, market: 'us' }).rows;
     };
@@ -9185,9 +9188,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   let companyQualificationNote: string | null = null;
   if (engEmailPolicy) {
     // Constructor checkpoints and partial/empty results can bypass its final
-    // validation filter. The client base still contains only accepted addresses;
-    // the constructor keeps the source rows for diagnostics.
-    storedRows = selectHeEngEmailRows(storedRows);
+    // validation filter. The client base still contains only accepted addresses
+    // and, marked, unverified ones from the company's own site; the constructor
+    // keeps the source rows for diagnostics.
+    storedRows = selectHeEngCollectRows(storedRows, (row) => ({ status: row._email_status, row }));
     if (storedRows.length > 0) {
       const scope = companyQualificationScope ?? await readHeEngQualificationScope(ctx.supabase, {
         project, verticalId: base.vertical_id, collectInfo: info, mode: 'collection',

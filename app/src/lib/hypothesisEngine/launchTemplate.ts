@@ -241,6 +241,7 @@ import {
   type HeTemplateLaunchInfo,
   type HeTemplateLaunchPending,
 } from './launchHandoff';
+import { HE_ENG_UNVERIFIED_SITE_EMAIL } from './engCollectionTarget';
 
 export type HeLaunchLocale = 'ru' | 'en';
 
@@ -296,6 +297,8 @@ interface HeLaunchMessages {
   segmentSplitInfo: (campaignsCount: number) => string;
   rowsSkippedNote: (invalid: number, irrelevant: number) => string;
   unverifiedSkippedNote: (unverified: number) => string;
+  /** ENG: адреса с сайта компании, которые почтовый сервер не дал проверить, — не в этой кампании. */
+  unverifiedSiteHeldNote: (held: number) => string;
   /** RU: строки без вердикта ОТПРАВЛЕНЫ (как до 26.09.2026) — назвать вслух. */
   unverifiedSentNote: (unverified: number) => string;
   unparsedEmailNote: (multiAddress: number, malformed: number) => string;
@@ -552,6 +555,9 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     unverifiedSkippedNote: (unverified) =>
       `Не отправлено строк без вердикта валидации email: ${unverified.toLocaleString('ru-RU')} — ` +
       'непроверенный адрес в рассылку не идёт.',
+    unverifiedSiteHeldNote: (held) =>
+      `Отложено адресов без проверки: ${held.toLocaleString('ru-RU')} — компания опубликовала их на своём сайте, ` +
+      'но её почтовый сервер не дал их проверить; в эту кампанию они не входят.',
     unverifiedSentNote: (unverified) =>
       `ОТПРАВЛЕНО строк без вердикта валидации email: ${unverified.toLocaleString('ru-RU')} — ` +
       'у этой базы конструктор не дошёл до шага валидации почт. Правило RU-инструмента прежнее ' +
@@ -804,6 +810,9 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     unverifiedSkippedNote: (unverified) =>
       `Rows left out because their address has no validation verdict: ${unverified.toLocaleString('en-US')}. ` +
       'An unverified address is never contacted.',
+    unverifiedSiteHeldNote: (held) =>
+      `Held back: ${held.toLocaleString('en-US')} addresses the company publishes on its own site, ` +
+      'but whose mail server refused verification. They are not part of this campaign.',
     // Недостижимо в en-контуре: у us-проекта вердикт обязателен, поэтому
     // строка без вердикта никогда не отправляется (шаг 5). Пара к RU-ключу
     // нужна типу словаря, и врать в ней нельзя — текст честный.
@@ -2011,6 +2020,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   const gateEmailColumn = filterRows ? detectedEmailColumn : null;
   let skippedInvalid = 0;
   let skippedUnverified = 0;
+  let heldUnverifiedSite = 0;
   let unverifiedSent = 0;
   let skippedIrrelevant = 0;
   let skippedCompanyQualification = 0;
@@ -2029,6 +2039,12 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
         }
         if (gateEmailColumn && String(r[gateEmailColumn] ?? '').trim() === '') return true;
         const verdict = heLaunchEmailVerdict(r._email_status, { allowCatchAll });
+        // Marked by the ENG collection (engCollectionTarget): kept in the base,
+        // never sent together with the checked addresses.
+        if (verdict === 'rejected' && allowCatchAll && r._email_unverified === HE_ENG_UNVERIFIED_SITE_EMAIL) {
+          heldUnverifiedSite += 1;
+          return false;
+        }
         if (verdict === 'rejected') {
           skippedInvalid += 1;
           return false;
@@ -3297,6 +3313,9 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   // staff во внутреннем UI), а новые появляются только когда реально отсеяли.
   if (skippedUnverified > 0) {
     warnings.push(t.unverifiedSkippedNote(skippedUnverified));
+  }
+  if (heldUnverifiedSite > 0) {
+    warnings.push(t.unverifiedSiteHeldNote(heldUnverifiedSite));
   }
   // RU: строки без вердикта уехали (правило инструмента прежнее) — но теперь
   // сотрудник видит, сколько именно. Раньше это был молчаливый риск.
