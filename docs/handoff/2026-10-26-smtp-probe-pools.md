@@ -39,7 +39,7 @@ Spamhaus были 0–22 в неделю с июля по 11.10.
 | Английский автоаутрич (198) | 0 | 198 |
 | ENG (71) | 0 | 71 |
 
-## Пока западных IP нет
+## Пока западных IP нет (так было до 26.10 08:22 UTC)
 
 - ENG-сборы, английский автоаутрич и западные демо-базы не подтверждают новые адреса. Работают только
   кэшированные вердикты.
@@ -59,16 +59,48 @@ Spamhaus были 0–22 в неделю с июля по 11.10.
 4. Темп ниже стандартного, потому что эти IP проверяют только чувствительные шлюзы. Например,
    `SMTP_PROVIDER_HOURLY_LIMITS=microsoft=300,google=600,mimecast=150,proofpoint=150`.
 5. На проде дописать `SMTP_PROXY_URLS_WEST=http://IP4:3100,http://IP5:3100` в `/home/Portal/prod/.env`.
-   Все проверяющие воркеры получают переменные через `env_file`. Переменные `env_file` читаются при
-   создании контейнера, поэтому воркеры с `SMTP_PROXY_URLS` нужно пересоздать
-   (`docker compose … up -d --force-recreate --no-deps <сервисы>`):
-   `worker-emailvalidation`, `worker-baseconstructor*`, `worker-hypothesis-engine-eng`,
-   `worker-polza-outreach`, `worker-autopipeline`, `worker-outreach`, `worker-li-outreach`,
-   `worker-tg-outreach`, `outreachos`, `outreachos-ru`.
+   Переменные `env_file` читаются при создании контейнера, поэтому нужно пересоздать воркеры, в сборке
+   которых есть проверка почты:
+   - `worker-emailvalidation`;
+   - `worker-baseconstructor` и `-2`…`-12`;
+   - `worker-polza-outreach`, `worker-outreach`, `worker-autopipeline`, `worker-manual-scoring`.
+
+   Приложение `portal` пересоздавать не нужно: оно только ставит задачи в очередь. `outreachos` и
+   `outreachos-ru` эту переменную не читают.
+
+   **Осторожно с `drain-worker.sh`.** Если передать ему часть общего пула, он ставит на паузу все
+   очереди и останавливает весь пул: `portal-worker-hh`, `-search`, `-enrich`, `-yandexmaps`,
+   `-tg-outreach`, `-aicaller`, `-tg-transcribe`, `-eng-hiring`. Потом `docker compose up` поднимет
+   только переданные сервисы. Деплой это обходит: `.semaphore/select-deploy-targets.sh` расширяет такой
+   выбор до всех воркеров.
+
+   Вручную есть два способа:
+   - передать полный `ALL_WORKER_SERVICES` из `select-deploy-targets.sh` и его же пересоздать;
+   - после пересоздания проверить `docker ps -a --filter name=portal-worker-` и запустить остановленные
+     (`docker start`).
+
+   26.10 так 8 воркеров простояли две минуты. Задачи на паузе потом продолжились сами.
 6. Когда западные проверки уйдут со старых IP, снять с них Spamhaus (check.spamhaus.org, каждый IP
    отдельно).
 
 Вернуть прежнее поведение: задать в `SMTP_PROXY_URLS_WEST` тот же список, что в `SMTP_PROXY_URLS`.
+
+## Сделано 26.10
+
+- **Серверы.** Два play2go LC-1 (Финляндия, Ubuntu 24.04): 2.26.100.163 (`mx4.polza-agency.online`) и
+  31.76.81.3 (`mx5.polza-agency.online`). У них та же сеть провайдера (AS215439), что у 31.76.79.220 и
+  144.31.54.166, но другие /24. Перед подключением оба были чистыми в Spamhaus, Barracuda, SpamCop и PSBL.
+- **DNS и PTR.** Записи A и TXT `v=spf1 a -all` добавлены через API Reg.ru. Зона на аккаунте
+  `REGRU_USERNAME`, второй аккаунт её не видит. Порт 25 открывается кнопкой в панели play2go, PTR
+  ставится там же.
+- **Прокси.** `/opt/smtp-proxy`: тот же `smtp_proxy.py`, что на 89, служба systemd `smtp-proxy`. Порт
+  3100 открыт только для 139.60.162.24. В `proxy.env` указаны
+  `SMTP_PROVIDER_HOURLY_LIMITS=microsoft=300,google=600,mimecast=150,proofpoint=150` и HELO `mx4`/`mx5`,
+  в unit — `PYTHONUNBUFFERED=1`.
+- **Прод.** `SMTP_PROXY_URLS_WEST` добавлен в 08:21 UTC (копия — `.env.bak-20261026-smtp-west`), 17
+  воркеров пересозданы в 08:22 UTC. Проверка через «Ключи API» прошла через западные IP с ответом SMTP 250.
+- **Старые IP** сняты из Spamhaus до 06:28 UTC. Проверку, что они держатся, задача на 27.10 делает
+  DNS-запросом к `zen.spamhaus.org`.
 
 ## Кто ходит в прокси в обход валидатора
 

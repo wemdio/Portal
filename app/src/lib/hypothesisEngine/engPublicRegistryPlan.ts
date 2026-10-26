@@ -19,25 +19,30 @@ export const HE_ENG_REGISTRY_CATEGORIES: Readonly<Record<HeEngRegistryProvider, 
   pra: ['insurers', 'banks'],
   // ESMA register of AIF and UCITS managers in the EU/EEA (engEsmaRegistry.ts).
   esma: ['fund_managers'],
+  // EBA register of PSD2 payment and e-money institutions in the EU/EEA (engEbaRegistry.ts).
+  eba: ['payment_institutions'],
 };
 
-type NationalProvider = Exclude<HeEngRegistryProvider, 'gleif' | 'osm' | 'esma'>;
+type NationalProvider = Exclude<HeEngRegistryProvider, 'gleif' | 'osm' | 'esma' | 'eba'>;
 const PROVIDER_ISO: Readonly<Record<NationalProvider, string>> = {
   brreg: 'no', france: 'fr', companies_house: 'gb', fdic: 'us', nppes: 'us', fmcsa: 'us', pra: 'gb',
 };
 /** Sources covering many countries: one slice per sector reads all allowed countries. */
-export const HE_ENG_GLOBAL_REGISTRY_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set(['gleif', 'osm', 'esma']);
-/** A global source's countries; ESMA registers firms of the EU and the EEA only. */
+export const HE_ENG_GLOBAL_REGISTRY_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set(['gleif', 'osm', 'esma', 'eba']);
+// The EU authorities' registers hold firms of the EU and the EEA only.
+const EEA_REGISTRY_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set(['esma', 'eba']);
+/** A global source's countries. */
 function providerCovers(provider: HeEngRegistryProvider, country: string): boolean {
-  return provider !== 'esma' || Object.hasOwn(HE_ENG_ESMA_MEMBER_STATES, engCountryIso2(country) ?? '');
+  return !EEA_REGISTRY_PROVIDERS.has(provider) || Object.hasOwn(HE_ENG_ESMA_MEMBER_STATES, engCountryIso2(country) ?? '');
 }
 const MAX_TASKS = 120;
 const MAX_TASK_COUNTRIES = 40;
-// An ESMA slice is read whole and paged within the 80-page safety limit (2 000
-// firms); ten countries stay under it (all 30 member states hold about 3 200).
-const ESMA_MAX_TASK_COUNTRIES = 10;
+// An EU register slice is read whole and paged within the 80-page safety limit
+// (2 000 firms); ten countries stay under it. ESMA holds about 3 200 managers in
+// all 30 member states, EBA 1 242 authorised payment firms (October 2026).
+const EEA_MAX_TASK_COUNTRIES = 10;
 function maxTaskCountries(provider: HeEngRegistryProvider): number {
-  return provider === 'esma' ? ESMA_MAX_TASK_COUNTRIES : MAX_TASK_COUNTRIES;
+  return EEA_REGISTRY_PROVIDERS.has(provider) ? EEA_MAX_TASK_COUNTRIES : MAX_TASK_COUNTRIES;
 }
 // OpenStreetMap maps premises, mostly small businesses, and never a headcount:
 // a scope of 50+ employees would only spend company checks on them.
@@ -61,6 +66,9 @@ const SECTORS: readonly Sector[] = [
     sources: { brreg: ['66'], france: ['66.30Z'], companies_house: ['66300'], gleif: ['asset_management'], esma: ['fund_managers'] } },
   { match: /\b(?:insurers?|reinsurers?|insurance (?:carriers?|companies))\b/i,
     sources: { brreg: ['65'], france: ['65.12Z'], companies_house: ['65120'], gleif: ['insurance'], osm: ['insurance'], pra: ['insurers'] } },
+  // Licensed under PSD2: payment and e-money institutions and account information providers.
+  { match: /\b(?:payments? (?:institutions?|companies|firms|providers?|processors?|platforms?|gateways?|service providers?|fintechs?)|psps?|e-?money (?:institutions?|issuers?|providers?)|electronic money (?:institutions?|issuers?)|(?:merchant|card|payment) acquir(?:ers?|ing (?:banks?|companies|providers?))|money (?:transfer|remittance) (?:operators?|companies|providers?|services?)|remittance (?:companies|providers?|operators?)|paytech (?:companies|firms|providers?)|account information (?:service )?providers?|open banking (?:providers?|platforms?|companies))\b/i,
+    sources: { eba: ['payment_institutions'] } },
   { match: /\b(?:dentists?|dental (?:clinics?|practices?|groups?|offices?))\b/i,
     sources: { brreg: ['86.23'], france: ['86.23Z'], companies_house: ['86230'], nppes: ['Dentist'], osm: ['dental'] } },
   { match: /\bhospitals?\b/i,

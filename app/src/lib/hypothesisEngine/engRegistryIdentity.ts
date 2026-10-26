@@ -13,6 +13,9 @@ export function validLei(id: string): boolean {
 }
 /** The public ESMA register query for one record; the query value follows. */
 export const ESMA_RECORD = 'https://registers.esma.europa.eu/solr/esma_registers_upreg/select?q=';
+/** The EBA register's page of one payment or e-money institution; its entity type and code follow. */
+export const EBA_RECORD = 'https://euclid.eba.europa.eu/register/pir/view/';
+export const HE_ENG_EBA_ENTITY_TYPES: readonly string[] = ['PSD_PI', 'PSD_EMI', 'PSD_AISP'];
 function engCountry(country: unknown): boolean {
   return typeof country === 'string' && ENG_COUNTRIES.some(item => item.value === country);
 }
@@ -44,6 +47,10 @@ export function heEngRegistryRecordValid(provider: unknown, id: unknown, country
     // An ESMA-registered fund manager by its LEI, or by ESMA's own record id when it has none.
     case 'esma': return engCountry(country) && (validLei(id) ? url.href === `${ESMA_RECORD}ae_lei:${id}`
       : /^ae\d{1,9}$/.test(id) && url.href === `${ESMA_RECORD}id:${id}`);
+    // A PSD2 payment or e-money institution by the code the EBA register keys it on
+    // («IE_CBI!C182347», «FT00128275»), on its page for the entity type.
+    case 'eba': return engCountry(country) && /^[A-Za-z0-9][A-Za-z0-9_!.-]{3,29}$/.test(id) &&
+      HE_ENG_EBA_ENTITY_TYPES.some(type => url.href === `${EBA_RECORD}${type}/${id}`);
     // Global sources: the country comes from the record itself (GLEIF headquarters,
     // or the OpenStreetMap country boundary containing the premises).
     case 'gleif': return engCountry(country) && validLei(id) && url.href === `https://api.gleif.org/api/v1/lei-records/${id}`;

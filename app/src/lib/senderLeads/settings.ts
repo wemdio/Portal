@@ -43,6 +43,18 @@ export interface LeadSettings {
   enabled: boolean;
   telegram: boolean;
   criteria: string | null;
+  /**
+   * Кампания Движка вертикалей (source_kind 've2'): оценка по брифу и
+   * критерию проекта, лид — карточкой специалисту проекта, не в чат продаж.
+   */
+  route?: 'project';
+  projectId?: string;
+  /** Бриф проекта; '' — без брифа (null квалификатор понял бы как «искать в Instantly»). */
+  briefText?: string;
+  /** Адреса «Передачи лида» проекта и их корпоративные домены: письма оттуда — не лид. */
+  clientParty?: { addresses: string[]; domains: string[] };
+  /** Проект не прочитан — ответы его кампаний ждут повтора, остальные идут как шли. */
+  projectError?: string;
 }
 
 export const DEFAULT_LEAD_SETTINGS: LeadSettings = {
@@ -80,26 +92,39 @@ export function settingsFromFolder(row: FolderRow): LeadSettings {
   };
 }
 
+export interface CampaignLeadSettings {
+  settings: LeadSettings;
+  campaignName: string;
+  /**
+   * Проект Portal кампании Движка вертикалей (source_kind 've2'). Её настройки
+   * накладывает projectScope.withProjectLeadSettings: модуль берут и экраны,
+   * поэтому серверный код проекта здесь не подключается.
+   */
+  veProjectId?: string;
+}
+
 /** Настройки для набора рассылок: id рассылки → настройки её папки. */
 export async function loadCampaignSettings(
   db: SupabaseClient,
   campaignIds: string[],
-): Promise<Map<string, { settings: LeadSettings; campaignName: string }>> {
-  const out = new Map<string, { settings: LeadSettings; campaignName: string }>();
+): Promise<Map<string, CampaignLeadSettings>> {
+  const out = new Map<string, CampaignLeadSettings>();
   const ids = Array.from(new Set(campaignIds));
   if (!ids.length) return out;
 
   const { data, error } = await db
     .from('sender_campaigns')
-    .select('id, name, sender_folders(id, key, name, lead_criteria, leads_enabled, leads_telegram)')
+    .select('id, name, source_kind, project_id, sender_folders(id, key, name, lead_criteria, leads_enabled, leads_telegram)')
     .in('id', ids);
   if (error) throw new Error(`sender_campaigns: ${error.message}`);
 
-  for (const row of (data ?? []) as Array<{ id: string; name: string; sender_folders: FolderRow | FolderRow[] | null }>) {
+  type CampaignRow = { id: string; name: string; source_kind?: string | null; project_id?: string | null; sender_folders: FolderRow | FolderRow[] | null };
+  for (const row of (data ?? []) as CampaignRow[]) {
     const folder = Array.isArray(row.sender_folders) ? row.sender_folders[0] ?? null : row.sender_folders;
     out.set(row.id, {
       settings: folder ? settingsFromFolder(folder) : DEFAULT_LEAD_SETTINGS,
       campaignName: row.name,
+      ...(row.source_kind === 've2' && row.project_id ? { veProjectId: row.project_id } : {}),
     });
   }
   return out;

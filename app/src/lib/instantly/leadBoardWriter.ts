@@ -178,6 +178,8 @@ export interface BoardRowInput {
   stepNumber: number | null;
   replyTimestamp: string | null;
   requiresSpecialistReview?: boolean;
+  /** Лид из «Рассылки» (не Instantly): такие строки не входят в «Исходы» ящиков Instantly. */
+  source?: 'sender';
 }
 
 /**
@@ -204,6 +206,8 @@ export async function upsertBoardRow(db: InstantlyDb, input: BoardRowInput): Pro
       // Omit for automatic/unconfigured projects during rolling upgrades.
       // Manual candidates fail closed if the publication migration is absent.
       ...(input.requiresSpecialistReview ? { specialist_review_required: true } : {}),
+      // Только у лидов «Рассылки»: строки Instantly пишутся как раньше (по умолчанию 'instantly').
+      ...(input.source ? { source: input.source } : {}),
     };
   const { error } = await db.from('project_lead_board_rows').upsert(
     { ...payload, auto_reply_ids: [sourceId] },

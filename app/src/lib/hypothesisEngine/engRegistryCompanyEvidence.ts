@@ -40,6 +40,7 @@ const DIRECTORY_HOSTS = new Set(['linkedin.com', 'facebook.com', 'instagram.com'
   'scoriff.co.uk', 'businessmad.com', 'northdata.com', 'northdata.de', 'bloomberg.com', 'rocketreach.co',
   'apollo.io', 'signalhire.com', 'lusha.com', 'cbinsights.com', 'pitchbook.com', 'preqin.com', 'legal500.com',
   'chambers.com', 'vat-search.ie', 'solocheck.ie', 'societe.com', 'pappers.fr', 'infogreffe.fr', 'verif.com', 'bankofengland.co.uk', 'esma.europa.eu',
+  'eba.europa.eu',
   'manageo.fr', 'proff.no', 'purehelp.no', '1881.no', 'gulesider.no', 'bizapedia.com', 'manta.com',
   'buzzfile.com', 'yelp.com', 'bbb.org', 'sophymarine.com', 'experian.com', 'ebay.com', 'amazon.com']);
 // Legal-form words: the register says «LTD», the company's own footer «Limited».
@@ -131,8 +132,9 @@ function candidateFingerprint(candidate: HeEngRegistryCandidate): string {
   return fingerprint([candidate.provider, candidate.recordId, candidate.company, candidate.country, candidate.address,
     candidate.addressKind, candidate.category, candidate.employees ?? '', candidate.employeeYear ?? null, candidate.website,
     candidate.emails, candidate.description, candidate.sourceUrl,
-    // Only GLEIF records carry it; older candidates keep their fingerprint.
-    ...(candidate.localRegistryId !== undefined ? [candidate.localRegistryId] : [])]);
+    // Only some registries carry them; older candidates keep their fingerprint.
+    ...(candidate.localRegistryId !== undefined ? [candidate.localRegistryId] : []),
+    ...(candidate.supervisorReference !== undefined ? [{ supervisorReference: candidate.supervisorReference }] : [])]);
 }
 function hasRegistryCountry(candidate: HeEngRegistryCandidate): boolean {
   // The adapter validates the record address; never infer country from the
@@ -311,6 +313,8 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
       'under\\s+(?:firm\\s+)?(?:reference|registration)\\s+(?:number|no)'].join('|'),
     // An ESMA record id is the firm's LEI when it has one; ESMA's own id never appears on a site.
     esma: 'lei|legal\\s+entity\\s+identifier',
+    // The EBA register's key never appears on a site; the supervisor's reference is matched below.
+    eba: '(?!)',
   };
   const id = identifierKey(candidate.recordId);
   const digits = candidate.provider === 'companies_house' ? companiesHouseDigits(id) : id;
@@ -368,30 +372,36 @@ function nameWindows(value: string, company: string): string[] {
 // Handelsregister, Dutch KvK, Danish CVR, Nordic org. numbers, Finnish Y-tunnus,
 // Irish CRO, Luxembourg RCS, Austrian Firmenbuch, Belgian KBO and others; the UK
 // Companies House forms; the NAIC company code GLEIF holds for many US insurers.
-const LOCAL_REGISTRY_LABELS = '(?:handelsregister|registernummer|registergericht|hr[ab]|kvk|kamer\\s+van\\s+koophandel|cvr|'
+const LOCAL_REGISTRY_LABELS = '(?:handelsregister|registernummer|registergericht|hr[ab]|kvk|kamer\\s+van\\s+koophandel|cvr|siren|'
+  // Supervisors' numbers that the EBA register files: German BaFin-ID, Swedish institutnummer.
+  + 'bafin[\\s-]*(?:id|nr|nummer)|bak[\\s-]*nr|institut(?:s)?nummer|'
   + 'org(?:anisations|anisasjons)?\\.?[\\s-]*(?:nr|nummer|number|no)|y-tunnus|business\\s+id|fo-nummer|cro|rcs|firmenbuch|fn|'
   + 'kbo|ondernemingsnummer|company\\s+(?:reg(?:istration)?\\.?\\s*)?(?:no|number|nr)|registration\\s+(?:no|number|nr)|'
   + 'registered\\s+(?:no|number)|reg\\.?\\s*(?:no|nr)|krs|nip|regon|cif|nif|p\\.?\\s*iva|partita\\s+iva|'
   + `naic(?:\\s+company)?(?:\\s+(?:code|number|no))?|${UK_COMPANY_NUMBER_LABELS})`;
 /**
- * GLEIF's `registeredAs`: «HRB 7876», «B123456», «12345678». A number with its
- * own letters is matched as written; a bare number needs a register label.
- * Local numbers repeat between courts and countries, so the caller also
- * requires the legal name in the same block.
+ * GLEIF's `registeredAs`: «HRB 7876», «B123456», «12345678»; or an EBA
+ * supervisor's reference: «relationship number: F0038». A number with its own
+ * letters is matched as written; a bare number needs a register label. Local
+ * numbers repeat between courts and countries, so the caller also requires the
+ * legal name in the same block.
  */
 function localRegistryNumber(value: string, candidate: HeEngRegistryCandidate): boolean {
-  // ESMA fund managers and PRA banks carry the same GLEIF number, looked up by their LEI.
-  if (!['gleif', 'esma', 'pra'].includes(candidate.provider) || !candidate.localRegistryId) return false;
-  const chars = candidate.localRegistryId.normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
-  if (chars.length < 5 || chars.length > 30) return false;
-  // GLEIF keeps a Companies House number padded («01167327»); the site writes
-  // «company number 1167327». Same rule as companiesHouseDigits.
-  const digits = companiesHouseDigits(chars);
-  const pattern = `${digits !== chars ? '(?:0[\\s.:/-]*)*' : ''}${digits.split('').map(char => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s.:/-]*')}`;
-  const end = '(?![\\p{L}\\p{N}]|[\\s.-]{1,3}\\d)';
-  return /\p{L}/u.test(chars)
-    ? new RegExp(`(?<![\\p{L}\\p{N}])${pattern}${end}`, 'iu').test(value)
-    : new RegExp(`\\b${LOCAL_REGISTRY_LABELS}\\b[\\s:./#-]{0,16}${pattern}${end}`, 'iu').test(value);
+  // ESMA fund managers and PRA banks carry the same GLEIF number, looked up by their LEI;
+  // EBA firms the one GLEIF holds for their exact legal name, and their supervisor's reference.
+  if (!['gleif', 'esma', 'pra', 'eba'].includes(candidate.provider)) return false;
+  return [candidate.localRegistryId, candidate.supervisorReference].some(number => {
+    const chars = (number ?? '').normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
+    if (chars.length < 5 || chars.length > 30) return false;
+    // GLEIF keeps a Companies House number padded («01167327»); the site writes
+    // «company number 1167327». Same rule as companiesHouseDigits.
+    const digits = companiesHouseDigits(chars);
+    const pattern = `${digits !== chars ? '(?:0[\\s.:/-]*)*' : ''}${digits.split('').map(char => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s.:/-]*')}`;
+    const end = '(?![\\p{L}\\p{N}]|[\\s.-]{1,3}\\d)';
+    return /\p{L}/u.test(chars)
+      ? new RegExp(`(?<![\\p{L}\\p{N}])${pattern}${end}`, 'iu').test(value)
+      : new RegExp(`\\b${LOCAL_REGISTRY_LABELS}\\b[\\s:./#-]{0,16}${pattern}${end}`, 'iu').test(value);
+  });
 }
 interface OwnFacts { identity: boolean; employees: HeEngEmployeeRange | null }
 /** Site identity is verified from its own Organization, never a search result title/snippet. */
