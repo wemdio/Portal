@@ -52,6 +52,9 @@ jest.mock('@/lib/verticalEngineV2/relevanceGate', () => ({
 }));
 
 import { addVeKnownWebsiteSource, VE_KNOWN_ADULT_WEBSITES } from '@/lib/verticalEngineV2/knownWebsiteDirectory';
+import { finalizeVeTwoGisTwins, pairVeTwoGisStates, veCountedPlanTasks, veTwoGisTwinKeys, VE_TWO_GIS_PAIR_LOST_NOTE, withVeTwoGisTwins } from '@/lib/verticalEngineV2/twoGisQuarantine';
+import { applyVeCollectionGeographyToPlan, veTwoGisQueryScope } from '@/lib/verticalEngineV2/collectionGeography';
+import { veCanWidenPlan } from '@/lib/verticalEngineV2/planWidening';
 import { createHash } from 'node:crypto';
 import { createMockSupabase as createRawMockSupabase, type MockSupabaseClient, type MockSupabaseSeed } from '@/../tests/helpers/mockSupabase';
 import { capVeContactsPerCompany, normalizeVeMaxEmailsPerCompany } from '@/lib/verticalEngineV2/companyContactCap';
@@ -4369,6 +4372,213 @@ describe('base_collect: план кончился раньше цели', () => 
     }
   });
 
+  // 2ГИС (план R3, часть 2): флаг, близнецы в первичном плане, пары.
+  const TWO_GIS_FLAG = { version: 1 as const, snapshot_id: 7, features_version: 1, max_candidates: 1000, frozen_at: '2026-10-26T12:00:00.000Z' };
+  const twoGisMaps = (query: string) => ({ source: 'yandex_maps' as const, rationale: `Карты: ${query}`, maps_query: { geo: 'Россия', queries: [query] } });
+
+  it('2ГИС: флаг ставит только вставка нового RU-превью при mode=on, проверенном снимке и открытой выдаче; поставка копирует его по тем же правилам', async () => {
+    const settings = { market: 'ru', mode: 'on', reads_enabled: true, client_use: 'all', internal_projects: [], excluded_projects: [],
+      quiet_start_utc: '02:00', quiet_end_utc: '11:00', max_candidates: 1000, snapshot_id: 7, features_version: 1, built_at: '2026-10-26T10:00:00Z' };
+    const meat = (id: string) => ({ id, project_id: 'p1', vertical_id: 'v1', status: 'accepted', broad: false, ...MEAT });
+    const enqueueDb = (row: Record<string, unknown> | null, market = 'ru', errorTables?: Record<string, string>) => createMockSupabase({
+      tables: { ve_projects: [{ id: 'p1', brief: {}, market }], ve_hypotheses: [meat('h1'), meat('h2')],
+        ...(row ? { ve_twogis_source_settings: [row] } : {}) }, ...(errorTables ? { errorTables } : {}) });
+    const settingsReads = (db: MockSupabaseClient) => db.selects.filter((read) => read.table === 've_twogis_source_settings').length;
+    const enqueue = { verticalId: 'v1', projectId: 'p1', verticalName: 'Мясо', limit: 100 };
+    const preview = { ...enqueue, collectionMode: 'preview' as const, hypothesisIds: ['h1', 'h2'] };
+    const db = enqueueDb(settings);
+    await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, preview)).resolves.toMatchObject({ ok: true, created: true });
+    expect(db.getRows('ve_bases').map((base) => (base.collect_info as VeCollectInfo).two_gis_source))
+      .toEqual([0, 1].map(() => ({ ...TWO_GIS_FLAG, frozen_at: expect.any(String) })));
+    expect(db.getRows('ve_jobs').every((row) => !('two_gis_source' in (row.payload as Record<string, unknown>)))).toBe(true);
+    expect(settingsReads(db)).toBe(1); // одна строка настроек на запрос
+    expect(db.selects).toContainEqual({ table: 've_projects', columns: 'brief, market' }); // рынок — тем же чтением, что и география
+    // Повтор и ремонт осиротевшей базы флаг не ставят и настроек не читают.
+    await db.from('ve_twogis_source_settings').update({ snapshot_id: 8 }).eq('market', 'ru');
+    await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, preview)).resolves.toMatchObject({ ok: true, created: false });
+    await db.from('ve_jobs').delete();
+    await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, preview)).resolves.toMatchObject({ ok: true, created: false });
+    expect(settingsReads(db)).toBe(1);
+    expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).two_gis_source?.snapshot_id).toBe(7);
+    for (const [row, market, errors] of [[{ ...settings, mode: 'off' }], [{ ...settings, client_use: 'off' }],
+      [{ ...settings, excluded_projects: ['p1'] }], [{ ...settings, client_use: 'internal', internal_projects: ['other'] }],
+      [{ ...settings, snapshot_id: null }], [{ ...settings, mode: 'maybe' }], [null], [settings, 'ru', { ve_twogis_source_settings: 'read failed' }],
+      [settings, 'us']] as Array<[Record<string, unknown> | null, string?, Record<string, string>?]>) {
+      const closed = enqueueDb(row, market, errors);
+      await expect(enqueueVeBaseCollect(closed as unknown as SupabaseClient, preview)).resolves.toMatchObject({ ok: true, created: true });
+      expect(closed.getRows('ve_bases').some((base) => 'two_gis_source' in (base.collect_info as VeCollectInfo))).toBe(false);
+      expect(settingsReads(closed)).toBe(market === 'us' ? 0 : 1);
+    }
+    const refill = enqueueDb(settings);
+    await expect(enqueueVeBaseCollect(refill as unknown as SupabaseClient, { ...enqueue, hypothesisIds: null, refill: { campaignId: 'c1' } }))
+      .resolves.toMatchObject({ ok: true });
+    expect(settingsReads(refill)).toBe(0);
+
+    // Поставка: линия запуска несёт флаг и без снимка и географии; чужая форма — как флага нет.
+    const lineage = { ve_contact_supply_batches: [{ id: 'flag-batch', base_id: 'b1', plan_id: 'flag-plan' }],
+      ve_contact_supply_plans: [{ id: 'flag-plan', project_id: 'p1', hypothesis_id: 'h1', item_id: 'flag-launch' }],
+      ve_launch_queue_items: [{ id: 'flag-launch', project_id: 'p1', hypothesis_id: 'h1', base_id: 'flag-preview' }] };
+    const source = { id: 'flag-preview', project_id: 'p1', hypothesis_id: 'h1', source: 'auto', status: 'analyzed', audience_snapshot: null, cost_policy: null };
+    const lineageInput = { projectId: 'p1', hypothesisId: 'h1', batchId: 'flag-batch', baseId: 'b1' };
+    for (const [flag, expected] of [[TWO_GIS_FLAG, { snapshot: null, costPolicy: null, geography: null, twoGisSource: TWO_GIS_FLAG }],
+      [{ ...TWO_GIS_FLAG, version: 2 }, null], [undefined, null]] as const) {
+      const lineageDb = createMockSupabase({ tables: { ...lineage, ve_bases: [{ ...source, two_gis_source: flag }] } });
+      await expect(loadVeApprovedSupplyAudience(lineageDb as unknown as SupabaseClient, lineageInput)).resolves.toEqual(expected);
+      expect(lineageDb.selects.some((read) => read.table === 've_bases'
+        && read.columns.includes('two_gis_source:collect_info->two_gis_source'))).toBe(true);
+    }
+    jest.mocked(searchRows).mockResolvedValue({ rows: [] } as never);
+    for (const [row, flagged, copied] of [[settings, true, true], [{ ...settings, mode: 'off' }, true, false],
+      [{ ...settings, snapshot_id: 8 }, true, false], [{ ...settings, features_version: 2 }, true, false],
+      [{ ...settings, excluded_projects: ['p1'] }, true, false], [settings, false, false]] as const) {
+      const supplyInfo: VeCollectInfo = { collection_mode: 'supply', supply_batch_id: 'flag-batch', ready_target: 500 };
+      const supplyDb = seed(supplyInfo, { ...hypothesis({ ...MEAT, broad: false }), ...lineage, ve_twogis_source_settings: [row],
+        ve_bases: [makeBase(supplyInfo), { ...source, ...(flagged ? { two_gis_source: TWO_GIS_FLAG } : {}),
+          collection_geography: { version: 1, required: null } }] });
+      const originalRpc = supplyDb.rpc;
+      supplyDb.rpc = (name, params) => name === 've_require_contact_supply_active'
+        ? Promise.resolve({ data: { id: 'flag-plan' }, error: null }) : originalRpc(name, params);
+      jest.mocked(callLLMWithSchema).mockResolvedValueOnce(planLlmReply([MEAT_TASK]));
+      const supply = (await wake(supplyDb)).collect_info as VeCollectInfo;
+      if (copied) expect(supply.two_gis_source).toEqual(TWO_GIS_FLAG);
+      else expect(supply).not.toHaveProperty('two_gis_source');
+      expect(settingsReads(supplyDb)).toBe(flagged ? 1 : 0);
+    }
+  });
+
+  it('2ГИС: база без флага, а с флагом — при профиле аудитории, получает тот же план, промпт и состояния; реплан близнецов не даёт', async () => {
+    jest.mocked(searchRows).mockResolvedValue({ rows: [] } as never);
+    const llmTasks = [MEAT_TASK, twoGisMaps('мясокомбинат'), twoGisMaps('колбасный цех')];
+    const run = async (info: VeCollectInfo, text: { title: string; description: string; broad?: boolean; audience_scope?: unknown }) => {
+      jest.mocked(callLLMWithSchema).mockClear();
+      const db = seed(info, hypothesis(text));
+      jest.mocked(callLLMWithSchema).mockResolvedValueOnce(planLlmReply(llmTasks));
+      const saved = (await wake(db)).collect_info as VeCollectInfo;
+      return { saved, prompt: jest.mocked(callLLMWithSchema).mock.calls[0][0],
+        settingsReads: db.selects.filter((read) => read.table === 've_twogis_source_settings').length };
+    };
+    type Text = { title: string; description: string; broad?: boolean };
+    const texts: Text[] = [{ ...MEAT, broad: false }, { ...MEAT }, { title: 'Стоматологические клиники', broad: false,
+      description: 'Частные стоматологии с несколькими креслами и записью пациентов онлайн.' }];
+    for (const text of texts) {
+      const plain = await run({ collection_mode: 'preview' }, text);
+      expect(plain.saved.plan!.tasks.some((task) => task.source === 'two_gis')).toBe(false);
+      // Задачи карт этот тик не трогал: их состояние — ровно прежние пять полей, без two_gis и пары.
+      expect(plain.saved.tasks!.slice(1).map((state) => Object.keys(state).sort().join()))
+        .toEqual(['child_job_id,rows,source,status,task', 'child_job_id,rows,source,status,task']);
+      expect(plain.settingsReads).toBe(0);
+      if (text.broad === false && text.title === MEAT.title) continue; // без профиля флаг даёт близнецов — следующий it()
+      // Флаг при профиле или непрочитанном broad ничего не меняет: тот же план, состояния и промпт.
+      const inert = await run({ collection_mode: 'preview', two_gis_source: TWO_GIS_FLAG }, text);
+      expect(inert.saved.plan).toEqual(plain.saved.plan);
+      expect(inert.saved.tasks).toEqual(plain.saved.tasks);
+      expect(inert.prompt).toEqual(plain.prompt);
+      expect(inert.settingsReads).toBe(0);
+    }
+
+    // Реплан базы с близнецом: в промпте его нет, добавленная задача — без близнеца и пары.
+    const [maps, twin] = withVeTwoGisTwins({ tasks: [twoGisMaps('мясокомбинат')] }).tasks;
+    const replanInfo = exhaustedInfo(MEAT_TASK, { two_gis_source: TWO_GIS_FLAG,
+      adaptive_collection: { ...newVeAdaptiveCollection(), replan_needed: true, replan_reason: 'low_yield', active_source: veSourceStrategyKey(MEAT_TASK) } });
+    replanInfo.plan!.tasks.push(maps, twin);
+    replanInfo.tasks!.push({ source: 'yandex_maps', task: maps, status: 'done', child_job_id: null, rows: 0, exhausted: true, two_gis_pair_id: 'p' },
+      { source: 'two_gis', task: twin, status: 'done', child_job_id: null, rows: 0, unavailable: true, two_gis_pair_id: 'p' });
+    jest.mocked(callLLMWithSchema).mockClear();
+    const db = seedBase(replanInfo, { ...MEAT, broad: false });
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(planLlmReply([twoGisMaps('кондитерская фабрика'), SWEETS_TASK]));
+    const replanned = (await wake(db)).collect_info as VeCollectInfo;
+    const feedback = String(jest.mocked(callLLMWithSchema).mock.calls[0][0].at(-1)?.content);
+    expect(feedback).toContain('Предыдущий план (без порогов размера)');
+    expect(feedback).not.toContain('two_gis');
+    // Реплан добавил Яндекс-задачу — без близнеца и без пары; близнец в базе по-прежнему один.
+    expect(replanned.tasks![3]).toMatchObject({ source: 'yandex_maps', task: { maps_query: { queries: ['кондитерская фабрика'] } } });
+    expect(replanned.tasks![3].two_gis_pair_id).toBeUndefined();
+    expect(replanned.tasks!.filter((state) => state.source === 'two_gis')).toHaveLength(1);
+    expect(replanned.tasks!.slice(3).every((state) => state.two_gis_pair_id === undefined)).toBe(true);
+  });
+
+  it('2ГИС: близнецы вне потолка 6 задач, каждый сразу после своей Яндекс-задачи с общей парой; known_websites близнеца не перезаписывает', async () => {
+    jest.mocked(searchRows).mockResolvedValue({ rows: [] } as never);
+    const directory = (okved: string) => ({ source: 'companies_directory' as const, rationale: `Реестр ${okved}`,
+      directory_filters: { includeIp: false, okvedCodes: [okved] } });
+    const hh = { source: 'hh_live' as const, rationale: 'Найм технологов мясного производства', hh_query: { text: 'технолог мясного производства' } };
+    const db = seed({ collection_mode: 'preview', two_gis_source: TWO_GIS_FLAG }, hypothesis({ ...MEAT, broad: false }));
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(planLlmReply([directory('10.1'), twoGisMaps('мясокомбинат'),
+      twoGisMaps('колбасный цех'), hh, directory('10.13')]));
+    const info = (await wake(db)).collect_info as VeCollectInfo;
+    expect(info.plan!.tasks.map((task) => task.source)).toEqual(['companies_directory', 'yandex_maps', 'two_gis', 'yandex_maps', 'two_gis',
+      'hh_live', 'companies_directory']);
+    expect(veCountedPlanTasks(info.plan!.tasks)).toHaveLength(5);
+    const pairs = info.tasks!.map((state) => state.two_gis_pair_id ?? null);
+    expect(pairs[1]).toEqual(expect.any(String));
+    expect([pairs[2], pairs[3], pairs[4]]).toEqual([pairs[1], expect.any(String), pairs[3]]);
+    expect(pairs[3]).not.toBe(pairs[1]);
+    expect([pairs[0], pairs[5], pairs[6]]).toEqual([null, null, null]);
+    // Потолок плана считает только 5 настоящих задач; с двумя обычными вместо близнецов их было бы 7.
+    expect(veCanWidenPlan(info.plan!.tasks, { replan_attempts: 0, widenings: 0 })).toBe(true);
+    expect(veCanWidenPlan([...veCountedPlanTasks(info.plan!.tasks), directory('10.85'), directory('10.86')],
+      { replan_attempts: 0, widenings: 0 })).toBe(false);
+
+    // Решение Сергея 26.10: структурная аудитория получает близнеца, кроме аудитории с обязательными условиями;
+    // профили (ниша, клиники, медиа, ритейл, рестораны, генерация, финтех) — без близнецов.
+    const planOf = async (text: Record<string, unknown>, tasks: unknown[], extra: Partial<VeCollectInfo> = {}) => {
+      const profiledDb = seed({ collection_mode: 'preview', two_gis_source: TWO_GIS_FLAG, ...extra },
+        hypothesis(text as { title: string; description: string }));
+      jest.mocked(callLLMWithSchema).mockResolvedValueOnce(planLlmReply(tasks));
+      const profiled = await wake(profiledDb);
+      expect(profiled.status).not.toBe('failed');
+      return (profiled.collect_info as VeCollectInfo).plan!.tasks.map((task) => task.source);
+    };
+    const scope = (required: string[]) => ({ version: 1, kind: 'segment', any_of: ['Мясоперерабатывающие заводы'], required, excluded: [] });
+    const meatPlan = [directory('10.1'), twoGisMaps('мясокомбинат')];
+    expect(await planOf({ ...MEAT, broad: false, audience_scope: scope([]) }, meatPlan)).toEqual(['companies_directory', 'yandex_maps', 'two_gis']);
+    expect(await planOf({ ...MEAT, broad: false, audience_scope: scope(['Собственная лаборатория']) }, meatPlan))
+      .toEqual(['companies_directory', 'yandex_maps']);
+    // Дедуп близнецов — после географии брифа: «Москва» и «Россия» сводятся к одному ключу; проза — без близнеца.
+    const moscowRussia = [directory('10.1'), { ...twoGisMaps('мясокомбинат'), maps_query: { geo: 'Москва', queries: ['мясокомбинат'] } },
+      twoGisMaps('мясокомбинат')];
+    expect(await planOf({ ...MEAT, broad: false }, moscowRussia, { collection_geography: { version: 1, required: 'Москва и МО' } }))
+      .toEqual(['companies_directory', 'yandex_maps', 'two_gis', 'yandex_maps']);
+    expect(await planOf({ ...MEAT, broad: false }, meatPlan, { collection_geography: { version: 1, required: 'РФ кроме Москвы' } }))
+      .not.toContain('two_gis');
+    for (const profile of [
+      { title: 'Платформы веб-моделей и взрослого контента', description: 'Стриминговые платформы для взрослых и фан-сообщества 18+.', broad: false },
+      { title: 'Стоматологические клиники', description: 'Частные стоматологии с несколькими креслами и записью пациентов онлайн.', broad: false },
+      { title: 'Игры и анимация', broad: false,
+        description: 'Игровые издатели, анимационные студии и владельцы IP с титрами, UI, мерчем и промо. Шрифт помогает создать узнаваемый мир и локализовать кириллицу.' },
+      { title: 'Производители строительно-отделочных материалов', broad: false, origin: 'generated',
+        description: 'Заводы сухих смесей, напольных покрытий, плитки и ЛКМ с собственным шоурумом и интернет-магазином. Потеря прямых частных заказов при передаче их сторонним дилерам.' },
+      { title: 'Сетевые ресторанные альянсы и гастромаркеты', broad: false, origin: 'generated',
+        description: 'Ресторанные холдинги, сети концептуальных кафе и фудмоллы. Необходимость привлекать трафик гостей в непиковые часы и презентовать сезонные меню.' },
+      { title: 'Энергетические компании', broad: false,
+        description: 'ТЭЦ, ГРЭС, АЭС-смежные и генерирующие компании с химлабораториями воды, топлива, масел и выбросов. ЛИМС упорядочивает пробы, графики, приборы и отчётность.' },
+      // Широкий финтех, который не распознаётся нишей «платежи».
+      { title: 'Финтех-компании', description: 'Необанки и финтех-сервисы', broad: true },
+    ]) {
+      const sources = await planOf(profile, [...meatPlan, hh]);
+      expect(sources).toContain('yandex_maps');
+      expect(sources).not.toContain('two_gis');
+    }
+
+    // known_websites: при добавлении близнец не перезаписан; при замене его Яндекс-задачи — закрыт.
+    const adult = { id: 'h1', status: 'accepted', title: 'Платформы веб-моделей и взрослого контента',
+      description: 'Стриминговые платформы для взрослых и фан-сообщества 18+.' };
+    const [webcam, webcamTwin] = withVeTwoGisTwins({ tasks: [twoGisMaps('вебкам студия')] }).tasks;
+    const knownInfo = (maps: Partial<NonNullable<VeCollectInfo['tasks']>[number]>): VeCollectInfo => ({ collection_mode: 'preview',
+      hypotheses: [adult], niche_source_profile: 'adult_platform', plan: { tasks: [webcam, webcamTwin] },
+      target_progress: { ...createCollectionTarget('preview'), round: 1, candidates_processed: 0, ready_rows: 0 },
+      tasks: [{ source: 'yandex_maps', task: webcam, status: 'pending', child_job_id: null, rows: 0, two_gis_pair_id: 'p', ...maps },
+        { source: 'two_gis', task: webcamTwin, status: 'pending', child_job_id: null, rows: 0, two_gis_pair_id: 'p' }] });
+    const appended = knownInfo({ status: 'done', rows: 2, harvest: processed });
+    expect(addVeKnownWebsiteSource(appended)).toBe(true);
+    expect(appended.tasks!.map((state) => state.source)).toEqual(['yandex_maps', 'two_gis', 'known_websites']);
+    expect(appended.tasks![1]).toEqual({ source: 'two_gis', task: webcamTwin, status: 'pending', child_job_id: null, rows: 0, two_gis_pair_id: 'p' });
+    const replaced = knownInfo({});
+    expect(addVeKnownWebsiteSource(replaced)).toBe(true);
+    expect(replaced.tasks!.map((state) => state.source)).toEqual(['known_websites', 'two_gis']);
+    expect(replaced.tasks![1]).toMatchObject({ status: 'done', unavailable: true, two_gis_pair_id: 'p' });
+  });
+
   it('analyzed-база с исчерпанным реестром с порогами продолжается и открывает расширенный срез', async () => {
     const info = exhaustedInfo(SWEETS_TASK, {
       target_progress: { ...createCollectionTarget('preview'), status: 'limited', round: 11, max_rounds: 100, candidates_processed: processed.length,
@@ -5048,6 +5258,150 @@ describe('base_collect: старая задача карт продолжает�
       expect(db.getRows('base_constructor_jobs')).toHaveLength(0);
       if (task === twin) expect(state.harvest).toEqual([twinRow]);
     }
+  });
+
+  it('2ГИС: ключ близнеца не зависит от пары и плана, одинаковые близнецы сводятся к одному, пара переживает географию и jsonb', async () => {
+    // Ключи прежних задач не меняются (сняты до части 2).
+    expect(veSourceStrategyKey({ source: 'yandex_maps', rationale: 'r', maps_query: { geo: 'Россия', queries: ['агентство недвижимости'] } }))
+      .toBe('9d88872881c5ff95b9b49d062f3a272f3f7c8ddec4a2875a82bdcfbe8088220c');
+    expect(veSourceStrategyKey({ source: 'companies_directory', rationale: 'r', directory_filters: { okvedCodes: ['68.3'], includeIp: false } }))
+      .toBe('8bf09126779c0b2cb021cc6d293678c7f23aa5d1e25dba59638acb4e347b4841');
+    expect(veSourceStrategyKey({ source: 'hh_live', rationale: 'r', hh_query: { text: 'риелтор', area: '113' } }))
+      .toBe('e200accb1a96c9b299dc62c4215944824eda2bb24a038940328c575608cb0c68');
+    const moscow = { ...REALTY_MAPS, maps_query: { geo: 'Москва', queries: [...REALTY_MAPS.maps_query.queries] } };
+    const plan = { tasks: [REALTY_DIRECTORY, REALTY_MAPS, moscow] };
+    const first = withVeTwoGisTwins(plan), again = withVeTwoGisTwins(structuredClone(plan));
+    expect(first.tasks.map((task) => task.source)).toEqual(['companies_directory', 'yandex_maps', 'two_gis', 'yandex_maps', 'two_gis']);
+    expect(first.tasks[0]).toBe(REALTY_DIRECTORY);
+    expect(first.tasks[2].two_gis_query).toEqual({ from_queries: REALTY_MAPS.maps_query.queries, geo: 'Россия' });
+    const twinKeys = (tasks: typeof first.tasks) => tasks.filter((task) => task.source === 'two_gis').map(veSourceStrategyKey);
+    expect(twinKeys(again.tasks)).toEqual(twinKeys(first.tasks));
+    expect(new Set(twinKeys(first.tasks)).size).toBe(2); // те же запросы, другое geo — два ключа
+    const states = first.tasks.map((task) => ({ source: task.source, task, status: 'pending' as const, child_job_id: null, rows: 0 })) as
+      NonNullable<VeCollectInfo['tasks']>;
+    const unpaired = veTwoGisTwinKeys(states);
+    let id = 0;
+    pairVeTwoGisStates(states, () => `pair-${++id}`);
+    expect(states.map((state) => state.two_gis_pair_id ?? null)).toEqual([null, 'pair-1', 'pair-1', 'pair-2', 'pair-2']);
+    expect(veTwoGisTwinKeys(JSON.parse(JSON.stringify(states)))).toEqual(unpaired);
+    const doubled = finalizeVeTwoGisTwins(withVeTwoGisTwins({ tasks: [REALTY_MAPS, { ...REALTY_MAPS, rationale: 'Другая формулировка' }] }));
+    expect(doubled).toMatchObject({ added: 1, dropped: 1 });
+    const doubledStates = doubled.plan.tasks.map((task) => ({ source: task.source, task, status: 'pending' as const, child_job_id: null, rows: 0 })) as
+      NonNullable<VeCollectInfo['tasks']>;
+    pairVeTwoGisStates(doubledStates, () => 'only');
+    expect(doubledStates.map((state) => [state.source, state.two_gis_pair_id ?? null])).toEqual([['yandex_maps', 'only'], ['two_gis', 'only'], ['yandex_maps', null]]);
+    // Близнец без соседки-Яндекса с теми же запросами — «пара потеряна», без id пары.
+    const [lostMaps, lostTwin] = withVeTwoGisTwins({ tasks: [REALTY_MAPS] }).tasks;
+    for (const order of [[lostTwin, lostMaps], [{ ...lostMaps, maps_query: { ...lostMaps.maps_query!, queries: ['другой запрос'] } }, lostTwin]]) {
+      const lost = order.map((task) => ({ source: task.source, task, status: 'pending' as const, child_job_id: null, rows: 0 })) as
+        NonNullable<VeCollectInfo['tasks']>;
+      pairVeTwoGisStates(lost, () => 'never');
+      const twinState = lost.find((state) => state.source === 'two_gis')!;
+      expect(twinState).toMatchObject({ status: 'done', unavailable: true, note: VE_TWO_GIS_PAIR_LOST_NOTE });
+      expect(lost.every((state) => state.two_gis_pair_id === undefined)).toBe(true);
+    }
+    // География 2ГИС — только Россия: регион с кодом, город, вся страна; чужая страна и проза — не читаем.
+    for (const [geo, scope] of [['Москва и МО', { region_codes: ['77', '50'] }], ['Казань', { cities: ['Казань'] }], ['Россия', {}],
+      ['Россия, Москва', {}], ['Россия, Казахстан', null], ['РФ кроме Москвы', null], ['Кемеровская область', { region_codes: ['42'] }],
+      ['Москва, Ханты-Мансийский АО - Югра', { region_codes: ['77', '86'] }]] as const) expect(veTwoGisQueryScope({ geo })).toEqual(scope);
+    expect(veTwoGisQueryScope({})).toEqual({});
+    const geography = { version: 1 as const, required: 'Москва и МО' };
+    const placed = applyVeCollectionGeographyToPlan(first, geography);
+    expect(placed.tasks[2].two_gis_query).toEqual({ from_queries: REALTY_MAPS.maps_query.queries, geo: 'Москва, Московская область',
+      region_codes: ['77', '50'], collection_geography: geography });
+    expect(JSON.stringify(applyVeCollectionGeographyToPlan(placed, geography))).toBe(JSON.stringify(placed));
+    expect(finalizeVeTwoGisTwins(placed)).toMatchObject({ added: 1, dropped: 1 }); // география свела два geo к одному ключу
+    expect(finalizeVeTwoGisTwins(applyVeCollectionGeographyToPlan(first, { version: 1, required: 'РФ кроме Москвы' })).added).toBe(0);
+
+    // Тик базы: пары из jsonb (ключи по длине, затем по байтам) не дают ложного «отличается».
+    const TWO_GIS_TICK_FLAG = { version: 1 as const, snapshot_id: 7, features_version: 1, max_candidates: 1000, frozen_at: '2026-10-26T12:00:00.000Z' };
+    const jsonb = (value: unknown): unknown => Array.isArray(value) ? value.map(jsonb) : value && typeof value === 'object'
+      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0))
+        .map(([key, item]) => [key, jsonb(item)])) : value;
+    const other = { ...REALTY_MAPS, maps_query: { geo: 'Россия', queries: ['риелтор'] } };
+    const stale = { ...REALTY_MAPS, maps_query: { geo: 'Россия', queries: ['новостройки'] } };
+    const [storedMaps, storedTwin, storedOther, rawOtherTwin, storedStale, rawStaleTwin] = [
+      ...placed.tasks.slice(1, 3), ...applyVeCollectionGeographyToPlan({ tasks: [other] }, geography).tasks,
+      ...withVeTwoGisTwins({ tasks: [other] }).tasks.slice(1), ...applyVeCollectionGeographyToPlan({ tasks: [stale] }, geography).tasks,
+      ...withVeTwoGisTwins({ tasks: [stale] }).tasks.slice(1)].map((task) => jsonb(task) as typeof first.tasks[number]);
+    const done = { status: 'done' as const, child_job_id: null, rows: 0, exhausted: true, catalog: { version: 1 as const,
+      filters: { categories: ['Агентства недвижимости'], countries: ['Россия'] } } };
+    // У ожидающего близнеца — старые города и курсор: пересчёт географии убирает оба.
+    const staleOtherTwin = jsonb({ ...rawOtherTwin, two_gis_query: { ...rawOtherTwin.two_gis_query!, cities: ['Казань'] } }) as typeof rawOtherTwin;
+    const [, orphanTwin] = withVeTwoGisTwins({ tasks: [{ ...REALTY_MAPS, maps_query: { geo: 'Россия', queries: ['сирота'] } }] }).tasks;
+    const staleRow = unifiedRow({ company: 'АН Справочный', website: 'spravka-an.test', source_detail: 'справочник организаций' });
+    const info = jsonb({ collection_mode: 'preview', collection_geography: geography,
+      two_gis_source: TWO_GIS_TICK_FLAG, target_progress: createCollectionTarget('preview'),
+      plan: { tasks: [storedMaps, storedTwin, storedOther, staleOtherTwin, storedStale, rawStaleTwin, orphanTwin] },
+      tasks: [
+        { source: 'yandex_maps', task: storedMaps, ...done, two_gis_pair_id: 'p' },
+        { source: 'two_gis', task: storedTwin, status: 'pending', child_job_id: null, rows: 0, two_gis_pair_id: 'p' },
+        { source: 'yandex_maps', task: storedOther, ...done, two_gis_pair_id: 'q' },
+        { source: 'two_gis', task: staleOtherTwin, status: 'pending', child_job_id: null, rows: 0, two_gis_pair_id: 'q',
+          two_gis: { version: 1, cursor: 1 } },
+        { source: 'yandex_maps', task: storedStale, ...done, two_gis_pair_id: 'r' },
+        { source: 'two_gis', task: rawStaleTwin, status: 'done', child_job_id: null, rows: 1, harvest: [staleRow], two_gis_pair_id: 'r' },
+        // Близнец без Яндекс-задачи с той же парой: тик закрывает его «пара потеряна».
+        { source: 'two_gis', task: orphanTwin, status: 'pending', child_job_id: null, rows: 0, two_gis_pair_id: 's' },
+      ] }) as VeCollectInfo;
+    const db = seed(info, { ve_hypotheses: [{ id: 'h1', project_id: 'p1', vertical_id: 'v1', status: 'accepted', broad: false,
+      title: 'Агентства недвижимости', description: 'Агентства недвижимости с сайтом.' }] });
+    await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+    const base = db.getRows('ve_bases')[0];
+    const saved = base.collect_info as VeCollectInfo;
+    expect(base.status).not.toBe('failed');
+    expect(saved.tasks!.map((state) => state.two_gis_pair_id)).toEqual(['p', 'p', 'q', 'q', 'r', 'r', 's']);
+    expect(JSON.stringify(saved.tasks![1].task)).toBe(JSON.stringify(storedTwin));
+    // Ожидающий близнец без географии пересчитан веткой two_gis; пара та же.
+    expect(saved.tasks![3].task.two_gis_query).toEqual({ from_queries: ['риелтор'], geo: 'Москва, Московская область',
+      region_codes: ['77', '50'], collection_geography: geography });
+    expect(saved.tasks![3].two_gis).toBeUndefined();
+    expect(saved.tasks![6]).toMatchObject({ status: 'done', unavailable: true, note: VE_TWO_GIS_PAIR_LOST_NOTE });
+    // Близнец с прогрессом по прежней географии закрыт, а не валит базу; собранное осталось.
+    expect(saved.tasks![5]).toMatchObject({ status: 'done', unavailable: true, rows: 1, task: rawStaleTwin,
+      note: 'География сбора изменилась: справочник организаций по прежней географии не продолжается' });
+    expect(saved.tasks![5].harvest).toEqual([staleRow]);
+
+    // География брифа не сводится к местам России: ожидающий близнец закрыт на тике, база не падает.
+    const prose = { version: 1 as const, required: 'РФ кроме Москвы' };
+    const [proseMaps] = applyVeCollectionGeographyToPlan({ tasks: [REALTY_MAPS] }, prose).tasks;
+    const [, proseTwin] = withVeTwoGisTwins({ tasks: [REALTY_MAPS] }).tasks;
+    const proseInfo: VeCollectInfo = { collection_mode: 'preview', collection_geography: prose, two_gis_source: TWO_GIS_TICK_FLAG,
+      target_progress: createCollectionTarget('preview'), plan: { tasks: [proseMaps, proseTwin] }, tasks: [
+        { source: 'yandex_maps', task: proseMaps, ...done, two_gis_pair_id: 'p' },
+        { source: 'two_gis', task: proseTwin, status: 'pending', child_job_id: null, rows: 0, two_gis_pair_id: 'p' }] };
+    const proseDb = seed(proseInfo, { ve_hypotheses: [{ id: 'h1', project_id: 'p1', vertical_id: 'v1', status: 'accepted', broad: false,
+      title: 'Агентства недвижимости', description: 'Агентства недвижимости с сайтом.' }] });
+    await runBaseCollectStage(makeJob(), { supabase: proseDb as unknown as SupabaseClient });
+    expect(proseDb.getRows('ve_bases')[0].status).not.toBe('failed');
+    expect((proseDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks![1]).toMatchObject({ status: 'done', unavailable: true,
+      two_gis_pair_id: 'p', note: 'География сбора не сводится к регионам и городам России: справочник организаций не читается' });
+
+    // Ремонт географии не оставляет близнеца живым: он в retired, пересобранная Яндекс-задача — без пары.
+    const repairRows = [0, 1].map((i) => ({ company: `Агентство ${i}`, inn: `770000001${i}`, email: `a${i}@example.test`,
+      address: 'Москва', _email_status: 'ok', _ve_relevance: { status: 'relevant', context_hash: 'paid' },
+      _ve_company_name: { version: 1, source: `Агентство ${i}`, website: '', status: 'ready', value: `Агентство ${i}` } }));
+    const [repairMaps, repairTwin] = withVeTwoGisTwins({ tasks: [REALTY_MAPS] }).tasks;
+    const repairSnapshot: VeGeographyRepairSnapshot = { project_id: 'project', setup_revision: 1, selected: true, approved: false,
+      frozen: false, accepted_launch: false,
+      base: { id: 'repair-base', project_id: 'project', hypothesis_id: 'hypothesis', source: 'auto', status: 'analyzed',
+        data: repairRows, row_count: repairRows.length, columns: ['company', 'inn', 'email', 'address'], updated_at: '2026-10-26T13:00:00Z',
+        max_emails_per_company: 1, analysis: null, collect_info: { collection_mode: 'preview',
+          target_progress: { mode: 'preview', ready_target: 500, ready_rows: 2, round: 3, max_rounds: 100,
+            candidates_processed: 50, max_candidates: 10000, status: 'limited' },
+          target_checkpoint: { completed_round: 3, seen_rows: repairRows, processed_rows: 2 },
+          tasks: [{ source: 'yandex_maps', status: 'pending', child_job_id: null, rows: 0, task: repairMaps, two_gis_pair_id: 'p' },
+            { source: 'two_gis', status: 'pending', child_job_id: null, rows: 0, task: repairTwin, two_gis_pair_id: 'p' }] } },
+      preparation: { base_id: 'repair-base', hypothesis_id: 'hypothesis', status: 'ready', updated_at: '2026-10-26T13:00:00Z',
+        paused_at: null, cancelled_at: null, pause_state: null, locked_until: null, claim_token: null, independent_control: true },
+      jobs: [], children: [] };
+    const repaired = planVeCollectionGeographyRepair(repairSnapshot, { repair_id: 'twin-geo', required: geography,
+      reviewed_data_hash: veGeographyRepairHash(repairRows), ready_row_indices: [0, 1], prepared_at: '2026-10-26T14:00:00Z' });
+    if (repaired.status === 'blocked') throw new Error(repaired.reasons.join(','));
+    expect(repaired.patch.collect_info.geography_repair?.retired_task_indices).toEqual([1]);
+    expect(repaired.patch.collect_info.tasks!.map((state) => state.source)).toEqual(['yandex_maps']);
+    expect(repaired.patch.collect_info.plan!.tasks.map((task) => task.source)).toEqual(['yandex_maps']);
+    expect(repaired.patch.collect_info.tasks![0].two_gis_pair_id).toBeUndefined();
   });
 });
 
