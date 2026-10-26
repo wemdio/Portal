@@ -33,7 +33,8 @@ export function buildHeEngReadyBaseAnalysis(
   const companies = new Set(rows.map((row) => heCompanySiteIdentity(row.website)?.host ||
     normalizeCompanyForDedup(text(row.company)) || text(row.email)));
   const ok = rows.filter((row) => row._email_status === 'ok').length;
-  const catchAll = rows.length - ok;
+  const unverified = rows.filter((row) => row._email_status === 'unknown').length;
+  const catchAll = rows.length - ok - unverified;
   const countries = rows.map((row) => readHeEngSourceCountry(row)?.country ?? 'Not recorded');
   const categories = rows.map((row) => text(row.category) || 'Not recorded');
   const reserveCount = typeof options.reserveCount === 'number' && Number.isSafeInteger(options.reserveCount)
@@ -44,7 +45,10 @@ export function buildHeEngReadyBaseAnalysis(
     company_type_distribution: [],
     title_distribution: [],
     notable_segments: rows.length ? [`${companies.size} companies in the ready contact batch.`] : [],
-    data_quality_notes: `${rows.length} unique ready contacts: ${ok} OK and ${catchAll} catch-all. ` +
+    data_quality_notes: (unverified
+      ? `${rows.length} unique ready contacts: ${ok} OK, ${catchAll} catch-all and ${unverified} unverified ` +
+        '(published on the company\'s own site; its mail server refused the check, so they are not sent with the others). '
+      : `${rows.length} unique ready contacts: ${ok} OK and ${catchAll} catch-all. `) +
       `${reserveCount} reserve contacts are stored separately and are not included in this summary. ` +
       (options.stopReason ? 'Collection stopped before filling all requested contacts; see the collection status for the reason. ' : '') +
       'Distributions use recorded metadata only; job roles and company services are not inferred.',
