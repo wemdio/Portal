@@ -526,12 +526,19 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         template: loaded.template,
         base: loaded.base,
       });
+      const launch = launchForAudit(loaded.template, audit);
+      // Неясный запуск в «Рассылку» записи запуска не оставляет — узнаём его по
+      // черновикам попытки, чтобы панель сверки предложила их удалить.
+      let senderDrafts = false;
+      if (audit.launch_status === 'uncertain' && !launch && audit.launch_reservation_id) {
+        senderDrafts = await readVeSenderReservationCampaigns(supabaseAdmin, audit.launch_reservation_id)
+          .then((drafts) => drafts.length > 0, () => false);
+      }
       return NextResponse.json({
-        audit: publicAudit(
-          audit,
-          validation.state === 'current',
-          launchForAudit(loaded.template, audit),
-        ),
+        audit: {
+          ...publicAudit(audit, validation.state === 'current', launch),
+          ...(senderDrafts ? { launch_transport: 'sender' } : {}),
+        },
       });
     },
   );

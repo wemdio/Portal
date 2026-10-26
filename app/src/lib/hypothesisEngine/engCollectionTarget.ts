@@ -119,16 +119,22 @@ export function createHeEngCollectionPool(
  * Owner decision 2026-10-26: an address the company published on its own site
  * whose mail server refused verification (validator «unknown», e.g. Microsoft
  * 365 or Mimecast) stays in the base after the checked ones, marked
- * `_email_unverified: 'site'`, and is never sent with them. Registry rows
- * bring an address of their own (engPublicRegistries), so only rows whose
- * address can come from the site crawl alone qualify, and only on the
- * company's own domain: its catalogue site or the current site found for it.
+ * `_email_unverified: 'site'`, and is never sent with them. Brreg, FMCSA and
+ * OpenStreetMap records bring an address of their own (engPublicRegistries),
+ * and their rows cannot tell it from a crawled one, so those rows never
+ * qualify. Other registries' records carry no address: every address of
+ * theirs came from the company's site. Either way only an address on the
+ * company's own domain qualifies: its catalogue site or the current site found.
  */
 export const HE_ENG_UNVERIFIED_SITE_EMAIL = 'site';
+// Registries whose records never carry an address (engPublicRegistries,
+// engPraRegistry, engEsmaRegistry). A new registry stays out until it is listed.
+const SITE_ONLY_REGISTRIES = new Set(['france', 'fdic', 'nppes', 'companies_house', 'gleif', 'pra', 'esma']);
 
 export function heEngUnverifiedSiteEmail(status: unknown, row: HeEngCollectionRow): boolean {
   if (typeof status !== 'string' || status.trim().toLowerCase() !== 'unknown') return false;
-  if (typeof row.source_detail !== 'string' || !row.source_detail.trim() || row.source_detail.startsWith('eng_registry')) return false;
+  if (typeof row.source_detail !== 'string' || !row.source_detail.trim()) return false;
+  if (row.source_detail.startsWith('eng_registry') && !SITE_ONLY_REGISTRIES.has(row.source_detail.slice('eng_registry:'.length))) return false;
   const email = typeof row.email === 'string' ? row.email.trim().toLowerCase() : '';
   const at = email.lastIndexOf('@');
   const domain = at > 0 && !/[\s,;]/.test(email) ? heCompanySiteIdentity(email.slice(at + 1))?.registrable : undefined;

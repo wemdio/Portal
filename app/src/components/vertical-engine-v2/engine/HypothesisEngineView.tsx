@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowRight, ChevronDown, Plus, X } from 'lucide-react';
 import type { VeProject } from '@/lib/verticalEngineV2/types';
+import { senderMarketBannerLines } from '@/lib/verticalEngineV2/senderTransport/labels';
 import {
   VE_API,
   veEngineCall,
@@ -53,6 +54,7 @@ export function VeEngineWorkspace({
   onProjectOpenChange?: (open: boolean) => void;
 } = {}) {
   const [projects, setProjects] = useState<VeProject[]>([]);
+  const [senderMarkets, setSenderMarkets] = useState<string[]>([]);
   const [listLoading, setListLoading] = useState(true);
   const [projectQuery, setProjectQuery] = useState('');
   const visibleProjects = projects.filter((project) =>
@@ -71,7 +73,10 @@ export function VeEngineWorkspace({
     void (async () => {
       try {
         const { data } = await veEngineCall<VeProjectsResponse>(`${VE_API}/projects`);
-        if (!cancelled) setProjects(Array.isArray(data.projects) ? data.projects : []);
+        if (!cancelled) {
+          setProjects(Array.isArray(data.projects) ? data.projects : []);
+          setSenderMarkets(senderMarketBannerLines(Array.isArray(data.launch_transport) ? data.launch_transport : []));
+        }
       } finally {
         if (!cancelled) setListLoading(false);
       }
@@ -145,6 +150,11 @@ export function VeEngineWorkspace({
           {errorMsg ? (
             <div className="mb-5">
               <StatusBox tone="error">{errorMsg}</StatusBox>
+            </div>
+          ) : null}
+          {senderMarkets.length ? (
+            <div className="mb-5">
+              <StatusBox tone="info">{senderMarkets.map((line) => <span key={line} className="block">{line}</span>)}</StatusBox>
             </div>
           ) : null}
 

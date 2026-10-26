@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type JSX } from 'react';
 import { parseLaunchInfo, type VeTemplateLaunchInfo } from '@/lib/verticalEngineV2/launchHandoff';
+import { senderOpenLabel } from '@/lib/verticalEngineV2/senderTransport/labels';
 import { VE_API, veEngineCall, veEnginePatch, veEnginePost } from '../api';
 import { HE, Spinner, StatusDot } from '../design';
 
@@ -64,6 +65,8 @@ interface SegmentationAuditSnapshot {
   launchStartedAt: string | null;
   launchError: string | null;
   launch: VeTemplateLaunchInfo | null;
+  /** Запуск шёл в «Рассылку»: по записи запуска или по черновикам неясной попытки. */
+  launchToSender: boolean;
   summary: SegmentationAuditSummary | null;
 }
 
@@ -240,6 +243,7 @@ function normalizeAudit(value: unknown): SegmentationAuditSnapshot | null {
     rawLaunchStatus === 'uncertain'
       ? rawLaunchStatus
       : 'idle';
+  const launch = parseLaunchInfo(record.launch);
   return {
     id,
     status,
@@ -249,7 +253,8 @@ function normalizeAudit(value: unknown): SegmentationAuditSnapshot | null {
     launchReservationId: firstString(record, ['launch_reservation_id', 'launchReservationId']) || null,
     launchStartedAt: firstString(record, ['launch_started_at', 'launchStartedAt']) || null,
     launchError: firstString(record, ['launch_error', 'launchError']) || null,
-    launch: parseLaunchInfo(record.launch),
+    launch,
+    launchToSender: record.launch_transport === 'sender' || launch?.transport === 'sender',
     summary: normalizeSummary(record.summary),
   };
 }
@@ -533,6 +538,38 @@ function LaunchRecoveryPanel({ audit }: { audit: SegmentationAuditController }):
     ),
   ];
 
+  // «Рассылка» сверяется только отменой: черновики попытки удаляются, запуск повторяется.
+  if (audit.audit?.launchToSender) {
+    return (
+      <section className="ve2-nt ve2-nt-warn space-y-3 px-4 py-3" aria-labelledby="segmentation-audit-title" role="alert">
+        <div>
+          <h3 id="segmentation-audit-title" className="flex items-center gap-2 text-sm font-medium">
+            <StatusDot tone="warn" />
+            Результат запуска нужно проверить
+          </h3>
+          <p className="ve2-mut mt-1 text-xs leading-relaxed">
+            Запуск в «Рассылку» не завершился: черновики этой попытки остались. Удалите их кнопкой ниже — затем запуск
+            можно повторить. Повтор заблокирован, чтобы не создать дубли.
+          </p>
+          {audit.audit.launchError ? <p className="ve2-mut mt-1 text-xs">Причина: {audit.audit.launchError}</p> : null}
+        </div>
+        {audit.resolutionError ? (
+          <p className="text-xs text-red-700" role="alert">
+            {audit.resolutionError}
+          </p>
+        ) : null}
+        <button
+          type="button"
+          onClick={() => void audit.resolveLaunch('no_campaign')}
+          disabled={audit.resolving}
+          className={HE.btnPrimary}
+        >
+          {audit.resolving ? 'Удаляем…' : 'Удалить черновики и разрешить повтор'}
+        </button>
+      </section>
+    );
+  }
+
   return (
     <section className="ve2-nt ve2-nt-warn space-y-3 px-4 py-3" aria-labelledby="segmentation-audit-title" role="alert">
       <div>
@@ -741,7 +778,7 @@ export function SegmentationAuditPanel({ audit }: { audit: SegmentationAuditCont
             rel="noreferrer"
             className="ve2-link mt-2 inline-block text-xs underline"
           >
-            Открыть в Instantly
+            {audit.launchInfo.transport === 'sender' ? senderOpenLabel() : 'Открыть в Instantly'}
           </a>
         ) : null}
       </section>

@@ -11,6 +11,7 @@ import type { VeBase, VeJob, VeSegmentationAudit, VeTemplate } from './types';
 import { readDeliveryRate } from './contactDeliveryRateService';
 import { activateDeliveredContactCampaigns } from './contactDeliveryActivation';
 import { resolveVeLaunchTransport, transportExpectationIssue, transportOf } from './senderTransport/transport';
+import { attachVeSenderPool } from './senderTransport/senderPool';
 
 const itemSchema = z.object({
   hypothesis_id: z.string().uuid(), base_id: z.string().uuid(), template_id: z.string().uuid(),
@@ -34,7 +35,8 @@ export interface VeOutreachRun {
   request: VeOutreachLaunchRequest; request_hash: string; items: RunItem[]; error: string | null; created_at: string; updated_at: string;
 }
 export class VeOutreachLaunchError extends Error {
-  constructor(message: string, readonly status = 409) { super(message); }
+  /** code — только там, где экрану нужно отличить отказ (смена способа отправки). */
+  constructor(message: string, readonly status = 409, readonly code?: string) { super(message); }
 }
 function fail(message: string): never { throw new VeOutreachLaunchError(message); }
 function canonicalRequest(input: VeOutreachLaunchRequest): VeOutreachLaunchRequest {
@@ -119,7 +121,9 @@ export async function prepareVeOutreachLaunch(db: SupabaseClient, instantlyDb: S
       const current = (audits ?? []).find((audit) => validateStoredAuditSnapshot({ audit, template, base }).state === 'current') as VeSegmentationAudit | undefined;
       if (current) {
         const reviewed = { ...item, segmentation_audit_id: current.id };
-        const preview = await buildVeContactDeliveryPreview(db, instantlyDb, deliveryInput(request, reviewed));
+        // Ящики «Рассылки» — только для обзора (панель запуска их показывает); старт их не читает.
+        const preview = await attachVeSenderPool(db, instantlyDb, await buildVeContactDeliveryPreview(db, instantlyDb, deliveryInput(request, reviewed)),
+          { templateId: reviewed.template_id, presetId: request.preset_id });
         if (preview.status !== 200) fail(typeof preview.body.error === 'string' ? preview.body.error : 'Не удалось проверить условия отправки.');
         const details = preview.body.preview as { prospective_ready?: number; sender_capacity?: number } | undefined;
         if (!details?.prospective_ready || !details.sender_capacity) fail('Нет новых проверенных контактов или доступных отправителей.');
@@ -166,7 +170,7 @@ export async function startVeOutreach(db: SupabaseClient, instantlyDb: SupabaseC
   }
   await readSetup(db, input.projectId, request);
   const transportIssue = transportExpectationIssue(await resolveVeLaunchTransport(db, input.projectId), request.expected_transport);
-  if (transportIssue) throw new VeOutreachLaunchError(transportIssue.error, transportIssue.status);
+  if (transportIssue) throw new VeOutreachLaunchError(transportIssue.error, transportIssue.status, transportIssue.code);
   for (const item of request.items) {
     if (!item.segmentation_audit_id) fail('Дождитесь проверки аудитории и просмотрите обзор запуска.');
     const { template, base } = await readItem(db, input.projectId, item);

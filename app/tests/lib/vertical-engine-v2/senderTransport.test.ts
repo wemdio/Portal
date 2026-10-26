@@ -12,10 +12,11 @@ import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import { AppendLeadsPartialError } from '@/lib/clientLaunch/appendLeads';
 import { completeAppendLedgerBatch } from '@/lib/clientReports/ledgerStore';
 import { getCampaign, listLeads } from '@/lib/instantly/client';
-import { importRecipients, SenderOpError } from '@/lib/sender/campaignOps';
+import { importRecipients, SenderOpError, startCampaign } from '@/lib/sender/campaignOps';
 import { syncProjectContactsFromInstantly } from '@/lib/projectContactsSync';
 import { activateDeliveredContactCampaigns } from '@/lib/verticalEngineV2/contactDeliveryActivation';
 import { loadVeContactDeliveryCampaignInventory } from '@/lib/verticalEngineV2/contactDeliveryInventory';
+import { loadContactUploadStatus } from '@/lib/verticalEngineV2/contactUploadStatus';
 import { reconcileContactDeliveries } from '@/lib/verticalEngineV2/contactDeliveryReconciliation';
 import { parseLaunchInfo } from '@/lib/verticalEngineV2/launchHandoff';
 import { appendLeadsToVeSenderCampaign } from '@/lib/verticalEngineV2/senderTransport/senderAppend';
@@ -28,6 +29,20 @@ import {
   veSenderSyntaxIssue,
   veSequenceToSenderSteps,
 } from '@/lib/verticalEngineV2/senderTransport/senderLaunchPlan';
+import {
+  senderCampaignHint,
+  senderCampaignStartable,
+  senderCampaignStateLabel,
+  senderCreateCampaignsLabel,
+  senderMarketBannerLines,
+  senderPaceWarning,
+  senderPoolLine,
+  senderStartButtonLabel,
+  senderStartReport,
+  veTransportView,
+} from '@/lib/verticalEngineV2/senderTransport/labels';
+import { summarizeVeSenderPool } from '@/lib/verticalEngineV2/senderTransport/senderPool';
+import { startVeSenderBundle } from '@/lib/verticalEngineV2/senderTransport/senderStart';
 import {
   decideVeLaunchTransport,
   resolveVeLaunchTransport,
@@ -57,7 +72,7 @@ jest.mock('@/lib/sender/campaignOps', () => {
   class SenderOpError extends Error {
     constructor(message: string, readonly status: number) { super(message); }
   }
-  return { importRecipients: jest.fn(), createCampaign: jest.fn(), SenderOpError };
+  return { importRecipients: jest.fn(), createCampaign: jest.fn(), startCampaign: jest.fn(), SenderOpError };
 });
 
 beforeEach(() => {
@@ -471,5 +486,159 @@ describe('запуск VE2 в «Рассылку»', () => {
       expect(portal.rpcCalls.at(-1)).toMatchObject({ fn: 've_finalize_template_launch',
         params: { p_launch_status: 'failed', p_launch_info: null } });
     }
+  });
+});
+
+describe('экраны VE2 для «Рассылки»', () => {
+  it('подписи «Рассылки» не путаются с Instantly, а ящики пресета считаются как у запуска: один на адрес, лимиты и окно', () => {
+    expect(veTransportView(undefined)).toBe('instantly');
+    expect(veTransportView('sender')).toBe('sender');
+    expect([0, 1, 2, 3, -1, null].map((status) => senderCampaignStateLabel(status))).toEqual([
+      'Черновик в «Рассылке» — ожидает запуска',
+      'Идёт в «Рассылке» — отправка по расписанию',
+      'На паузе в «Рассылке» — отправка выключена',
+      'Завершена в «Рассылке» — новые контакты в неё не подаются',
+      'Письма кампании не подходят к контактам — подача в неё остановлена',
+      'Статус «Рассылки» ещё не получен',
+    ]);
+    // Запустить можно черновик или паузу, и только с контактами: пустой «Рассылка» не запустит.
+    expect([[0, 3], [2, 1], [0, 0], [1, 3], [3, 3], [-1, 3]].map(([remote_status, leads_count]) =>
+      senderCampaignStartable({ remote_status, leads_count }))).toEqual([true, true, false, false, false, false]);
+
+    const pool = summarizeVeSenderPool(
+      ['Box1@x.ru', 'box2@x.ru', 'box3@x.ru', 'box4@x.ru'],
+      [
+        { id: 'm1', email: 'box1@x.ru', status: 'verified', enabled: true },
+        { id: 'm1b', email: 'BOX1@x.ru', status: 'verified', enabled: true },
+        { id: 'm2', email: 'box2@x.ru', status: 'verified', enabled: true },
+        { id: 'm3', email: 'box3@x.ru', status: 'failed', enabled: true },
+        { id: 'm9', email: 'stranger@x.ru', status: 'verified', enabled: true },
+      ],
+      [
+        { id: 'm1', daily_campaign_limit: 5, daily_total_limit: 100 },
+        { id: 'm1b', daily_campaign_limit: 50, daily_total_limit: 500 },
+        { id: 'm2', daily_campaign_limit: 5, daily_total_limit: 12 },
+      ],
+      // 9 часов, пауза 10 мин + в среднем 1 мин: 49 писем — новых с ящика не больше 49/4 при цепочке из 4.
+      { steps: 4, window: { sendHourFrom: 9, sendHourTo: 18, gapSeconds: 600, gapJitterSeconds: 120 } },
+    );
+    expect(pool).toEqual({ preset_mailboxes: 4, in_sender: 3, ready: 2, new_per_day: 5 + 3 });
+    expect(senderPoolLine(pool)).toBe('В «Рассылке» готово 2 из 4 ящиков пресета · около 8 новых контактов в рабочий день.');
+    expect(senderPoolLine({ ...pool, ready: 0, new_per_day: 0 })).toContain('Запуск в «Рассылку» невозможен');
+    expect(senderPoolLine(null)).toContain('Не удалось проверить');
+    expect(senderPaceWarning(8, pool)).toBeNull();
+    expect(senderPaceWarning(100, pool)).toContain('ящики «Рассылки» отправят около 8');
+
+    expect(senderCreateCampaignsLabel(1)).toBe('Создать черновик в «Рассылке»');
+    expect(senderCreateCampaignsLabel(5)).toBe('Создать 5 черновиков в «Рассылке»');
+    expect(senderStartButtonLabel(2)).toBe('Запустить 2 кампании в «Рассылке»');
+    expect(senderStartReport([], [])).toEqual(['Запускать нечего: кампании уже идут или ждут первую порцию контактов.']);
+    // Кнопка в «Рассылке» у паузы — «Продолжить», у черновика — «Запустить».
+    expect(senderCampaignHint({ remote_status: 2, leads_count: 3, scheduled_start_at: '2099-10-27T06:00:00.000Z' })).toContain('нажмите «Продолжить»');
+    expect(senderMarketBannerLines([{ market: 'ru', mode: 'pilot', sender_uploads_enabled: false }])).toEqual([
+      'РФ: пилот — в «Рассылку» идут новые запуски только выбранных проектов, остальные — в Instantly. Подача контактов в кампании «Рассылки» сейчас выключена.',
+    ]);
+  });
+
+  it('«Запустить в «Рассылке»» запускает только свои черновики и паузы с контактами — и только после свежей проверки состояния', async () => {
+    const campaign = (id: string, status: string, extra: Record<string, unknown> = {}) =>
+      ({ id, status, source_kind: 've2', project_id: 'pp1', client_user_id: 'client-1', ...extra });
+    const child = (n: number, remote_status: number, leads_count = 3) =>
+      ({ id: `q${n}`, item_id: 'i1', campaign_id: `c${n}`, campaign_name: 'АБВГДЕЖЗИКЛМН'[n - 1], remote_status, leads_count, status_observed_at: null });
+    const db = senderDb({}, {
+      sender_campaigns: [
+        campaign('c1', 'draft'), campaign('c2', 'running'), campaign('c3', 'draft'), campaign('c4', 'paused'),
+        campaign('c5', 'draft'), campaign('c6', 'draft'), campaign('c7', 'draft', { project_id: 'pp-other' }),
+        campaign('c8', 'draft'), campaign('c9', 'draft'), campaign('c10', 'draft'), campaign('c11', 'draft'),
+        campaign('c12', 'draft', { scheduled_start_at: '2099-10-27T06:00:00.000Z' }), campaign('c13', 'draft'),
+      ],
+      ve_launch_queue_items: [
+        { id: 'i1', project_id: 've1', template_id: 't1', status: 'prepared', instantly_account_id: 'ws', mailbox_ids: ['box@x.ru'], transport: 'sender' },
+        { id: 'i2', project_id: 've1', template_id: 't2', status: 'active', instantly_account_id: 'ws', mailbox_ids: ['box@x.ru'], transport: 'instantly' },
+      ],
+      // c1 черновик, c2 идёт, c3 без контактов, c4 пауза, c5 письма сломаны, c6 чужие ящики, c7 чужой проект, c8/c9 — для отказов
+      // запуска, c10 — контакты уже в кампании (очереди нет), а follow-up просит переменную, которой у них нет; c11 — у
+      // контактов колонка под {{city}} пустая: «Рассылка» пустое не хранит, но переменная у них есть — запускаем.
+      ve_launch_queue_campaigns: [child(1, 0), child(2, 1), child(3, 0, 0), child(4, 2), { ...child(5, 0), campaign_name: 'ООО «Ромашка» · Клиники' },
+        child(6, 0), child(7, 0), child(8, 0), child(9, 0), child(10, 0), child(11, 0), child(12, 0), child(13, 0)],
+      // c12 — запуск уже назначен в «Рассылке»; c13 — запущена, но часть базы не встала в очередь.
+      sender_campaign_mailboxes: ['c1', 'c2', 'c3', 'c4', 'c5', 'c7', 'c8', 'c9', 'c10', 'c11', 'c12', 'c13'].map((id) => ({ campaign_id: id, mailbox_id: 'm1' }))
+        .concat([{ campaign_id: 'c6', mailbox_id: 'm2' }]),
+      sender_mailboxes: [{ id: 'm1', email: 'Box@x.ru' }, { id: 'm2', email: 'other@x.ru' }],
+      sender_campaign_steps: ['c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7', 'c8', 'c9', 'c10', 'c11', 'c12', 'c13'].map((id) => ({ campaign_id: id, step_no: 1, subject: '{{companyName}}', body: 'Здравствуйте, {{companyName}}' }))
+        .concat([{ campaign_id: 'c10', step_no: 2, subject: '', body: 'Как дела у {{position}}?' }, { campaign_id: 'c11', step_no: 2, subject: '', body: 'Как погода, {{city}}?' }]),
+      sender_recipients: [
+        { id: 'r10', campaign_id: 'c10', email: 'a@acme.ru', name: null, vars: { company_name: 'Acme' }, status: 'active' },
+        { id: 'r11', campaign_id: 'c11', email: 'b@acme.ru', name: null, vars: { company_name: 'Acme' }, status: 'active' },
+      ],
+      // Письмо c5 пустое у большинства начала её очереди — проверка ставит −1.
+      ve_contact_delivery_rows: Array.from({ length: 20 }, (_, index) => ({ campaign_row_id: 'q5', status: 'ready', drip_order: index,
+        lead_payload: { email: `lead${index}@acme.ru`, custom_variables: { companyName: index < 5 ? 'Acme' : '' } as Record<string, string> } }))
+        .concat([{ campaign_row_id: 'q11', status: 'accepted', drip_order: 0,
+          lead_payload: { email: 'b@acme.ru', custom_variables: { companyName: 'Acme', city: '' } } }]),
+    });
+    const rpcs: string[] = [];
+    Object.assign(db, { rpc: async (fn: string, params: { p_item_id: string; p_campaigns: Array<{ campaign_id: string; status: number; status_observed_at: string }> }) => {
+      rpcs.push(fn);
+      for (const row of params.p_campaigns) {
+        await db.from('ve_launch_queue_campaigns').update({ remote_status: row.status, status_observed_at: row.status_observed_at })
+          .eq('item_id', params.p_item_id).eq('campaign_id', row.campaign_id);
+      }
+      return { data: { observed: true }, error: null };
+    } });
+    jest.mocked(startCampaign).mockReset().mockImplementation(async (id: string) => {
+      if (id === 'c4') throw new SenderOpError('Стоп-листы клиента и проекта не сверены — запуск отложен', 503);
+      if (id === 'c8') throw new SenderOpError('Кампанию уже запустили или завершили — обновите экран', 409);
+      if (id === 'c9') throw new Error('socket hang up');
+      if (id === 'c13') throw new SenderOpError('Кампания запущена, но часть базы не встала в очередь: timeout. Нажмите «Пауза» и «Запустить» ещё раз', 500);
+    });
+
+    // Чужая кампания в запуске — проверка состояния не прошла: ничего не запускаем по старому состоянию.
+    const unchecked = await startVeSenderBundle(db as never, null, { veProjectId: 've1', templateId: 't1' });
+    expect(jest.mocked(startCampaign)).not.toHaveBeenCalled();
+    expect(rpcs).toEqual([]);
+    expect(unchecked.results.find((row) => row.campaign_id === 'c1')).toMatchObject({ outcome: 'failed', message: expect.stringContaining('Не удалось проверить состояние') });
+    // Причина — по названию кампании, без id строки очереди и кампании.
+    expect(unchecked.notes).toEqual(['Кампания «Рассылки» «Ж» не принадлежит этому запуску.']);
+
+    await db.from('ve_launch_queue_campaigns').delete().in('id', ['q6', 'q7']);
+    const { results, notes, diagnostics } = await startVeSenderBundle(db as never, null, { veProjectId: 've1', templateId: 't1' });
+    expect(jest.mocked(startCampaign).mock.calls.map(([id]) => id)).toEqual(['c1', 'c4', 'c8', 'c9', 'c11', 'c13']);
+    expect(results.map((row) => [row.campaign_id, row.outcome])).toEqual([
+      ['c1', 'started'], ['c2', 'skipped'], ['c3', 'skipped'], ['c4', 'failed'], ['c5', 'failed'], ['c8', 'skipped'], ['c9', 'failed'],
+      ['c10', 'failed'], ['c11', 'started'], ['c12', 'skipped'], ['c13', 'started'],
+    ]);
+    // Назначенный в «Рассылке» запуск не отменяем молча; частичный запуск — запуск, с советом «Рассылки».
+    expect(results.find((row) => row.campaign_id === 'c12')?.message).toBe('Запуск назначен в «Рассылке» на 27.10, 09:00 МСК — она запустит кампанию сама. Раньше — откройте кампанию в «Рассылке» и нажмите «Запустить».');
+    expect(results.find((row) => row.campaign_id === 'c13')?.message).toContain('поставьте её на паузу и запустите ещё раз');
+    expect(results.find((row) => row.campaign_id === 'c10')?.message).toContain('{{position}}');
+    // Ошибка базы (5xx) — общей фразой; сырой текст — только в журнал.
+    expect(results.find((row) => row.campaign_id === 'c4')?.message).toBe('Стоп-листы клиента и проекта не сверены — запуск отложен. Повторите позже.');
+    expect(results.find((row) => row.campaign_id === 'c5')?.message).toContain('Письма кампании не подходят');
+    expect(results.find((row) => row.campaign_id === 'c9')?.message).toBe('Не удалось запустить — повторите.');
+    expect(diagnostics).toEqual(['c4: Стоп-листы клиента и проекта не сверены — запуск отложен', 'c9: socket hang up',
+      'c13: Кампания запущена, но часть базы не встала в очередь: timeout. Нажмите «Пауза» и «Запустить» ещё раз']);
+    // «» в названии кампании не сбивают разбор: причина видна, а не общая фраза.
+    expect(notes).toEqual([expect.stringMatching(/^Кампания «Рассылки» «ООО «Ромашка» · Клиники»: .*пустым у 15 из 20.* — подача в неё остановлена\.$/)]);
+    // Состояние записано до запуска и после — «Идёт» видно сразу.
+    expect(rpcs).toEqual(['ve_observe_manual_campaigns', 've_observe_manual_campaigns']);
+    expect(senderStartReport(results, [])[0]).toBe('Запущено в «Рассылке»: 3 кампании. Отправка пойдёт по расписанию.');
+
+    await expect(startVeSenderBundle(db as never, null, { veProjectId: 've1', templateId: 't2' }))
+      .rejects.toMatchObject({ status: 409, code: 'VE_SENDER_START_NOT_SENDER' });
+    expect(jest.mocked(startCampaign)).toHaveBeenCalledTimes(6);
+
+    // Закрытый запуск: карточка не предлагает запуск, который всё равно откажет.
+    const status = await loadContactUploadStatus(db as never, 've1', 't1');
+    expect(status).toMatchObject({ transport: 'sender' });
+    // Назначенный в «Рассылке» запуск виден на карточке, и кнопка его не предлагает.
+    const c12 = status.campaigns?.find((campaign) => campaign.campaign_id === 'c12');
+    expect(c12).toMatchObject({ scheduled_start_at: '2099-10-27T06:00:00.000Z' });
+    expect(senderCampaignStartable({ ...c12!, leads_count: 3 })).toBe(false);
+    expect(status.campaigns?.find((campaign) => campaign.campaign_id === 'c1')).not.toHaveProperty('scheduled_start_at');
+    expect(await loadContactUploadStatus(db as never, 've1', 't1')).not.toHaveProperty('launch_closed');
+    await db.from('ve_launch_queue_items').update({ status: 'released' }).eq('id', 'i1');
+    expect(await loadContactUploadStatus(db as never, 've1', 't1')).toMatchObject({ transport: 'sender', launch_closed: true });
+    expect(await loadContactUploadStatus(db as never, 've1', 't2')).not.toHaveProperty('transport');
   });
 });
