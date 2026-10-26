@@ -180,8 +180,12 @@ export function SharedLetterToolbar({
   disabled?: boolean;
 }) {
   const run = (edit: (text: string, start: number, end: number) => TextEdit) => active.current?.().format(edit);
+  // Фрагмент, а не обёртка: панель прилипает (`sticky` в LetterToolbar) только
+  // в пределах родителя. В своей обёртке ей некуда было двигаться, и она стояла
+  // в конце блока писем; родитель — весь блок писем, и панель едет у нижнего
+  // края окна, пока блок не кончится, а в конце встаёт на своё место.
   return (
-    <div>
+    <>
       <LetterToolbar
         disabled={disabled}
         onBold={() => run(toggleBold)}
@@ -202,7 +206,7 @@ export function SharedLetterToolbar({
       <p className="mt-1 text-center text-xs text-zinc-500">
         Выделите текст в письме и нажмите кнопку на панели: жирный, курсив, подчёркнутый, зачёркнутый, списки, цитата. Слово + «Ссылка» — ссылка под словом
       </p>
-    </div>
+    </>
   );
 }
 
