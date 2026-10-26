@@ -8,7 +8,8 @@ fx_rate_probes). Дата запроса и дата публикации — р
 ближайший курс не позже даты операции — так выходные закрываются сами.
 
 Источники валютных дат — brocard_transactions, manual_expenses,
-bank_transactions и crypto_income_transfers (см. _OPERATION_DATES_SQL).
+manual_incomes, bank_transactions и crypto_income_transfers (см.
+_OPERATION_DATES_SQL).
 Крипта попала сюда вместе с источником crypto_usdt и требует оговорки: USDT
 считается по курсу ДОЛЛАРА, подмена валюты сделана прямо в объединении дат —
 подробности в комментарии там же. Место в SOURCES (main.py) обязывает:
@@ -66,6 +67,11 @@ _OPERATION_DATES_SQL = """
       UNION ALL
       SELECT occurred_on AS d, currency
       FROM manual_expenses
+      UNION ALL
+      -- Ручной доход (supabase/migrations/20261026_0100_manual_incomes.sql):
+      -- наличные в долларах без курса остались бы в доходе без рублёвой суммы.
+      SELECT occurred_on AS d, currency
+      FROM manual_incomes
       UNION ALL
       SELECT (occurred_at AT TIME ZONE 'Europe/Moscow')::date AS d, currency
       FROM bank_transactions

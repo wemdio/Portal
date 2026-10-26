@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 
 import DailyLedger from '@/components/expenses/DailyLedger';
 import IncomeFilters, {
@@ -9,6 +9,7 @@ import IncomeFilters, {
 } from '@/components/expenses/IncomeFilters';
 import IncomeKpiRow from '@/components/expenses/IncomeKpiRow';
 import IncomeTimeChart from '@/components/expenses/IncomeTimeChart';
+import ManualEntries from '@/components/expenses/ManualEntries';
 import NonRevenueBreakdown from '@/components/expenses/NonRevenueBreakdown';
 import PayerBreakdown from '@/components/expenses/PayerBreakdown';
 import type { PeriodValue } from '@/components/expenses/PeriodBar';
@@ -19,15 +20,19 @@ import type { IncomesSummary, PayerBreakdownItem } from '@/lib/expenses/types';
  * Доходная сторона раздела «Деньги».
  *
  * Период приходит сверху, из `MoneyView`, и потому переживает переключение
- * вкладок. Всё остальное — своё: у прихода нет ни разметки, ни ручного ввода,
- * зато есть не-выручка с причинами, которой нет у расхода.
+ * вкладок. Всё остальное — своё: у прихода нет разметки, зато есть не-выручка
+ * с причинами, которой нет у расхода. Ручной доход (с 26.10.2026) вносится
+ * кнопкой «+ Доход» над вкладками, а здесь виден списком внизу.
  */
 export default function IncomesView({
   period,
   onPeriodChange,
+  refreshKey,
 }: {
   period: PeriodValue;
   onPeriodChange: (next: PeriodValue) => void;
+  /** Растёт, когда запись внесли кнопкой «+ Доход» / «+ Расход» над вкладками. */
+  refreshKey: number;
 }) {
   const [filters, setFilters] = useState<IncomeFiltersValue>(() => getDefaultIncomeFilters());
   const [summary, setSummary] = useState<IncomesSummary | null>(null);
@@ -35,12 +40,17 @@ export default function IncomesView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  // Правка ручного дохода в списке: перечитать сводку и пересоздать блоки,
+  // которые ходят за данными сами.
+  const [manualKey, setManualKey] = useState(0);
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ from: period.from, to: period.to, groupBy: period.groupBy });
     if (filters.source) params.set('source', filters.source);
     return params.toString();
   }, [period, filters]);
+
+  const range = useMemo(() => ({ from: period.from, to: period.to }), [period.from, period.to]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -72,7 +82,7 @@ export default function IncomesView({
       active = false;
       controller.abort();
     };
-  }, [query]);
+  }, [query, refreshKey, manualKey]);
 
   async function exportXlsx() {
     setExporting(true);
@@ -92,8 +102,8 @@ export default function IncomesView({
         <div>
           <h1 className="text-lg font-semibold text-zinc-900">Доходы</h1>
           <p className="text-xs text-zinc-500">
-            Приход по счетам в банках, сгруппированный по плательщикам. Суммы — в рублях по курсу ЦБ на дату
-            операции.
+            Приход по счетам в банках, криптокошельку и ручной ввод, по плательщикам. Суммы — в рублях по курсу
+            ЦБ на дату операции.
           </p>
         </div>
         <button
@@ -127,16 +137,27 @@ export default function IncomesView({
 
           <IncomeTimeChart series={summary.series} groupBy={period.groupBy} />
 
-          <PayerBreakdown items={payers} query={query} />
+          {/* Ключ пересоздаёт блоки, которые сами ходят за данными, когда
+              ручной доход добавили или поправили. */}
+          <Fragment key={`${refreshKey}:${manualKey}`}>
+            <PayerBreakdown items={payers} query={query} />
 
-          {/* Разбивка по плательщикам — «от кого за период», список по дням —
-              «что именно пришло в этот день». */}
-          <DailyLedger kind="incomes" query={query} />
+            {/* Разбивка по плательщикам — «от кого за период», список по дням —
+                «что именно пришло в этот день». */}
+            <DailyLedger kind="incomes" query={query} />
 
-          {/* Мелкие платежи — отдельно и ниже: в доход они не входят, но
-              пропасть с экрана не должны, иначе сумма перестанет сходиться с
-              выпиской. Пустой список не рисуется. */}
-          <DailyLedger kind="incomes" query={query} smallOnly />
+            {/* Мелкие платежи — отдельно и ниже: в доход они не входят, но
+                пропасть с экрана не должны, иначе сумма перестанет сходиться с
+                выпиской. Пустой список не рисуется. */}
+            <DailyLedger kind="incomes" query={query} smallOnly />
+          </Fragment>
+
+          <ManualEntries
+            kind="income"
+            range={range}
+            refreshKey={refreshKey}
+            onChanged={() => setManualKey((prev) => prev + 1)}
+          />
         </>
       ) : null}
     </div>
