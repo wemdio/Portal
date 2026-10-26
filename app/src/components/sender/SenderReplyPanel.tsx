@@ -45,6 +45,8 @@ function writeSaved(recipientId: string, text: string) {
   }
 }
 
+const sameEmails = (a: string[], b: string[]) => [...a].sort().join() === [...b].sort().join();
+
 /** Пока ответ в очереди или отправляется, переписку перечитываем: видно, ушёл ли он. */
 const PENDING_NOTES = new Set(['в очереди', 'отправляется']);
 
@@ -52,7 +54,9 @@ const PENDING_NOTES = new Set(['в очереди', 'отправляется'])
  * Переписка «Рассылки» с персонализированным ответом — как в инструменте
  * «Персонализированные ответы»: лента писем, метка лида, ИИ пишет ответ на
  * русском или английском по брифу кампании и нашей цепочке, сотрудник правит
- * и отправляет. Письмо уходит с ящика переписки тем же тредом.
+ * и отправляет. Письмо уходит с ящика переписки тем же тредом — или, если
+ * адресат прислал новый контакт («пишите Екатерине»), ей отдельным письмом
+ * либо лиду с ней в копии (плашка «Кому», как в персонализированных ответах).
  */
 export function SenderReplyPanel({
   recipientId,
@@ -77,6 +81,12 @@ export function SenderReplyPanel({
   const [confirming, setConfirming] = useState(false);
   const [sending, setSending] = useState(false);
   const [copied, setCopied] = useState(false);
+  /** Адреса, на которые адресат перенаправил («пишите Екатерине, почта ...»). */
+  const [referredEmails, setReferredEmails] = useState<string[]>([]);
+  /** Кому пишем: null — ответ в ту же переписку, иначе новый контакт из ответа. */
+  const [recipient, setRecipient] = useState<string | null>(null);
+  /** Присланные адресатом адреса в копии ответа ему (при recipient === null). */
+  const [ccEmails, setCcEmails] = useState<string[]>([]);
   // Передача лида клиенту: письмо в тот же тред с клиентом в копии.
   const [handoff, setHandoff] = useState<ThreadHandoffDto | null>(null);
   const [handoffMode, setHandoffMode] = useState(false);
@@ -95,7 +105,7 @@ export function SenderReplyPanel({
   // ответах» (ResizableEditor): родная в углу textarea упиралась в край экрана.
   const rootRef = useRef<HTMLDivElement>(null);
   // Вдвое ниже общей: на всю высоту поле прятало переписку, на которую отвечают.
-  const editor = useEditorHeight('sender-reply-editor-height', rootRef, EDITOR_DEFAULT_PX / 2);
+  const editor = useEditorHeight('sender-reply-editor-height', rootRef, EDITOR_DEFAULT_PX / 4);
   const lastItemRef = useRef<HTMLDivElement>(null);
 
   const loadThread = useCallback(async () => {
@@ -107,6 +117,9 @@ export function SenderReplyPanel({
       mailbox: res.thread.mailbox_email,
       email: res.thread.recipient_email,
     });
+    const referred = res.referredEmails ?? [];
+    setReferredEmails(referred);
+    return referred;
   }, [recipientId]);
 
   useEffect(() => {
@@ -118,11 +131,15 @@ export function SenderReplyPanel({
         void fetchThreadHandoff(recipientId)
           .then((res) => { if (!cancelled) setHandoff(res); })
           .catch(() => undefined);
-        const [, draftRes] = await Promise.all([loadThread(), fetchReplyDraft(recipientId)]);
+        const [referred, draftRes] = await Promise.all([loadThread(), fetchReplyDraft(recipientId)]);
         if (cancelled) return;
         setLanguage(draftRes.language);
         setHasBrief(draftRes.hasBrief);
         setDraft(draftRes.draft);
+        // «Кому» — тот, под кого написан сохранённый черновик, пока адрес ещё в ответе.
+        const draftTo = draftRes.draft?.recipientEmail ?? null;
+        setRecipient(draftTo && referred.includes(draftTo) ? draftTo : null);
+        setCcEmails((draftRes.draft?.ccEmails ?? []).filter((e) => referred.includes(e)));
         // Сохранённый черновик ИИ подставляем, только если руками ничего не набрано.
         if (draftRes.draft && !readSaved(recipientId).trim()) setText(draftRes.draft.text);
       } catch (e) {
@@ -177,7 +194,7 @@ export function SenderReplyPanel({
     setGenerating(true);
     setError(null);
     try {
-      const res = await generateReplyDraft(recipientId, language);
+      const res = await generateReplyDraft(recipientId, language, { toEmail: recipient, ccEmails: recipient === null ? ccEmails : [] });
       setDraft(res.draft);
       setText(res.draft.text);
     } catch (e) {
@@ -198,10 +215,15 @@ export function SenderReplyPanel({
     setSending(true);
     setError(null);
     try {
-      await replyToThread(recipientId, body, draft && body ? draft.id : null);
+      await replyToThread(recipientId, body, draft && body ? draft.id : null, {
+        toEmail: recipient,
+        ccEmails: recipient === null ? ccEmails : [],
+      });
       setConfirming(false);
       setText('');
       setDraft(null);
+      setRecipient(null);
+      setCcEmails([]);
       await loadThread();
       onSent?.();
     } catch (e) {
@@ -277,7 +299,10 @@ export function SenderReplyPanel({
   // вся правая часть исчезала и собиралась заново.
   return (
     <div ref={rootRef} className="flex h-full min-h-0 flex-col">
-      <div className="border-b border-zinc-200 px-5 py-3">
+      {/* Шапка и метка лида в одну строку: каждая прежде занимала свою полосу,
+          и на ноутбуке письма читались в щёлку. */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-zinc-200 px-5 py-2.5">
+       <div className="min-w-0 flex-1">
         {loading && !header ? (
           <>
             <div className="h-6 w-48 animate-pulse rounded bg-zinc-100" />
@@ -292,12 +317,12 @@ export function SenderReplyPanel({
             </div>
           </>
         )}
-      </div>
-
-      {/* Метка лида — вне ленты: подгружается отдельно и не должна сдвигать
-          письма, уже прокрученные к последнему. */}
-      <div className="px-5 pt-3">
-        <LeadVerdictBar recipientId={recipientId} onChange={onVerdictChange} />
+       </div>
+        {/* Метка лида — подгружается отдельно и не должна сдвигать письма,
+            уже прокрученные к последнему. */}
+        <div className="shrink-0">
+          <LeadVerdictBar recipientId={recipientId} onChange={onVerdictChange} />
+        </div>
       </div>
 
       <div ref={threadRef} className="relative min-h-0 flex-1 overflow-y-auto px-5 pb-4 [scrollbar-gutter:stable]">
@@ -319,7 +344,10 @@ export function SenderReplyPanel({
                 >
                   <div className={`max-w-[85%] rounded-xl border p-3 ${outgoing ? 'border-blue-100 bg-blue-50' : 'border-zinc-200 bg-white'}`}>
                     <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
-                      <span className="font-medium text-zinc-700">{outgoing ? 'Мы' : item.fromEmail || 'Адресат'}</span>
+                      <span className="font-medium text-zinc-700">
+                        {outgoing ? (item.toEmail ? `Мы → ${item.toEmail}` : 'Мы') : item.fromEmail || 'Адресат'}
+                      </span>
+                      {item.ccEmails?.length ? <span>копия: {item.ccEmails.join(', ')}</span> : null}
                       <span>{formatAt(item.at)}</span>
                       {item.note ? <span className="rounded-md bg-zinc-100 px-1.5 py-0.5">{item.note}</span> : null}
                     </div>
@@ -340,12 +368,61 @@ export function SenderReplyPanel({
         gripClassName="bg-zinc-300 group-hover:bg-zinc-400"
       />
       <div className="px-5 pb-3 pt-1">
+        {/* Кому: адресат прислал новый адрес — можно написать туда, а не ему.
+            Черновик пишется под выбранного получателя, поэтому после смены
+            его нужно сгенерировать заново. */}
+        {referredEmails.length > 0 ? (
+          <div className="mb-2 space-y-1 text-xs">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-zinc-500">Кому:</span>
+              {[null, ...referredEmails].map((email) => {
+                const active = recipient === email;
+                return (
+                  <button
+                    key={email ?? 'lead'}
+                    type="button"
+                    onClick={() => setRecipient(email)}
+                    aria-pressed={active}
+                    disabled={generating || sending}
+                    className={`rounded-full border px-2 py-0.5 transition ${
+                      active ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-zinc-200 text-zinc-600 hover:bg-zinc-50'
+                    }`}
+                  >
+                    {email ? `${email} · новый контакт` : `${header?.email ?? 'адресат'} · ответить в переписку`}
+                  </button>
+                );
+              })}
+            </div>
+            {recipient === null ? (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-zinc-600">
+                <span className="text-zinc-500">В копию:</span>
+                {referredEmails.map((email) => (
+                  <label key={email} className="inline-flex cursor-pointer items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      checked={ccEmails.includes(email)}
+                      disabled={generating || sending}
+                      onChange={(e) => setCcEmails((cur) => (e.target.checked ? [...cur, email] : cur.filter((x) => x !== email)))}
+                      className="rounded border-zinc-300"
+                    />
+                    {email}
+                  </label>
+                ))}
+              </div>
+            ) : null}
+            {draft && draft.recipientEmail !== recipient ? (
+              <p className="text-amber-600">Черновик написан для {draft.recipientEmail ?? header?.email} — нажмите «Сгенерировать заново».</p>
+            ) : draft && recipient === null && !sameEmails(ccEmails, draft.ccEmails) ? (
+              <p className="text-amber-600">Копия изменилась — нажмите «Сгенерировать заново», чтобы текст писался под неё.</p>
+            ) : null}
+          </div>
+        ) : null}
         <div className="mb-2 flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={() => void generate()}
             disabled={loading || generating || handoffDrafting || !hasIncoming}
-            title={hasIncoming ? undefined : 'Отвечать пока не на что: адресат ещё не ответил'}
+            title={hasIncoming ? (hasBrief ? 'В поле появится черновик ИИ, его можно править' : 'У кампании нет брифа — ИИ опирается на нашу цепочку писем (шестерёнка у кампании слева)') : 'Отвечать пока не на что: адресат ещё не ответил'}
             className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
           >
             {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
@@ -403,15 +480,7 @@ export function SenderReplyPanel({
             </button>
           </span>
         </div>
-        {/* Подсказка — своей строкой фиксированной высоты: тексты разной длины
-            раньше двигали кнопки рядом. */}
-        <p className="mb-2 h-4 truncate text-xs text-zinc-500">
-          {generating
-            ? 'ИИ пишет, обычно до минуты'
-            : hasBrief
-              ? 'В поле — черновик ИИ, его можно править'
-              : 'У кампании нет брифа — ИИ опирается на нашу цепочку писем (шестерёнка у кампании слева)'}
-        </p>
+        {generating ? <p className="mb-2 text-xs text-zinc-500">ИИ пишет, обычно до минуты</p> : null}
 
         <textarea
           value={text}
@@ -468,7 +537,11 @@ export function SenderReplyPanel({
         ) : confirming ? (
           <div className="mt-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
             <span>
-              Уйдёт с {header?.mailbox ?? 'ящика переписки'} на {header?.email} в эту же переписку — в течение минуты.
+              {recipient
+                ? `Уйдёт с ${header?.mailbox ?? 'ящика переписки'} новым письмом на ${recipient} — не в эту переписку, в течение минуты.`
+                : `Уйдёт с ${header?.mailbox ?? 'ящика переписки'} на ${header?.email}${
+                    ccEmails.length ? `, копия: ${ccEmails.join(', ')},` : ''
+                  } в эту же переписку — в течение минуты.`}
             </span>
             <span className="flex gap-2">
               <button type="button" onClick={() => setConfirming(false)} disabled={sending} className="rounded-md px-2.5 py-1 text-blue-700 hover:bg-blue-100">

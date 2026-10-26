@@ -1,11 +1,34 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError, checkIsAdmin } from '@/lib/liOutreach/apiHelpers';
+import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
 import { collectUnknownPlaceholders, unknownPlaceholderError } from '@/lib/liOutreach/campaignTextCheck';
 import { normalizeTimezoneOffset, normalizeWorkingHours } from '@/lib/liOutreach/schedule';
+import { saveCampaignAccounts } from '@/lib/liOutreach/campaignAccounts';
+import { logCampaignEvent } from '@/lib/liOutreach/campaignLog';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
+
+/** Поля настроек кампании, изменение которых пишется в журнал. */
+const SETTING_LABELS: Record<string, string> = {
+  name: 'название',
+  steps: 'шаги цепочки',
+  use_ai: 'ИИ-персонализация',
+  ai_prompt_invite: 'промпт инвайта',
+  ai_prompt_chat: 'промпт сообщений',
+  stop_on_reply: 'остановка при ответе',
+  min_delay: 'пауза между людьми',
+  max_delay: 'пауза между людьми',
+  daily_invite_limit: 'дневной лимит инвайтов',
+  welcome_message: 'приветственное сообщение',
+  message_existing_connections: 'сообщения существующим контактам',
+  use_ai_welcome: 'ИИ в приветствии',
+  use_ai_followup: 'ИИ в фоллоу-апах',
+  ai_model: 'модель ИИ',
+  use_custom_invites: 'персональные инвайты',
+  working_hours: 'рабочие часы',
+  timezone_offset: 'часовой пояс',
+};
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'tools.li-outreach.campaigns.getOne' }, async () => {
@@ -43,7 +66,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     // hit a 403).
     const { data: existing } = await supabaseAdmin
       .from('li_campaigns')
-      .select('id')
+      .select('id, status')
       .eq('id', id)
       .maybeSingle();
     if (!existing) return jsonError('Campaign not found', 404);
@@ -62,6 +85,11 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
 
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     for (const key of allowed) { if (key in body) patch[key] = body[key]; }
+    // Архив: запущенную кампанию не убираем из списка, пока она рассылает.
+    if (typeof body.archived === 'boolean') {
+      if (body.archived && existing.status === 'running') return jsonError('Сначала остановите кампанию', 409);
+      patch.archived_at = body.archived ? new Date().toISOString() : null;
+    }
     // working_hours / timezone_offset go through the shared normalizers so
     // garbage values can't reach the DB (the runner regex-matches each entry).
     if ('working_hours' in body) {
@@ -72,11 +100,39 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       patch.timezone_offset = normalizeTimezoneOffset(body.timezone_offset);
     }
 
+    // Список аккаунтов сохраняется отдельно (и сам выставляет основной).
+    const accountIds = Array.isArray(body.account_ids)
+      ? (body.account_ids as unknown[]).filter((v): v is string => typeof v === 'string' && v !== '')
+      : null;
+    if (accountIds) {
+      delete patch.account_id;
+      const accError = await saveCampaignAccounts(supabaseAdmin, id, accountIds);
+      if (accError) return jsonError(accError, 409);
+    }
+
     const { error } = await supabaseAdmin
       .from('li_campaigns')
       .update(patch)
       .eq('id', id);
     if (error) return jsonError(error.message, 500);
+
+    const actor = auth.user.email ?? null;
+    if (typeof body.archived === 'boolean') {
+      await logCampaignEvent(supabaseAdmin, id, 'info', body.archived ? 'Кампания отправлена в архив' : 'Кампания возвращена из архива', actor);
+    }
+    if (typeof body.lead_list_id === 'string' && body.lead_list_id) {
+      const { data: list } = await supabaseAdmin.from('li_lead_lists').select('name').eq('id', body.lead_list_id).maybeSingle();
+      await logCampaignEvent(supabaseAdmin, id, 'info', `Рассылаемая база выбрана вручную: «${list?.name ?? body.lead_list_id}»`, actor);
+    }
+    if (accountIds) {
+      const { data: accs } = await supabaseAdmin.from('li_accounts').select('name, unipile_account_id').in('id', accountIds);
+      const names = (accs ?? []).map((a) => (a.name as string | null) || (a.unipile_account_id as string)).join(', ');
+      await logCampaignEvent(supabaseAdmin, id, 'info', `Аккаунты кампании: ${names || 'не выбраны'}`, actor);
+    }
+    const changed = [...new Set(Object.keys(body).filter((key) => SETTING_LABELS[key]).map((key) => SETTING_LABELS[key]))];
+    if (changed.length > 0) {
+      await logCampaignEvent(supabaseAdmin, id, 'info', `Настройки изменены: ${changed.join(', ')}`, actor);
+    }
     return NextResponse.json({ ok: true });
   });
 }
@@ -87,11 +143,9 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
     const { id } = await ctx.params;
-    const admin = await checkIsAdmin(auth.user.id);
 
-    let existQ = supabaseAdmin.from('li_campaigns').select('id').eq('id', id);
-    if (!admin) existQ = existQ.eq('user_id', auth.user.id);
-    const { data: existing } = await existQ.maybeSingle();
+    // Удалять может любой специалист: кампании общие, как и редактирование.
+    const { data: existing } = await supabaseAdmin.from('li_campaigns').select('id').eq('id', id).maybeSingle();
     if (!existing) return jsonError('Campaign not found', 404);
 
     const { error } = await supabaseAdmin

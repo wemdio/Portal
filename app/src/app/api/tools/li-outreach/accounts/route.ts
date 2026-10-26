@@ -21,9 +21,10 @@ export async function GET(req: NextRequest) {
     // `campaigns` lists where each account is used. After a reconnect Unipile
     // issues a new account id and the old card lingers as an inactive twin;
     // the list shows which twin a campaign still points at before deleting it.
-    const [{ data, error }, { data: campaignRows, error: campaignsError }] = await Promise.all([
+    const [{ data, error }, { data: campaignRows, error: campaignsError }, { data: extraRows }] = await Promise.all([
       supabaseAdmin.from('li_accounts').select('*').order('created_at', { ascending: false }),
       supabaseAdmin.from('li_campaigns').select('id, name, status, account_id').not('account_id', 'is', null),
+      supabaseAdmin.from('li_campaign_accounts').select('campaign_id, account_id'),
     ]);
     if (error) return jsonError(error.message, 500);
     if (campaignsError) return jsonError(campaignsError.message, 500);
@@ -33,6 +34,16 @@ export async function GET(req: NextRequest) {
       const list = campaignsByAccount.get(c.account_id) ?? [];
       list.push({ id: c.id, name: c.name, status: c.status });
       campaignsByAccount.set(c.account_id, list);
+    }
+
+    // Остальные аккаунты многоаккаунтных кампаний (основной уже учтён выше).
+    const campaignById = new Map(((campaignRows ?? []) as Array<{ id: string; name: string; status: string }>).map((c) => [c.id, c]));
+    for (const r of (extraRows ?? []) as Array<{ campaign_id: string; account_id: string }>) {
+      const c = campaignById.get(r.campaign_id);
+      if (!c) continue;
+      const list = campaignsByAccount.get(r.account_id) ?? [];
+      if (!list.some((x) => x.id === c.id)) list.push({ id: c.id, name: c.name, status: c.status });
+      campaignsByAccount.set(r.account_id, list);
     }
 
     const accounts = (data ?? []) as Array<Record<string, unknown> & { id: string; user_id: string; proxy_url: string | null }>;

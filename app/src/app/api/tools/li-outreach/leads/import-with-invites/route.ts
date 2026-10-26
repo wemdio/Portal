@@ -20,6 +20,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
 import { extractPublicIdentifier } from '@/lib/liOutreach/leadHelpers';
+import { logCampaignEvent } from '@/lib/liOutreach/campaignLog';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -78,6 +80,7 @@ export async function POST(req: NextRequest) {
       const formData = await req.formData();
       const file = formData.get('file') as File | null;
       const listNameRaw = formData.get('list_name') as string | null;
+      const campaignIdRaw = formData.get('campaign_id') as string | null;
       if (!file) return jsonError('No file provided', 400);
 
       const text = await file.text();
@@ -172,6 +175,7 @@ export async function POST(req: NextRequest) {
           name: listName,
           description: `Импорт CSV с персонализированными инвайтами (${leadsToInsert.length} лидов)`,
           has_custom_invites: true,
+          campaign_id: campaignIdRaw?.trim() || null,
         })
         .select()
         .single();
@@ -199,6 +203,15 @@ export async function POST(req: NextRequest) {
         imported += batch.length;
       }
 
+      if (supabaseAdmin) {
+        await logCampaignEvent(
+          supabaseAdmin,
+          campaignIdRaw?.trim() || null,
+          'info',
+          `Загружена база с персональными инвайтами «${leadList.name}»: добавлено ${imported}, пропущено ${skipped.length}`,
+          auth.user.email ?? null,
+        );
+      }
       return NextResponse.json({
         imported,
         skipped: skipped.length,

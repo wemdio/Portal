@@ -21,12 +21,14 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       
         const { data: campaign } = await supabase
           .from('tg_outreach_campaigns')
-          .select('id, status')
+          .select('*')
           .eq('id', id)
           .single();
-      
+
         if (!campaign) return jsonError('Кампания не найдена', 404);
         if (campaign.status === 'running') return jsonError('Кампания уже запущена', 409);
+        // Архивная кампания не пишет людям: сначала её достают из архива.
+        if (campaign.archived_at) return jsonError('Кампания в архиве — достаньте её из архива, чтобы запустить', 409);
         // Идущий прогрев запуску не мешает: взаимоисключающими остаются
         // аккаунт и его роль, а не кампания целиком. Отмеченные на прогрев
         // боевой круг пропускает сам.

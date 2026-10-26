@@ -95,6 +95,9 @@ const SOURCE_TO_CHANNEL: ReadonlyMap<string, SummaryChannelName> = new Map(
       ['ВК', 'marketing'],
       ['Avito', 'marketing'],
       ['Авито', 'marketing'],
+      // Реклама в Meta — та же платная реклама, что и Директ. Без строки
+      // fixhubcom (квал и встреча 20.10.2026) выпадала из отчёта целиком.
+      ['Meta Ads', 'marketing'],
 
       ['Личный бренд (инст /ютуб)', 'smm'],
       ['SMM', 'smm'],

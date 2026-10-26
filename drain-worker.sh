@@ -530,7 +530,10 @@ if should_drain_baseconstructor_workers; then
   # Keep a deployment-side backstop after every replica has stopped so a failed
   # signal handler or database request cannot leave a fresh heartbeat behind.
   if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
-    base_constructor_handoff_code="$(patch_rows "base_constructor_jobs" "status=eq.processing" '{"started_at":"1970-01-01T00:00:00Z"}')"
+    # Чуть старше порога подбора воркера (BASE_CONSTRUCTOR_STALE_MINUTES, 15), но моложе порога
+    # монитора (20 мин): воркер подхватит задачу сразу, а монитор не примет это за зависание.
+    handoff_at="$(date -u -d "$(( ${BASE_CONSTRUCTOR_STALE_MINUTES:-15} + 1 )) minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
+    base_constructor_handoff_code="$(patch_rows "base_constructor_jobs" "status=eq.processing" "{\"started_at\":\"${handoff_at}\"}")"
     if [[ "$base_constructor_handoff_code" =~ ^(200|204)$ ]]; then
       echo "[drain] base_constructor_jobs: processing jobs marked for immediate resume"
     else

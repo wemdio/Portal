@@ -29,6 +29,7 @@ import { parseHandoff } from '@/lib/handoffCheck/parseHandoff';
 import { checkCard } from '@/lib/handoffCheck/checkCard';
 import { fetchCard } from '@/lib/handoffCheck/amoApi';
 import {
+  messageLink,
   noLinkReply,
   problemsReply,
   reminderReply,
@@ -137,12 +138,13 @@ async function evaluate(
 
 // ── Telegram ────────────────────────────────────────────────────────────────
 
-function replyText(kind: ReplyKind, decision: Decision, amoUrl: string | null): string {
+function replyText(kind: ReplyKind, decision: Decision, amoUrl: string | null, messageId: number): string {
+  const messageUrl = messageLink(CHAT_ID, THREAD_ID, messageId);
   const problems = chatVisibleProblems(decision.problems);
   if (kind === 'no_link') return noLinkReply();
   if (kind === 'resolved') return resolvedReply();
-  if (kind === 'reminder') return reminderReply(problems, amoUrl);
-  return problemsReply(problems, amoUrl);
+  if (kind === 'reminder') return reminderReply(problems, amoUrl, messageUrl);
+  return problemsReply(problems, amoUrl, messageUrl);
 }
 
 /** Реплай на сообщение о передаче; null — не отправилось. */
@@ -256,7 +258,7 @@ async function applyDecision(
   await upsertCheck(ctx.db, claimedRow(prev, decision, fields, nowIso));
   if (!decision.reply) return;
 
-  const sentId = await sendReply(ctx, target.messageId, replyText(decision.reply, decision, target.amoUrl));
+  const sentId = await sendReply(ctx, target.messageId, replyText(decision.reply, decision, target.amoUrl, target.messageId));
   ctx.log('info', `message ${target.messageId}: ${decision.reply} reply ${sentId != null ? 'sent' : 'FAILED'}`);
 
   const key = { chat_id: fields.chat_id, message_id: fields.message_id, status: decision.status };

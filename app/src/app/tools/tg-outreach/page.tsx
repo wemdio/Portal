@@ -1,7 +1,16 @@
 'use client';
 
-import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { Suspense, useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import type { Route } from 'next';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
+import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
+import { proxyCountryLabel } from '@/lib/tgOutreach/proxyCountry';
+import { RowMenu } from '@/components/tg-outreach/RowMenu';
+import { Reveal } from '@/components/tg-outreach/Reveal';
+import { PageLoader } from '@/components/tg-outreach/PageLoader';
+import { FailedReplyBubble, ReplyFailureIndicator } from '@/components/tg-outreach/FailedReplyBubble';
+import { ArchiveCampaignDialog, CampaignList, DeleteCampaignDialog, archiveBlockReason } from '@/components/tg-outreach/CampaignList';
 import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
 import { BaseContactsModal } from '@/components/tg-outreach/BaseContactsModal';
@@ -33,12 +42,14 @@ import {
   Ban,
   RefreshCw,
   AlertCircle,
+  AlertTriangle,
+  CheckCircle2,
   Flame,
   Database,
-  Eye,
+  Eraser,
   ShieldCheck,
   FileSpreadsheet,
-  LayoutDashboard,
+  BarChart3,
   Power,
   PowerOff,
   FolderPlus,
@@ -47,6 +58,8 @@ import {
   Move,
   Pencil,
   Archive,
+  ArchiveRestore,
+  ArrowLeft,
   UserPen,
   Check,
   CheckCheck,
@@ -55,6 +68,7 @@ import { AccountArchiveSection, ArchiveAccountsDialog } from '@/components/tg-ou
 import type { ArchiveReason } from '@/lib/tgOutreach/accountArchive';
 import DashboardTab from '@/components/tg-outreach/DashboardTab';
 import BaseComparison from '@/components/tg-outreach/BaseComparison';
+import BasesForecast from '@/components/tg-outreach/BasesForecast';
 import { AccountPicker } from '@/components/tg-outreach/AccountPicker';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
 import CrmSettingsPanel, { type CrmSettings } from '@/components/tg-outreach/CrmSettingsPanel';
@@ -87,6 +101,7 @@ import { accountLabel } from '@/lib/tgOutreach/accountLabel';
 import { leadMarkLabel, type LeadByFilter } from '@/lib/tgOutreach/leadMark';
 import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
 import { ProxyPicker } from '@/components/tg-outreach/ProxyPicker';
+import { CopyTableButton, type CopyRow } from '@/components/tg-outreach/CopyTableButton';
 import {
   takenProxyUrls,
   selectableProxies,
@@ -96,7 +111,6 @@ import {
   describeSending,
   healthToneClass,
   describeProxy,
-  countSendingAccounts,
   pickDeadAccounts,
   type AccountSendingStat,
   type HealthMark,
@@ -108,6 +122,8 @@ import type { AccountCheckResult, OtherSession } from '@/lib/tgOutreach/accountC
 import type { ProxyCheckResult } from '@/lib/tgOutreach/proxyCheck';
 
 const API_BASE = '/api/tools/tg-outreach';
+/** Прокси в одной пачке проверки (сервер берёт до 200): 150 — быстро и без таймаута запроса. */
+const CHECK_BATCH = 150;
 /**
  * Со скольких дней молчания аккаунт считается неживым.
  *
@@ -179,19 +195,6 @@ const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   // пока он идёт, боевой аутрич запустить нельзя.
   warming: { label: 'Прогрев', cls: 'bg-blue-100 text-blue-700' },
 };
-
-/** Цвет точки кампании в списке. */
-function statusDotClass(status: string): string {
-  switch (status) {
-    case 'running': return 'bg-emerald-400';
-    case 'starting': return 'bg-emerald-300 animate-pulse';
-    case 'stopping': return 'bg-amber-400 animate-pulse';
-    case 'paused': return 'bg-amber-400';
-    case 'warming': return 'bg-blue-400';
-    case 'error': return 'bg-rose-400';
-    default: return 'bg-gray-400';
-  }
-}
 
 /** Как часто шапка кампании перечитывает состояние с сервера. */
 const PHASE_POLL_MS = 4000;
@@ -422,9 +425,9 @@ function Collapsible({ title, hint, badge, children }: {
 }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="rounded-lg border border-gray-200">
+    <div className={`rounded-lg border ${INPUT_BORDER} ${INPUT_BG}`}>
       <button type="button" onClick={() => setOpen(v => !v)}
-        className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition hover:bg-gray-50 cursor-pointer">
+        className="flex w-full items-center gap-2 rounded-lg px-3.5 py-3.5 text-left transition hover:bg-gray-100 cursor-pointer">
         {open ? <ChevronUp className="h-3.5 w-3.5 shrink-0 text-gray-400" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-gray-400" />}
         <span className="text-xs font-semibold text-gray-800">{title}</span>
         {badge && <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">{badge}</span>}
@@ -439,23 +442,22 @@ function Collapsible({ title, hint, badge, children }: {
   );
 }
 
-/* Переключатель вместо галочки: follow-up включают и выключают целиком, и
-   состояние должно читаться с расстояния — залитый синим тумблер видно сразу,
-   пустой квадратик галочки нет. Ползунок ездит слева направо и обратно. */
-function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
-  return (
-    <label className="flex w-fit cursor-pointer items-center gap-2.5 text-sm font-medium text-gray-700">
-      <span className="relative inline-flex shrink-0">
-        <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} className="peer sr-only" />
-        <span className="block h-5 w-9 rounded-full bg-gray-300 transition-colors duration-200 peer-checked:bg-indigo-600 peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-300" />
-        <span className="pointer-events-none absolute left-0.5 top-0.5 block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 peer-checked:translate-x-4" />
-      </span>
-      {label}
-    </label>
-  );
-}
-
 /* =================== SETTINGS TAB =================== */
+/**
+ * Поля настроек, которых нет на экране (22.10.2026). Экран не пишет их в базу,
+ * если у кампании их не было: старая кампания продолжает работать на значениях
+ * воркера по умолчанию, а не на дефолтах экрана.
+ */
+const HIDDEN_TELEGRAM_KEYS = [
+  'account_cooldown_hours',
+  'account_concurrency',
+  'first_touch_gap_minutes',
+  'first_touch_per_gap',
+  'read_reply_delay_range',
+  'cycle_delay_range',
+  'account_loop_delay_range',
+] as const satisfies ReadonlyArray<keyof TelegramSettings>;
+
 function SettingsTab({ campaign, onSave }: {
   campaign: OutreachCampaign;
   onSave: (name: string, openai: OpenAISettings, telegram: TelegramSettings, crm: CrmSettings | null) => Promise<void>;
@@ -482,121 +484,157 @@ function SettingsTab({ campaign, onSave }: {
     (campaign.telegram_settings?.blocked_usernames ?? []).join(', ')
   );
 
-  const handleSave = async () => {
-    if (!campaignName.trim()) {
-      setSaveError('Название кампании обязательно');
-      setSaved(false);
+  /**
+   * Что уходит в базу. Скрытые с экрана поля (паузы, порции, параллельность)
+   * пишем, только если они у кампании уже были: иначе дефолты экрана молча
+   * поменяли бы поведение старой кампании, у которой воркер берёт свои.
+   * CRM без воронки и этапа не сохраняем — остальное сохраняется.
+   */
+  const buildPayload = () => {
+    const original = (campaign.telegram_settings ?? {}) as Partial<TelegramSettings>;
+    const tgOut: Partial<TelegramSettings> = {
+      ...telegram,
+      blocked_usernames: blockedRaw.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean),
+    };
+    for (const key of HIDDEN_TELEGRAM_KEYS) {
+      if (!(key in original)) delete tgOut[key];
+    }
+    return { name: campaignName.trim(), openai, telegram: tgOut as TelegramSettings, crm: crmIncomplete ? null : crm };
+  };
+
+  /**
+   * Автосохранение: через 0,8 с после последней правки. Работающая кампания
+   * подхватывает новые настройки на ходу (refreshSettings в campaignLoop) —
+   * перед следующим аккаунтом круга. Сохранения идут строго по очереди:
+   * правка во время записи сохранится следующим заходом.
+   */
+  const payload = buildPayload();
+  const payloadKey = JSON.stringify(payload);
+  const lastSavedKey = useRef(payloadKey);
+  const saveChain = useRef<Promise<void>>(Promise.resolve());
+  const latestPayload = useRef(payload);
+  const onSaveRef = useRef(onSave);
+  // Таймер сохранения читает последние значения через ref: сам эффект
+  // пересоздаётся только при смене снимка.
+  useEffect(() => {
+    latestPayload.current = payload;
+    onSaveRef.current = onSave;
+  });
+  const [retryTick, setRetryTick] = useState(0);
+  // Блок CRM отдаёт свой выбор сразу после монтирования. Это не правка
+  // оператора: первый такой снимок — точка отсчёта, а не повод сохранять.
+  const baselineTaken = useRef(false);
+
+  useEffect(() => {
+    if (crm === null) return;
+    if (!baselineTaken.current) {
+      baselineTaken.current = true;
+      lastSavedKey.current = payloadKey;
       return;
     }
-    setSaving(true);
-    setSaveError(null);
-    setSaved(false);
-    const parsed = blockedRaw.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean);
-    const updatedTelegram = { ...telegram, blocked_usernames: parsed };
-    try {
-      await onSave(campaignName.trim(), openai, updatedTelegram, crm);
-      setCampaignName(campaignName.trim());
-      setSaved(true);
-    } catch (e) {
-      setSaveError(e instanceof Error ? e.message : 'Не удалось сохранить настройки');
-    } finally {
-      setSaving(false);
+    if (payloadKey === lastSavedKey.current) return;
+    if (!campaignName.trim()) {
+      setSaveError('Название кампании обязательно');
+      return;
     }
-  };
+    setSaved(false);
+    setSaveError(null);
+    const timer = setTimeout(() => {
+      saveChain.current = saveChain.current.then(async () => {
+        const p = latestPayload.current;
+        const key = JSON.stringify(p);
+        if (key === lastSavedKey.current) return;
+        setSaving(true);
+        try {
+          await onSaveRef.current(p.name, p.openai, p.telegram, p.crm);
+          lastSavedKey.current = key;
+          setSaved(true);
+          setSaveError(null);
+        } catch (e) {
+          setSaveError(e instanceof Error ? e.message : 'Не удалось сохранить настройки');
+        } finally {
+          setSaving(false);
+        }
+      });
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [payloadKey, campaignName, crm, retryTick]);
 
   const setOAI = <K extends keyof OpenAISettings>(k: K, v: OpenAISettings[K]) =>
     setOpenai(prev => ({ ...prev, [k]: v }));
   const setTG = <K extends keyof TelegramSettings>(k: K, v: TelegramSettings[K]) =>
     setTelegram(prev => ({ ...prev, [k]: v }));
 
+  const blockedCount = blockedRaw.split(',').map(x => x.trim()).filter(Boolean).length;
+
+  // Форма из групп: слева — что настраивается и зачем, справа — поля. Раньше
+  // поля шли сплошной стеной без заголовков, и найти нужное было тяжело.
   return (
-    <div className="space-y-6" onChangeCapture={() => { setSaved(false); setSaveError(null); }}>
-      {/* Промпт, триггеры и чаты-приёмники. Заголовка нет намеренно: «OpenRouter»
-          называл поставщика модели, а не то, что оператор здесь настраивает. */}
-      <section className="space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="space-y-1">
-            <Field label="Название кампании" value={campaignName} onChange={setCampaignName} />
-            <p className="text-[10px] text-gray-400">Отображается в списке кампаний и заголовке.</p>
-          </div>
-          <Field label="Название проекта" value={openai.project_name} onChange={v => setOAI('project_name', v)} />
-        </div>
-        <FieldArea label="Системный промпт" value={openai.system_prompt} onChange={v => setOAI('system_prompt', v)} rows={6} />
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <FieldArea label="Триггер (положительный)" value={openai.trigger_phrases_positive} onChange={v => setOAI('trigger_phrases_positive', v)} rows={2} />
-          <Field label="Чат для пересылки (+)" value={openai.target_chats_positive} onChange={v => setOAI('target_chats_positive', v)} placeholder="@username" />
-        </div>
+    <div className="pb-20">
+      <div className="rounded-2xl border border-gray-200 bg-white px-5 md:px-7">
+        {/* «Название проекта» (openai.project_name) убрано с экрана 22.10.2026:
+            оно лишь подставлялось в промпт вместо {project_name}, а на 22.10 ни
+            один промпт этой подстановки не содержал — поле дублировало
+            название кампании. Сохранённое значение воркер читает как раньше. */}
+        <SettingsGroup title="Кампания" hint="Название видно в списке кампаний.">
+          <Field half label="Название кампании" value={campaignName} onChange={setCampaignName} />
+        </SettingsGroup>
+
+        <SettingsGroup title="Как отвечает бот" hint="Роль, тон и правила, по которым GPT ведёт переписку.">
+          <FieldArea label="Системный промпт" value={openai.system_prompt} onChange={v => setOAI('system_prompt', v)} rows={8} />
+        </SettingsGroup>
+
         {/* Чат пересылки наполняет автоматика по триггерной фразе; ручные
             передачи с вкладки «Диалоги» — лид и партнёр — уходят в него же.
             Пустой чат — передача лида становится просто пометкой «Лид». */}
-        <p className="text-[10px] text-gray-400 -mt-2">
-          В чат пересылки бот отправляет сам по триггерной фразе. Пусто — контакт только помечается лидом.
-        </p>
-        {/* Для кампаний, где квалификацию (роль, объём, бюджет) ведёт промпт:
-            общая проверка интереса передавала лида на «расскажите подробнее»
-            в обход промпта. См. OpenAISettings.handoff_direct_request_only. */}
-        <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
-          <input type="checkbox" checked={openai.handoff_direct_request_only === true} onChange={e => setOAI('handoff_direct_request_only', e.target.checked)} className="rounded border-gray-300" />
-          Передавать сам только по прямой просьбе: менеджер, созвон, встреча
-        </label>
-        {/* Жёсткое правило поверх промпта: лид уходит менеджеру только после
-            ответов на эти вопросы. См. OpenAISettings.qualification_required. */}
-        <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
-          <input type="checkbox" checked={openai.qualification_required === true} onChange={e => setOAI('qualification_required', e.target.checked)} className="rounded border-gray-300" />
-          Передавать только после квалификации
-        </label>
-        {openai.qualification_required === true && (
-          <>
-            <FieldArea label="Контрольные вопросы (по одному в строке)" value={openai.qualification_questions ?? ''} onChange={v => setOAI('qualification_questions', v)} rows={4} />
-            <p className="text-[10px] text-gray-400 -mt-2">
-              Не ответил на все — бот спросит один раз. Всё равно не ответил — лид уйдёт с пометкой «без полной квалификации».
-            </p>
-          </>
-        )}
-      </section>
-
-      {/* Переданный лид — сразу сделкой в CRM (наша AMO или клиента). Сохраняется общей кнопкой. */}
-      <CrmSettingsPanel campaignId={campaign.id} onChange={setCrm} />
-
-      {/* Заголовок «Telegram» снят с секции: экран целиком про Telegram-аутрич,
-          и подпись ничего не отделяла от соседних блоков. */}
-      <section className="space-y-4">
-        {/* Названия сверены с кодом: каждое поле подписано тем, что оно делает
-            на самом деле, а не тем, как называется переменная. Три подписи были
-            неверны и вводили в заблуждение — история в комментариях ниже. */}
-        {/* «Сообщений в пересылке» и «Сообщений в контексте GPT» убраны с экрана
-            09.09.2026: пересылка лида шлёт 5 последних сообщений, модель читает
-            20 — дефолты подходят всегда, сохранённые значения кампаний воркер
-            продолжает читать как раньше. */}
-        {/* Две строки вместо трёх сеток по два поля: сверху — что кампания
-            рассылает (пояс, пауза после ограничения, дневная норма, длина
-            письма), снизу — с каким темпом. Поля узкие, поэтому в строку
-            влезает по четыре-шесть штук. */}
-        <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
-          <div className="w-auto space-y-1">
-            <TimezoneField value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
-            <p className="text-[10px] text-gray-400">
-              Влияет только на «Периоды сна».
-            </p>
+        <SettingsGroup title="Передача лида" hint="Когда бот сам передаёт человека менеджеру и куда.">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <FieldArea label="Триггерная фраза" value={openai.trigger_phrases_positive} onChange={v => setOAI('trigger_phrases_positive', v)} rows={2} />
+            <div className="space-y-1">
+              <Field label="Чат для пересылки" value={openai.target_chats_positive} onChange={v => setOAI('target_chats_positive', v)} placeholder="@username" />
+              <p className="text-[11px] text-gray-400">Пусто — контакт только помечается лидом.</p>
+            </div>
           </div>
-          {/* Было «Пауза аккаунта (часов)» — читалось как штатная пауза между
-              заходами и создавало ложное чувство, что нагрузка размазана по
-              суткам. На деле пауза включается ТОЛЬКО после того, как Telegram
-              ограничил аккаунт (FloodError/Frozen), см. campaignLoop:1507. */}
-          <div className="w-52 space-y-1">
-            <StepperField
-              label="Пауза после ограничения (часов)"
-              value={telegram.account_cooldown_hours}
-              min={1}
-              max={72}
-              onChange={v => setTG('account_cooldown_hours', v)}
-              title="Сколько часов аккаунт не берётся в работу после ограничения Telegram."
-            />
-            <p className="text-[10px] text-gray-400">
-              Сколько аккаунт отдыхает после PEER_FLOOD / FloodWait.
-            </p>
-          </div>
-          <div className="w-52 space-y-1">
+          {/* Для кампаний, где квалификацию (роль, объём, бюджет) ведёт промпт:
+              общая проверка интереса передавала лида на «расскажите подробнее»
+              в обход промпта. См. OpenAISettings.handoff_direct_request_only. */}
+          <SwitchRow
+            checked={openai.handoff_direct_request_only === true}
+            onChange={v => setOAI('handoff_direct_request_only', v)}
+            label="Только по прямой просьбе"
+            hint="Передавать, когда человек сам просит менеджера, созвон или встречу."
+          />
+          {/* Жёсткое правило поверх промпта: лид уходит менеджеру только после
+              ответов на эти вопросы. См. OpenAISettings.qualification_required. */}
+          <SwitchRow
+            checked={openai.qualification_required === true}
+            onChange={v => setOAI('qualification_required', v)}
+            label="Только после квалификации"
+            hint="Сначала ответы на контрольные вопросы, потом передача."
+          />
+          <Reveal open={openai.qualification_required === true}>
+            <div className="space-y-1">
+              <FieldArea label="Контрольные вопросы, по одному в строке" value={openai.qualification_questions ?? ''} onChange={v => setOAI('qualification_questions', v)} rows={4} />
+              <p className="text-[11px] text-gray-400">
+                Не ответил на все — бот спросит один раз. Опять нет — лид уйдёт с пометкой «без полной квалификации».
+              </p>
+            </div>
+          </Reveal>
+        </SettingsGroup>
+
+        {/* Переданный лид — сразу сделкой в CRM (наша AMO или клиента). Сохраняется общей кнопкой. */}
+        <SettingsGroup title="Сделка в CRM" hint="Переданный лид сразу становится сделкой.">
+          <CrmSettingsPanel initial={campaign.crm_settings} onChange={setCrm} />
+        </SettingsGroup>
+
+        {/* 22.10.2026 на экране оставлены только пояс и дневная норма (решение
+            пользователя). Паузы, порции, параллельность и паузу после
+            ограничения кампания берёт из сохранённых значений, а новая — из
+            DEFAULT_TELEGRAM_SETTINGS (lib/tgOutreach/types.ts). */}
+        <SettingsGroup title="Рассылка" hint="Сколько первых сообщений уходит и когда аккаунты молчат.">
+          {/* Одна строка: норма, периоды сна, часовой пояс. Периоды сна узкие —
+              в них помещается «00:00-08:00». Пояснение по сну — под полем. */}
+          <div className="flex flex-wrap items-start gap-x-6 gap-y-4">
             <StepperField
               label="Первых сообщений на аккаунт в сутки"
               value={telegram.first_touch_per_account_per_day ?? 3}
@@ -605,166 +643,122 @@ function SettingsTab({ campaign, onSave }: {
               onChange={v => setTG('first_touch_per_account_per_day', v)}
               title="Дневная норма первых сообщений на каждый аккаунт. Ноль выключает рассылку."
             />
+            <div className="w-64 space-y-1">
+              <Field label="Периоды сна" value={telegram.sleep_periods.join(', ')} onChange={v => setTG('sleep_periods', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="00:00-08:00" />
+              <p className="text-[11px] text-gray-400">В эти часы аккаунты молчат.</p>
+            </div>
+            <TimezoneField value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
           </div>
-          {/* Рядом с дневной нормой: вместе они и отвечают на вопрос «сколько
-              уйдёт за круг». Ждать друг друга аккаунтам незачем — у каждого своя
-              сессия и свой прокси; ограничение упирается в прокси-хост, а не в
-              Telegram. */}
-          <div className="w-52 space-y-1">
-            <StepperField
-              label="Аккаунтов одновременно рассылает"
-              value={telegram.account_concurrency ?? 6}
-              min={1}
-              max={20}
-              onChange={v => setTG('account_concurrency', v)}
-              title="Сколько аккаунтов кампания обходит параллельно. Больше — быстрее круг, но выше нагрузка на прокси-хост."
-            />
-          </div>
-          {/* «Максимум знаков в первом сообщении» убран с экрана 10.09.2026:
-              порог один на все кампании (DEFAULT_MAX_MESSAGE_CHARS, 600 знаков,
-              меняется переменной окружения TG_FIRST_TOUCH_MAX_CHARS). */}
-        </div>
-        {/* Вторая строка — темп: разнос нормы по дню и паузы обхода.
-            09.09.2026 в ATOL-1 Telegram выдал PEER_FLOOD свежим аккаунтам после
-            3–6 первых сообщений подряд при суточной норме 4. Спасает не норма, а
-            расстояние между отправками: порция уходит, дальше аккаунт молчит.
-            «Пауза перед прочтением» с экрана убрана — теперь всегда рандом
-            5–15 сек (campaignLoop), настройкой не управляется. */}
-        <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
-          <div className="w-44 space-y-1">
-            <FieldNum
-              compact
-              label="Пауза между порциями (минут)"
-              value={telegram.first_touch_gap_minutes ?? 60}
-              onChange={v => setTG('first_touch_gap_minutes', v)}
-            />
-            <p className="text-[10px] text-gray-400">
-              Сколько аккаунт молчит между порциями. Ноль — вся норма уйдёт сразу, одной очередью.
-            </p>
-          </div>
-          {/* Прежняя подпись объясняла порцию через саму порцию («сколько писем
-              в порции») и оператору ничего не давала. Пример с числами — самый
-              короткий способ показать, что поле делает с дневной нормой. */}
-          <div className="w-56 space-y-1">
-            <StepperField
-              label="Писем в одной порции"
-              value={telegram.first_touch_per_gap ?? 2}
-              min={1}
-              max={20}
-              onChange={v => setTG('first_touch_per_gap', v)}
-              title="Сколько первых сообщений аккаунт отправляет подряд, прежде чем замолчать до следующей порции."
-            />
-            <p className="text-[10px] text-gray-400">
-              Норма 6, в порции 2, пауза 60 минут: два письма, час тишины, ещё два, час тишины, ещё два.
-            </p>
-          </div>
-          {/* Было «Задержка до ответа» — подпись покрывала лишь одно из четырёх
-              применений. Тот же диапазон задаёт паузу между ПЕРВЫМИ сообщениями
-              внутри дневной нормы (firstTouch/send.ts, gapMs), а при 5–10 сек
-              аккаунт пишет всю норму незнакомым людям за полминуты — самый
-              короткий путь к ограничению. */}
-          <RangeField compact label="Пауза между действиями (сек)" value={telegram.read_reply_delay_range} onChange={v => setTG('read_reply_delay_range', v)} />
-          {/* Пауза между полными кругами по всем аккаунтам. Раньше была
-              захардкожена в 30 секунд, что на «горячих» mobile-pool IP
-              слишком быстро (Telegram продолжал отвечать silent throttle).
-              Сейчас вынесено в настройки с дефолтом [300, 600] сек. */}
-          <RangeField compact label="Пауза между кругами (сек)" value={telegram.cycle_delay_range ?? [300, 600]} onChange={v => setTG('cycle_delay_range', v)} />
-          <RangeField compact label="Пауза между аккаунтами (сек)" value={telegram.account_loop_delay_range} onChange={v => setTG('account_loop_delay_range', v)} />
-        </div>
-        {/* «Окно ожидания диалога» (dialog_wait_window_range) убрано с экрана:
-            ключ есть в TelegramSettings и в дефолтах, но НИ ОДНА строка кода его
-            не читает — поле ничего не делало, а операторы его крутили. Значение
-            в БД оставлено как есть, чтобы не трогать сохранённые кампании. */}
-        <Field half label="Периоды сна" value={telegram.sleep_periods.join(', ')} onChange={v => setTG('sleep_periods', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="00:00-08:00, 19:00-00:00" />
-        <div className="flex flex-col gap-2">
-          <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
-            <input type="checkbox" checked={telegram.reply_only_if_previously_wrote} onChange={e => setTG('reply_only_if_previously_wrote', e.target.checked)} className="rounded border-gray-300" />
-            Отвечать только если ранее писали
-          </label>
-          <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
-            <input type="checkbox" checked={telegram.auto_allow_new_dialogs} onChange={e => setTG('auto_allow_new_dialogs', e.target.checked)} className="rounded border-gray-300" />
-            Новым диалогам разрешать отправку автоматически
-          </label>
-          <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
-            <input type="checkbox" checked={telegram.ignore_no_username} onChange={e => setTG('ignore_no_username', e.target.checked)} className="rounded border-gray-300" />
-            Игнорировать без имени пользователя
-          </label>
-        </div>
+        </SettingsGroup>
+
         {/* Галочки «Писать только контактам из баз» и «Игнорировать ботов» сняты
             с экрана 10.09.2026: обе теперь заложены в инструмент и работают
-            всегда (campaignLoop). Выключать их было незачем — выключенная первая
-            возвращала ответы партнёрам по прогреву и фальшивые лиды. */}
-      </section>
+            всегда (campaignLoop). */}
+        {/* Группа «Кому отвечать» снята с экрана 22.10.2026: три правила теперь
+            заложены в код и действуют всегда — отвечать только тем, кому мы
+            писали; новые диалоги сразу разрешены к отправке; ответ человеку без
+            @username не пропускается (в базах только username-контакты). */}
 
-      {/* Оба чёрных списка — рядом: заполняют их редко и обычно вместе, а по
-          отдельности каждый занимал целую строку экрана. */}
-      <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-2">
-        <Collapsible
-          title="Чёрный список username"
-          hint="Через запятую. Этим аккаунтам кампания не пишет и не отвечает."
-          badge={blockedRaw.trim() ? `${blockedRaw.split(',').map(x => x.trim()).filter(Boolean).length}` : undefined}
-        >
-          <Field
-            label="Через запятую"
-            value={blockedRaw}
-            onChange={setBlockedRaw}
-            placeholder="SpamBot, another_bot"
-          />
-        </Collapsible>
-        <GlobalBlocklistSection />
-      </div>
-
-      {/* Follow-up */}
-      <section className="space-y-4">
-        {/* Пояснение вынесено в сам заголовок: отдельная строка под ним занимала
-            место ради одной фразы. */}
-        <h3 className="text-sm font-semibold text-gray-800">
-          Настройки Follow-up сообщений{' '}
-          <span className="font-normal text-gray-400">(уходит один раз на диалог, если человек не ответил)</span>
-        </h3>
-        <Toggle
-          checked={telegram.follow_up.enabled}
-          onChange={v => setTG('follow_up', { ...telegram.follow_up, enabled: v })}
-          label="Включить Follow-up сообщения"
-        />
-        {telegram.follow_up.enabled && (
-          <div className="space-y-4 rounded-lg border border-gray-200 p-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <FieldNum label="Задержка перед отправкой (часы)" value={telegram.follow_up.delay_hours} onChange={v => setTG('follow_up', { ...telegram.follow_up, delay_hours: v })} />
-              </div>
-              <div>
-                <FieldNum label="Задержка (минуты)" value={telegram.follow_up.delay_minutes ?? 0} onChange={v => setTG('follow_up', { ...telegram.follow_up, delay_minutes: v })} />
-              </div>
-            </div>
-            <p className="text-[11px] text-gray-500">Через сколько времени без ответа отправить follow-up (по умолчанию: 24 часа 0 минут)</p>
-            <div>
-              <FieldArea label="Промпт для генерации сообщения" value={telegram.follow_up.prompt} onChange={v => setTG('follow_up', { ...telegram.follow_up, prompt: v })} rows={4} placeholder="Напиши короткое напоминание о себе..." />
-              <p className="mt-1 text-[11px] text-gray-500">GPT учтёт историю переписки. Опишите, каким должно быть сообщение.</p>
-            </div>
-            <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-3 text-[11px] text-gray-700">
-              <strong>Важно:</strong>
-              <ul className="mt-1 list-inside list-disc space-y-0.5">
-                <li>Отправляется только если последнее сообщение от бота</li>
-                <li>Только 1 раз для каждого пользователя</li>
-                <li>Не отправляется для уже обработанных клиентов</li>
-              </ul>
-            </div>
+        {/* Оба чёрных списка — рядом: заполняют их редко и обычно вместе. */}
+        <SettingsGroup title="Чёрные списки" hint="Этим людям кампания не пишет и не отвечает.">
+          <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-2">
+            <Collapsible
+              title="Username кампании"
+              hint="Через запятую. Действует только в этой кампании."
+              badge={blockedCount ? `${blockedCount}` : undefined}
+            >
+              <Field label="Через запятую" value={blockedRaw} onChange={setBlockedRaw} placeholder="SpamBot, another_bot" />
+            </Collapsible>
+            <GlobalBlocklistSection />
           </div>
-        )}
-      </section>
+        </SettingsGroup>
 
-      <div className="flex items-center gap-3">
-        <button type="button" onClick={handleSave} disabled={saving || crmIncomplete || !campaignName.trim()}
-          className="inline-flex items-center gap-2 rounded-full bg-indigo-600 px-6 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-          Сохранить настройки
-        </button>
-        {crmIncomplete && <span className="text-[11px] text-amber-600">Выберите воронку и этап CRM</span>}
+        <SettingsGroup title="Follow-up" hint="Одно напоминание, если человек не ответил.">
+          <SwitchRow
+            checked={telegram.follow_up.enabled}
+            onChange={v => setTG('follow_up', { ...telegram.follow_up, enabled: v })}
+            label="Отправлять follow-up"
+            hint="Только если последнее сообщение наше, один раз на человека, не тем, кто уже обработан."
+          />
+          <Reveal open={telegram.follow_up.enabled}>
+            <div className="space-y-4">
+              <div className="flex flex-wrap gap-4">
+                <div className="w-40">
+                  <FieldNum label="Через, часов" value={telegram.follow_up.delay_hours} onChange={v => setTG('follow_up', { ...telegram.follow_up, delay_hours: v })} />
+                </div>
+                <div className="w-40">
+                  <FieldNum label="и минут" value={telegram.follow_up.delay_minutes ?? 0} onChange={v => setTG('follow_up', { ...telegram.follow_up, delay_minutes: v })} />
+                </div>
+              </div>
+              <div className="space-y-1">
+                <FieldArea label="Промпт для follow-up" value={telegram.follow_up.prompt} onChange={v => setTG('follow_up', { ...telegram.follow_up, prompt: v })} rows={4} placeholder="Напиши короткое напоминание о себе..." />
+                <p className="text-[11px] text-gray-400">GPT учтёт историю переписки.</p>
+              </div>
+            </div>
+          </Reveal>
+        </SettingsGroup>
       </div>
-      {saveError && <p role="alert" className="text-xs text-red-600">{saveError}</p>}
-      {saved && <p role="status" className="text-xs text-emerald-600">Настройки сохранены</p>}
+
+      <div className="sticky bottom-0 z-20 mt-4">
+      <div className="flex w-full flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-2xl border border-gray-200 bg-white/95 px-6 py-2.5 text-center text-xs shadow-lg backdrop-blur" aria-live="polite">
+        {saving ? (
+          <span className="inline-flex items-center gap-1.5 text-gray-500"><Loader2 className="h-3.5 w-3.5 animate-spin" />Сохраняю…</span>
+        ) : saveError ? (
+          <>
+            <span role="alert" className="text-red-600">{saveError}</span>
+            <button type="button" onClick={() => { lastSavedKey.current = ''; setRetryTick((n) => n + 1); }}
+              className="rounded-full border border-red-300 px-3 py-1 font-medium text-red-600 hover:bg-red-50 cursor-pointer">
+              Повторить
+            </button>
+          </>
+        ) : saved ? (
+          <span role="status" className="inline-flex items-center gap-1 text-emerald-600"><Check className="h-3.5 w-3.5" />Сохранено, кампания применит сразу</span>
+        ) : (
+          <span className="text-gray-400">Изменения сохраняются автоматически</span>
+        )}
+        {crmIncomplete && <span className="text-amber-600">CRM не сохранится, пока не выбраны воронка и этап</span>}
+      </div>
+      </div>
     </div>
+  );
+}
+
+/** Группа формы настроек: слева название и пояснение, справа поля. */
+function SettingsGroup({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <section className="grid grid-cols-1 gap-x-10 gap-y-3 border-t border-gray-100 py-6 first:border-t-0 md:grid-cols-[13rem_minmax(0,1fr)]">
+      <div>
+        <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
+        {hint && <p className="mt-1 text-xs leading-relaxed text-gray-500">{hint}</p>}
+      </div>
+      <div className="min-w-0 space-y-4">{children}</div>
+    </section>
+  );
+}
+
+/**
+ * Переключатель с подписью и необязательным пояснением под ней. Ползунок —
+ * `bg-[#ffffff]`, а не `bg-white`: тёмная тема перекрашивает bg-white в цвет
+ * поверхности, и ползунок сливался с дорожкой.
+ */
+function SwitchRow({ checked, onChange, label, hint }: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  hint?: string;
+}) {
+  return (
+    <label className="flex cursor-pointer items-start gap-3">
+      <span className="relative mt-0.5 inline-flex shrink-0">
+        <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} className="peer sr-only" />
+        <span className="block h-5 w-9 rounded-full bg-[#6b7280] transition-colors duration-200 peer-checked:bg-[#6366f1] peer-focus-visible:ring-2 peer-focus-visible:ring-[#a5b4fc]" />
+        <span className="pointer-events-none absolute left-0.5 top-0.5 block h-4 w-4 rounded-full bg-[#ffffff] shadow-sm transition-transform duration-200 peer-checked:translate-x-4" />
+      </span>
+      <span className="min-w-0">
+        <span className="block text-sm text-gray-800">{label}</span>
+        {hint && <span className="mt-0.5 block text-xs text-gray-500">{hint}</span>}
+      </span>
+    </label>
   );
 }
 
@@ -992,7 +986,7 @@ function LogsTab({ campaignId }: { campaignId: string }) {
                 key={r}
                 type="button"
                 onClick={() => setViewRange(r)}
-                className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition cursor-pointer border ${viewRange === r ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}
+                className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition cursor-pointer border ${viewRange === r ? 'bg-[#4f46e5] text-[#ffffff] border-[#4f46e5] shadow-sm' : 'bg-white text-gray-600 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}
               >
                 {RANGE_LABEL[r]}
               </button>
@@ -1041,7 +1035,7 @@ function LogsTab({ campaignId }: { campaignId: string }) {
       </div>
 
       {/* Right: errors side panel */}
-      <aside className="rounded-lg border border-gray-200 bg-white flex flex-col h-[538px] min-h-0 overflow-hidden">
+      <aside className="tg-logs-aside rounded-lg border border-gray-200 bg-white flex flex-col h-[538px] min-h-0 overflow-hidden">
         <header className="px-3.5 py-3 border-b border-gray-100 space-y-2">
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-xs font-semibold text-gray-800 flex items-center gap-1.5">
@@ -1200,6 +1194,16 @@ function LogsTab({ campaignId }: { campaignId: string }) {
 // Флага «своя/чужая кампания» здесь больше нет. Он появился как зеркало RLS из
 // 20260320_0003 (читать всем, писать владельцу) — а 20260807_0004 это правило
 // сняла: аутрич командный, кампанию ведут несколько специалистов.
+/**
+ * Цвет счётчика сообщений: две и больше — разговор завязался, по таким
+ * диалогам и проверяют работу. Явные цвета (белый текст на сплошной заливке),
+ * чтобы одинаково читалось в светлой и тёмной теме.
+ */
+function messageCountClass(n: number): string {
+  // Ответ был (2 и больше) — зелёный; одно наше сообщение — тусклый серый.
+  return n >= 2 ? 'bg-[#16a34a] text-white' : 'bg-[#e5e7eb] text-[#6b7280]';
+}
+
 function DialogsTab({ campaignId, crmEnabled }: {
   campaignId: string;
   /** Включена ли у кампании передача в CRM — тогда у лидов без сделки есть кнопка «В CRM». */
@@ -1236,11 +1240,13 @@ function DialogsTab({ campaignId, crmEnabled }: {
    * загруженной страницы врала бы про количество.
    */
   const [filterAccountId, setFilterAccountId] = useState('');
+  /** Открытый справа диалог; пока не выбран — первый в списке. */
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [sendText, setSendText] = useState('');
   const [sending, setSending] = useState(false);
   // Сообщения бота, по которым ушла задача на удаление в Telegram: ключ — диалог, время и текст.
   const [deletingMsgs, setDeletingMsgs] = useState<Set<string>>(new Set());
+  const [deletionJobs, setDeletionJobs] = useState<Record<string, { id: string; dialogId: string }>>({});
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
   /** Базы кампании — для фильтра «показать только диалоги этой гипотезы». */
   const [bases, setBases] = useState<Array<{ id: string; name: string }>>([]);
@@ -1249,7 +1255,10 @@ function DialogsTab({ campaignId, crmEnabled }: {
   const [forwarding, setForwarding] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState<string | null>(null);
   const [crmPushing, setCrmPushing] = useState<string | null>(null);
-  const limit = 30;
+  /** Порция подгрузки: первые 50, дальше по 50 при прокрутке списка вниз. */
+  const limit = 50;
+  const dialogsCountRef = useRef(0);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   const fetchAccounts = useCallback(async () => {
     const res = await authFetch(`${API_BASE}/accounts?campaign_id=${campaignId}`);
@@ -1289,8 +1298,13 @@ function DialogsTab({ campaignId, crmEnabled }: {
    * наверх, и после каждой пометки место приходилось искать заново.
    */
   const fetchDialogs = useCallback(async (options?: { silent?: boolean }) => {
-    if (!options?.silent) setLoading(true);
-    const params = new URLSearchParams({ campaign_id: campaignId, limit: String(limit), offset: String(offset) });
+    // offset > 0 — подгрузка следующей порции: дописываем к списку. Тихое
+    // обновление перечитывает всё уже загруженное одним запросом.
+    const append = !options?.silent && offset > 0;
+    if (!options?.silent && !append) setLoading(true);
+    if (append) setLoadingMore(true);
+    const pageSize = options?.silent ? Math.max(limit, dialogsCountRef.current) : limit;
+    const params = new URLSearchParams({ campaign_id: campaignId, limit: String(pageSize), offset: String(options?.silent || !append ? 0 : offset) });
     if (query.trim()) params.set('q', query.trim());
     if (filterStatus) params.set('status', filterStatus);
     if (filterCanSend === 'enabled') params.set('can_send', 'true');
@@ -1304,9 +1318,17 @@ function DialogsTab({ campaignId, crmEnabled }: {
     const res = await authFetch(`${API_BASE}/dialogs?${params}`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachDialog[]; total: number };
-      setDialogs(d.items); setTotal(d.total);
+      setDialogs((cur) => {
+        const next = append
+          ? [...cur, ...d.items.filter((x) => !cur.some((c) => c.id === x.id))]
+          : d.items;
+        dialogsCountRef.current = next.length;
+        return next;
+      });
+      setTotal(d.total);
     }
     setLoading(false);
+    setLoadingMore(false);
   }, [campaignId, offset, query, filterStatus, filterCanSend, filterAudience, filterAccountId, filterBaseId, filterMessages, filterLeadBy]);
 
   // Полсекунды тишины — и запрос уходит. Заодно сбрасываем страницу: искать на
@@ -1320,6 +1342,49 @@ function DialogsTab({ campaignId, crmEnabled }: {
   }, [search, query]);
 
   useEffect(() => { queueMicrotask(() => { void fetchDialogs(); void fetchAccounts(); void fetchBases(); }); }, [fetchDialogs, fetchAccounts, fetchBases]);
+
+  // Ошибка/автоперегенерация ответа видна в открытой вкладке без перезагрузки.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void fetchDialogs({ silent: true });
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [fetchDialogs]);
+
+  // Создание задачи ещё не означает удаление в Telegram. Ждём её результата,
+  // обновляем открытую переписку и возвращаем кнопку при ошибке воркера.
+  useEffect(() => {
+    if (!Object.keys(deletionJobs).length) return;
+    let cancelled = false;
+    let busy = false;
+    const poll = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        for (const [key, job] of Object.entries(deletionJobs)) {
+          const res = await authFetch(`${API_BASE}/jobs/${job.id}`);
+          if (!res.ok || cancelled) continue;
+          const result = await res.json() as { status: string; error_message?: string | null };
+          if (cancelled || !['completed', 'failed', 'cancelled'].includes(result.status)) continue;
+          if (result.status === 'completed') {
+            await fetchDialogs({ silent: true });
+          } else {
+            setDialogSaveError({ id: job.dialogId, message: result.error_message || 'Не удалось удалить сообщение в Telegram' });
+          }
+          if (cancelled) return;
+          setDeletingMsgs((cur) => { const next = new Set(cur); next.delete(key); return next; });
+          setDeletionJobs((cur) => { const next = { ...cur }; delete next[key]; return next; });
+        }
+      } catch {
+        // При кратком обрыве сети продолжаем ждать подтверждения от воркера.
+      } finally {
+        busy = false;
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 1500);
+    void poll();
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [deletionJobs, fetchDialogs]);
 
   /**
    * Пометка статуса и тумблер «можно писать» — оптимистично.
@@ -1542,6 +1607,7 @@ function DialogsTab({ campaignId, crmEnabled }: {
     if (!window.confirm('Удалить это сообщение в Telegram у обеих сторон? Отменить нельзя.')) return;
     const key = `${dialogId}|${m.timestamp ?? ''}|${m.content}`;
     setDeletingMsgs((cur) => new Set(cur).add(key));
+    setDialogSaveError((cur) => cur?.id === dialogId ? null : cur);
     try {
       const res = await authFetch(`${API_BASE}/dialogs/${dialogId}/delete-message`, {
         method: 'POST',
@@ -1551,6 +1617,8 @@ function DialogsTab({ campaignId, crmEnabled }: {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
         throw new Error(body?.error ?? `сервер ответил ${res.status}`);
       }
+      const job = await res.json() as { id: string };
+      setDeletionJobs((cur) => ({ ...cur, [key]: { id: job.id, dialogId } }));
     } catch (err) {
       setDeletingMsgs((cur) => { const next = new Set(cur); next.delete(key); return next; });
       setDialogSaveError({ id: dialogId, message: err instanceof Error ? err.message : 'не удалось удалить сообщение' });
@@ -1581,8 +1649,32 @@ function DialogsTab({ campaignId, crmEnabled }: {
     URL.revokeObjectURL(url);
   };
 
-  const totalPages = Math.ceil(total / limit);
-  const currentPage = Math.floor(offset / limit) + 1;
+  const selectedDialog = dialogs.find((x) => x.id === expandedId) ?? dialogs[0] ?? null;
+  const listRef = useRef<HTMLUListElement>(null);
+  const messagesEndKey = selectedDialog ? `${selectedDialog.id}:${selectedDialog.messages.length}:${selectedDialog.reply_failure?.timestamp ?? ''}:${selectedDialog.reply_failure?.retrying ?? ''}` : '';
+
+  // Переписка открывается на последних сообщениях, как в мессенджере.
+  useEffect(() => {
+    const box = document.querySelector<HTMLElement>('[data-dialog-messages]');
+    if (box) box.scrollTop = box.scrollHeight;
+  }, [messagesEndKey]);
+
+  // Стрелки вверх/вниз листают список, пока курсор не в поле ввода.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      const idx = dialogs.findIndex((x) => x.id === (selectedDialog?.id ?? ''));
+      const next = dialogs[idx + (e.key === 'ArrowDown' ? 1 : -1)];
+      if (!next) return;
+      e.preventDefault();
+      setExpandedId(next.id);
+      listRef.current?.querySelector(`[data-dialog-id="${next.id}"]`)?.scrollIntoView({ block: 'nearest' });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [dialogs, selectedDialog?.id]);
 
   return (
     <div className="space-y-4">
@@ -1748,7 +1840,7 @@ function DialogsTab({ campaignId, crmEnabled }: {
       </div>
 
       {loading ? (
-        <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
+        <PageLoader />
       ) : dialogs.length === 0 ? (
         <p className="text-xs text-gray-400 py-8 text-center">
           {query.trim()
@@ -1770,18 +1862,85 @@ function DialogsTab({ campaignId, crmEnabled }: {
                       : 'Нет диалогов'}
         </p>
       ) : (
-        <div className="space-y-2">
-          {dialogs.map(d => {
-            const isExpanded = expandedId === d.id;
-            const st = DIALOG_STATUS_LABELS[d.status] ?? DIALOG_STATUS_LABELS.none;
-            const autoMark = describeAutoForward(d);
-            const leadMark = leadMarkLabel(d);
-            return (
-              <div key={d.id} className="rounded-xl border border-gray-200 bg-white shadow-sm">
-                <button type="button" onClick={() => setExpandedId(isExpanded ? null : d.id)}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-100 transition rounded-xl cursor-pointer">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
+        <div className="grid h-[calc(100vh-250px)] min-h-[520px] grid-cols-1 gap-3 lg:grid-cols-[340px_minmax(0,1fr)]">
+          {/* Слева — список: выбрал строку, справа сразу переписка. Раскрывать
+              карточки по одной больше не нужно. */}
+          <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white/50">
+            <div className="flex items-center justify-between border-b border-gray-200 px-3 py-2 text-[11px] text-gray-500">
+              <span>Диалогов: {total}</span>
+              <span className="text-gray-400">↑ ↓ — переключать</span>
+            </div>
+            <ul
+              ref={listRef}
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                if (el.scrollHeight - el.scrollTop - el.clientHeight < 200 && !loadingMore && !loading && dialogs.length < total) {
+                  setOffset(dialogs.length);
+                }
+              }}
+              className="min-h-0 flex-1 overflow-y-auto"
+            >
+              {dialogs.map((d) => {
+                const active = selectedDialog?.id === d.id;
+                const st = DIALOG_STATUS_LABELS[d.status] ?? DIALOG_STATUS_LABELS.none;
+                const last = d.messages.at(-1);
+                // Последним написал человек — ход за нами.
+                const waiting = last?.role === 'user' && d.status === 'none';
+                return (
+                  <li key={d.id} data-dialog-id={d.id}>
+                    <button
+                      type="button"
+                      onClick={() => setExpandedId(d.id)}
+                      className={`tg-list-item block w-full border-b border-gray-100 px-3 py-2.5 text-left ${active ? 'tg-list-item--active' : ''}`}
+                    >
+                      <span className="flex items-center gap-1.5">
+                        {waiting && <span title="Человек ответил — ждёт нас" className="h-2 w-2 shrink-0 rounded-full bg-indigo-500" />}
+                        <span className={`min-w-0 flex-1 truncate text-xs ${active ? 'font-semibold text-indigo-700' : 'font-medium text-gray-900'}`}>
+                          {d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`}
+                        </span>
+                        <span
+                          title={`Сообщений в переписке: ${d.messages.length}`}
+                          className={`shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums ${messageCountClass(d.messages.length)}`}
+                        >
+                          {d.messages.length} сообщ.
+                        </span>
+                        {d.status !== 'none' && <span className={`shrink-0 rounded-full px-1.5 py-px text-[10px] font-medium ${st.cls}`}>{st.label}</span>}
+                        {d.can_send === false && <Ban className="h-3 w-3 shrink-0 text-rose-500" />}
+                        {d.reply_failure && <ReplyFailureIndicator failure={d.reply_failure} />}
+                        <span className="shrink-0 text-[10px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : ''}</span>
+                      </span>
+                      <span className="mt-0.5 block truncate text-[11px] text-gray-500">
+                        {last?.role === 'assistant' ? 'Вы: ' : ''}{last?.content ?? '—'}
+                      </span>
+                      {(d.base || accountLabelMap.get(d.account_id)) && (
+                        <span className="mt-1 flex items-center gap-1.5 text-[10px] text-gray-400">
+                          {d.base && <span className="truncate text-violet-600">{d.base.name}</span>}
+                          {accountLabelMap.get(d.account_id) && <span className="shrink-0">· {accountLabelMap.get(d.account_id)}</span>}
+                        </span>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            {loadingMore && (
+              <div className="flex items-center justify-center gap-1.5 border-t border-gray-200 px-2 py-1.5 text-[11px] text-gray-500">
+                <Loader2 className="h-3 w-3 animate-spin" /> Загружаю ещё…
+              </div>
+            )}
+          </div>
+
+          {/* Справа — выбранная переписка: шапка и действия сверху, сообщения
+              занимают всё свободное место, поле ввода прижато к низу. */}
+          <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white/50">
+            {selectedDialog && (() => {
+              const d = selectedDialog;
+              const autoMark = describeAutoForward(d);
+              const leadMark = leadMarkLabel(d);
+              return (
+                <>
+                  <div className="shrink-0 border-b border-gray-200 px-4 py-2.5">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="text-sm font-medium text-gray-900">{d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`}</span>
                       {/* Из какой гипотезы человек — сразу за ником: база
                           отвечает на вопрос «кто это», а не «что с ним
@@ -1803,7 +1962,6 @@ function DialogsTab({ campaignId, crmEnabled }: {
                           {d.base.alsoIn.length > 0 && <span className="opacity-70">+{d.base.alsoIn.length}</span>}
                         </span>
                       )}
-                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${st.cls}`}>{st.label}</span>
                       {/* Кто сделал лидом — сразу за статусом: ИИ или сотрудник. */}
                       {leadMark && (
                         <span
@@ -1859,28 +2017,9 @@ function DialogsTab({ campaignId, crmEnabled }: {
                           : <span title="Не прочитано"><Check className="h-3.5 w-3.5 text-gray-400" /></span>
                       )}
                     </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : '—'}</span>
-                      {/* С какого нашего аккаунта идёт переписка. В кампании их
-                          несколько, а раньше это было видно только внутри
-                          раскрытого диалога, в подписях сообщений: чтобы
-                          понять, кому писать дальше, приходилось разворачивать
-                          каждую строку. */}
-                      {accountLabelMap.get(d.account_id) && (
-                        <span
-                          title={`Переписку ведёт наш аккаунт ${accountLabelMap.get(d.account_id)}`}
-                          className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700"
-                        >
-                          <Send className="h-3 w-3" />
-                          {accountLabelMap.get(d.account_id)}
-                        </span>
-                      )}
-                    </div>
                   </div>
-                  {isExpanded ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
-                </button>
-                {isExpanded && (
-                  <div className="border-t border-gray-100 px-4 py-3 space-y-3">
+                  <div className="flex min-h-0 flex-1 flex-col gap-2.5 px-4 py-3">
+                    <div className="max-h-[38%] shrink-0 space-y-2.5 overflow-y-auto">
                     {dialogSaveError?.id === d.id && (
                       <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">
                         <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0" />
@@ -2079,7 +2218,8 @@ function DialogsTab({ campaignId, crmEnabled }: {
                         )}
                       </div>
                     )}
-                    <div className="max-h-72 overflow-auto space-y-1.5 rounded-lg bg-gray-50 p-2">
+                    </div>
+                    <div data-dialog-messages className="min-h-0 flex-1 overflow-auto space-y-1.5 rounded-lg bg-gray-50 p-2">
                       {d.messages.map((m, i) => {
                         const senderName = m.role === 'user'
                           ? (d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`)
@@ -2127,6 +2267,7 @@ function DialogsTab({ campaignId, crmEnabled }: {
                           </div>
                         );
                       })}
+                      {d.reply_failure && <FailedReplyBubble failure={d.reply_failure} />}
                     </div>
                     <div className="flex gap-2">
                       <input value={sendText} onChange={e => setSendText(e.target.value)}
@@ -2139,22 +2280,13 @@ function DialogsTab({ campaignId, crmEnabled }: {
                       </button>
                     </div>
                   </div>
-                )}
-              </div>
-            );
-          })}
+                </>
+              );
+            })()}
+          </div>
         </div>
       )}
 
-      {totalPages > 1 && (
-        <div className="flex items-center justify-center gap-2">
-          <button type="button" disabled={currentPage <= 1} onClick={() => setOffset(Math.max(0, offset - limit))}
-            className="rounded-full px-4 py-2 text-xs font-medium border border-gray-200 bg-white text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer">Назад</button>
-          <span className="text-xs text-gray-500">{currentPage} / {totalPages}</span>
-          <button type="button" disabled={currentPage >= totalPages} onClick={() => setOffset(offset + limit)}
-            className="rounded-full px-4 py-2 text-xs font-medium border border-gray-200 bg-white text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer">Вперёд</button>
-        </div>
-      )}
     </div>
   );
 }
@@ -2192,7 +2324,7 @@ function SelectAllCheckbox({
       onChange={e => onChange(e.target.checked)}
       title={allSelected ? 'Снять выделение' : 'Выделить все'}
       aria-label={allSelected ? 'Снять выделение' : 'Выделить все'}
-      className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+      className="tg-check"
     />
   );
 }
@@ -2231,11 +2363,20 @@ function BulkActionsBar({
 }) {
   if (selectedCount === 0) return null;
   return (
-    // Прилипает к верху: в списке на сотни строк за кнопками приходилось
-    // каждый раз возвращаться в начало страницы. `bulk-actions-bar` — сплошной
-    // фон в тёмной теме (globals.css): полупрозрачный пропускал строки таблицы.
-    <div className="bulk-actions-bar sticky top-0 z-20 flex flex-wrap items-center gap-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 shadow-sm">
+    // Плавающая панель снизу экрана: раньше она вставлялась в поток над
+    // таблицей, и при выборе первой строки весь список прыгал вниз.
+    <div className="bulk-actions-bar fixed bottom-4 left-1/2 z-40 flex w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-wrap items-center gap-3 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 shadow-xl">
       <span className="text-xs font-medium text-indigo-900">Выбрано: {selectedCount}</span>
+      {/* «Снять выделение» — слева, рядом со счётчиком: справа, после десятка
+          кнопок, до него приходилось тянуться через весь экран. */}
+      <button
+        type="button"
+        onClick={onClear}
+        disabled={deleting}
+        className="rounded-full border border-indigo-300 bg-white/60 px-3 py-1 text-xs font-medium text-indigo-700 transition hover:bg-white hover:text-indigo-900 cursor-pointer disabled:opacity-50"
+      >
+        Снять выделение
+      </button>
       {onCheck && (
         <button
           type="button"
@@ -2259,14 +2400,6 @@ function BulkActionsBar({
       >
         {deleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
         Удалить выбранные
-      </button>
-      <button
-        type="button"
-        onClick={onClear}
-        disabled={deleting}
-        className="text-xs text-indigo-700 hover:text-indigo-900 hover:underline transition cursor-pointer disabled:opacity-50"
-      >
-        Снять выделение
       </button>
     </div>
   );
@@ -2611,7 +2744,9 @@ function SortHeader({
   );
 }
 
-const ACCOUNT_GRID = 'grid grid-cols-[32px_44px_minmax(0,1fr)_76px_126px_150px_360px_138px_92px_60px_88px] gap-4 items-center';
+// Здоровье прокси живёт в одной ячейке с самим прокси (22.10.2026): отдельная колонка
+// съедала ширину. Аккаунт — самая широкая колонка, прокси чуть короче прежних 360 px.
+const ACCOUNT_GRID = 'grid grid-cols-[32px_44px_minmax(280px,1.6fr)_76px_126px_150px_minmax(230px,300px)_92px_60px_88px] gap-4 items-center';
 
 /**
  * Ячейка здоровья: слово и цвет, объяснение — под курсором.
@@ -2636,6 +2771,24 @@ function HealthCell({ mark }: { mark: HealthMark }) {
   );
 }
 
+/**
+ * Здоровье прокси значком перед адресом: зелёная галочка — работает, жёлтый
+ * треугольник — сбоит или ещё не проверялся, красный круг — не работает.
+ * Причина — в подсказке при наведении.
+ */
+function ProxyHealthIcon({ mark }: { mark: HealthMark }) {
+  const icon = mark.tone === 'ok'
+    ? <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+    : mark.tone === 'bad'
+      ? <AlertCircle className="h-4 w-4 text-rose-500" />
+      : <AlertTriangle className="h-4 w-4 text-amber-500" />;
+  return (
+    <span title={`${mark.label}. ${mark.detail}`.trim()} className="inline-flex shrink-0 cursor-help">
+      {icon}
+    </span>
+  );
+}
+
 function CampaignAccountsTab({
   campaignId,
   campaignStatus,
@@ -2655,6 +2808,7 @@ function CampaignAccountsTab({
   const [archivedAccounts, setArchivedAccounts] = useState<OutreachAccount[]>([]);
   /** Кого убираем в архив — открытое окно выбора причины. */
   const [archiveTarget, setArchiveTarget] = useState<string[] | null>(null);
+  const [accountsView, setAccountsView] = useState<'active' | 'archive'>('active');
   const [archiveSaving, setArchiveSaving] = useState(false);
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [restoringIds, setRestoringIds] = useState<string[]>([]);
@@ -2672,8 +2826,8 @@ function CampaignAccountsTab({
    */
   const [queuePending, setQueuePending] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
-  const [showAdd, setShowAdd] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const addFilesRef = useRef<HTMLInputElement>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSummary, setUploadSummary] = useState<AccountsUploadSummary | null>(null);
   /** Страна партии со слов оператора — см. выпадающий список у кнопки загрузки. */
@@ -2684,20 +2838,12 @@ function CampaignAccountsTab({
    * рядом с кнопкой загрузки: проставить цену потом, по одной строке на
    * полсотни аккаунтов, оператор не станет. Пусто — цена не указана.
    */
-  /** Цена для аккаунта, добавляемого вручную. */
-  const [newPrice, setNewPrice] = useState('');
   /** Цена, которую проставляем выбранным строкам разом. */
   const [bulkPrice, setBulkPrice] = useState('');
   const [bulkPriceSaving, setBulkPriceSaving] = useState(false);
   /** Аккаунт, у которого сейчас правят цену прямо в строке. */
   const [editingPriceFor, setEditingPriceFor] = useState<string | null>(null);
   const [priceDraft, setPriceDraft] = useState('');
-  const [sessionName, setSessionName] = useState('');
-  const [apiId, setApiId] = useState('');
-  const [apiHash, setApiHash] = useState('');
-  const [phone, setPhone] = useState('');
-  const [proxyId, setProxyId] = useState('');
-  const [saving, setSaving] = useState(false);
   const [editingProxyFor, setEditingProxyFor] = useState<string | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<OutreachAccount | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
@@ -2964,6 +3110,25 @@ function CampaignAccountsTab({
   useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
 
   /**
+   * Живые цифры: список и сводка («живо», «ограничены», потрачено) перечитываются
+   * сами каждые 15 секунд, пока вкладка открыта и видна, и сразу при возвращении
+   * на неё. Тихо — без заглушки «Загрузка…» и без прокрутки в начало.
+   * Кулдауны и статусы меняет воркер, и без этого экран показывал состояние на
+   * момент открытия.
+   */
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === 'visible') void load({ silent: true });
+    };
+    const timer = setInterval(refresh, 15_000);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [load]);
+
+  /**
    * Цена одной строки. Пустое поле стирает цену (null), а не ставит ноль:
    * ноль означает «достался бесплатно» и попадает в сумму партии.
    */
@@ -3003,27 +3168,6 @@ function CampaignAccountsTab({
     0,
   );
   const accountsWithoutPrice = accounts.filter((a) => a.price === null || a.price === undefined).length;
-
-  const addAccount = async () => {
-    if (!sessionName.trim() || !apiId.trim() || !apiHash.trim()) return;
-    setSaving(true);
-    await authFetch(`${API_BASE}/accounts`, {
-      method: 'POST',
-      body: JSON.stringify({
-        campaign_id: campaignId,
-        session_name: sessionName.trim(),
-        api_id: Number(apiId),
-        api_hash: apiHash.trim(),
-        phone: phone.trim(),
-        proxy_id: proxyId || null,
-        price: newPrice.trim() === '' ? null : Number(newPrice.trim().replace(',', '.')),
-      }),
-    });
-    setSaving(false);
-    setSessionName(''); setApiId(''); setApiHash(''); setPhone(''); setProxyId(''); setNewPrice('');
-    setShowAdd(false);
-    void load();
-  };
 
   /**
    * Прочитать профиль одного аккаунта из Telegram и обновить строку списка.
@@ -3543,34 +3687,11 @@ function CampaignAccountsTab({
     [accounts, errorCounts, loadedAt],
   );
 
-  /**
-   * Сколько аккаунтов реально ведут рассылку.
-   *
-   * Отдельно от «жив» и «Активен»: и то, и другое — про разрешения, а не про
-   * работу. Аккаунт может быть живым, включённым, с рабочим прокси — и при этом
-   * не написать никому ни разу, потому что кончилась очередь контактов или круг
-   * до него не доходит.
-   */
-  const sendingCount = useMemo(
-    () => countSendingAccounts(accounts, sendingStats),
-    [accounts, sendingStats],
-  );
-
-  /** Кого Telegram хоть раз за сутки прижал: ошибка или предупреждение в логах.
-   *  FLOOD_WAIT, PEER_FLOOD, повторное подключение и т.п. — это и читается
-   *  сводным словом «ограничены». Считается поверх alive/dead — отдельно от
-   *  статуса проверки и отдельно от фактических отправок. */
-  const restrictedCount = accountStats.withErrors + accountStats.withWarningsOnly;
-
-  /** Кто именно не рассылает — под курсор на плашке, чтобы не искать глазами. */
-  const notSendingNames = useMemo(
-    () => accounts
-      .filter((a) => (sendingStats[a.id]?.sent_24h ?? 0) === 0)
-      .map((a) => a.session_name)
-      .slice(0, 12)
-      .join(', '),
-    [accounts, sendingStats],
-  );
+  /** Греются сейчас: срок прогрева ещё в будущем (как в круге рассылки). */
+  const warmingCount = useMemo(() => {
+    const now = loadedAt ?? Date.now();
+    return accounts.filter((a) => a.warmup_until && new Date(a.warmup_until).getTime() > now).length;
+  }, [accounts, loadedAt]);
 
   /**
    * Кого предлагает выключить кнопка «Снять неживые с рассылки».
@@ -3637,13 +3758,36 @@ function CampaignAccountsTab({
     }
   }, [deadAccounts, campaignId, load]);
 
+  /** Переключатель «Активные / Архив»: архив — отдельный вид, а не свёрнутый блок над списком. */
+  const viewSwitch = (
+    <div className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white p-1">
+      <button type="button" onClick={() => setAccountsView('active')}
+        className={`rounded-full px-4 py-1.5 text-xs font-medium transition cursor-pointer ${accountsView === 'active' ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}>
+        Активные · {accounts.length}
+      </button>
+      <button type="button" onClick={() => setAccountsView('archive')}
+        className={`rounded-full px-4 py-1.5 text-xs font-medium transition cursor-pointer ${accountsView === 'archive' ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}>
+        Архив · {archivedAccounts.length}
+      </button>
+    </div>
+  );
+
+  if (accountsView === 'archive') {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between flex-wrap gap-2">{viewSwitch}</div>
+        <AccountArchiveSection
+          flat
+          items={archivedAccounts}
+          restoringIds={restoringIds}
+          onRestore={(ids) => { void restoreAccounts(ids); }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
-      <AccountArchiveSection
-        items={archivedAccounts}
-        restoringIds={restoringIds}
-        onRestore={(ids) => { void restoreAccounts(ids); }}
-      />
       {archiveTarget && (
         <ArchiveAccountsDialog
           count={archiveTarget.length}
@@ -3655,9 +3799,7 @@ function CampaignAccountsTab({
       )}
 
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <span className="text-sm font-medium text-gray-700">
-          Аккаунты кампании <span className="text-gray-400 font-normal">({accounts.length})</span>
-        </span>
+        {viewSwitch}
         <div className="flex items-center gap-2">
           {/* Первой кнопкой — уборка: пока в списке висят мёртвые номера, они
               съедают время круга и контакты из базы, а искать их глазами среди
@@ -3697,17 +3839,14 @@ function CampaignAccountsTab({
                 ? `Обновить профили выбранных (${syncTargets.length})`
                 : `Обновить профили всех (${syncTargets.length})`}
           </button>
-          <label
+          {/* «Добавить» открывает выбор файлов: tdata — zip-архивами (можно сразу
+              несколько), старый формат — парами .session и .json. Ручная форма
+              с API ID/Hash убрана 22.10.2026 — аккаунты заводят только файлами. */}
+          <input ref={addFilesRef} type="file" multiple accept=".json,.session,.zip" className="hidden" onChange={e => { void handleFiles(e); }} />
+          <button type="button" onClick={() => addFilesRef.current?.click()} disabled={uploading}
             title="tdata — zip-архивами (можно сразу несколько), старый формат — парами .session и .json"
-            className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer"
-          >
-            {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
-            Загрузить файлы
-            <input type="file" multiple accept=".json,.session,.zip" className="hidden" onChange={e => { void handleFiles(e); }} />
-          </label>
-          <button type="button" onClick={() => setShowAdd(!showAdd)}
-            className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition cursor-pointer">
-            <Plus className="h-3.5 w-3.5" /> Добавить
+            className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition disabled:opacity-60 cursor-pointer">
+            {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />} Добавить
           </button>
         </div>
       </div>
@@ -3722,17 +3861,24 @@ function CampaignAccountsTab({
       {!loading && accounts.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-[11px]">
           <span
-            className={`rounded-md px-2 py-1 font-medium ${accountStats.alive > 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}
-            title="Последняя проверка вернула «жив». Проверку теперь ставит и сама рассылка: каждый успешный круг аккаунта — это подтверждение, что он жив, без остановки кампании."
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.healthy > 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}
+            title="Аккаунты, которые сейчас могут работать: не под кулдауном и не мёртвые. Вместе с «ограничены» дают всю партию."
           >
-            живо {accountStats.alive} из {accounts.length}
+            живо {accountStats.healthy} из {accounts.length}
           </span>
 
           <span
-            className={`rounded-md px-2 py-1 font-medium ${restrictedCount > 0 ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-400'}`}
-            title="За сутки в логах аккаунта были ошибки или предупреждения — обычно это временные ограничения Telegram (FLOOD_WAIT, PEER_FLOOD), разрыв соединения со второй попытки или отложенный контакт. Считается по факту работы за сутки, а не по статусу проверки."
+            className={`rounded-md px-2 py-1 font-medium ${warmingCount > 0 ? 'bg-yellow-50 text-yellow-700' : 'bg-gray-50 text-gray-400'}`}
+            title="Греются сейчас: в боевую рассылку не идут, пока не выйдет срок прогрева. Они входят в «живо»."
           >
-            ограничены {restrictedCount} из {accounts.length}
+            греются {warmingCount} из {accounts.length}
+          </span>
+
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.restricted > 0 ? 'bg-rose-50 text-rose-700' : 'bg-gray-50 text-gray-400'}`}
+            title="Сейчас не могут работать: кулдаун после ограничения Telegram, мёртвая сессия, бан, заморозка. Сбои связи с прокси сюда не входят."
+          >
+            ограничены {accountStats.restricted} из {accounts.length}
           </span>
 
           {/* Деньги партии: сумма считается только по строкам с проставленной
@@ -3753,16 +3899,6 @@ function CampaignAccountsTab({
                 · без цены {accountsWithoutPrice}
               </span>
             )}
-          </span>
-
-          <span
-            className={`rounded-md px-2 py-1 font-medium ${sendingCount > 0 ? 'bg-indigo-50 text-indigo-700' : 'bg-rose-50 text-rose-700'}`}
-            title={
-              `За сутки первое сообщение ушло с ${sendingCount} из ${accounts.length} аккаунтов.`
-              + (notSendingNames ? ` Не рассылают: ${notSendingNames}${accounts.length - sendingCount > 12 ? ' и другие' : ''}. Причина по каждому — в колонке «Рассылка».` : '')
-            }
-          >
-            рассылали за 24ч {sendingCount} из {accounts.length}
           </span>
 
           <span className="ml-auto text-[10px] text-gray-400">
@@ -3848,65 +3984,14 @@ function CampaignAccountsTab({
         </div>
       )}
 
-      {showAdd && (
-        <div className="rounded-lg border border-gray-200 p-4 space-y-3 bg-gray-50">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <label className="space-y-1 col-span-2">
-              <span className="text-[11px] font-medium text-gray-500">Session name</span>
-              <input value={sessionName} onChange={e => setSessionName(e.target.value)} placeholder="my_account"
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
-            </label>
-            <label className="space-y-1">
-              <span className="text-[11px] font-medium text-gray-500">API ID</span>
-              <input type="number" value={apiId} onChange={e => setApiId(e.target.value)}
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
-            </label>
-            <label className="space-y-1">
-              <span className="text-[11px] font-medium text-gray-500">API Hash</span>
-              <input value={apiHash} onChange={e => setApiHash(e.target.value)}
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
-            </label>
-            <label className="space-y-1">
-              <span className="text-[11px] font-medium text-gray-500">Телефон</span>
-              <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+79001234567"
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
-            </label>
-            <label className="space-y-1">
-              <span className="text-[11px] font-medium text-gray-500">Цена, ₽</span>
-              <input type="number" min={0} step="1" value={newPrice} onChange={e => setNewPrice(e.target.value)} placeholder="—"
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
-            </label>
-            {/* Не <label>: внутри теперь кнопка со своим списком, а клик по
-                подписи в этом случае никуда не ведёт. */}
-            <div className="space-y-1">
-              <span className="block text-[11px] font-medium text-gray-500">Прокси</span>
-              <ProxyPicker
-                value={proxyId}
-                proxies={freeProxies}
-                now={healthNow}
-                ariaLabel="Прокси нового аккаунта"
-                onChange={setProxyId}
-                className="py-1.5"
-              />
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <button type="button" onClick={() => { void addAccount(); }} disabled={saving || !sessionName.trim() || !apiId || !apiHash.trim()}
-              className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Сохранить'}
-            </button>
-            <button type="button" onClick={() => setShowAdd(false)}
-              className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
-          </div>
-        </div>
-      )}
-
       {/* Проверять можно и на работающей кампании: там нажатие не лезет в
           Telegram, а ставит заказ — выполнит рассылка своим соединением в
           ближайшем круге. Раньше кнопка была просто заблокирована, и «жив/не
           жив» на экране устаревал неделями. */}
       <BulkActionsBar
-        selectedCount={selectedIds.length}
+        // Пока список грузится, панели нет: выбор относится к строкам, которых
+        // на экране ещё нет, и действие ушло бы вслепую.
+        selectedCount={loading ? 0 : selectedIds.length}
         deleting={bulkDeleting}
         onClear={clear}
         onDelete={() => { void deleteSelected(); }}
@@ -3958,7 +4043,7 @@ function CampaignAccountsTab({
               disabled={campaignStatus === 'running'}
               title={campaignStatus === 'running'
                 ? 'Сначала остановите кампанию: из-под работающего круга аккаунты не переносятся'
-                : 'Перенести выбранные аккаунты в другую остановленную кампанию; перенесённые — вернуть обратно'}
+                : 'Перенести выбранные аккаунты в другую остановленную кампанию: они переедут как есть, с прокси'}
               className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Move className="h-3.5 w-3.5" />
@@ -4064,7 +4149,7 @@ function CampaignAccountsTab({
       )}
 
       {loading ? (
-        <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
+        <PageLoader />
       ) : accounts.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
           <Users className="mx-auto h-8 w-8 text-gray-300 mb-2" />
@@ -4097,14 +4182,7 @@ function CampaignAccountsTab({
               sort={accountSort}
               onSort={toggleAccountSort}
             />
-            <SortHeader col="proxy" label="Прокси" sort={accountSort} onSort={toggleAccountSort} />
-            <SortHeader
-              col="health"
-              label="Здоровье прокси"
-              title="Проходят ли через прокси круги рассылки. Если нет — сколько дней уже не проходят."
-              sort={accountSort}
-              onSort={toggleAccountSort}
-            />
+            <SortHeader col="proxy" label="Прокси и здоровье" title="Прокси аккаунта и рядом — проходят ли через него круги рассылки." sort={accountSort} onSort={toggleAccountSort} />
             {/* Цена нужна не бухгалтерии, а гипотезам: партии покупают у разных
                 поставщиков и по разной цене, а живут они по-разному. Сумма по
                 колонке считается только по заполненным ценам. */}
@@ -4133,14 +4211,14 @@ function CampaignAccountsTab({
             return (
               <div
                 key={a.id}
-                className={`${ACCOUNT_GRID} px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
+                className={`${ACCOUNT_GRID} px-4 py-3 transition-colors duration-300 ease-out ${isSelected(a.id) ? 'bg-[rgba(99,102,241,0.07)]' : ''}`}
               >
                 <input
                   type="checkbox"
                   checked={isSelected(a.id)}
                   onChange={() => toggle(a.id)}
                   aria-label={`Выбрать ${a.session_name}`}
-                  className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+                  className="tg-check"
                 />
                 <button
                   type="button"
@@ -4234,10 +4312,7 @@ function CampaignAccountsTab({
                           профиль не применился
                         </span>
                       )}
-                      {/* «В гостях»: аккаунт пришёл из другой кампании. Пометка
-                          нужна не для красоты — от неё зависит, что с
-                          аккаунтом можно сделать: вернуть домой, но не
-                          переносить дальше. */}
+                      {/* Пометка «откуда пришёл»: аккаунт приехал из другой кампании. */}
                       {a.moved_from_campaign_id && (
                         <span
                           title={[
@@ -4249,8 +4324,7 @@ function CampaignAccountsTab({
                                 })
                               : null,
                             a.moved_reason ? `Причина: ${a.moved_reason}` : null,
-                            'Его можно вернуть обратно, но не перенести в третью кампанию.',
-                          ].filter(Boolean).join(' · ')}
+                                          ].filter(Boolean).join(' · ')}
                           className="cursor-help rounded-md bg-sky-50 px-1.5 py-0.5 text-[10px] text-sky-700"
                         >
                           из «{a.moved_from_campaign_name ?? '—'}»
@@ -4352,6 +4426,8 @@ function CampaignAccountsTab({
                     </div>
                   )}
                 </div>
+                <div className="flex min-w-0 items-center gap-2">
+                {proxy && editingProxyFor !== a.id && <ProxyHealthIcon mark={proxyMark} />}
                 {editingProxyFor === a.id ? (
                   /* Свой список вместо <select>: рядом с каждым адресом стоит
                      его состояние, иначе сорок одинаковых строк «тот же хост,
@@ -4376,12 +4452,12 @@ function CampaignAccountsTab({
                     // Подсказка при наведении показывает адрес целиком.
                     title={proxy ? `${proxy.name || proxy.url} — нажмите, чтобы сменить` : 'Назначить прокси'}
                     onClick={() => setEditingProxyFor(a.id)}
-                    className="w-full text-left text-xs truncate rounded px-1 py-0.5 hover:bg-indigo-50 hover:text-indigo-700 transition cursor-pointer group"
+                    className="min-w-0 flex-1 text-left text-xs truncate rounded px-1 py-0.5 hover:bg-indigo-50 hover:text-indigo-700 transition cursor-pointer group"
                   >
-                    {proxy ? (proxy.name || proxy.url) : <span className="text-gray-300 group-hover:text-indigo-400">—</span>}
+                    {proxy ? (proxy.name || proxy.url) : <HealthCell mark={proxyMark} />}
                   </button>
                 )}
-                <HealthCell mark={proxyMark} />
+                </div>
                 {editingPriceFor === a.id ? (
                   <input
                     type="number"
@@ -4412,19 +4488,15 @@ function CampaignAccountsTab({
                   className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${a.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
                   {a.is_active ? 'Да' : 'Нет'}
                 </button>
-                <div className="flex items-center gap-0.5">
-                  <button type="button" onClick={() => setSelectedAccount(a)} title="Логи и информация"
-                    className="p-1.5 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer">
-                    <ScrollText className="h-3.5 w-3.5" />
-                  </button>
-                  <button type="button" onClick={() => { setArchiveError(null); setArchiveTarget([a.id]); }} title="Убрать в архив"
-                    className="p-1.5 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer">
-                    <Archive className="h-3.5 w-3.5" />
-                  </button>
-                  <button type="button" onClick={() => { void deleteAccount(a.id); }} title="Удалить аккаунт"
-                    className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer">
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                <div className="flex items-center justify-end">
+                  <RowMenu
+                    label={`Действия: ${a.session_name}`}
+                    items={[
+                      { label: 'Логи и информация', icon: <ScrollText className="h-3.5 w-3.5" />, onClick: () => setSelectedAccount(a) },
+                      { label: 'Убрать в архив', icon: <Archive className="h-3.5 w-3.5" />, onClick: () => { setArchiveError(null); setArchiveTarget([a.id]); } },
+                      { label: 'Удалить аккаунт', icon: <Trash2 className="h-3.5 w-3.5" />, danger: true, onClick: () => { void deleteAccount(a.id); } },
+                    ]}
+                  />
                 </div>
               </div>
             );
@@ -4452,7 +4524,7 @@ function CampaignAccountsTab({
             clear();
             setMoveNotice(
               `Перенесено аккаунтов: ${movedIds.length} → «${toName}». `
-              + 'Там они выключены и без прокси — назначьте прокси и включите.',
+              + 'Они приехали как есть, вместе с прокси.',
             );
           }}
         />
@@ -4869,7 +4941,7 @@ function AccountProfileModal({
           <label className="space-y-1 block">
             <span className="text-[11px] font-medium text-gray-500">Описание ({bio.length}/70)</span>
             <textarea value={bio} onChange={(e) => setBio(e.target.value)} maxLength={70} rows={2}
-              className="block w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y" />
+              className="block w-full rounded-lg border border-gray-300/70 bg-white/50 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y" />
           </label>
 
           {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</div>}
@@ -5211,7 +5283,10 @@ function CampaignBasesTab({
    * оператор перенёс их руками.
    */
   const [orphans, setOrphans] = useState<OutreachBase[]>([]);
+  /** Выбранные базы в порядке цепочки (Set помнит порядок вставки). */
   const [linked, setLinked] = useState<Set<string>>(new Set());
+  /** Этап каждой включённой базы: одинаковый — параллельно, следующий стартует, когда предыдущий выдал всё. */
+  const [stageOf, setStageOf] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState('');
   const [busy, setBusy] = useState(false);
@@ -5271,8 +5346,9 @@ function CampaignBasesTab({
       setOrphans(d.orphans ?? []);
     }
     if (linkRes.ok) {
-      const d = (await linkRes.json()) as { items: Array<{ base_id: string }> };
+      const d = (await linkRes.json()) as { items: Array<{ base_id: string; stage?: number }> };
       setLinked(new Set(d.items.map((i) => i.base_id)));
+      setStageOf(Object.fromEntries(d.items.map((i) => [i.base_id, Number(i.stage ?? 0)])));
     }
     if (accRes.ok) {
       const d = await accRes.json() as { items: OutreachAccount[] };
@@ -5337,14 +5413,13 @@ function CampaignBasesTab({
     } finally { setBusy(false); }
   };
 
-  const toggleLink = async (baseId: string) => {
-    const next = new Set(linked);
-    if (next.has(baseId)) next.delete(baseId); else next.add(baseId);
+  const saveLinks = async (next: Set<string>, nextStages: Record<string, number>) => {
     setLinked(next);
+    setStageOf(nextStages);
     setError(null);
     const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/bases`, {
       method: 'PUT',
-      body: JSON.stringify({ base_ids: [...next] }),
+      body: JSON.stringify({ items: [...next].map((id) => ({ base_id: id, stage: nextStages[id] ?? 0 })) }),
     });
     if (!res.ok) {
       const d = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -5353,6 +5428,33 @@ function CampaignBasesTab({
       // а на сервере ничего не изменилось.
       void load();
     }
+  };
+
+  /** Разные этапы включённых баз по возрастанию: номер этапа для экрана — место в этом списке. */
+  const stageList = [...new Set([...linked].map((id) => stageOf[id] ?? 0))].sort((x, y) => x - y);
+
+  /**
+   * Поставить/снять галочку. В запущенную кампанию новая база встаёт в следующий
+   * этап (в цепочку после текущих); до запуска — в первый этап, параллельно.
+   */
+  const toggleLink = async (baseId: string) => {
+    const next = new Set(linked);
+    const nextStages = { ...stageOf };
+    if (next.has(baseId)) {
+      next.delete(baseId);
+      delete nextStages[baseId];
+    } else {
+      next.add(baseId);
+      const top = stageList.length ? stageList[stageList.length - 1] : 0;
+      nextStages[baseId] = campaignStatus === 'running' && stageList.length ? top + 1 : (stageList[0] ?? 0);
+    }
+    await saveLinks(next, nextStages);
+  };
+
+  /** Перенести базу в этап с номером `rank` (1…N); N+1 — новый этап в конце. */
+  const moveToStage = async (baseId: string, rank: number) => {
+    const target = rank <= stageList.length ? stageList[rank - 1] : (stageList[stageList.length - 1] ?? 0) + 1;
+    await saveLinks(new Set(linked), { ...stageOf, [baseId]: target });
   };
 
   /** Забрать базу без владельца в эту кампанию. */
@@ -5488,6 +5590,29 @@ function CampaignBasesTab({
     </button>
   );
 
+  /** Один скрытый выбор файла на все строки: меню открывается порталом, label внутри него не живёт. */
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const uploadTargetRef = useRef<string | null>(null);
+
+  /** Убрать все контакты, оставив базу: имя, чаты-источники и привязка к кампании сохраняются. */
+  const clearBase = async (base: OutreachBase) => {
+    const sentNote = base.counts.sent > 0
+      ? ` По ней уже отправлено ${base.counts.sent} сообщений — история «кому писали» будет потеряна.`
+      : '';
+    if (!confirm(`Очистить базу «${base.name}»: удалить все ${base.counts.total} контактов? Сама база останется, и в неё можно загрузить файл заново.${sentNote}`)) return;
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      const res = await authFetch(`${API_BASE}/bases/${base.id}/contacts?confirm_total=${base.counts.total}`, { method: 'DELETE' });
+      const d = (await res.json().catch(() => null)) as { error?: string; deleted?: number } | null;
+      if (!res.ok) {
+        setError(d?.error ?? `Не удалось очистить базу (${res.status})`);
+        return;
+      }
+      setNotice(`База «${base.name}» очищена: удалено контактов — ${d?.deleted ?? 0}.`);
+      void refreshBases();
+    } finally { setBusy(false); }
+  };
+
   const deleteBase = async (base: OutreachBase) => {
     // Предупреждаем про отправленных отдельно: контакты уйдут каскадом, и
     // история «кому мы уже писали по этой гипотезе» пропадёт вместе с базой.
@@ -5576,10 +5701,18 @@ function CampaignBasesTab({
 
   return (
     <div className="space-y-4">
+      {/* Пока список не пришёл, шапка («Базы контактов (0)», поле имени, кнопка)
+          не рисуется: «(0)» врал, а форма создания мигала до загрузки. */}
+      {!loading && (
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <span className="text-sm font-medium text-gray-700">
-          Базы контактов <span className="text-gray-400 font-normal">({bases.length})</span>
-        </span>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span className="text-sm font-medium text-gray-700">
+            Базы контактов <span className="text-gray-400 font-normal">({bases.length})</span>
+          </span>
+          {bases.length > 0 && (
+            <BasesForecast campaignId={campaignId} refreshKey={[...linked].map((id) => `${id}:${stageOf[id] ?? 0}`).join(',')} />
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <input
             value={newName}
@@ -5593,6 +5726,7 @@ function CampaignBasesTab({
           </button>
         </div>
       </div>
+      )}
 
       {notice && (
         <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-900">{notice}</div>
@@ -5602,7 +5736,7 @@ function CampaignBasesTab({
       )}
 
       {loading ? (
-        <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
+        <PageLoader />
       ) : bases.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
           <Database className="mx-auto h-8 w-8 text-gray-300 mb-2" />
@@ -5617,10 +5751,12 @@ function CampaignBasesTab({
           {/* «Отложено» (status=failed) раньше не показывали вовсе: контакты
               копились в невидимой колонке, и база, вставшая на пороге длины,
               выглядела просто пустеющей. */}
-          <div className="grid grid-cols-[32px_1fr_repeat(5,80px)_215px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className="grid grid-cols-[32px_1fr_repeat(5,80px)_48px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <span />
             <span>База</span><span>Всего</span><span>Ждут</span><span>Отправлено</span><span>Пропущено</span><span>Отложено</span><span />
           </div>
+          {/* Видно пять баз (строка ~88 px), остальные — прокруткой. */}
+          <div className="max-h-[450px] divide-y divide-gray-100 overflow-y-auto">
           {bases.map((b) => {
             const chats = (b.source_chats ?? '')
               .split(/[\n,;]+/)
@@ -5628,17 +5764,45 @@ function CampaignBasesTab({
               .filter(Boolean);
             return (
             <React.Fragment key={b.id}>
-            <div className={`grid grid-cols-[32px_1fr_repeat(5,80px)_215px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
-              <input
-                type="checkbox"
-                checked={linked.has(b.id)}
-                onChange={() => { void toggleLink(b.id); }}
-                title="Участвует в рассылке. Снятая галочка ставит базу на паузу, контакты и счётчики сохраняются"
-                aria-label={`Участвует в рассылке: база ${b.name}`}
-                className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
-              />
+            <div className={`grid grid-cols-[32px_1fr_repeat(5,80px)_48px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
+              {/* Пустую базу выбрать нельзя: при наведении вместо галочки — крестик.
+                  Уже выбранную пустую снять можно. */}
+              <span className="group relative inline-flex items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={linked.has(b.id)}
+                  disabled={b.counts.total === 0 && !linked.has(b.id)}
+                  onChange={() => { void toggleLink(b.id); }}
+                  title={b.counts.total === 0 && !linked.has(b.id)
+                    ? 'В базе нет контактов — выбрать нельзя'
+                    : 'Участвует в рассылке. Снятая галочка ставит базу на паузу, контакты и счётчики сохраняются'}
+                  aria-label={`Участвует в рассылке: база ${b.name}`}
+                  className="tg-check disabled:cursor-not-allowed disabled:opacity-40"
+                />
+                {b.counts.total === 0 && !linked.has(b.id) && (
+                  <X className="pointer-events-none absolute left-0 top-0 h-[18px] w-[18px] p-0.5 text-rose-500 opacity-0 transition-opacity group-hover:opacity-100" />
+                )}
+              </span>
               <div className="min-w-0">
-                <div className="text-xs font-medium text-gray-800 truncate">{b.name}</div>
+                <div className="flex items-center gap-2 text-xs font-medium text-gray-800">
+                  {linked.has(b.id) && (
+                    <span className="relative inline-flex shrink-0 items-center">
+                      <select
+                        value={stageList.indexOf(stageOf[b.id] ?? 0) + 1}
+                        onChange={(e) => { void moveToStage(b.id, Number(e.target.value)); }}
+                        title="Этап рассылки. Базы одного этапа рассылаются параллельно, следующий этап стартует, когда предыдущий выдал все контакты"
+                        aria-label={`Этап рассылки: база ${b.name}`}
+                        className="h-5 min-h-0 cursor-pointer appearance-none rounded-full bg-[#4f46e5] py-0 pl-2 pr-5 text-[10px] font-semibold leading-none text-white outline-none"
+                      >
+                        {Array.from({ length: stageList.length + 1 }, (_, i) => (
+                          <option key={i + 1} value={i + 1}>{i < stageList.length ? `этап ${i + 1}` : `этап ${i + 1} (новый)`}</option>
+                        ))}
+                      </select>
+                      <ChevronDown className="pointer-events-none absolute right-1.5 h-3 w-3 text-white/80" />
+                    </span>
+                  )}
+                  <span className="truncate">{b.name}</span>
+                </div>
                 {/* Чаты-источники живут в строке базы, а не в отдельном экране:
                     их спрашивает отчёт по договору, и заполнить их проще там
                     же, где базу заводят. */}
@@ -5695,32 +5859,18 @@ function CampaignBasesTab({
               <span className={`text-xs ${b.counts.failed > 0 ? 'text-amber-600 font-medium' : 'text-gray-600'}`}>
                 {b.counts.failed}
               </span>
-              <div className="flex items-center gap-1">
-              <label className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 transition cursor-pointer w-fit">
-                <Upload className="h-3 w-3" /> Загрузить
-                <input type="file" accept=".xlsx,.xls,.csv" className="hidden" disabled={busy}
-                  onChange={(e) => { void uploadContacts(b.id, e); }} />
-              </label>
-                {exportButton(b)}
-                {/* Просмотр базы: до него она была чёрным ящиком — видно
-                    только счётчики. Убрать один неверный ник значило выгрузить
-                    файл, поправить и залить обратно, потеряв статусы отправки
-                    по всей базе. */}
-                <button type="button" onClick={() => setViewingBase({ id: b.id, name: b.name })} disabled={busy}
-                  title="Посмотреть контакты базы, поправить или удалить отдельные, очистить базу целиком"
-                  className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-50">
-                  <Eye className="h-3.5 w-3.5" />
-                </button>
-                <button type="button" onClick={() => { void requeueBase(b); }} disabled={busy || b.counts.failed === 0}
-                  title="Вернуть отложенные контакты в очередь — например, после того как подняли порог длины первого сообщения"
-                  className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent">
-                  <RefreshCw className="h-3.5 w-3.5" />
-                </button>
-                <button type="button" onClick={() => { void deleteBase(b); }} disabled={busy}
-                  title="Удалить базу вместе с контактами"
-                  className="p-1 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer disabled:opacity-50">
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
+              <div className="flex justify-end">
+                <RowMenu
+                  label={`Действия: ${b.name}`}
+                  items={[
+                    { label: 'Загрузить контакты', icon: <Upload className="h-3.5 w-3.5" />, onClick: () => { uploadTargetRef.current = b.id; uploadInputRef.current?.click(); } },
+                    { label: 'Редактировать', icon: <Pencil className="h-3.5 w-3.5" />, onClick: () => setViewingBase({ id: b.id, name: b.name }) },
+                    ...(b.counts.total > 0 ? [{ label: 'Скачать в Excel', icon: <Download className="h-3.5 w-3.5" />, onClick: () => { void downloadBase(b); } }] : []),
+                    ...(b.counts.failed > 0 ? [{ label: 'Вернуть отложенные в очередь', icon: <RefreshCw className="h-3.5 w-3.5" />, onClick: () => { void requeueBase(b); } }] : []),
+                    ...(b.counts.total > 0 ? [{ label: 'Очистить базу', icon: <Eraser className="h-3.5 w-3.5" />, danger: true, onClick: () => { void clearBase(b); } }] : []),
+                    { label: 'Удалить базу', icon: <Trash2 className="h-3.5 w-3.5" />, danger: true, onClick: () => { void deleteBase(b); } },
+                  ]}
+                />
               </div>
             </div>
             {attachmentsFor === b.id && <BaseAttachmentsPanel baseId={b.id} baseName={b.name} />}
@@ -5784,6 +5934,7 @@ function CampaignBasesTab({
             </React.Fragment>
             );
           })}
+          </div>
         </div>
       )}
 
@@ -5834,6 +5985,18 @@ function CampaignBasesTab({
           </div>
         </div>
       )}
+
+      <input
+        ref={uploadInputRef}
+        type="file"
+        accept=".xlsx,.xls,.csv"
+        className="hidden"
+        onChange={(e) => {
+          const id = uploadTargetRef.current;
+          if (id) void uploadContacts(id, e);
+          else e.target.value = '';
+        }}
+      />
 
       {viewingBase && (
         <BaseContactsModal
@@ -6186,6 +6349,40 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     }
   };
 
+  /**
+   * Определить страну только что добавленных прокси: проверка пачками по 150 с
+   * записью страны в строку, без раскладки по спискам. Список остаётся там, куда
+   * его добавили, а страна появляется в колонке «Страна».
+   */
+  const detectCountries = async (ids: string[]) => {
+    if (!ids.length || sortRun) return;
+    setProxyError(null);
+    setSortRun({ done: 0, total: ids.length, working: 0 });
+    let working = 0;
+    try {
+      for (let i = 0; i < ids.length; i += CHECK_BATCH) {
+        const batch = ids.slice(i, i + CHECK_BATCH);
+        const res = await authFetch(`${API_BASE}/proxies/check`, {
+          method: 'POST',
+          body: JSON.stringify({ campaign_id: campaignId, proxy_ids: batch, detect_country: true, save: true }),
+        });
+        const body = (await res.json().catch(() => null)) as { items?: ProxyCheckResult[]; error?: string } | null;
+        if (!res.ok || !body?.items) {
+          setProxyError(body?.error ?? `Определение страны остановилось на ${i} из ${ids.length} (HTTP ${res.status})`);
+          break;
+        }
+        working += body.items.filter((r) => r.status === 'ok').length;
+        setSortRun({ done: Math.min(i + batch.length, ids.length), total: ids.length, working });
+      }
+      setSortRun({ done: ids.length, total: ids.length, working, note: 'Страна указана в колонке «Страна».' });
+    } catch (e) {
+      setProxyError(`Проверка не дошла до сервера: ${e instanceof Error ? e.message : String(e)}`);
+      setSortRun(null);
+    } finally {
+      void reloadAll();
+    }
+  };
+
   const addProxy = async () => {
     if (!url.trim()) return;
     setSaving(true);
@@ -6205,8 +6402,10 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         setProxyError(errBody?.error ?? `Ошибка сервера (${res.status})`);
         return;
       }
+      const created = (await res.json().catch(() => null)) as { id?: string; duplicate?: boolean } | null;
       setUrl(''); setName(''); setShowAdd(false);
       void reloadAll();
+      if (created?.id && !created.duplicate) void detectCountries([created.id]);
     } finally {
       setSaving(false);
     }
@@ -6233,8 +6432,10 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         setProxyError(errBody?.error ?? `Не удалось загрузить прокси (ошибка ${res.status})`);
         return;
       }
+      const added = (await res.json().catch(() => null)) as { items?: { id: string }[] } | null;
       setBulkText(''); setShowBulk(false);
       void reloadAll();
+      void detectCountries((added?.items ?? []).map((i) => i.id));
     } finally {
       setSaving(false);
     }
@@ -6261,10 +6462,10 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
       const items: ProxyCheckResult[] = [];
       let missing = 0;
       let checkedAt = new Date().toISOString();
-      for (let i = 0; i < ids.length; i += 50) {
+      for (let i = 0; i < ids.length; i += CHECK_BATCH) {
         const res = await authFetch(`${API_BASE}/proxies/check`, {
           method: 'POST',
-          body: JSON.stringify({ campaign_id: campaignId, proxy_ids: ids.slice(i, i + 50), detect_country: true, save: true }),
+          body: JSON.stringify({ campaign_id: campaignId, proxy_ids: ids.slice(i, i + CHECK_BATCH), detect_country: true, save: true }),
         });
         const body = (await res.json().catch(() => null)) as
           | { items?: ProxyCheckResult[]; checked_at?: string; missing_ids?: string[]; error?: string }
@@ -6308,6 +6509,9 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
    * определением страны. После неё прокси «Неопределённых» и автосписков
    * раскладываются по странам; списки, названные вручную, остаются как есть.
    */
+  /** «Авто · …» и «Не работают» раскладываются по странам; созданные вручную остаются как есть. */
+  const activeListName = lists.find((l) => l.id === activeList)?.name ?? '';
+  const activeListIsAuto = activeListName.startsWith('Авто · ') || activeListName === 'Не работают';
   const recheckActiveList = () => checkListAndSort(proxies.filter((p) => (p.proxy_list_id ?? null) === activeList).map((p) => p.id), activeList);
 
   const checkListAndSort = async (targets: string[], sortListId: string | null) => {
@@ -6316,8 +6520,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     setSortRun({ done: 0, total: targets.length, working: 0 });
     let working = 0;
     try {
-      for (let i = 0; i < targets.length; i += 50) {
-        const ids = targets.slice(i, i + 50);
+      for (let i = 0; i < targets.length; i += CHECK_BATCH) {
+        const ids = targets.slice(i, i + CHECK_BATCH);
         const res = await authFetch(`${API_BASE}/proxies/check`, {
           method: 'POST',
           body: JSON.stringify({ campaign_id: campaignId, proxy_ids: ids, detect_country: true, save: true }),
@@ -6463,18 +6667,21 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   }, [lists, moveTarget]);
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-[220px_1fr] gap-4">
+    <div className="grid grid-cols-1 items-start gap-4 md:grid-cols-[240px_1fr]">
       {/* Сайдбар списков. Виртуальный «Неопределённые» — первым, потому что
           на старте у всех 140 прокси именно он. Иконка Inbox читается как
           «всё подряд», не как именованная папка. */}
-      <aside className="space-y-1">
+      {/* Списки — отдельной карточкой: раньше пункты висели прямо на фоне и не
+          читались как единый список. */}
+      <aside className="space-y-1 rounded-2xl border border-gray-200 bg-white/50 p-4 backdrop-blur-sm">
+        <div className="px-3 pb-2 pt-1 text-sm font-semibold text-gray-800">Списки прокси</div>
         <button
           type="button"
           onClick={() => setActiveList(null)}
-          className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs transition cursor-pointer ${
+          className={`tg-list-item flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs transition cursor-pointer ${
             activeList === null
-              ? 'bg-indigo-50 text-indigo-700 font-semibold'
-              : 'text-gray-700 hover:bg-gray-50'
+              ? 'tg-list-item--active text-indigo-700 font-semibold'
+              : 'text-gray-700'
           }`}
         >
           <Inbox className="h-3.5 w-3.5 shrink-0" />
@@ -6494,8 +6701,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
           return (
             <div key={l.id} className="space-y-1">
               <div
-                className={`group flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs transition ${
-                  active ? 'bg-indigo-50 text-indigo-700' : 'text-gray-700 hover:bg-gray-50'
+                className={`tg-list-item group flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs transition ${
+                  active ? 'tg-list-item--active text-indigo-700' : 'text-gray-700'
                 }`}
               >
                 <Folder className="h-3.5 w-3.5 shrink-0 ml-1" />
@@ -6648,7 +6855,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
           <button
             type="button"
             onClick={() => setShowCreateList(true)}
-            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs text-indigo-600 hover:bg-indigo-50 transition cursor-pointer"
+            className="tg-list-item tg-list-item--add flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs text-indigo-600 transition cursor-pointer"
           >
             <FolderPlus className="h-3.5 w-3.5" />
             Создать список
@@ -6656,7 +6863,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         )}
       </aside>
 
-      <div className="space-y-4 min-w-0">
+      {/* Правая часть — такая же полупрозрачная карточка на одном уровне со списком. */}
+      <div className="min-w-0 space-y-4 rounded-2xl border border-gray-200 bg-white/50 p-4 backdrop-blur-sm">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="min-w-0">
             <div className="text-sm font-medium text-gray-700">
@@ -6695,7 +6903,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
                 className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-60">
                 {sortRun && sortRun.done < sortRun.total
                   ? `Проверяю ${sortRun.done} из ${sortRun.total}…`
-                  : 'Перепроверить список и определить страну'}
+                  : (activeListIsAuto ? 'Перепроверить и разложить' : 'Определить страну')}
               </button>
             )}
             {activeList === null && (
@@ -6731,7 +6939,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
           <div className="flex items-start justify-between gap-2 rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-xs text-indigo-900">
             <span>
               {sortRun.done < sortRun.total
-                ? `Проверка неопределённых: ${sortRun.done} из ${sortRun.total}, работает ${sortRun.working}`
+                ? `Проверка прокси: ${sortRun.done} из ${sortRun.total}, работает ${sortRun.working}`
                 : `Проверено ${sortRun.total}, работает ${sortRun.working}. ${sortRun.note ?? ''}`}
             </span>
             {sortRun.done >= sortRun.total && (
@@ -6776,7 +6984,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
             </p>
             <textarea value={bulkText} onChange={e => setBulkText(e.target.value)} rows={5}
               placeholder={'host:port@user:pass\nuser:pass@host:port\nhost:port:user:pass\nпо одному прокси на строку'}
-              className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y font-mono" />
+              className="block w-full rounded-lg border border-gray-300/70 bg-white/50 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y font-mono" />
             <div className="flex gap-2">
               <button type="button" onClick={() => { void addBulk(); }} disabled={saving || !bulkText.trim()}
                 className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
@@ -6807,7 +7015,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         )}
 
         <BulkActionsBar
-          selectedCount={selectedIds.length}
+          selectedCount={loading ? 0 : selectedIds.length}
           deleting={bulkDeleting}
           onClear={clear}
           onDelete={() => { void deleteSelected(); }}
@@ -6929,7 +7137,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         )}
 
         {loading ? (
-          <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
+          <PageLoader />
         ) : proxies.length === 0 ? (
           <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
             <Network className="mx-auto h-8 w-8 text-gray-300 mb-2" />
@@ -6941,23 +7149,23 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
           </div>
         ) : (
           <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-            <div className="grid grid-cols-[32px_1fr_80px_180px_40px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+            <div className="grid grid-cols-[32px_1fr_150px_80px_180px_40px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
               <SelectAllCheckbox total={proxies.length} selectedCount={selectedIds.length} onChange={setAll} />
-              <span>URL / Название</span><span>Активен</span><span>Список</span><span />
+              <span>URL / Название</span><span>Страна</span><span>Активен</span><span>Список</span><span />
             </div>
             {pagedProxies.map(p => {
               const check = checkById.get(p.id);
               return (
               <div
                 key={p.id}
-                className={`grid grid-cols-[32px_1fr_80px_180px_40px] gap-4 items-center px-4 py-2.5 ${isSelected(p.id) ? 'bg-indigo-50/60' : ''}`}
+                className={`grid grid-cols-[32px_1fr_150px_80px_180px_40px] gap-4 items-center px-4 py-2.5 transition-colors duration-300 ease-out ${isSelected(p.id) ? 'bg-[rgba(99,102,241,0.07)]' : ''}`}
               >
                 <input
                   type="checkbox"
                   checked={isSelected(p.id)}
                   onChange={() => toggle(p.id)}
                   aria-label={`Выбрать ${p.name || p.url}`}
-                  className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+                  className="tg-check"
                 />
                 <div className="min-w-0">
                   {p.name && <p className="text-xs font-medium text-gray-800">{p.name}</p>}
@@ -6982,6 +7190,10 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
                     </div>
                   )}
                 </div>
+                {/* Страна выхода прокси — из проверки; пусто, пока не определена. */}
+                <span className="truncate text-xs text-gray-600" title={p.country_code ?? ''}>
+                  {p.country_code ? proxyCountryLabel(p.country_code) : <span className="text-gray-300">—</span>}
+                </span>
                 <button type="button" onClick={() => { void toggleActive(p.id, p.is_active); }}
                   className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${p.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
                   {p.is_active ? 'Да' : 'Нет'}
@@ -7044,11 +7256,13 @@ interface ReportResponse {
   report: {
     weeks: Array<{
       period: string; chats: number | null; contacts: number; delivered: number;
-      anyReplies: number; targetReplies: number; blocks: number; conversion: number | null;
+      anyReplies: number; targetReplies: number; conversion: number | null;
+      /** Разбивка по гипотезам; в отчётах, собранных до 22.10.2026, её нет. */
+      bases?: Array<{ base: string; chats: number | null; contacts: number }>;
     }>;
     total: ReportResponse['report']['weeks'][number];
     leads: Array<{
-      sourceChat: string; criterion: string; nickname: string; offerSentAt: string;
+      week?: string; sourceChat: string; criterion: string; nickname: string; offerSentAt: string;
       offerNumber: string; quality: string; handedOverAt: string;
     }>;
     offers: Array<{
@@ -7072,10 +7286,49 @@ function toDateInput(ms: number): string {
  * закрытой прошлой неделе значило бы прятать свежие дни. Даты можно менять —
  * форма допускает и длинный период с накоплением недельных строк.
  *
- * Колонки, которых в данных нет (номер оффера, критерий отбора, качество лида,
- * дата передачи клиенту), отдаются пустыми и заполняются руками уже в файле.
- * Показывать вместо них догадку было бы хуже пустоты: цифры уходят клиенту.
+ * Таблицы копируются кнопкой целиком — в документ ложатся таблицей, в Sheets
+ * по ячейкам. Пустым остаётся только «Критерий отбора»: его в данных нет.
  */
+const REPORT_SECTION_1_HEADERS = [
+  'Период', 'Обработано чатов', 'Подобрано контактов', 'Доставлено',
+  'Любых ответов', 'Целевых ответов (передано лидов)', 'Конверсия, %',
+];
+const REPORT_SECTION_2_HEADERS = [
+  'Чат/группа', 'Критерий отбора', 'Никнейм', 'Дата оффера', '№ оффера', 'Качество лида', 'Передан клиенту',
+];
+
+/** Разбивка по гипотезам под суммой: «Гипотеза 3 — 4». */
+function formatBaseLines(
+  bases: ReportResponse['report']['weeks'][number]['bases'],
+  field: 'chats' | 'contacts',
+): string[] {
+  return (bases ?? []).map((b) => `${b.base} — ${b[field] === null ? 'не указаны' : b[field]}`);
+}
+
+function BaseBreakdown({ lines }: { lines: string[] }) {
+  if (!lines.length) return null;
+  return (
+    <div className="mt-0.5 space-y-px text-[10px] font-normal leading-snug text-gray-400">
+      {lines.map((l, i) => <div key={i}>{l}</div>)}
+    </div>
+  );
+}
+
+/** Строка истории отчётов: без самих цифр, они открываются по клику. */
+interface ReportHistoryItem {
+  id: string;
+  period_from: string;
+  period_to: string;
+  created_by_name: string | null;
+  created_at: string;
+}
+
+/** «01.10.2026 — 22.10.2026»: конец в базе исключающий, на экране — включительно. */
+function formatReportPeriod(fromIso: string, toIso: string): string {
+  const fmt = (ms: number) => new Date(ms + 3 * 3_600_000).toLocaleDateString('ru-RU', { timeZone: 'UTC' });
+  return `${fmt(new Date(fromIso).getTime())} — ${fmt(new Date(toIso).getTime() - 1)}`;
+}
+
 function CampaignReportTab({ campaignId }: { campaignId: string }) {
   const [{ from, to }, setPeriod] = useState(() => {
     // Первое число текущего месяца собираем из частей московской даты, а не
@@ -7092,6 +7345,11 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
     };
   });
   const [data, setData] = useState<ReportResponse['report'] | null>(null);
+  /** История собранных отчётов кампании (видна всем сотрудникам). */
+  const [history, setHistory] = useState<ReportHistoryItem[]>([]);
+  /** Какой сохранённый отчёт сейчас на экране; null — собран только что с другими датами. */
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [openingId, setOpeningId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -7103,6 +7361,35 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
     return `from=${encodeURIComponent(fromIso)}&to=${encodeURIComponent(toIso)}`;
   }, [from, to]);
 
+  const loadHistory = useCallback(async () => {
+    const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/report?list=1`);
+    if (!res.ok) return;
+    const body = (await res.json().catch(() => null)) as { items?: ReportHistoryItem[] } | null;
+    setHistory(body?.items ?? []);
+  }, [campaignId]);
+
+  useEffect(() => { queueMicrotask(() => { void loadHistory(); }); }, [loadHistory]);
+
+  /** Открыть сохранённый отчёт: цифры как были на момент сборки, без пересчёта. */
+  const openSaved = async (id: string) => {
+    setOpeningId(id); setError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/report?id=${id}`);
+      const body = (await res.json().catch(() => null)) as
+        (ReportResponse & { from?: string; to?: string; error?: string }) | null;
+      if (!res.ok || !body?.report) {
+        setError(body?.error ?? `Не удалось открыть отчёт (${res.status})`);
+        return;
+      }
+      setData(body.report);
+      setActiveId(id);
+      // Даты в полях показываем те, за которые отчёт собран; конец — включительно.
+      if (body.from && body.to) {
+        setPeriod({ from: toDateInput(new Date(body.from).getTime()), to: toDateInput(new Date(body.to).getTime() - 1) });
+      }
+    } finally { setOpeningId(null); }
+  };
+
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
@@ -7113,13 +7400,19 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
         return;
       }
       setData(body?.report ?? null);
+      setActiveId((body as { saved?: { id?: string } | null } | null)?.saved?.id ?? null);
+      void loadHistory();
     } finally { setLoading(false); }
-  }, [campaignId, range]);
+  }, [campaignId, range, loadHistory]);
 
   const download = async () => {
     setDownloading(true); setError(null);
     try {
-      const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/report?${range()}&format=xlsx`);
+      const res = await authFetch(
+        activeId
+          ? `${API_BASE}/campaigns/${campaignId}/report?id=${activeId}&format=xlsx`
+          : `${API_BASE}/campaigns/${campaignId}/report?${range()}&format=xlsx`,
+      );
       if (!res.ok) {
         setError(`Не удалось выгрузить файл (${res.status})`);
         return;
@@ -7137,17 +7430,46 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
   const cell = 'px-2 py-1.5 text-xs text-gray-700 border border-gray-200';
   const head = 'px-2 py-1.5 text-[11px] font-medium text-gray-500 border border-gray-200 bg-gray-50 text-left';
 
+  // Те же строки и на экране, и в буфере обмена — чтобы вставленное не
+  // расходилось с тем, что видно.
+  const section1Rows: CopyRow[] = data ? [...data.weeks, data.total].map((w) => {
+    const chats = w.chats === null ? '—' : String(w.chats);
+    const chatLines = formatBaseLines(w.bases, 'chats');
+    const contactLines = formatBaseLines(w.bases, 'contacts');
+    return [
+      w.period,
+      chatLines.length ? [chats, ...chatLines] : chats,
+      contactLines.length ? [String(w.contacts), ...contactLines] : String(w.contacts),
+      w.delivered, w.anyReplies, w.targetReplies,
+      w.conversion === null ? '—' : w.conversion,
+    ];
+  }) : [];
+  // Период длиннее недели — лиды под заголовками недель, как строки раздела 1.
+  const section2Rows: CopyRow[] = [];
+  if (data) {
+    const byWeek = data.weeks.length > 1;
+    let week: string | null = null;
+    for (const l of data.leads) {
+      if (byWeek && (l.week ?? '') !== week) {
+        week = l.week ?? '';
+        if (week) section2Rows.push({ group: week });
+      }
+      section2Rows.push([l.sourceChat, l.criterion, l.nickname, l.offerSentAt, l.offerNumber, l.quality, l.handedOverAt]);
+    }
+  }
+
   return (
-    <div className="space-y-4">
+    <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
+    <div className="min-w-0 space-y-4">
       <div className="flex flex-wrap items-end gap-3">
         <label className="space-y-1">
           <span className="block text-[11px] font-medium text-gray-500">Период с</span>
-          <input type="date" value={from} onChange={(e) => setPeriod((p) => ({ ...p, from: e.target.value }))}
+          <input type="date" value={from} onChange={(e) => { setActiveId(null); setPeriod((p) => ({ ...p, from: e.target.value })); }}
             className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400" />
         </label>
         <label className="space-y-1">
           <span className="block text-[11px] font-medium text-gray-500">по (включительно)</span>
-          <input type="date" value={to} onChange={(e) => setPeriod((p) => ({ ...p, to: e.target.value }))}
+          <input type="date" value={to} onChange={(e) => { setActiveId(null); setPeriod((p) => ({ ...p, to: e.target.value })); }}
             className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400" />
         </label>
         <button type="button" onClick={() => { void load(); }} disabled={loading}
@@ -7176,97 +7498,70 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
       {data && (
         <div className="space-y-6">
           <div className="space-y-2">
-            <h3 className="text-sm font-medium text-gray-800">1. Рассылка и реакция</h3>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-medium text-gray-800">1. Рассылка и реакция</h3>
+              <CopyTableButton headers={REPORT_SECTION_1_HEADERS} rows={section1Rows} />
+            </div>
             <div className="overflow-x-auto">
               <table className="min-w-full border-collapse">
                 <thead>
-                  <tr>
-                    <th className={head}>Период</th>
-                    <th className={head}>Обработано чатов</th>
-                    <th className={head}>Подобрано контактов</th>
-                    <th className={head}>Доставлено</th>
-                    <th className={head}>Любых ответов</th>
-                    <th className={head}>Целевых ответов</th>
-                    <th className={head}>Блокировок</th>
-                    <th className={head}>Конверсия, %</th>
-                  </tr>
+                  <tr>{REPORT_SECTION_1_HEADERS.map((h) => <th key={h} className={head}>{h}</th>)}</tr>
                 </thead>
                 <tbody>
                   {[...data.weeks, data.total].map((w, i) => (
                     <tr key={w.period + i} className={w.period === 'Итого' ? 'font-medium bg-gray-50' : ''}>
-                      <td className={cell}>{w.period}</td>
-                      <td className={cell}>{w.chats === null ? '—' : w.chats}</td>
-                      <td className={cell}>{w.contacts}</td>
-                      <td className={cell}>{w.delivered}</td>
-                      <td className={cell}>{w.anyReplies}</td>
-                      <td className={cell}>{w.targetReplies}</td>
-                      <td className={cell}>{w.blocks}</td>
-                      <td className={cell}>{w.conversion === null ? '—' : w.conversion}</td>
+                      <td className={`${cell} whitespace-nowrap align-top`}>{w.period}</td>
+                      <td className={`${cell} align-top`}>
+                        {w.chats === null ? '—' : w.chats}
+                        <BaseBreakdown lines={formatBaseLines(w.bases, 'chats')} />
+                      </td>
+                      <td className={`${cell} align-top`}>
+                        {w.contacts}
+                        <BaseBreakdown lines={formatBaseLines(w.bases, 'contacts')} />
+                      </td>
+                      <td className={`${cell} align-top`}>{w.delivered}</td>
+                      <td className={`${cell} align-top`}>{w.anyReplies}</td>
+                      <td className={`${cell} align-top`}>{w.targetReplies}</td>
+                      <td className={`${cell} align-top`}>{w.conversion === null ? '—' : w.conversion}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-            {/* Оговорки, без которых цифрам нельзя доверять вслепую. Уходят
-                клиенту — лучше знать заранее, что именно они означают. */}
             <p className="text-[10px] text-gray-400">
-              Блокировки — только выявленные: мы узнаём о них, когда пытаемся написать
-              повторно, поэтому заблокировавшие сразу после первого касания сюда не попадают.
-              Обработанные чаты — уникальные чаты-источники контактов, загруженных в базы этой
-              кампании за период. Целевые ответы отнесены к неделе последнего сообщения диалога:
-              момент срабатывания триггера в базе не хранится.
+              Гипотеза попадает в неделю, когда по ней ушло первое сообщение. Ответы — только на наше касание, целевые — переданные клиенту лиды.
             </p>
-            {[...data.weeks, data.total].every((w) => w.chats === null) && (
-              <p className="text-[11px] text-amber-600">
-                «Обработано чатов» — прочерк: в файлах базы этой кампании нет колонки
-                «Ссылка на источник», и портал не знает, из каких чатов взяты контакты.
-                Добавьте её при следующей загрузке базы — TG-парсер отдаёт её в выгрузке, —
-                и цифра начнёт считаться сама. За прошлые недели впишите её в файл руками.
-              </p>
-            )}
           </div>
 
           <div className="space-y-2">
-            <h3 className="text-sm font-medium text-gray-800">
-              2. Лиды <span className="font-normal text-gray-400">({data.leads.length})</span>
-            </h3>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-medium text-gray-800">
+                2. Лиды <span className="font-normal text-gray-400">({data.leads.length})</span>
+              </h3>
+              {data.leads.length > 0 && <CopyTableButton headers={REPORT_SECTION_2_HEADERS} rows={section2Rows} />}
+            </div>
             {data.leads.length === 0 ? (
-              <p className="text-xs text-gray-400">За период целевых ответов не было.</p>
+              <p className="text-xs text-gray-400">За период лидов клиенту не передавали.</p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="min-w-full border-collapse">
                   <thead>
-                    <tr>
-                      <th className={head}>Чат/группа</th>
-                      <th className={head}>Критерий отбора</th>
-                      <th className={head}>Никнейм</th>
-                      <th className={head}>Дата оффера</th>
-                      <th className={head}>№ оффера</th>
-                      <th className={head}>Качество лида</th>
-                      <th className={head}>Передан клиенту</th>
-                    </tr>
+                    <tr>{REPORT_SECTION_2_HEADERS.map((h) => <th key={h} className={head}>{h}</th>)}</tr>
                   </thead>
                   <tbody>
-                    {data.leads.map((l, i) => (
-                      <tr key={l.nickname + i}>
-                        <td className={cell}>{l.sourceChat || <span className="text-gray-300">—</span>}</td>
-                        <td className={cell} />
-                        <td className={cell}>{l.nickname}</td>
-                        <td className={cell}>{l.offerSentAt}</td>
-                        <td className={cell} />
-                        <td className={cell} />
-                        <td className={cell} />
+                    {section2Rows.map((row, i) => (Array.isArray(row) ? (
+                      <tr key={i}>
+                        {row.map((c, j) => <td key={j} className={cell}>{c || <span className="text-gray-300">—</span>}</td>)}
                       </tr>
-                    ))}
+                    ) : (
+                      <tr key={i}>
+                        <td colSpan={REPORT_SECTION_2_HEADERS.length} className={`${cell} bg-gray-50 font-medium`}>{row.group}</td>
+                      </tr>
+                    )))}
                   </tbody>
                 </table>
               </div>
             )}
-            <p className="text-[10px] text-gray-400">
-              Пустые колонки портал не заполняет — их дописывают руками в выгруженном файле.
-              Чат-источник берётся из колонки «Ссылка на источник» загруженного файла базы;
-              если её при загрузке не было, останется пусто.
-            </p>
           </div>
 
           <div className="space-y-2">
@@ -7302,37 +7597,98 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
               </table>
             </div>
             <p className="text-[10px] text-gray-400">
-              Строка на каждую базу кампании. Цифры считает портал, остальное — из плана работ.
+              Строка на каждую гипотезу, по которой в периоде что-то было. Цифры считает портал, остальное — из плана работ.
             </p>
           </div>
         </div>
       )}
+    </div>
+
+    {/* История отчётов справа: видны последние десять, остальные — прокруткой. */}
+    <aside className="rounded-xl border border-gray-200 bg-white/50 lg:sticky lg:top-4">
+      <div className="flex items-center justify-between border-b border-gray-200 px-3.5 py-3">
+        <h3 className="text-xs font-semibold text-gray-800">История отчётов</h3>
+        <span className="text-[11px] text-gray-400">{history.length}</span>
+      </div>
+      {history.length === 0 ? (
+        <p className="px-3.5 py-6 text-center text-[11px] text-gray-400">
+          Собранные отчёты появятся здесь — их видят все сотрудники.
+        </p>
+      ) : (
+        <ul className="max-h-[600px] overflow-y-auto">
+          {history.map((h) => {
+            const active = activeId === h.id;
+            return (
+              <li key={h.id}>
+                <button
+                  type="button"
+                  onClick={() => { void openSaved(h.id); }}
+                  disabled={openingId === h.id}
+                  className={`tg-list-item block w-full border-b border-gray-100 px-3.5 py-2.5 text-left ${active ? 'tg-list-item--active' : ''}`}
+                >
+                  <span className={`block text-xs ${active ? 'font-semibold text-indigo-700' : 'font-medium text-gray-800'}`}>
+                    {formatReportPeriod(h.period_from, h.period_to)}
+                  </span>
+                  <span className="mt-0.5 block text-[11px] text-gray-500">
+                    {h.created_by_name || 'неизвестно кто'}
+                  </span>
+                  <span className="block text-[10px] text-gray-400">
+                    собран {new Date(h.created_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </aside>
     </div>
   );
 }
 
 /* =================== CAMPAIGN VIEW (5 tabs) =================== */
 const TABS = [
-  // Сводка первой и стартовой: открывая кампанию, оператор спрашивает «как
-  // дела», а не «какие тут настройки» — их заводят один раз и больше не трогают.
-  { id: 'dashboard', label: 'Сводка', icon: LayoutDashboard },
+  // 22.10.2026, порядок по просьбе: рабочие вкладки сверху, логи — последними.
   { id: 'settings', label: 'Настройки', icon: Settings },
-  // Дальше — в порядке заполнения кампании: аккаунты, им прокси, базы, прогрев.
   { id: 'accounts', label: 'Аккаунты', icon: Users },
-  { id: 'proxies', label: 'Прокси', icon: Network },
-  { id: 'bases', label: 'Базы', icon: Database },
-  { id: 'warmup', label: 'Прогрев', icon: Flame },
-  { id: 'logs', label: 'Логи', icon: ScrollText },
   { id: 'dialogs', label: 'Диалоги', icon: MessageCircle },
+  { id: 'bases', label: 'Базы', icon: Database },
+  { id: 'proxies', label: 'Прокси', icon: Network },
+  { id: 'dashboard', label: 'Статистика', icon: BarChart3 },
+  { id: 'warmup', label: 'Прогрев', icon: Flame },
   { id: 'report', label: 'Отчёт', icon: FileSpreadsheet },
+  { id: 'logs', label: 'Логи', icon: ScrollText },
 ] as const;
 
-function CampaignView({ campaign, onUpdate, onDelete }: {
+function CampaignView({ campaign, onUpdate, onDelete, onBack }: {
   campaign: OutreachCampaign;
   onUpdate: () => void;
   onDelete: (id: string) => void;
+  onBack: () => void;
 }) {
-  const [tab, setTab] = useState<string>('dashboard');
+  // Вкладка живёт в адресе (?tab=…) и в localStorage: после перезагрузки
+  // открывается последняя, а первое открытие — «Настройки».
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const [tab, setTabState] = useState<string>(() => {
+    const fromUrl = searchParams.get('tab');
+    if (fromUrl && TABS.some((t) => t.id === fromUrl)) return fromUrl;
+    try {
+      const saved = window.localStorage.getItem('tg-outreach-last-tab');
+      if (saved && TABS.some((t) => t.id === saved)) return saved;
+    } catch { /* localStorage недоступен — идём с вкладкой по умолчанию */ }
+    return 'settings';
+  });
+  const setTab = useCallback((next: string) => {
+    setTabState(next);
+    try { window.localStorage.setItem('tg-outreach-last-tab', next); } catch { /* */ }
+    // replace, а не push: переключение вкладок не должно забивать историю «Назад».
+    router.replace(`${pathname}?campaign=${campaign.id}&tab=${next}` as Route, { scroll: false });
+  }, [router, pathname, campaign.id]);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const archived = Boolean(campaign.archived_at);
   const [actionLoading, setActionLoading] = useState<'start' | 'stop' | null>(null);
   /** Текст ошибки последнего действия. Раньше ответ ручки не читали вовсе. */
   const [actionError, setActionError] = useState<string | null>(null);
@@ -7477,9 +7833,41 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
   const stopping = displayStatus === 'stopping';
   const starting = displayStatus === 'starting';
   const running = displayStatus === 'running';
+  // Блокировку берём с учётом живого статуса шапки, а не только списка.
+  const archiveBlocked = archiveBlockReason({ ...campaign, status: displayStatus as CampaignStatus });
+
+  const restore = async () => {
+    setRestoring(true);
+    setActionError(null);
+    const res = await authFetch(`${API_BASE}/campaigns/${campaign.id}/archive`, { method: 'DELETE' });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null) as { error?: string } | null;
+      setActionError(body?.error || `Не удалось вернуть кампанию (${res.status})`);
+    }
+    setRestoring(false);
+    onUpdate();
+  };
 
   return (
     <div className="space-y-4">
+      <CampaignRail items={TABS} active={tab} onSelect={setTab} />
+      <button type="button" onClick={onBack}
+        className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-indigo-700 cursor-pointer">
+        <ArrowLeft className="h-3.5 w-3.5" /> Все кампании
+      </button>
+      {archived && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <span>
+            Кампания в архиве с {new Date(campaign.archived_at as string).toLocaleDateString('ru-RU')}
+            {campaign.archive_reason ? ` — ${campaign.archive_reason}` : ''}. Запуск и прогрев недоступны.
+          </span>
+          <button type="button" onClick={() => void restore()} disabled={restoring}
+            className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-white px-3 py-1 font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50 cursor-pointer">
+            {restoring ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArchiveRestore className="h-3 w-3" />}
+            Вернуть из архива
+          </button>
+        </div>
+      )}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-bold text-gray-900">{campaign.name}</h2>
@@ -7546,7 +7934,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
               {actionLoading === 'stop' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
               Остановить
             </button>
-          ) : (
+          ) : archived ? null : (
             <button type="button" onClick={() => void doAction('start')}
               disabled={actionLoading !== null}
               className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-emerald-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
@@ -7554,12 +7942,26 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
               Запустить
             </button>
           )}
-          <button type="button" onClick={() => onDelete(campaign.id)}
+          {!archived && (
+            <button type="button" onClick={() => setArchiveOpen(true)} disabled={Boolean(archiveBlocked)}
+              title={archiveBlocked ?? 'Убрать в архив'}
+              className="rounded-full border border-gray-200 p-2.5 text-gray-400 hover:text-amber-700 hover:border-amber-300 hover:bg-amber-50 transition disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer">
+              <Archive className="h-3.5 w-3.5" />
+            </button>
+          )}
+          <button type="button" onClick={() => onDelete(campaign.id)} title="Удалить кампанию"
             className="rounded-full border border-gray-200 p-2.5 text-gray-400 hover:text-rose-600 hover:border-rose-300 hover:bg-rose-50 transition cursor-pointer">
             <Trash2 className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
+      {archiveOpen && (
+        <ArchiveCampaignDialog
+          campaign={campaign}
+          onClose={() => setArchiveOpen(false)}
+          onDone={() => { setArchiveOpen(false); onUpdate(); }}
+        />
+      )}
 
       {/* Отказ ручки виден оператору. До 09.10.2026 ответ не читали вовсе:
           кампания не запускалась, а на экране не было ни слова почему. */}
@@ -7574,19 +7976,6 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
           Кампания ещё сворачивает прошлый круг — это занимает пару минут. Запустим её сами, как только он закроется; страницу можно не трогать.
         </div>
       )}
-
-      <div className="flex gap-1 border-b border-gray-200">
-        {TABS.map(t => {
-          const Icon = t.icon;
-          return (
-            <button key={t.id} type="button" onClick={() => setTab(t.id)}
-              className={`inline-flex items-center gap-1.5 px-5 py-3 text-xs font-medium transition border-b-2 -mb-px cursor-pointer ${tab === t.id ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'}`}>
-              <Icon className="h-3.5 w-3.5" />
-              {t.label}
-            </button>
-          );
-        })}
-      </div>
 
       <div>
         {tab === 'dashboard' && <DashboardTab campaignId={campaign.id} />}
@@ -7621,12 +8010,13 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
 /* half — поле на половину ширины: у «Периодов сна» внутри строка вида
    «00:00-08:00», растянутая на весь экран она читалась как место под длинный
    список. */
+/** Общий вид полей ввода: полупрозрачный фон, одинаковый в светлой и тёмной теме. */const INPUT_BG = 'bg-white/50';const INPUT_BORDER = 'border-gray-300/70';
 function Field({ label, value, onChange, placeholder, type, half }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string; type?: string; half?: boolean }) {
   return (
     <label className="block space-y-1">
       <span className="block text-[11px] font-medium text-gray-500">{label}</span>
       <input type={type ?? 'text'} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
-        className={`${half ? 'w-full md:w-1/2' : 'w-full'} block rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400`} />
+        className={`${half ? 'w-full md:w-1/2' : 'w-full'} block rounded-lg border ${INPUT_BORDER} ${INPUT_BG} px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400`} />
     </label>
   );
 }
@@ -7636,7 +8026,7 @@ function FieldNum({ label, value, onChange, compact }: { label: string; value: n
     <label className="space-y-1">
       <span className="block text-[11px] font-medium text-gray-500">{label}</span>
       <input type="number" value={value} onChange={e => onChange(Number(e.target.value))}
-        className={`${compact ? 'w-20 text-center' : 'w-full'} block rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400`} />
+        className={`${compact ? 'w-20 text-center' : 'w-full'} block rounded-lg border ${INPUT_BORDER} ${INPUT_BG} px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400`} />
     </label>
   );
 }
@@ -7645,28 +8035,12 @@ function FieldArea({ label, value, onChange, rows, placeholder }: { label: strin
   return (
     <label className="space-y-1">
       <span className="text-[11px] font-medium text-gray-500">{label}</span>
+      {/* Растягивать можно, сжимать — не ниже исходной высоты: иначе поле
+          сжималось до полоски, в которой не видно ни строки. 1rem — строка
+          text-xs, 0.75rem — вертикальные отступы и рамка. */}
       <textarea value={value} onChange={e => onChange(e.target.value)} rows={rows ?? 3} placeholder={placeholder}
-        className="block w-full rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 resize-y" />
-    </label>
-  );
-}
-
-/* compact — поля под числа в 2–4 знака: тянуть их на всю колонку незачем,
-   и ряд из трёх пауз влезает в строку, не расползаясь на пол-экрана. */
-function RangeField({ label, value, onChange, compact }: { label: string; value: [number, number]; onChange: (v: [number, number]) => void; compact?: boolean }) {
-  const box = compact
-    ? 'w-16 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-center text-xs text-gray-800 outline-none focus:border-indigo-400'
-    : 'block w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400';
-  return (
-    <label className="space-y-1">
-      <span className="block text-[11px] font-medium text-gray-500">{label}</span>
-      <div className="flex items-center gap-1">
-        <input type="number" value={value[0]} onChange={e => onChange([Number(e.target.value), value[1]])}
-          className={box} />
-        <span className="text-gray-400 text-xs">—</span>
-        <input type="number" value={value[1]} onChange={e => onChange([value[0], Number(e.target.value)])}
-          className={box} />
-      </div>
+        style={{ minHeight: `${(rows ?? 3) + 0.75}rem` }}
+        className={`block w-full rounded-lg border ${INPUT_BORDER} ${INPUT_BG} px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 resize-y`} />
     </label>
   );
 }
@@ -7714,7 +8088,7 @@ function TimezoneField({ value, onChange }: { value: number; onChange: (v: numbe
           вроде «UTC+3 — Москва, Минск, Стамбул», растянутое поле выглядело
           пустым. max-w держит список в рамках колонки на узком экране. */}
       <select value={value} onChange={e => onChange(Number(e.target.value))}
-        className="block w-auto max-w-full cursor-pointer rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400">
+        className={`block w-auto max-w-full cursor-pointer rounded-lg border ${INPUT_BORDER} ${INPUT_BG} px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400`}>
         {!known && <option value={value}>{formatUtcOffset(value)} — сохранённое значение</option>}
         {TIMEZONE_ZONES.map(z => (
           <option key={z.offset} value={z.offset}>{formatUtcOffset(z.offset)} — {z.cities}</option>
@@ -7735,7 +8109,7 @@ function StepperField({ label, value, min, max, onChange, title }: { label: stri
       <div className="flex items-center gap-1">
         <input type="number" min={min} max={max} value={value}
           onChange={e => onChange(clamp(Number(e.target.value) || min))}
-          className="w-14 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-center text-xs text-gray-800 outline-none focus:border-indigo-400 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none" />
+          className={`w-14 rounded-lg border ${INPUT_BORDER} ${INPUT_BG} px-2 py-1.5 text-center text-xs text-gray-800 outline-none focus:border-indigo-400 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none`} />
         <span className="flex flex-col">
           <button type="button" aria-label="Больше" disabled={value >= max} onClick={() => onChange(clamp(value + 1))}
             className={`${arrow} rounded-t-md`}>▲</button>
@@ -7748,13 +8122,18 @@ function StepperField({ label, value, min, max, onChange, title }: { label: stri
 }
 
 /* =================== CAMPAIGNS SECTION =================== */
+/**
+ * Список кампаний таблицей и открытая кампания отдельным экраном. Открытая
+ * кампания живёт в адресе (`?campaign=<id>`): «Назад» браузера и кнопка
+ * «Все кампании» возвращают к списку, ссылку на кампанию можно переслать.
+ */
 function CampaignsSection() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const selectedId = searchParams.get('campaign');
   const [campaigns, setCampaigns] = useState<OutreachCampaign[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [showCreate, setShowCreate] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [creating, setCreating] = useState(false);
 
   const fetchCampaigns = useCallback(async () => {
     const token = await getAccessToken();
@@ -7763,108 +8142,96 @@ function CampaignsSection() {
     if (res.ok) {
       const d = await res.json() as { items: OutreachCampaign[] };
       setCampaigns(d.items);
-      // Открываем первую кампанию сразу, чтобы инструмент не встречал пустым
-      // экраном с одними табами — в 99% случаев следующий клик всё равно был
-      // по ней. Функциональная форма, а не чтение selectedId: иначе он попал бы
-      // в зависимости useCallback, тот бы пересоздавался на каждый выбор
-      // кампании и перезапускал загрузку списка. `prev ??` заодно бережёт
-      // ручной выбор при фоновых обновлениях списка.
-      setSelectedId((prev) => prev ?? d.items[0]?.id ?? null);
     }
     setLoading(false);
   }, []);
 
   useEffect(() => { queueMicrotask(() => { void fetchCampaigns(); }); }, [fetchCampaigns]);
 
-  const createCampaign = async () => {
-    if (!newName.trim()) return;
-    setCreating(true);
+  // `as Route` — типизированные маршруты не выводят адрес с query-строкой.
+  const openCampaign = useCallback((id: string) => {
+    router.push(`${pathname}?campaign=${id}` as Route);
+  }, [router, pathname]);
+  const backToList = useCallback(() => {
+    router.push(pathname as Route);
+  }, [router, pathname]);
+
+  const createCampaign = async (name: string) => {
     const res = await authFetch(`${API_BASE}/campaigns`, {
       method: 'POST',
-      body: JSON.stringify({ name: newName.trim() }),
+      body: JSON.stringify({ name }),
     });
+    await fetchCampaigns();
     if (res.ok) {
       const c = await res.json() as OutreachCampaign;
-      setSelectedId(c.id);
-      setNewName(''); setShowCreate(false);
+      openCampaign(c.id);
     }
-    setCreating(false);
-    void fetchCampaigns();
   };
 
-  const deleteCampaign = async (id: string) => {
-    // С 12.08.2026 базы принадлежат кампании и уходят вместе с ней по cascade.
-    // Раньше они переживали удаление, поэтому прежний текст «это действие
-    // необратимо» больше не описывает масштаб потери.
-    if (!confirm(
-      'Удалить кампанию? Вместе с ней будут удалены её базы контактов и вся история отправок по ним.'
-      + ' Это действие необратимо.',
-    )) return;
-    await authFetch(`${API_BASE}/campaigns/${id}`, { method: 'DELETE' });
-    if (selectedId === id) setSelectedId(null);
-    void fetchCampaigns();
+  // Окно удаления вместо системного confirm. С 12.08.2026 базы принадлежат
+  // кампании и уходят вместе с ней по cascade — окно говорит об этом прямо.
+  const [deleteTarget, setDeleteTarget] = useState<OutreachCampaign | null>(null);
+  const [archiveTarget, setArchiveTarget] = useState<OutreachCampaign | null>(null);
+  const deleteCampaign = (id: string) => {
+    const c = campaigns.find((x) => x.id === id);
+    if (c) setDeleteTarget(c);
   };
 
   const selected = campaigns.find(c => c.id === selectedId) ?? null;
 
   return (
-    <div className="w-full text-left">
+    <div className={`w-full text-left ${selected ? 'lg:pl-14' : ''}`}>
       <div className="min-w-0 w-full space-y-6">
-        {/* Header */}
-        <header className="space-y-2">
-          <div className="inline-flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
-            <MessageSquareMore className="h-3.5 w-3.5" />
-            TG Аутрич
-          </div>
-          <h1 className="text-2xl font-bold text-gray-900">Telegram Аутрич</h1>
-          <p className="max-w-2xl text-sm text-gray-500">
-            Массовый B2B-аутрич через Telegram. Управление кампаниями, автоответы GPT, квалификация лидов.
-          </p>
-        </header>
+        {!selected && (
+          <header className="space-y-2">
+            <div className="inline-flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
+              <MessageSquareMore className="h-3.5 w-3.5" />
+              TG Аутрич
+            </div>
+            <h1 className="text-2xl font-bold text-gray-900">Telegram Аутрич</h1>
+            <p className="max-w-2xl text-sm text-gray-500">
+              Массовый B2B-аутрич через Telegram. Управление кампаниями, автоответы GPT, квалификация лидов.
+            </p>
+          </header>
+        )}
 
-        {/* Campaign selector */}
-        <div className="flex items-center gap-3 flex-wrap">
-          {campaigns.map(c => {
-            const st = STATUS_LABELS[c.status] ?? STATUS_LABELS.stopped;
-            return (
-              <button key={c.id} type="button" onClick={() => setSelectedId(c.id)} title={st.label}
-                className={`inline-flex items-center gap-2 rounded-full px-5 py-2.5 text-xs font-medium transition border cursor-pointer ${selectedId === c.id ? 'bg-indigo-600 text-white border-indigo-600 font-semibold ring-2 ring-indigo-300 ring-offset-2 ring-offset-transparent shadow-md' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm'}`}>
-                <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass(c.status)}`} />
-                {c.name}
-                {selectedId === c.id && <span className="rounded-full bg-white/20 px-2 py-0.5 text-[10px] uppercase tracking-wide">открыта</span>}
-              </button>
-            );
-          })}
-          <button type="button" onClick={() => setShowCreate(!showCreate)}
-            className="inline-flex items-center gap-1.5 rounded-full border border-dashed border-gray-300 px-5 py-2.5 text-xs font-medium text-gray-500 hover:border-indigo-300 hover:text-indigo-600 hover:bg-indigo-50/50 transition cursor-pointer">
-            <Plus className="h-3.5 w-3.5" /> Новая кампания
-          </button>
-        </div>
+        {loading && <PageLoader />}
 
-        {showCreate && (
-          <div className="flex items-center gap-2 rounded-lg border border-gray-200 p-3">
-            <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Название кампании"
-              className="flex-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs outline-none focus:border-indigo-400"
-              onKeyDown={e => { if (e.key === 'Enter') void createCampaign(); }} />
-            <button type="button" onClick={createCampaign} disabled={creating}
-              className="rounded-full bg-indigo-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-              {creating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Создать'}
-            </button>
-            <button type="button" onClick={() => setShowCreate(false)} className="p-2 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition cursor-pointer"><X className="h-4 w-4" /></button>
+        {!loading && !selected && (
+          <CampaignList
+            campaigns={campaigns}
+            statusOf={(s) => STATUS_LABELS[s] ?? STATUS_LABELS.stopped}
+            onOpen={openCampaign}
+            onChanged={() => void fetchCampaigns()}
+            onCreate={createCampaign}
+          />
+        )}
+
+        {!loading && selectedId && !selected && (
+          <div className="rounded-2xl border border-gray-200 bg-white/90 p-6 text-center text-sm text-gray-500">
+            Кампания не найдена.{' '}
+            <button type="button" onClick={backToList} className="text-indigo-600 hover:underline cursor-pointer">К списку</button>
           </div>
         )}
 
-        {loading && (
-          <div className="flex items-center justify-center py-12 text-gray-400">
-            <Loader2 className="h-5 w-5 animate-spin mr-2" />Загрузка...
-          </div>
+        {deleteTarget && (
+          <DeleteCampaignDialog
+            campaign={deleteTarget}
+            onClose={() => setDeleteTarget(null)}
+            onDeleted={() => {
+              if (selectedId === deleteTarget.id) backToList();
+              setDeleteTarget(null);
+              void fetchCampaigns();
+            }}
+            onArchive={() => { setArchiveTarget(deleteTarget); setDeleteTarget(null); }}
+          />
         )}
-
-        {!loading && campaigns.length === 0 && !showCreate && (
-          <div className="rounded-2xl border border-gray-200 bg-white/90 p-8 text-center">
-            <MessageSquareMore className="mx-auto h-10 w-10 text-gray-300 mb-3" />
-            <p className="text-sm text-gray-500">Нет кампаний. Создайте первую для начала работы.</p>
-          </div>
+        {archiveTarget && (
+          <ArchiveCampaignDialog
+            campaign={archiveTarget}
+            onClose={() => setArchiveTarget(null)}
+            onDone={() => { setArchiveTarget(null); void fetchCampaigns(); }}
+          />
         )}
 
         {selected && (
@@ -7879,6 +8246,7 @@ function CampaignsSection() {
             campaign={selected}
             onUpdate={() => void fetchCampaigns()}
             onDelete={deleteCampaign}
+            onBack={backToList}
           />
         )}
       </div>
@@ -7888,9 +8256,12 @@ function CampaignsSection() {
 
 /* =================== MAIN PAGE =================== */
 export default function TgOutreachPage() {
+  // useSearchParams требует границы Suspense, иначе сборка падает на статике.
   return (
-    <div className="w-full text-left">
-      <CampaignsSection />
+    <div className="no-focus-ring w-full text-left">
+      <Suspense fallback={null}>
+        <CampaignsSection />
+      </Suspense>
     </div>
   );
 }

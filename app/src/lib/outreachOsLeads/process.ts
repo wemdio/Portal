@@ -66,6 +66,8 @@ async function enqueue(db: SupabaseClient, row: {
   companyName: string | null;
   campaignName: string;
   tgHtml: string;
+  instantlyEmailId?: string | null;
+  instantlyCampaignId?: string | null;
 }): Promise<void> {
   const email = row.leadEmail.trim().toLowerCase();
   const { error } = await db.from('outreachos_lead_pushes').insert({
@@ -81,6 +83,8 @@ async function enqueue(db: SupabaseClient, row: {
     campaign_name: row.campaignName,
     tg_html: row.tgHtml,
     message_text: htmlToNote(row.tgHtml),
+    instantly_email_id: row.instantlyEmailId ?? null,
+    instantly_campaign_id: row.instantlyCampaignId ?? null,
   });
   // Та же заявка уже в очереди — второй сделки и второго сообщения не будет.
   if (error && error.code !== '23505') throw new Error(`outreachos_lead_pushes insert: ${error.message}`);
@@ -94,6 +98,9 @@ export interface OutreachOsReplyLead {
   companyName: string | null;
   replySubject: string | null;
   replyBody: string | null;
+  /** Для ответа лиду с общей почтой в копии (agencyLeadHandoff). */
+  instantlyEmailId?: string | null;
+  instantlyCampaignId?: string | null;
 }
 
 export function buildOutreachOsReplyMessage(lead: OutreachOsReplyLead): string {
@@ -118,6 +125,8 @@ export async function enqueueOutreachOsReplyLead(db: SupabaseClient, lead: Outre
     companyName: lead.companyName,
     campaignName: lead.campaignName ?? '',
     tgHtml: buildOutreachOsReplyMessage(lead),
+    instantlyEmailId: lead.instantlyEmailId,
+    instantlyCampaignId: lead.instantlyCampaignId,
   });
 }
 

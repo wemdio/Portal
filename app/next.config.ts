@@ -19,7 +19,8 @@ const explicitlyPrecheckedBuildRequestedTypecheckSkip =
 // disables auth (renders pages without login) and the browser client falls
 // back to a dead URL, so data fetches surface empty/error states. Lets the UI
 // be reviewed locally with zero backend. `npm run dev:ui` sets the flag.
-const envCandidates = [resolve(__dirname, '..', '.env.local'), resolve(__dirname, '..', '.env')];
+// .env.local грузится последним и перекрывает .env — как в Next.js.
+const envCandidates = [resolve(__dirname, '..', '.env'), resolve(__dirname, '..', '.env.local')];
 if (process.env.UI_ONLY !== '1') {
   for (const envPath of envCandidates) {
     config({ path: envPath, override: true });

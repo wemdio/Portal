@@ -72,7 +72,7 @@ export async function POST(req: NextRequest) {
       return jsonError(`Строки не сохранились: ${rowsErr.message}`, 500);
     }
   }
-  await logAudit('polza_ru_outreach.upload.created', 'Наш автоаутрич: загружен файл сигналов', { kind, rows: rows.length, uploadId: upload.id }, { userId: auth.user.id });
+  await logAudit('polza_ru_outreach.upload.created', 'Русский автоаутрич: загружен файл сигналов', { kind, rows: rows.length, uploadId: upload.id }, { userId: auth.user.id });
   return NextResponse.json({ upload, rows: rows.length });
 }
 

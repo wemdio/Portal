@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 import { issueBenchKey } from '@/lib/bench/issueKey';
+import { benchLimitsSchema } from '@/lib/bench/limitsSchema';
 import { describeBenchTool, listAllBenchTools } from '@/lib/bench/registry';
 import { loadBenchUsage } from '@/lib/bench/usage';
 import { logAudit, logError } from '@/lib/loggerServer';
@@ -94,13 +95,9 @@ export async function GET(req: NextRequest) {
   });
 }
 
-const issueSchema = z.object({
+const issueSchema = benchLimitsSchema.partial().extend({
   name: z.string().min(1).max(200),
   tools: z.array(z.string().min(1).max(64)).min(1),
-  rpm_limit: z.number().int().min(1).max(10_000).optional(),
-  daily_jobs_limit: z.number().int().min(0).max(100_000).optional(),
-  daily_rows_limit: z.number().int().min(0).max(50_000_000).optional(),
-  max_active_jobs: z.number().int().min(1).max(50).optional(),
 });
 
 export async function POST(req: NextRequest) {

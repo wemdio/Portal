@@ -11,14 +11,16 @@
  * Здесь только раскладка уже готовых чисел, ничего не пересчитывается.
  */
 
+import { PageLoader } from './PageLoader';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { EChartsCoreOption } from 'echarts/core';
-import { AlertCircle, Loader2 } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
 
 import { authFetch } from '@/lib/authFetch';
 import EChart from '@/components/charts/EChart';
 import BasesTable from '@/components/tg-outreach/BasesTable';
-import type { BaseStats } from '@/lib/tgOutreach/baseStats';
+import type { BaseStats, SendForecast } from '@/lib/tgOutreach/baseStats';
+import { formatForecastDate } from '@/lib/tgOutreach/baseStats';
 import {
   AXIS_FONT_SIZE,
   AXIS_LINE,
@@ -294,6 +296,7 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
    * ручка гарантирует, что два экрана не разойдутся в числах.
    */
   const [bases, setBases] = useState<BaseStats[]>([]);
+  const [forecast, setForecast] = useState<SendForecast | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -321,10 +324,12 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
         // Цифры по базам — дополнение к сводке: если они не пришли, показываем
         // сводку без них, а не пустой экран с ошибкой.
         if (basesRes.ok) {
-          const body = (await basesRes.json()) as { bases: BaseStats[] };
+          const body = (await basesRes.json()) as { bases: BaseStats[]; forecast?: SendForecast | null };
           setBases(body.bases ?? []);
+          setForecast(body.forecast ?? null);
         } else {
           setBases([]);
+          setForecast(null);
         }
       } catch {
         setError('Не удалось загрузить сводку');
@@ -357,6 +362,15 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
     const label = PERIOD_OPTIONS.find((o) => o.id === period)?.label ?? '';
     return period === 'all' ? 'за всё время' : `за ${label.toLowerCase()}`;
   }, [period, custom]);
+
+  // Под датой: когда кончится текущий этап (если их несколько) и сколько осталось.
+  const forecastCaption = (() => {
+    if (!forecast || forecast.remaining <= 0) return undefined;
+    const current = forecast.currentStage;
+    const multi = forecast.stages.filter((st) => st.remaining > 0).length > 1;
+    const stage = multi && current?.endsAt ? `этап ${current.rank} — до ${formatForecastDate(current.endsAt)} · ` : '';
+    return `${stage}осталось ${forecast.remaining} контактов`;
+  })();
 
   return (
     <div className="space-y-3 p-4">
@@ -419,9 +433,7 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
       </div>
 
       {loading ? (
-        <div className="flex items-center gap-2 p-8 text-xs text-gray-500">
-          <Loader2 className="h-4 w-4 animate-spin" /> Загружаю сводку…
-        </div>
+        <PageLoader />
       ) : error ? (
         <div className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800">
           <AlertCircle className="mt-px h-4 w-4 shrink-0" />
@@ -549,7 +561,7 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
             </div>
 
             <div className="text-[11px] font-medium text-gray-400">Темп</div>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               <Metric label="Отправлено сегодня" value={data.dashboard.pace.sentToday} />
               <Metric label="Вчера" value={data.dashboard.pace.sentYesterday} />
               {/* Без подписи цифру читали как «за всё время», хотя считается
@@ -559,6 +571,13 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
                 label="Среднесуточно"
                 value={data.dashboard.pace.perDay}
                 caption={paceCaption}
+              />
+              <Metric
+                label="Баз хватит"
+                value={forecast && forecast.remaining > 0
+                  ? (forecast.endsAt ? `до ${formatForecastDate(forecast.endsAt)}` : 'темп нулевой')
+                  : '—'}
+                caption={forecastCaption}
               />
             </div>
 

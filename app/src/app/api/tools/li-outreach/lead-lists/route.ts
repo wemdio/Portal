@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError, fetchOwnerNames } from '@/lib/liOutreach/apiHelpers';
+import { logCampaignEvent } from '@/lib/liOutreach/campaignLog';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -43,15 +44,18 @@ export async function POST(req: NextRequest) {
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
 
-    const body = (await req.json()) as { name?: string; description?: string };
+    const body = (await req.json()) as { name?: string; description?: string; campaign_id?: string | null };
     if (!body.name?.trim()) return jsonError('Name is required', 400);
 
     const { data, error } = await auth.supabase
       .from('li_lead_lists')
-      .insert({ user_id: auth.user.id, name: body.name.trim(), description: body.description ?? null })
+      .insert({ user_id: auth.user.id, name: body.name.trim(), description: body.description ?? null, campaign_id: body.campaign_id || null })
       .select()
       .single();
     if (error) return jsonError(error.message, 500);
+    if (data?.campaign_id) {
+      await logCampaignEvent(supabaseAdmin!, data.campaign_id as string, 'info', `Создана база «${data.name}»`, auth.user.email ?? null);
+    }
     return NextResponse.json({ lead_list: data });
   });
 }

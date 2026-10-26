@@ -1,4 +1,6 @@
 import 'server-only';
+import { advanceBaseQueue } from '@/lib/liOutreach/baseQueue';
+import { enrollActiveBase } from '@/lib/liOutreach/enroll';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
@@ -14,6 +16,7 @@ import { isRepeatOfOurs, type RepeatCheckMessage } from '../outreachRepeatGuard'
 import { extractPublicIdentifier } from './leadHelpers';
 import { findUnknownPlaceholders, supportedVarsHint } from './messageVars';
 import { isInWorkingHours } from './schedule';
+import { assignUnassignedLeads, loadCampaignAccountIds } from './campaignAccounts';
 import {
   applyCooldownToAccount,
   COOLDOWN_MINUTES,
@@ -163,9 +166,71 @@ function todayStr(): string {
 
 // ---- Campaign tick entry point ------------------------------------------
 
+/**
+ * Тик кампании с несколькими аккаунтами: лиды распределяются между
+ * аккаунтами, дальше каждый аккаунт отрабатывает свою долю. Аккаунты кампании
+ * эксклюзивны (один аккаунт — одна кампания), поэтому идут параллельно.
+ * Кампания с одним аккаунтом идёт прежним путём.
+ */
+/** Модель AI для LinkedIn-кампаний: одна на всех, Gemini 3.1 Pro (preview) — лучшая для текста. */
+const LI_AI_MODEL = 'google/gemini-3.1-pro-preview';
+
+export async function runCampaignTickAllAccounts(
+  campaignId: string,
+  userId: string,
+): Promise<{ processed: number; errors: number }> {
+  if (!supabaseAdmin) return { processed: 0, errors: 0 };
+  // Дозагруженные в рассылаемую базу люди и новая выбранная база попадают в рассылку без перезапуска.
+  try {
+    const added = await enrollActiveBase(supabaseAdmin, campaignId);
+    if (added > 0) {
+      await supabaseAdmin.from('li_campaign_logs').insert({
+        campaign_id: campaignId, level: 'info',
+        message: `В рассылку добавлено ${added} человек из базы кампании`,
+      });
+    }
+  } catch (err) {
+    console.warn(`[li-outreach] campaign ${campaignId}: enroll from base failed:`, err);
+  }
+  // Рассылаемая база закончилась — берём следующую из очереди кампании.
+  try {
+    const next = await advanceBaseQueue(supabaseAdmin, campaignId);
+    if (next) {
+      await supabaseAdmin.from('li_campaign_logs').insert({
+        campaign_id: campaignId, level: 'info',
+        message: `База закончилась, начата следующая: «${next.name}»`,
+      });
+      await enrollActiveBase(supabaseAdmin, campaignId);
+    }
+  } catch (err) {
+    console.warn(`[li-outreach] campaign ${campaignId}: advance base queue failed:`, err);
+  }
+  const { data: row } = await supabaseAdmin
+    .from('li_campaigns').select('account_id').eq('id', campaignId).maybeSingle();
+  const accountIds = await loadCampaignAccountIds(
+    supabaseAdmin, campaignId, (row as { account_id?: string | null } | null)?.account_id ?? null,
+  );
+  if (accountIds.length < 2) return runCampaignTick(campaignId, userId);
+
+  await assignUnassignedLeads(supabaseAdmin, campaignId, accountIds);
+  const results = await Promise.all(
+    accountIds.map((accountId) =>
+      runCampaignTick(campaignId, userId, { accountId }).catch((err) => {
+        console.warn(`[li-outreach] campaign ${campaignId} account ${accountId} tick failed:`, err);
+        return { processed: 0, errors: 1 };
+      }),
+    ),
+  );
+  return results.reduce(
+    (sum, r) => ({ processed: sum.processed + r.processed, errors: sum.errors + r.errors }),
+    { processed: 0, errors: 0 },
+  );
+}
+
 export async function runCampaignTick(
   campaignId: string,
   userId: string,
+  slot?: { accountId: string },
 ): Promise<{ processed: number; errors: number }> {
   if (!supabaseAdmin) return { processed: 0, errors: 0 };
   const db = supabaseAdmin;
@@ -244,7 +309,7 @@ export async function runCampaignTick(
   const { data: account } = await db
     .from('li_accounts')
     .select('id, name, unipile_account_id, cooldown_until, cooldown_reason')
-    .eq('id', campaign.account_id ?? '')
+    .eq('id', slot?.accountId ?? campaign.account_id ?? '')
     .maybeSingle<{
       id: string;
       name: string | null;
@@ -279,7 +344,7 @@ export async function runCampaignTick(
   // See migration 20260525_0003_li_outreach_drop_byok_keys.sql.
   const aiConfig = {
     apiKey: process.env.OPENROUTER_LI_OUTREACH_API_KEY ?? '',
-    model: campaign.ai_model || 'openai/gpt-4o-mini',
+    model: LI_AI_MODEL,
   };
 
   const steps = (campaign.steps ?? []) as LiCampaignStep[];
@@ -288,7 +353,7 @@ export async function runCampaignTick(
     return { processed: 0, errors: 0 };
   }
 
-  if (!campaign.account_id) {
+  if (!campaign.account_id && !slot) {
     log('error', 'Тик пропущен — к кампании не привязан LinkedIn-аккаунт. Выберите аккаунт в настройках кампании.');
     return { processed: 0, errors: 0 };
   }
@@ -309,6 +374,18 @@ export async function runCampaignTick(
   // mirror that "fresh day → 0" view here so we don't briefly show last
   // night's count before the first invite of the day.
   const today = todayStr();
+  if (slot) {
+    // Несколько аккаунтов: дневной счётчик инвайтов у каждого свой.
+    const { data: own } = await db
+      .from('li_campaign_accounts')
+      .select('invites_sent_today, last_invite_date')
+      .eq('campaign_id', campaignId)
+      .eq('account_id', slot.accountId)
+      .maybeSingle<{ invites_sent_today: number; last_invite_date: string | null }>();
+    campaign.invites_sent_today = own?.invites_sent_today ?? 0;
+    campaign.last_invite_date = own?.last_invite_date ?? null;
+    campaign.per_account_counter = true;
+  }
   if (campaign.last_invite_date !== today) {
     campaign.invites_sent_today = 0;
     log('info', `Наступил новый день — счётчик отправленных инвайтов обнулён (дневной лимит: ${campaign.daily_invite_limit} инвайтов)`);
@@ -316,12 +393,15 @@ export async function runCampaignTick(
 
   // Get campaign leads ready to process
   const now = new Date().toISOString();
-  const { data: campaignLeads } = await db
+  let leadsQuery = db
     .from('li_campaign_leads')
     .select('*, lead:li_leads(*)')
     .eq('campaign_id', campaignId)
     .in('status', ['pending', 'in_progress', 'waiting'])
-    .or(`next_action_at.is.null,next_action_at.lte.${now}`)
+    .or(`next_action_at.is.null,next_action_at.lte.${now}`);
+  // Свои лиды у каждого аккаунта кампании.
+  if (slot) leadsQuery = leadsQuery.eq('account_id', slot.accountId);
+  const { data: campaignLeads } = await leadsQuery
     .order('created_at', { ascending: true })
     .limit(20);
 
@@ -757,10 +837,16 @@ async function processInviteStep(
   // tick can never share a stale read. The RPC also handles new-day reset
   // in the same statement. See migration 20260420_0002.
   const today = todayStr();
-  const { data: rpcData, error: rpcErr } = await db.rpc('li_campaign_increment_invite', {
-    p_campaign_id: campaign.id,
-    p_today: today,
-  });
+  const { data: rpcData, error: rpcErr } = campaign.per_account_counter && accountDbId
+    ? await db.rpc('li_campaign_account_increment_invite', {
+        p_campaign_id: campaign.id,
+        p_account_id: accountDbId,
+        p_today: today,
+      })
+    : await db.rpc('li_campaign_increment_invite', {
+        p_campaign_id: campaign.id,
+        p_today: today,
+      });
   if (rpcErr || typeof rpcData !== 'number') {
     log(
       'error',
@@ -778,7 +864,7 @@ async function processInviteStep(
 
   await db
     .from('li_campaign_leads')
-    .update({ current_step: stepIdx + 1, status: stepIdx + 1 < (campaign.steps?.length ?? 0) ? 'in_progress' : 'completed', updated_at: now })
+    .update({ current_step: stepIdx + 1, status: stepIdx + 1 < (campaign.steps?.length ?? 0) ? 'in_progress' : 'completed', invite_sent_at: now, updated_at: now })
     .eq('id', cl.id);
 
   log('info', `Инвайт отправлен (${newCount}/${campaign.daily_invite_limit} сегодня)`, lead.name, stepIdx);

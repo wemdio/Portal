@@ -9,6 +9,7 @@
  * рисует и сообщает наверх о правках.
  */
 
+import { NumField } from './NumField';
 import React from 'react';
 import { FIELD_BOUNDS, type WarmupParamKey, type WarmupPerDayRow } from '@/lib/tgOutreach/warmup/settings';
 
@@ -68,8 +69,7 @@ export default function WarmupDayTable({
                   const dim = !chatsEnabled && c.key.startsWith('chat_');
                   return (
                     <td key={c.key} className="py-1 text-center">
-                      <input
-                        type="number"
+                      <NumField
                         min={bounds.min}
                         max={bounds.max}
                         value={row[c.key]}
@@ -79,9 +79,9 @@ export default function WarmupDayTable({
                             ? 'План этого дня уже составлен — правка вступит со следующего'
                             : undefined
                         }
-                        onChange={(e) => onChange(i, c.key, Number(e.target.value))}
+                        onChange={(v) => onChange(i, c.key, v)}
                         className={`w-14 rounded-lg border px-1.5 py-1 text-center text-[11px] outline-none focus:border-indigo-400 disabled:opacity-40 ${
-                          isCurrent ? 'border-indigo-300 bg-white' : 'border-gray-200 bg-gray-50'
+                          isCurrent ? 'border-indigo-300 bg-white/70' : 'border-gray-300/70 bg-white/50'
                         } ${isPast ? 'text-gray-400' : 'text-gray-800'}`}
                       />
                     </td>

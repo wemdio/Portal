@@ -112,7 +112,7 @@ async function handleMessageReceived(payload: Record<string, unknown>): Promise<
   // Mark as replied in campaign_leads
   await db
     .from('li_campaign_leads')
-    .update({ user_replied: true, updated_at: new Date().toISOString() })
+    .update({ user_replied: true, replied_at: new Date().toISOString(), updated_at: new Date().toISOString() })
     .eq('lead_id', lead.id);
 
   // Eager stop_on_reply: complete this lead's campaign-leads in stop_on_reply
@@ -227,6 +227,16 @@ async function handleConnectionAccepted(payload: Record<string, unknown>): Promi
     .from('li_campaign_leads')
     .update({ invite_accepted: true, updated_at: new Date().toISOString() })
     .eq('lead_id', lead.id);
+  // Время принятия — для «принято за период». Отдельным запросом: сбой записи времени
+  // (например, колонка ещё не создана) не должен ломать отметку принятия и приветствие.
+  try {
+    await db
+      .from('li_campaign_leads')
+      .update({ invite_accepted_at: new Date().toISOString() })
+      .eq('lead_id', lead.id);
+  } catch (e) {
+    console.warn('[li-outreach] invite_accepted_at не записан', e);
+  }
 
   // Send welcome message if configured.
   //

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError, fetchOwnerNames } from '@/lib/liOutreach/apiHelpers';
 import { collectUnknownPlaceholders, unknownPlaceholderError } from '@/lib/liOutreach/campaignTextCheck';
 import { normalizeTimezoneOffset, normalizeWorkingHours } from '@/lib/liOutreach/schedule';
+import { saveCampaignAccounts } from '@/lib/liOutreach/campaignAccounts';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -26,7 +27,26 @@ export async function GET(req: NextRequest) {
 
     const campaigns = (data ?? []) as Array<Record<string, unknown> & { user_id: string }>;
     const ownerMap = await fetchOwnerNames(campaigns.map((c) => c.user_id));
-    const withOwner = campaigns.map((c) => ({ ...c, owner_name: ownerMap.get(c.user_id) ?? null }));
+    // Аккаунты кампании по порядку; у старых кампаний без строк — один основной.
+    const { data: accRows } = await supabaseAdmin
+      .from('li_campaign_accounts')
+      .select('campaign_id, account_id, position')
+      .order('position', { ascending: true });
+    const accountsByCampaign = new Map<string, string[]>();
+    for (const r of (accRows ?? []) as Array<{ campaign_id: string; account_id: string }>) {
+      const list = accountsByCampaign.get(r.campaign_id) ?? [];
+      list.push(r.account_id);
+      accountsByCampaign.set(r.campaign_id, list);
+    }
+    const withOwner = campaigns.map((c) => {
+      const id = String(c.id ?? '');
+      const primary = typeof c.account_id === 'string' && c.account_id ? c.account_id : null;
+      return {
+        ...c,
+        owner_name: ownerMap.get(c.user_id) ?? null,
+        account_ids: accountsByCampaign.get(id) ?? (primary ? [primary] : []),
+      };
+    });
     return NextResponse.json({ campaigns: withOwner });
   });
 }
@@ -73,12 +93,24 @@ export async function POST(req: NextRequest) {
     // the field yet.
     if (workingHours !== null) insertRow.working_hours = workingHours;
 
+    const accountIds = Array.isArray(body.account_ids)
+      ? (body.account_ids as unknown[]).filter((v): v is string => typeof v === 'string' && v !== '')
+      : body.account_id ? [String(body.account_id)] : [];
+    insertRow.account_id = accountIds[0] ?? null;
+
     const { data, error } = await auth.supabase
       .from('li_campaigns')
       .insert(insertRow)
       .select()
       .single();
     if (error) return jsonError(error.message, 500);
+    if (supabaseAdmin && accountIds.length > 0) {
+      const accError = await saveCampaignAccounts(supabaseAdmin, (data as { id: string }).id, accountIds);
+      if (accError) {
+        await supabaseAdmin.from('li_campaigns').delete().eq('id', (data as { id: string }).id);
+        return jsonError(accError, 409);
+      }
+    }
     return NextResponse.json({ campaign: data });
   });
 }

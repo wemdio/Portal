@@ -22,33 +22,47 @@ export interface PendingContact {
 
 export interface SelectParams {
   /** Ожидающие контакты, сгруппированные по базам кампании. */
-  perBase: Array<{ baseId: string; contacts: PendingContact[] }>;
+  perBase: Array<{ baseId: string; contacts: PendingContact[]; stage?: number }>;
   limit: number;
 }
 
 /**
- * Берём из баз по кругу, по одному контакту из каждой.
+ * Берём из баз по этапам, а внутри этапа — по кругу, по одному контакту из каждой.
  *
- * Подряд нельзя: триста контактов первой базы уйдут за сутки, вторая начнётся
- * через день, и у гипотез окажется разное время на сбор ответов — сравнивать
- * будет нечего.
+ * Этап — группа баз, что рассылаются параллельно. Подряд внутри этапа нельзя:
+ * триста контактов первой базы уйдут за сутки, вторая начнётся через день, и у
+ * гипотез окажется разное время на сбор ответов — сравнивать будет нечего.
+ * Следующий этап начинается, как только предыдущий выдал всё, что в нём есть,
+ * без паузы: недобранное до limit добираем из него в этом же круге.
  */
 export function selectNextContacts({ perBase, limit }: SelectParams): PendingContact[] {
   if (limit <= 0) return [];
 
-  const out: PendingContact[] = [];
-  const cursors = perBase.map(() => 0);
+  const stages = new Map<number, Array<{ baseId: string; contacts: PendingContact[] }>>();
+  for (const base of perBase) {
+    if (!base.contacts.length) continue;
+    const stage = base.stage ?? 0;
+    const group = stages.get(stage);
+    if (group) group.push(base);
+    else stages.set(stage, [base]);
+  }
 
-  let progressed = true;
-  while (out.length < limit && progressed) {
-    progressed = false;
-    for (let i = 0; i < perBase.length && out.length < limit; i++) {
-      const contacts = perBase[i].contacts;
-      if (cursors[i] >= contacts.length) continue;
-      out.push(contacts[cursors[i]]);
-      cursors[i]++;
-      progressed = true;
+  const out: PendingContact[] = [];
+  for (const stage of [...stages.keys()].sort((x, y) => x - y)) {
+    const group = stages.get(stage)!;
+    const cursors = group.map(() => 0);
+    let progressed = true;
+    while (out.length < limit && progressed) {
+      progressed = false;
+      for (let i = 0; i < group.length && out.length < limit; i++) {
+        const contacts = group[i].contacts;
+        if (cursors[i] >= contacts.length) continue;
+        out.push(contacts[cursors[i]]);
+        cursors[i]++;
+        progressed = true;
+      }
     }
+    if (out.length >= limit) break;
   }
 
   return out;

@@ -3863,3 +3863,245 @@ html[data-portal-theme='dark'] .portal-shell .sender-table-head {
 @media (prefers-reduced-motion: reduce) {
   .portal-spinner { animation-duration: 2.4s; }
 }
+
+/* ─── Галочки выбора строк в TG-аутриче ──────────────────────────────────────
+   Системная галочка в тёмной теме — мелкий серый квадрат, по которому трудно
+   попасть и не видно, что выбрано. Здесь: крупный скруглённый квадрат, при
+   выборе заливка индиго с белой отметкой, у «выбрать все» — чёрточка, когда
+   выбрана часть. Цвета заданы явно: тёмная тема перекрашивает серые утилиты
+   Tailwind, но не эти правила. */
+.tg-check {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-grid;
+  place-content: center;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  border: 2px solid #71717a;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+.tg-check:hover {
+  border-color: #818cf8;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18);
+}
+/* Выбор: градиентная заливка и мягкое свечение, которые плавно проявляются
+   (без «прыжка»). Свечение остаётся, пока строка выбрана. */
+.tg-check:checked,
+.tg-check:indeterminate {
+  background-image: linear-gradient(135deg, #818cf8 0%, #6366f1 60%, #4f46e5 100%);
+  border-color: #818cf8;
+  box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.12), 0 0 6px 0 rgba(129, 140, 248, 0.25);
+  animation: tg-check-in 280ms ease-out;
+}
+.tg-check:checked::after {
+  content: '';
+  width: 10px;
+  height: 5px;
+  border-left: 2.5px solid #ffffff;
+  border-bottom: 2.5px solid #ffffff;
+  transform: translateY(-1px) rotate(-45deg);
+  animation: tg-check-mark 260ms 40ms ease-out both;
+  filter: none;
+}
+.tg-check:indeterminate::after {
+  content: '';
+  width: 10px;
+  height: 2.5px;
+  border-radius: 2px;
+  background: #ffffff;
+  box-shadow: 0 0 4px rgba(255, 255, 255, 0.6);
+}
+@keyframes tg-check-in {
+  0% { opacity: 0.4; transform: scale(0.9); box-shadow: 0 0 0 0 rgba(129, 140, 248, 0); }
+  100% { opacity: 1; transform: scale(1); }
+}
+@keyframes tg-check-mark {
+  0% { opacity: 0; transform: translateY(-1px) rotate(-45deg) scale(0.6); }
+  100% { opacity: 1; transform: translateY(-1px) rotate(-45deg) scale(1); }
+}
+.tg-check:focus-visible {
+  outline: 2px solid #a5b4fc;
+  outline-offset: 2px;
+}
+.tg-check:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tg-check, .tg-check::after { transition: none; animation: none !important; }
+}
+
+/* ─── Меню-троеточие строк в TG-аутриче ─────────────────────────────────────
+   Меню живёт в body, вне оболочки портала, поэтому цвета заданы здесь явно, а
+   не утилитами Tailwind (их hover-варианты в тёмной теме подменялись светлыми). */
+.tg-menu { padding: 6px; }
+.tg-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+.tg-menu--light .tg-menu-item { color: #3f3f46; }
+.tg-menu--light .tg-menu-item:hover { background: #f4f4f5; color: #18181b; }
+.tg-menu--light .tg-menu-item--danger { color: #e11d48; }
+.tg-menu--light .tg-menu-item--danger:hover { background: #fff1f2; color: #be123c; }
+.tg-menu--dark .tg-menu-item { color: #d4d4d8; }
+.tg-menu--dark .tg-menu-item:hover { background: rgba(255, 255, 255, 0.07); color: #fafafa; }
+.tg-menu--dark .tg-menu-item--danger { color: #fb7185; }
+.tg-menu--dark .tg-menu-item--danger:hover { background: rgba(244, 63, 94, 0.14); color: #fda4af; }
+.tg-menu-sep { height: 1px; margin: 5px 4px; }
+.tg-menu--light .tg-menu-sep { background: #e4e4e7; }
+.tg-menu--dark .tg-menu-sep { background: rgba(255, 255, 255, 0.1); }
+
+/* ─── Список списков прокси в TG-аутриче ────────────────────────────────────
+   Фон наведения и выбранного списка задан только здесь, а не утилитами Tailwind:
+   в тёмной теме их светлые варианты (indigo-50, gray-50) давали белую плашку. */
+.tg-list-item { position: relative; transition: background-color 160ms ease, color 160ms ease, box-shadow 160ms ease; }
+.tg-list-item:hover { background: #f4f4f5; }
+.tg-list-item--add:hover { background: #eef2ff; }
+.tg-list-item--active, .tg-list-item--active:hover {
+  background: #eef2ff;
+  box-shadow: inset 3px 0 0 #6366f1;
+}
+html[data-portal-theme='dark'] .tg-list-item:hover { background: rgba(255, 255, 255, 0.05) !important; }
+html[data-portal-theme='dark'] .tg-list-item--add { color: #a5b4fc !important; }
+html[data-portal-theme='dark'] .tg-list-item--add:hover {
+  background: rgba(99, 102, 241, 0.12) !important;
+  color: #c7d2fe !important;
+}
+html[data-portal-theme='dark'] .tg-list-item--active,
+html[data-portal-theme='dark'] .tg-list-item--active:hover {
+  background: linear-gradient(90deg, rgba(99, 102, 241, 0.26), rgba(99, 102, 241, 0.05)) !important;
+  color: #e0e7ff !important;
+  box-shadow: inset 3px 0 0 #818cf8;
+}
+
+/* Блок «Ошибки за период» во вкладке «Логи» TG-аутрича: в тёмной теме того же
+   цвета, что и окно логов слева (gray-950), а не светлее него. */
+html[data-portal-theme='dark'] .portal-shell aside.tg-logs-aside {
+  background-color: #030712 !important;
+  border-color: #1f2937 !important;
+}
+html[data-portal-theme='dark'] .portal-shell aside.tg-logs-aside header,
+html[data-portal-theme='dark'] .portal-shell aside.tg-logs-aside section {
+  border-color: #111827 !important;
+}
+
+/* TG/LinkedIn-аутрич: рамку фокуса браузера не показываем */
+.no-focus-ring :focus-visible {
+  outline: none !important;
+}
+
+/* Блоки статистики LinkedIn Outreach: лёгкий оттенок фона, рамки и цвета значений (тема — data-portal-theme).
+   Селекторы тяжелее стекла portal-glass.css, иначе оно перекрывает фон и рамку. */
+html[data-portal-theme] body .kpi-tint-violet.kpi-tint-violet.kpi-tint-violet { background-color: rgba(139, 92, 246, 0.12) !important; border-color: rgba(139, 92, 246, 0.45) !important; }
+html[data-portal-theme] .kpi-value-violet.kpi-value-violet { color: #6d28d9 !important; }
+html[data-portal-theme='dark'] .kpi-value-violet.kpi-value-violet { color: #c4b5fd !important; }
+html[data-portal-theme] body .kpi-tint-sky.kpi-tint-sky.kpi-tint-sky { background-color: rgba(14, 165, 233, 0.12) !important; border-color: rgba(14, 165, 233, 0.45) !important; }
+html[data-portal-theme] .kpi-value-sky.kpi-value-sky { color: #0369a1 !important; }
+html[data-portal-theme='dark'] .kpi-value-sky.kpi-value-sky { color: #7dd3fc !important; }
+html[data-portal-theme] body .kpi-tint-green.kpi-tint-green.kpi-tint-green { background-color: rgba(34, 197, 94, 0.12) !important; border-color: rgba(34, 197, 94, 0.45) !important; }
+html[data-portal-theme] .kpi-value-green.kpi-value-green { color: #15803d !important; }
+html[data-portal-theme='dark'] .kpi-value-green.kpi-value-green { color: #86efac !important; }
+html[data-portal-theme] body .kpi-tint-teal.kpi-tint-teal.kpi-tint-teal { background-color: rgba(20, 184, 166, 0.12) !important; border-color: rgba(20, 184, 166, 0.45) !important; }
+html[data-portal-theme] .kpi-value-teal.kpi-value-teal { color: #0f766e !important; }
+html[data-portal-theme='dark'] .kpi-value-teal.kpi-value-teal { color: #5eead4 !important; }
+html[data-portal-theme] body .kpi-tint-amber.kpi-tint-amber.kpi-tint-amber { background-color: rgba(245, 158, 11, 0.12) !important; border-color: rgba(245, 158, 11, 0.45) !important; }
+html[data-portal-theme] .kpi-value-amber.kpi-value-amber { color: #b45309 !important; }
+html[data-portal-theme='dark'] .kpi-value-amber.kpi-value-amber { color: #fcd34d !important; }
+/* LinkedIn Outreach: строка таблицы под мышкой в светлой теме заметно серее (в тёмной хватает темы). */
+html:not([data-portal-theme='dark']) body .li-row-hover.li-row-hover:hover { background-color: rgba(15, 23, 42, 0.06) !important; }
+/* LinkedIn Outreach: фильтры дашборда (кампания, период) — заметная рамка и фон в обеих темах. */
+html[data-portal-theme] body .li-filter.li-filter { background-color: rgba(15, 23, 42, 0.04) !important; border-color: rgba(15, 23, 42, 0.32) !important; color: inherit; }
+html[data-portal-theme='dark'] body .li-filter.li-filter { background-color: rgba(255, 255, 255, 0.10) !important; border-color: rgba(255, 255, 255, 0.38) !important; }
+html[data-portal-theme] body .li-period.li-period { background-color: rgba(15, 23, 42, 0.04) !important; border-color: rgba(15, 23, 42, 0.12) !important; }
+html[data-portal-theme='dark'] body .li-period.li-period { background-color: rgba(255, 255, 255, 0.05) !important; border-color: rgba(255, 255, 255, 0.12) !important; }
+html[data-portal-theme] body .li-period-btn.li-period-btn { background: transparent !important; border: 0 !important; backdrop-filter: none; color: #64748b; }
+html[data-portal-theme='dark'] body .li-period-btn.li-period-btn { color: #94a3b8; }
+html[data-portal-theme] body .li-period-btn.li-period-btn:hover { color: #0f172a; }
+html[data-portal-theme='dark'] body .li-period-btn.li-period-btn:hover { color: #e5e7eb; }
+html[data-portal-theme] body .li-period-btn-on.li-period-btn-on { background: #ffffff !important; color: #0f172a; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12); }
+html[data-portal-theme='dark'] body .li-period-btn-on.li-period-btn-on { background: rgba(255, 255, 255, 0.14) !important; color: #f8fafc; box-shadow: none; }
+
+/* LinkedIn Outreach: выбор кампании — акцентная кнопка и список. */
+html[data-portal-theme] body .li-picker.li-picker { background-color: rgba(59, 130, 246, 0.10) !important; border-color: rgba(37, 99, 235, 0.55) !important; color: #1e3a8a; }
+html[data-portal-theme] body .li-picker.li-picker:hover { background-color: rgba(59, 130, 246, 0.18) !important; }
+html[data-portal-theme='dark'] body .li-picker.li-picker { background-color: rgba(96, 165, 250, 0.16) !important; border-color: rgba(147, 197, 253, 0.6) !important; color: #e0f2fe; }
+html[data-portal-theme] body .li-picker-menu.li-picker-menu.li-picker-menu { background-color: #ffffff !important; border-color: rgba(15, 23, 42, 0.25) !important; color: #0f172a; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; opacity: 1; }
+html[data-portal-theme='dark'] body .li-picker-menu.li-picker-menu.li-picker-menu { background-color: #1c2030 !important; border-color: rgba(255, 255, 255, 0.3) !important; color: #e5e7eb; }
+html[data-portal-theme] body .li-picker-item.li-picker-item { background: transparent !important; border: 0 !important; }
+html[data-portal-theme] body .li-picker-item.li-picker-item:hover { background: rgba(59, 130, 246, 0.12) !important; }
+/* LinkedIn Outreach: карточка при наведении на прогресс — сплошной фон, как в «Рассылке». */
+html[data-portal-theme] body .li-hover-card.li-hover-card.li-hover-card { background-color: #ffffff !important; border-color: rgba(15, 23, 42, 0.16) !important; color: #0f172a; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+html[data-portal-theme='dark'] body .li-hover-card.li-hover-card.li-hover-card { background-color: #1c2030 !important; border-color: rgba(255, 255, 255, 0.18) !important; color: #f1f5f9; }
+html[data-portal-theme='dark'] body .li-hover-card.li-hover-card.li-hover-card .border-zinc-200 { border-color: rgba(255, 255, 255, 0.14); }
+/* LinkedIn Outreach: ссылка-кнопка «Все аккаунты». */
+html[data-portal-theme] body .li-link-pill.li-link-pill { background-color: rgba(59, 130, 246, 0.10) !important; border-color: rgba(59, 130, 246, 0.35) !important; color: #1d4ed8; }
+html[data-portal-theme] body .li-link-pill.li-link-pill:hover { background-color: rgba(59, 130, 246, 0.18) !important; }
+html[data-portal-theme='dark'] body .li-link-pill.li-link-pill { color: #93c5fd; border-color: rgba(147, 197, 253, 0.4) !important; }
+html[data-portal-theme='dark'] body .li-hover-card.li-hover-card.li-hover-card dt { color: #a8b3c7; }
+/* Кнопка «⋯» в строках таблиц: в тёмной теме наведение — мягкая светлая подложка, а не белый квадрат. */
+html[data-portal-theme='dark'] body .row-actions-btn.row-actions-btn { color: #a1a1aa; }
+html[data-portal-theme='dark'] body .row-actions-btn.row-actions-btn:hover { background-color: rgba(255, 255, 255, 0.14) !important; color: #f4f4f5; }
+html[data-portal-theme] body .row-actions-btn.row-actions-btn { color: #71717a; }
+html[data-portal-theme] body .row-actions-btn.row-actions-btn:hover { background-color: rgba(15, 23, 42, 0.08) !important; color: #18181b; }
+html[data-portal-theme='dark'] body .row-actions-btn.row-actions-btn { color: #a1a1aa; }
+html[data-portal-theme='dark'] body .row-actions-btn.row-actions-btn:hover { background-color: rgba(255, 255, 255, 0.14) !important; color: #f4f4f5; }
+/* Переключатель «Активные / Архив»: выбранная вкладка синяя, невыбранная серая. */
+html[data-portal-theme] body .li-switch-btn.li-switch-btn { background: transparent !important; border: 0 !important; color: #71717a; backdrop-filter: none; }
+html[data-portal-theme] body .li-switch-btn-on.li-switch-btn-on { background: #2563eb !important; color: #ffffff; }
+html[data-portal-theme='dark'] body .li-switch-btn.li-switch-btn { color: #a1a1aa; }
+html[data-portal-theme='dark'] body .li-switch-btn-on.li-switch-btn-on { background: #2563eb !important; color: #ffffff; }
+/* Список кампаний LinkedIn: в тёмной теме строка под мышкой слегка голубеет, в тон интерфейсу. */
+html[data-portal-theme='dark'] body .li-campaign-row.li-campaign-row.li-campaign-row:hover { background-color: rgba(96, 165, 250, 0.10) !important; box-shadow: inset 2px 0 0 rgba(96, 165, 250, 0.7); }
+/* Страница кампании LinkedIn: крупные кнопки пуска/остановки и шестерёнка настроек. */
+html[data-portal-theme] body .li-run-btn-start.li-run-btn-start { background-color: #16a34a !important; border: 0 !important; color: #ffffff; }
+html[data-portal-theme] body .li-run-btn-start.li-run-btn-start:hover { background-color: #15803d !important; }
+html[data-portal-theme] body .li-run-btn-stop.li-run-btn-stop { background-color: rgba(245, 158, 11, 0.14) !important; border-color: rgba(217, 119, 6, 0.6) !important; color: #b45309; }
+html[data-portal-theme] body .li-run-btn-stop.li-run-btn-stop:hover { background-color: rgba(245, 158, 11, 0.24) !important; }
+html[data-portal-theme='dark'] body .li-run-btn-stop.li-run-btn-stop { color: #fcd34d; border-color: rgba(252, 211, 77, 0.55) !important; }
+html[data-portal-theme] body .li-gear-btn.li-gear-btn { background-color: transparent !important; border-color: rgba(15, 23, 42, 0.28) !important; color: #52525b; }
+html[data-portal-theme='dark'] body .li-gear-btn.li-gear-btn { border-color: rgba(255, 255, 255, 0.3) !important; color: #d4d4d8; }
+html[data-portal-theme] body .li-gear-btn.li-gear-btn:hover { background-color: rgba(15, 23, 42, 0.08) !important; }
+html[data-portal-theme='dark'] body .li-gear-btn.li-gear-btn:hover { background-color: rgba(255, 255, 255, 0.12) !important; }
+html[data-portal-theme] body .li-gear-btn-on.li-gear-btn-on { background-color: #2563eb !important; border-color: #2563eb !important; color: #ffffff; }
+
+
+/* LinkedIn Outreach: значки-кнопки в строке (глаз, корзина) и постраничные кнопки. */
+html[data-portal-theme] body .li-icon-btn.li-icon-btn { background: transparent !important; border: 0 !important; color: #71717a; backdrop-filter: none; }
+html[data-portal-theme] body .li-icon-btn.li-icon-btn:hover { background: rgba(15, 23, 42, 0.08) !important; color: #18181b; }
+html[data-portal-theme='dark'] body .li-icon-btn.li-icon-btn { color: #a1a1aa; }
+html[data-portal-theme='dark'] body .li-icon-btn.li-icon-btn:hover { background: rgba(255, 255, 255, 0.14) !important; color: #f4f4f5; }
+html[data-portal-theme] body .li-icon-btn-danger.li-icon-btn-danger:hover { background: rgba(239, 68, 68, 0.14) !important; color: #dc2626; }
+html[data-portal-theme] body .li-page-btn.li-page-btn { background: transparent !important; border-color: rgba(15, 23, 42, 0.22) !important; color: #3f3f46; }
+html[data-portal-theme='dark'] body .li-page-btn.li-page-btn { border-color: rgba(255, 255, 255, 0.25) !important; color: #d4d4d8; }
+html[data-portal-theme] body .li-page-btn.li-page-btn:hover:not(:disabled) { background: rgba(59, 130, 246, 0.12) !important; }
+
+
+
+/* Логи кампании LinkedIn: обычные — светлые, предупреждения — жёлтые, ошибки — красные. */
+html body .li-log { border-left: 3px solid transparent; }
+html body .li-log-info { background: #f1f5f9; color: #1e293b; border-left-color: #94a3b8; }
+html body .li-log-warning { background: #fef9c3; color: #854d0e; border-left-color: #eab308; }
+html body .li-log-error { background: #fee2e2; color: #b91c1c; border-left-color: #ef4444; }
+html[data-portal-theme='dark'] body .li-log-info { background: rgba(148, 163, 184, 0.10); color: #f1f5f9; border-left-color: rgba(226, 232, 240, 0.45); }
+html[data-portal-theme='dark'] body .li-log-warning { background: rgba(250, 204, 21, 0.14); color: #fde047; border-left-color: #facc15; }
+html[data-portal-theme='dark'] body .li-log-error { background: rgba(239, 68, 68, 0.18); color: #fca5a5; border-left-color: #f87171; }
+html body .li-log .li-log-time { opacity: 0.6; }
+
+/* Панель инструментов письма (Ж, список, ссылка): при наведении кнопка заметно подсвечивается. */
+html body .letter-tool:hover:not(:disabled) { background-color: #dbeafe !important; color: #1d4ed8 !important; }
+html[data-portal-theme='dark'] body .letter-tool:hover:not(:disabled) { background-color: rgba(96, 165, 250, 0.28) !important; color: #ffffff !important; }
+
+/* Строки кампаний в «Письмах» Рассылки: наведение заметно и в тёмной теме. */
+html body .sender-pick-row:not(.is-selected):hover { background-color: #dbeafe !important; }
+html[data-portal-theme='dark'] body .sender-pick-row:not(.is-selected):hover { background-color: rgba(96, 165, 250, 0.2) !important; }

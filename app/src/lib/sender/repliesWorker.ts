@@ -56,14 +56,41 @@ async function campaignIdsOfMailbox(mailboxId: string): Promise<string[]> {
   return (data ?? []).map((row) => String(row.campaign_id));
 }
 
+/**
+ * Message-ID из заголовка In-Reply-To. Обычно он один, но тикет-системы
+ * пишут туда несколько: «<наше письмо> <их тикет>». Сравнение строки целиком
+ * такой ответ не узнавало — 14–19.10.2026 «Сравни» ответили на каждое из
+ * четырёх писем с другого адреса (m_service@ вместо service@), ответ не
+ * привязался к получателю, и цепочка дошла до конца.
+ */
+export function threadMessageIds(inReplyTo: string | null): string[] {
+  if (!inReplyTo) return [];
+  const ids = inReplyTo.match(/<[^<>\s]+>/g);
+  if (ids?.length) return [...new Set(ids)];
+  const trimmed = inReplyTo.trim();
+  return trimmed ? [trimmed] : [];
+}
+
 async function findRecipientByThread(inReplyTo: string | null): Promise<string | null> {
-  if (!supabaseAdmin || !inReplyTo) return null;
+  const ids = threadMessageIds(inReplyTo);
+  if (!supabaseAdmin || !ids.length) return null;
   const { data } = await supabaseAdmin
     .from('sender_messages')
     .select('recipient_id')
-    .eq('message_id', inReplyTo)
+    .in('message_id', ids)
+    .limit(1)
     .maybeSingle();
-  return data ? String(data.recipient_id) : null;
+  if (data) return String(data.recipient_id);
+  // Ответ на наше ручное письмо: новый контакт из ответа лида или тот, кто был
+  // в копии, пишет с адреса, которого нет в базе кампании, — только по треду.
+  const { data: manual } = await supabaseAdmin
+    .from('sender_manual_messages')
+    .select('recipient_id')
+    .in('message_id', ids)
+    .not('recipient_id', 'is', null)
+    .limit(1)
+    .maybeSingle();
+  return manual ? String(manual.recipient_id) : null;
 }
 
 async function findRecipientByEmail(email: string | null, campaignIds: string[]): Promise<string | null> {
@@ -76,6 +103,39 @@ async function findRecipientByEmail(email: string | null, campaignIds: string[])
     .limit(1)
     .maybeSingle();
   return data ? String(data.id) : null;
+}
+
+/**
+ * Получатель по корпоративному домену отправителя — когда ответил не тот,
+ * кому мы писали, а коллега: переслал письмо («FW:») или ответил с другого
+ * адреса. Ссылки на наше письмо в пересылке нет, адреса в базе нет, и ответ
+ * оставался ничьим: 20.10.2026 CMO «Рускона» (kutateladze.d@) предложил
+ * встречу в ответ на письмо на lk@ruscon.ru — ни оценки, ни чата, ни сделки,
+ * а цепочка дошла до конца.
+ *
+ * Только среди тех, кому из этого ящика уже ушло письмо, и только по
+ * корпоративному домену: бесплатные почты (gmail, mail.ru…) компанию не
+ * определяют. Если в компании писали нескольким, берём последнего, кому
+ * писали именно с этого ящика.
+ */
+async function findRecipientByDomain(
+  email: string | null,
+  campaignIds: string[],
+  mailboxId: string,
+): Promise<string | null> {
+  const domain = corporateDomain(email);
+  if (!supabaseAdmin || !domain || !campaignIds.length) return null;
+  const { data } = await supabaseAdmin
+    .from('sender_recipients')
+    .select('id, mailbox_id')
+    .in('campaign_id', campaignIds)
+    .eq('email_domain', domain)
+    .gte('last_step_sent', 1)
+    .order('updated_at', { ascending: false })
+    .limit(20);
+  const rows = (data ?? []) as Array<{ id: string; mailbox_id: string | null }>;
+  const own = rows.find((row) => row.mailbox_id === mailboxId) ?? rows[0];
+  return own ? String(own.id) : null;
 }
 
 /**
@@ -329,7 +389,8 @@ export async function processSenderReplies(opts: {
               : (await findRecipientByThread(reply.inReplyTo)) ??
               (kind === 'bounce'
                 ? await findRecipientByEmail(bouncedEmail, campaignIds)
-                : await findRecipientByEmail(reply.fromEmail, campaignIds));
+                : (await findRecipientByEmail(reply.fromEmail, campaignIds)) ??
+                  (await findRecipientByDomain(reply.fromEmail, campaignIds, mailbox.id)));
           // Не ответ на наше письмо и не от того, кому мы писали, — прогрев
           // чужой сети. Иначе он копился бы во «Входящих без привязки» и в
           // метриках (453 «ответа» при 7 письмах на старте прода).

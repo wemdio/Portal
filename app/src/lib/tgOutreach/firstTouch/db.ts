@@ -11,6 +11,8 @@ export interface CampaignBase {
   id: string;
   /** Пусто/null — шлют все аккаунты кампании (поведение до фичи). */
   sending_account_ids: string[] | null;
+  /** Этап базы: базы одного этапа идут параллельно, следующий этап — когда предыдущий выдал всё. */
+  stage?: number;
 }
 
 /** Включённые в рассылку базы кампании вместе с их фильтром аккаунтов. */
@@ -18,12 +20,21 @@ export async function loadCampaignBases(
   db: SupabaseClient,
   campaignId: string,
 ): Promise<CampaignBase[]> {
-  const { data: links } = await db
-    .from('tg_outreach_campaign_bases')
-    .select('base_id')
-    .eq('campaign_id', campaignId)
-    .limit(500);
-  const baseIds = (links ?? []).map((r) => (r as { base_id: string }).base_id);
+  type LinkRow = { base_id: string; stage?: number };
+  const readLinks = async (columns: string) => {
+    const res = await db
+      .from('tg_outreach_campaign_bases')
+      .select(columns)
+      .eq('campaign_id', campaignId)
+      .order('position', { ascending: true })
+      .limit(500);
+    return { rows: (res.data ?? []) as unknown as LinkRow[], failed: Boolean(res.error) };
+  };
+  let links = await readLinks('base_id, position, stage');
+  // Код выкатывается раньше миграции этапов — без колонки не оставляем кампанию без баз.
+  if (links.failed) links = await readLinks('base_id, position');
+  const baseIds = links.rows.map((r) => r.base_id);
+  const stageById = new Map(links.rows.map((r) => [r.base_id, Number(r.stage ?? 0)]));
   if (!baseIds.length) return [];
 
   // Пачками: пятьсот uuid одним `in()` — это URL под 20 КБ, который рискует
@@ -35,8 +46,12 @@ export async function loadCampaignBases(
       .from('tg_outreach_bases')
       .select('id, sending_account_ids')
       .in('id', baseIds.slice(i, i + 100));
-    out.push(...((bases ?? []) as Array<{ id: string; sending_account_ids: string[] | null }>));
+    out.push(...((bases ?? []) as Array<{ id: string; sending_account_ids: string[] | null }>)
+      .map((b) => ({ ...b, stage: stageById.get(b.id) ?? 0 })));
   }
+  // `in()` порядок не хранит — возвращаем в порядке цепочки.
+  const rank = new Map(baseIds.map((id, i) => [id, i]));
+  out.sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
   return out;
 }
 

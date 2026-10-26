@@ -135,9 +135,23 @@ export function BulkProfileModal({
     update(index, { avatar: file, avatarUrl: URL.createObjectURL(file), state: 'idle', detail: '' });
   };
 
-  /** Несколько файлов сразу — раскладываются по аккаунтам в порядке списка. */
+  /**
+   * Несколько файлов сразу — случайно по аккаунтам. Аватарок меньше, чем
+   * аккаунтов (10 на 50), — повторяются по кругу, поровну; больше — берутся
+   * случайные.
+   */
   const attachMany = (files: FileList) => {
-    [...files].slice(0, rowsRef.current.length).forEach((file, i) => attachAvatar(i, file));
+    const shuffle = <T,>(items: T[]): T[] => {
+      const a = [...items];
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+      return a;
+    };
+    const pool = shuffle([...files]);
+    const order = shuffle(rowsRef.current.map((_, i) => i));
+    order.forEach((rowIndex, k) => attachAvatar(rowIndex, pool[k % pool.length]));
   };
 
   /** Шаг 1: подобрать имя и свободный ник. В Telegram ничего не пишет. */
@@ -324,28 +338,16 @@ export function BulkProfileModal({
           </button>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 border-b border-gray-100 bg-gray-50 px-5 py-2.5">
-          <button
-            type="button"
-            onClick={() => bulkFileRef.current?.click()}
-            disabled={busy != null}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-700 transition hover:bg-gray-100 disabled:opacity-50"
-          >
-            <ImagePlus className="h-3.5 w-3.5" />
-            Аватарки файлами
-          </button>
-          <span className="text-[11px] text-gray-400">
-            Можно выбрать сразу несколько — разложатся по аккаунтам сверху вниз. До 1 МБ каждая.
-          </span>
-          {saved || warnings || queued || failed ? (
-            <span className="ml-auto text-xs text-gray-500">
+        {saved || warnings || queued || failed ? (
+          <div className="flex items-center justify-end border-b border-gray-100 bg-gray-50 px-5 py-2">
+            <span className="text-xs text-gray-500">
               Сохранено {saved}
               {warnings ? ` · с предупреждением ${warnings}` : ''}
               {queued ? ` · в очереди ${queued}` : ''}
               {failed ? ` · с ошибкой ${failed}` : ''}
             </span>
-          ) : null}
-        </div>
+          </div>
+        ) : null}
 
         <div className="min-h-0 flex-1 divide-y divide-gray-100 overflow-y-auto">
           {rows.map((row, index) => (
@@ -441,6 +443,16 @@ export function BulkProfileModal({
               Закрыть
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => bulkFileRef.current?.click()}
+            disabled={busy != null}
+            title="Можно выбрать сразу несколько — разложатся по аккаунтам случайно, при нехватке повторяются. До 1 МБ каждая."
+            className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-100 disabled:opacity-50"
+          >
+            <ImagePlus className="h-4 w-4" />
+            Аватарки
+          </button>
           <button
             type="button"
             onClick={() => void runAll('pick')}

@@ -14,9 +14,8 @@ export async function GET(req: NextRequest) {
     const { data, error } = await supabaseAdmin
       .from('li_tasks')
       .select('*')
-      .eq('user_id', auth.user.id)
       .order('created_at', { ascending: false })
-      .limit(50);
+      .limit(300);
     if (error) return jsonError(error.message, 500);
     return NextResponse.json({ tasks: data ?? [] });
   });

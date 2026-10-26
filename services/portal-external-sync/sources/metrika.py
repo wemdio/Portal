@@ -8,6 +8,7 @@ Metrika Logs API. Здесь пока только агрегат.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import date, datetime, timedelta
 
@@ -22,6 +23,17 @@ LOOKBACK_DAYS = int(os.environ.get("YANDEX_METRIKA_LOOKBACK_DAYS", "30"))
 
 API_URL = "https://api-metrika.yandex.net/stat/v1/data"
 
+RETRY_ATTEMPTS = int(os.environ.get("YANDEX_METRIKA_RETRY_ATTEMPTS", "4"))
+RETRY_BASE_DELAY_SEC = float(os.environ.get("YANDEX_METRIKA_RETRY_DELAY_SEC", "30"))
+
+
+def _retry_delay(resp: httpx.Response, attempt: int) -> float:
+    """Retry-After, если Метрика его прислала, иначе 30 с, 60 с, 120 с…"""
+    try:
+        return min(float(resp.headers["Retry-After"]), 300.0)
+    except (KeyError, ValueError):
+        return RETRY_BASE_DELAY_SEC * 2 ** (attempt - 1)
+
 
 class MetrikaSync(SyncSource):
     name = "metrika"
@@ -34,20 +46,29 @@ class MetrikaSync(SyncSource):
         start = end - timedelta(days=LOOKBACK_DAYS)
 
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.get(
-                API_URL,
-                headers={"Authorization": f"OAuth {TOKEN}"},
-                params={
-                    "ids": COUNTER,
-                    "metrics": "ym:s:visits,ym:s:users,ym:s:bounceRate",
-                    "dimensions": "ym:s:date,ym:s:lastTrafficSource",
-                    "date1": start.isoformat(),
-                    "date2": end.isoformat(),
-                    "limit": 10000,
-                    "accuracy": "full",
-                },
-            )
-            resp.raise_for_status()
+            for attempt in range(1, RETRY_ATTEMPTS + 1):
+                resp = await client.get(
+                    API_URL,
+                    headers={"Authorization": f"OAuth {TOKEN}"},
+                    params={
+                        "ids": COUNTER,
+                        "metrics": "ym:s:visits,ym:s:users,ym:s:bounceRate",
+                        "dimensions": "ym:s:date,ym:s:lastTrafficSource",
+                        "date1": start.isoformat(),
+                        "date2": end.isoformat(),
+                        "limit": 10000,
+                        "accuracy": "full",
+                    },
+                )
+                # 429 — квота Метрики (запросов в секунду/час на счётчик), 5xx — сбой на их стороне:
+                # ждём и повторяем, остальное сразу падает.
+                if (resp.status_code == 429 or resp.status_code >= 500) and attempt < RETRY_ATTEMPTS:
+                    await asyncio.sleep(_retry_delay(resp, attempt))
+                    continue
+                break
+            if resp.is_error:
+                # Тело ответа Метрики называет, какая квота кончилась, — без него алерт немой.
+                raise RuntimeError(f"Метрика ответила {resp.status_code}: {resp.text[:300]}")
             data = resp.json()
 
         rows: list[tuple] = []

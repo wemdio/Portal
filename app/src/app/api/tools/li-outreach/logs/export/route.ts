@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError, checkIsAdmin } from '@/lib/liOutreach/apiHelpers';
+import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -10,6 +10,7 @@ const RANGES: Record<string, { ms: number; suffix: string }> = {
   '6h': { ms: 6 * 60 * 60 * 1000, suffix: '6h' },
   '24h': { ms: 24 * 60 * 60 * 1000, suffix: '24h' },
   '7d': { ms: 7 * 24 * 60 * 60 * 1000, suffix: '7d' },
+  '30d': { ms: 30 * 24 * 60 * 60 * 1000, suffix: '30d' },
 };
 
 // Hard cap so a chatty week of logs can't OOM the export.
@@ -80,11 +81,8 @@ export async function GET(req: NextRequest) {
 
       // Admins can export logs across all users' campaigns; regular users are
       // scoped to their own. Mirrors /campaigns/[id]/logs admin behaviour.
-      const admin = await checkIsAdmin(auth.user.id);
-
-      // Pull owned campaigns for RLS-equivalent guard + display names.
-      let ocQ = supabaseAdmin.from('li_campaigns').select('id, name');
-      if (!admin) ocQ = ocQ.eq('user_id', auth.user.id);
+      // Кампании и аккаунты общие для команды: экспорт доступен всем.
+      const ocQ = supabaseAdmin.from('li_campaigns').select('id, name');
       const { data: ownedCampaigns, error: ocErr } = await ocQ;
       if (ocErr) return jsonError(ocErr.message, 500);
       const ownedIds = (ownedCampaigns ?? []).map((c) => c.id);
@@ -104,8 +102,7 @@ export async function GET(req: NextRequest) {
       // Pull owned accounts (in batch) so we can label rows by account.name.
       // Accounts are per-user — for admins we need the full set so labels work
       // when exporting logs from another user's campaign.
-      let accQ = supabaseAdmin.from('li_accounts').select('id, name, unipile_account_id');
-      if (!admin) accQ = accQ.eq('user_id', auth.user.id);
+      const accQ = supabaseAdmin.from('li_accounts').select('id, name, unipile_account_id');
       const { data: accounts, error: accErr } = await accQ;
       if (accErr) return jsonError(accErr.message, 500);
       const accountLabelById = new Map<string, string>(

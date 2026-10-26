@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import ssl
+import time
 import traceback
 from datetime import date
 from functools import lru_cache
@@ -124,9 +125,41 @@ PERIODS = [
 POLL_ATTEMPTS = 8
 POLL_INTERVAL_SEC = 90
 
+# Как у Т-Банка: повторяем только сбой установления соединения — запрос до
+# банка не дошёл, поэтому повтор даже POST не заказывает выписку дважды.
+# 26.10.2026 одиночный ConnectError ронял период целиком, хотя заявка уже
+# была заказана и остальные счета в том же прогоне проходили.
+CONNECT_RETRY_DELAYS = (2, 5)
+
+# Заявка, не дождавшаяся Ready, переживает прогон: следующий прогон сначала
+# спрашивает её, а не заказывает новую. Раньше каждые 15 минут на каждый счёт
+# уходила свежая заявка, брошенные копились в очереди банка, и 26.10.2026 все
+# четыре счёта 12 минут стояли в status=Created. Через два часа заявку
+# считаем потерянной и заказываем заново.
+PENDING_MAX_AGE_SEC = 2 * 60 * 60
+_pending_statements: dict[tuple[str, str, str], tuple[str, float]] = {}
+
 
 class TochkaStatementError(RuntimeError):
     """Controlled error text, safe to include in the health alert."""
+
+
+async def _request(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
+    """До трёх попыток при ConnectError/ConnectTimeout; остальное — как было."""
+    for attempt in range(len(CONNECT_RETRY_DELAYS) + 1):
+        try:
+            return await client.request(method, url, **kwargs)
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            if attempt == len(CONNECT_RETRY_DELAYS):
+                raise
+            delay = CONNECT_RETRY_DELAYS[attempt]
+            print(
+                f"[bank_tochka] {method}: {type(e).__name__}; "
+                f"повтор {attempt + 2}/{len(CONNECT_RETRY_DELAYS) + 1} через {delay}с",
+                flush=True,
+            )
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 def _parse_amount(t: dict) -> float | None:
@@ -351,7 +384,7 @@ class BankTochkaSync(SyncSource):
         async with httpx.AsyncClient(
             timeout=90, headers=headers, verify=tochka_ssl_context()
         ) as client:
-            bal = await client.get(f"{API_BASE}/balances")
+            bal = await _request(client, "GET", f"{API_BASE}/balances")
             bal.raise_for_status()
             accounts = sorted({
                 b["accountId"] for b in bal.json().get("Data", {}).get("Balance", [])
@@ -418,25 +451,38 @@ class BankTochkaSync(SyncSource):
         skip_counts: dict[str, int] | None = None,
         status_counts: dict[str, int] | None = None,
     ) -> list[tuple]:
-        create = await client.post(
-            f"{API_BASE}/statements",
-            json={"Data": {"Statement": {"accountId": acc, "startDateTime": st, "endDateTime": en}}},
-        )
-        if create.status_code >= 400:
-            raise TochkaStatementError(f"Создание выписки: HTTP {create.status_code}")
-        sid = create.json()["Data"]["Statement"]["statementId"]
+        now = time.monotonic()
+        for stale in [k for k, (_, at) in _pending_statements.items() if now - at >= PENDING_MAX_AGE_SEC]:
+            del _pending_statements[stale]
+
+        key = (acc, st, en)
+        pending = _pending_statements.get(key)
+        reused = pending is not None
+        sid = pending[0] if pending else await self._order_statement(client, acc, st, en)
         accq = quote(acc, safe="")
 
         stmt = None
         last_response = "ответ не получен"
-        for _ in range(POLL_ATTEMPTS):
-            # One statement order, checked at 1:30, 3:00, ... 12:00.
-            # No extra sleep after the last unsuccessful check.
-            await asyncio.sleep(POLL_INTERVAL_SEC)
-            r = await client.get(f"{API_BASE}/accounts/{accq}/statements/{sid}")
+        for attempt in range(POLL_ATTEMPTS):
+            # New order: checked at 1:30, 3:00, ... 12:00. An order left by the
+            # previous run is checked at once. No sleep after the last check.
+            if not (reused and attempt == 0):
+                await asyncio.sleep(POLL_INTERVAL_SEC)
+            try:
+                r = await _request(client, "GET", f"{API_BASE}/accounts/{accq}/statements/{sid}")
+            except httpx.TransportError as e:
+                # Сеть моргнула на проверке — заявка у банка цела, ждём дальше.
+                last_response = f"сеть: {type(e).__name__}"
+                continue
             last_response = f"HTTP {r.status_code}"
             if r.status_code in (401, 403):
                 raise TochkaStatementError(f"Получение выписки: {last_response}")
+            if r.status_code == 404 and reused:
+                # Банк забыл прежнюю заявку — заказываем новую и ждём уже её.
+                sid = await self._order_statement(client, acc, st, en)
+                reused = False
+                last_response += ", прежняя заявка не найдена"
+                continue
             if r.status_code == 200:
                 st_arr = r.json().get("Data", {}).get("Statement") or []
                 if st_arr:
@@ -447,6 +493,7 @@ class BankTochkaSync(SyncSource):
                     last_response += f", status={safe_status or 'unknown'}"
                     if status == "Ready":
                         stmt = st_arr[0]
+                        _pending_statements.pop(key, None)
                         break
                 else:
                     last_response += ", выписка отсутствует в ответе"
@@ -466,6 +513,18 @@ class BankTochkaSync(SyncSource):
             print(f"[bank_tochka] acc={acc} {st}..{en}: {warning}", flush=True)
 
         return [to_row(m) for m in mapped_rows]
+
+    async def _order_statement(self, client: httpx.AsyncClient, acc: str, st: str, en: str) -> str:
+        """Заказ выписки; заявка запоминается до Ready (см. _pending_statements)."""
+        create = await _request(
+            client, "POST", f"{API_BASE}/statements",
+            json={"Data": {"Statement": {"accountId": acc, "startDateTime": st, "endDateTime": en}}},
+        )
+        if create.status_code >= 400:
+            raise TochkaStatementError(f"Создание выписки: HTTP {create.status_code}")
+        sid = create.json()["Data"]["Statement"]["statementId"]
+        _pending_statements[(acc, st, en)] = (sid, time.monotonic())
+        return sid
 
     async def _upsert(self, conn: asyncpg.Connection, rows: list[tuple]) -> None:
         await conn.executemany(

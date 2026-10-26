@@ -214,6 +214,10 @@ export interface ThreadItemDto {
   at: string | null;
   note: string | null;
   fromEmail: string | null;
+  /** Ручной ответ ушёл новому контакту из ответа лида, а не ему. */
+  toEmail?: string | null;
+  /** Ручной ответ ушёл лиду с этими адресами в копии. */
+  ccEmails?: string[];
 }
 
 export interface ImportRecipientsResult {
@@ -261,7 +265,9 @@ export interface CampaignDetailsDto {
   };
   /** Строка на вариант письма: у шага без А/Б-теста она одна (variant_no = 1). */
   steps: { step_no: number; variant_no?: number; delay_hours: number; subject: string; body: string }[];
-  mailboxes: { id: string; email: string }[];
+  mailboxes: { id: string; email: string; tagId?: string | null }[];
+  /** Теги, привязанные к кампании целиком: ящики, добавленные под тег, доливаются в идущую кампанию. */
+  tagIds?: string[];
   /** Ответили по шагам цепочки: на каком касании лид ответил (задача 6.4). */
   repliesByStep?: { step: number; replied: number }[];
   /** Результаты А/Б-теста: сколько ушло и сколько ответили по каждому варианту. */
@@ -499,6 +505,7 @@ export function updateFolder(id: string, body: FolderSettingsInput) {
 export function createCampaign(body: {
   name: string;
   mailboxIds: string[];
+  tagIds?: string[];
   steps: StepInput[];
   timezone: string;
   sendHourFrom: number;
@@ -553,6 +560,8 @@ export function fetchThread(recipientId: string) {
       reply_count: number;
     };
     items: ThreadItemDto[];
+    /** Адреса, которые адресат прислал в последнем ответе («пишите Екатерине»). */
+    referredEmails?: string[];
   }>(`${BASE}/threads/${recipientId}`);
 }
 
@@ -584,6 +593,7 @@ export function updateCampaign(
   body: {
     name: string;
     mailboxIds: string[];
+    tagIds?: string[];
     steps: StepInput[];
     timezone: string;
     sendHourFrom: number;
@@ -733,6 +743,10 @@ export interface CampaignRecipientDto {
   repliedAt: string | null;
   updatedAt: string;
   mailboxEmail: string | null;
+  /** Колонки загруженного файла как есть. */
+  vars: Record<string, string>;
+  /** Письма цепочки в том виде, в каком они уйдут этому адресу. */
+  letters: { step: number; variant: string | null; subject: string; body: string }[];
 }
 
 export function fetchCampaignRecipients(
@@ -742,17 +756,23 @@ export function fetchCampaignRecipients(
   const query = new URLSearchParams({ page: String(params.page ?? 1) });
   if (params.search) query.set('search', params.search);
   if (params.status) query.set('status', params.status);
-  return authFetchJson<{ recipients: CampaignRecipientDto[]; total: number; pageSize: number }>(
+  return authFetchJson<{ recipients: CampaignRecipientDto[]; columns: string[]; total: number; pageSize: number }>(
     `${BASE}/campaigns/${campaignId}/recipients?${query.toString()}`,
   );
 }
 
 /** Ответить лиду из окна переписки (задача 4.1): уходит с закреплённого ящика. */
-export function replyToThread(recipientId: string, text: string, draftId?: string | null) {
+/** Кому уходит ответ: toEmail — новый контакт из ответа лида, иначе лиду в переписку с копией. */
+export interface ReplyTargetDto {
+  toEmail: string | null;
+  ccEmails: string[];
+}
+
+export function replyToThread(recipientId: string, text: string, draftId?: string | null, target?: ReplyTargetDto) {
   return authFetchJson<{ ok: true; messageId?: string }>(`${BASE}/threads/${recipientId}/reply`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, draftId: draftId ?? null }),
+    body: JSON.stringify({ text, draftId: draftId ?? null, toEmail: target?.toEmail ?? null, ccEmails: target?.ccEmails ?? [] }),
   });
 }
 
@@ -796,6 +816,9 @@ export interface ReplyDraftDto {
   factsUsed: string;
   sources: Array<{ url: string; title?: string }>;
   language: ReplyLanguage;
+  /** Новый контакт, под которого написан черновик; null — ответ лиду в переписку. */
+  recipientEmail: string | null;
+  ccEmails: string[];
   createdAt: string;
 }
 
@@ -805,11 +828,11 @@ export function fetchReplyDraft(recipientId: string) {
   );
 }
 
-export function generateReplyDraft(recipientId: string, language: ReplyLanguage) {
+export function generateReplyDraft(recipientId: string, language: ReplyLanguage, target?: ReplyTargetDto) {
   return authFetchJson<{ draft: ReplyDraftDto }>(`${BASE}/threads/${recipientId}/draft`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ language }),
+    body: JSON.stringify({ language, toEmail: target?.toEmail ?? null, ccEmails: target?.ccEmails ?? [] }),
   });
 }
 

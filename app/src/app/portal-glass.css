@@ -70,6 +70,54 @@ html body :is(.sender-glass, .portal-glass) [role='menu'] {
   backdrop-filter: none;
 }
 
+/* Меню «⋯» строки уходит порталом прямо в body — вне .sender-glass, поэтому
+   правило для [role='menu'] выше его не ловит и стекло темы делало меню
+   полупрозрачным. Плотный фон задаём без привязки к обёртке. */
+html body > .row-actions-menu {
+  background-color: #ffffff !important;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+html[data-portal-theme='dark'] body > .row-actions-menu {
+  background-color: #1c1e26 !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+}
+/* Подписи и подсветка пунктов — явно: вне оболочки портала тёмная тема их не перекрашивает. */
+html[data-portal-theme='dark'] body > .row-actions-menu button:not(.text-red-600) {
+  color: #f4f4f5 !important;
+}
+html[data-portal-theme='dark'] body > .row-actions-menu button:hover:not(:disabled):not(.text-red-600) {
+  background-color: rgba(96, 165, 250, 0.28) !important;
+  color: #ffffff !important;
+}
+html[data-portal-theme='dark'] body > .row-actions-menu button.text-red-600:hover:not(:disabled) {
+  background-color: rgba(239, 68, 68, 0.22) !important;
+}
+html:not([data-portal-theme='dark']) body > .row-actions-menu button:hover:not(:disabled):not(.text-red-600) {
+  background-color: #dbeafe !important;
+}
+
+/* Меню панели выделения ящиков («Под тег», «На адрес»): подсветка пункта — как у меню строк. */
+html body .sender-popover-menu button:hover:not(:disabled) {
+  background-color: #dbeafe !important;
+}
+html[data-portal-theme='dark'] body .sender-popover-menu button {
+  color: #f4f4f5 !important;
+}
+html[data-portal-theme='dark'] body .sender-popover-menu button:hover:not(:disabled) {
+  background-color: rgba(96, 165, 250, 0.28) !important;
+  color: #ffffff !important;
+}
+
+/* Панель массовых действий над ящиками липнет к шапке при прокрутке: заливка
+   сплошная, иначе строки таблицы просвечивали бы под ней. */
+html body :is(.sender-glass, .portal-glass) .sender-bulk-bar {
+  background-color: #e8f0fd !important;
+}
+html[data-portal-theme='dark'] body :is(.sender-glass, .portal-glass) .sender-bulk-bar {
+  background-color: #1d2a4a !important;
+}
+
 /* Подсказки графиков (ECharts) берут фон с карточки под графиком, а она под
    стеклом полупрозрачная — подсказка просвечивала. Плотный цвет поверхности
    для них — переменная --chart-surface (components/charts/theme.ts). */
@@ -101,8 +149,10 @@ html body :is(.sender-glass, .portal-glass) section.rounded-xl.border > table > 
   border-bottom-right-radius: 0.75rem;
 }
 
-/* Вложенные белые подложки внутри стекла — прозрачные, чтобы блок был цельным. */
-html body :is(.sender-glass, .portal-glass) .rounded-xl.border .bg-white:not(input):not(textarea):not(select):not(button):not([role='tooltip']) {
+/* Вложенные белые подложки внутри стекла — прозрачные, чтобы блок был цельным.
+   Всплывающие меню (с тенью) — исключение: «Под тег» и «На адрес» в панели
+   выделения ящиков становились прозрачными, сквозь них читались строки. */
+html body :is(.sender-glass, .portal-glass) .rounded-xl.border .bg-white:not(input):not(textarea):not(select):not(button):not([role='tooltip']):not([role='menu']):not(.shadow-lg):not(.shadow-xl) {
   background-color: transparent !important;
 }
 
@@ -119,7 +169,7 @@ html body :is(.sender-glass, .portal-glass) nav[aria-label='Разделы ра�
 html body :is(.sender-glass, .portal-glass) input:not([type='checkbox']):not([type='radio']),
 html body :is(.sender-glass, .portal-glass) textarea,
 html body :is(.sender-glass, .portal-glass) select,
-html body :is(.sender-glass, .portal-glass) button.border:not([class*='bg-blue']):not([class*='bg-emerald']):not([class*='bg-red']) {
+html body :is(.sender-glass, .portal-glass) button.border:not([class*='bg-blue']):not([class*='bg-emerald']):not([class*='bg-red']):not([class*='kpi-tint']) {
   background-color: var(--lg-fill-control) !important;
   -webkit-backdrop-filter: blur(12px) saturate(1.6);
   backdrop-filter: blur(12px) saturate(1.6);

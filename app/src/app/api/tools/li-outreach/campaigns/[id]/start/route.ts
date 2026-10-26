@@ -1,3 +1,4 @@
+import { enrollActiveBase } from '@/lib/liOutreach/enroll';
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
@@ -23,26 +24,12 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     if (!campaign) return jsonError('Campaign not found', 404);
     if (campaign.status === 'running') return jsonError('Already running', 400);
 
-    if (campaign.lead_list_id) {
-      // Every lead of the list, whoever added it: lists are shared by the team
-      // (08.10.2026), and a campaign on a colleague's list used to start empty.
-      const { data: leads } = await supabaseAdmin
-        .from('li_leads')
-        .select('id')
-        .eq('lead_list_id', campaign.lead_list_id)
-        .limit(5000);
-
-      // IMPORTANT: ignoreDuplicates=true ensures we ONLY insert new (campaign_id, lead_id)
-      // pairs and NEVER touch existing rows. Without this, every Start press would roll
-      // back current_step/status to 0/pending for leads already in waiting/in_progress —
-      // which sends them another invite and gets us `already_invited` storms from LinkedIn.
-      // See bug log Apr 2026: leads stuck cycling for 4 days.
-      for (const lead of leads ?? []) {
-        await supabaseAdmin.from('li_campaign_leads').upsert(
-          { campaign_id: id, lead_id: (lead as { id: string }).id, current_step: 0, status: 'pending' },
-          { onConflict: 'campaign_id,lead_id', ignoreDuplicates: true },
-        );
-      }
+    // Люди рассылаемой базы — общая функция с воркером: только недостающие пары,
+    // уже идущих лидов не трогаем (иначе повторный инвайт, апрель 2026).
+    try {
+      await enrollActiveBase(supabaseAdmin, id);
+    } catch (e) {
+      return jsonError(`Не удалось добавить людей базы в рассылку — ${e instanceof Error ? e.message : String(e)}`, 500);
     }
 
     const { error: updErr } = await supabaseAdmin

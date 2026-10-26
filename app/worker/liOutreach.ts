@@ -22,7 +22,8 @@
  * Runs every LI_CAMPAIGN_TICK_INTERVAL_MS (default 5 min).
  */
 
-import { runCampaignTick } from '@/lib/liOutreach/campaignRunner';
+import { runCampaignTickAllAccounts } from '@/lib/liOutreach/campaignRunner';
+import { syncLiAccounts } from '@/lib/liOutreach/accountSync';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown } from './_shared';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
@@ -34,13 +35,17 @@ const NO_ACCOUNT_KEY = '__no_account__';
 
 let lastTickAt = 0;
 
+/** Аккаунты синхронизируются с Unipile раз в 15 минут: ушедшие пропадают, разлогиненные получают статус. */
+const ACCOUNT_SYNC_INTERVAL_MS = Number(process.env.LI_ACCOUNT_SYNC_INTERVAL_MS ?? String(15 * 60 * 1000));
+let lastAccountSyncAt = 0;
+
 type CampaignRow = { id: string; user_id: string; name: string; account_id: string | null };
 
 async function runCampaignGroup(campaigns: CampaignRow[]): Promise<boolean> {
   let anyWork = false;
   for (const c of campaigns) {
     try {
-      const result = await runCampaignTick(c.id, c.user_id);
+      const result = await runCampaignTickAllAccounts(c.id, c.user_id);
       if (result.processed > 0 || result.errors > 0) {
         log('info', `Campaign "${c.name}" (${c.id}): processed=${result.processed}, errors=${result.errors}`);
         anyWork = true;
@@ -52,9 +57,26 @@ async function runCampaignGroup(campaigns: CampaignRow[]): Promise<boolean> {
   return anyWork;
 }
 
+async function syncAccountsIfDue(db: NonNullable<ReturnType<typeof requireSupabaseAdmin>>): Promise<void> {
+  const now = Date.now();
+  if (now - lastAccountSyncAt < ACCOUNT_SYNC_INTERVAL_MS) return;
+  lastAccountSyncAt = now;
+  try {
+    const result = await syncLiAccounts(db, { log });
+    if (result.removed > 0 || result.duplicates_removed > 0 || result.delete_skipped) {
+      log('info', `Синхронизация LinkedIn-аккаунтов: обновлено ${result.synced}, удалено ${result.removed}, дублей ${result.duplicates_removed}`);
+    }
+  } catch (err) {
+    // Сбой Unipile не должен останавливать кампании: следующая попытка через интервал.
+    log('error', 'Синхронизация LinkedIn-аккаунтов не удалась', err);
+  }
+}
+
 async function pollOnce(): Promise<boolean> {
   const db = requireSupabaseAdmin(log);
   if (!db) return false;
+
+  await syncAccountsIfDue(db);
 
   const now = Date.now();
   if (now - lastTickAt < TICK_INTERVAL_MS) return false;

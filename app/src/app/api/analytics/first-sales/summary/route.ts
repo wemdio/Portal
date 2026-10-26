@@ -8,6 +8,7 @@ import {
   fetchFirstSalesLeads,
 } from '@/lib/firstSales/metrics';
 import { fetchTaskMeetings } from '@/lib/firstSales/meetings';
+import { fetchRequalified } from '@/lib/firstSales/requalified';
 import { fetchFirstSalesPayments } from '@/lib/firstSales/money';
 
 // Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
@@ -53,19 +54,24 @@ export async function GET(req: NextRequest) {
   // сделок уже фильтруется (см. `or` в fetchFirstSalesLeads). Встречи по
   // закрытой задаче (fetchTaskMeetings) — требуют: такая сделка стоит на
   // «Назначена встреча», и ни одно поле окна её не поймает.
+  //
+  // Повторные квалы (fetchRequalified) — тоже: сделка, квалифицированная
+  // заново, могла завестись и впервые стать квалом задолго до окна.
   const loadWindow = async (windowFrom: Date, windowTo: Date) => {
-    const [payments, taskMeetings] = await Promise.all([
+    const [payments, taskMeetings, requalified] = await Promise.all([
       fetchFirstSalesPayments(db, PIPELINE_ID, windowFrom, windowTo),
       fetchTaskMeetings(db, PIPELINE_ID, windowFrom, windowTo),
+      cohort ? fetchRequalified(db, PIPELINE_ID, windowFrom, windowTo) : Promise.resolve(new Map<number, string>()),
     ]);
     const extraDealIds = [
       ...new Set([
         ...payments.map((p) => p.amo_deal_id).filter((id): id is number => id != null),
         ...taskMeetings.keys(),
+        ...requalified.keys(),
       ]),
     ];
     const leads = await fetchFirstSalesLeads(db, PIPELINE_ID, windowFrom, windowTo, extraDealIds);
-    return { payments, leads, taskMeetings };
+    return { payments, leads, taskMeetings, requalified };
   };
 
   try {
@@ -86,12 +92,18 @@ export async function GET(req: NextRequest) {
 
     const result = computeFirstSalesSeries(
       current.leads, from, to, groupBy, sources,
-      current.payments, current.taskMeetings, { cohort, cohortFrom, cohortTo },
+      current.payments, current.taskMeetings,
+      { cohort, cohortFrom, cohortTo, requalified: current.requalified },
     );
     const prevResult = computeFirstSalesSeries(
       previous.leads, prev.from, prev.to, groupBy, sources,
       previous.payments, previous.taskMeetings,
-      { cohort, cohortFrom: prevCohort.from, cohortTo: prevCohort.to },
+      {
+        cohort,
+        cohortFrom: prevCohort.from,
+        cohortTo: prevCohort.to,
+        requalified: previous.requalified,
+      },
     );
 
     const lastRun = lastRunRes.data;

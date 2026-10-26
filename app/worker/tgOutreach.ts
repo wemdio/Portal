@@ -359,7 +359,15 @@ async function handleDeleteMessagesJob(job: { id: string; campaign_id: string })
   const payload = (row?.payload ?? null) as { dialog_id?: string; timestamp?: string; content?: string } | null;
   try {
     if (!payload?.dialog_id || !payload.content) throw new Error('В задаче нет диалога или текста сообщения');
-    await deleteDialogMessages(job.campaign_id, db, { dialogId: payload.dialog_id, timestamp: payload.timestamp ?? null, content: payload.content });
+    const target = { dialogId: payload.dialog_id, timestamp: payload.timestamp ?? null, content: payload.content };
+    const liveDelete = campaignControls.get(job.campaign_id)?.deleteMessage;
+    if (liveDelete) {
+      await liveDelete(target);
+    } else if (runningCampaigns.has(job.campaign_id) || runningWarmups.has(job.campaign_id)) {
+      throw new Error('Соединение кампании ещё готовится — повторите удаление через несколько секунд');
+    } else {
+      await deleteDialogMessages(job.campaign_id, db, target);
+    }
     await db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);

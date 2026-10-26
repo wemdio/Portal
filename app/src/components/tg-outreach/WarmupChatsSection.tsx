@@ -10,7 +10,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
-import { AlertCircle, Loader2, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { AlertCircle, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import type { CampaignStatus } from '@/lib/tgOutreach/types';
 import type { WarmupChat } from '@/lib/tgOutreach/warmup/types';
 
@@ -43,6 +43,8 @@ export default function WarmupChatsSection({
   const [adding, setAdding] = useState(false);
   const [checking, setChecking] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  /** Жёлтая подсказка про формат: не ошибка сервера, а просьба поправить ввод. */
+  const [warning, setWarning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Проверка чатов занимает аккаунт кампании, поэтому доступна только на
@@ -69,9 +71,18 @@ export default function WarmupChatsSection({
     onChanged?.();
   };
 
-  const addChats = async () => {
-    const links = bulkText.split(/[\n,;\s]+/).map((s) => s.trim()).filter(Boolean);
+  const addChats = async (raw: string = bulkText) => {
+    // Одна ссылка на строку: запятые и пробелы — не разделитель. Если в строке
+    // больше одной ссылки, ничего не добавляем и просим разнести по строкам.
+    const links = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     if (!links.length) return;
+    if (links.some((l) => /[\s,;]/.test(l))) {
+      setBulkText(raw);
+      setNotice(null);
+      setWarning('Один чат на строку. Ссылки через запятую или пробел не принимаются — поставьте каждую с новой строки.');
+      return;
+    }
+    setWarning(null);
     setAdding(true);
     setError(null);
     setNotice(null);
@@ -221,25 +232,31 @@ export default function WarmupChatsSection({
         </div>
       )}
 
+      {/* Чаты добавляются сами: при вставке, а набранное руками — когда
+          уходите из поля. Кнопки «Добавить» нет. */}
       <textarea
         value={bulkText}
-        onChange={(e) => setBulkText(e.target.value)}
-        rows={2}
-        placeholder={'t.me/chat_name\n@another_chat'}
-        className="block w-full resize-y rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 font-mono text-[11px] outline-none focus:border-indigo-400"
+        onChange={(e) => { setBulkText(e.target.value); if (warning) setWarning(null); }}
+        onPaste={(e) => {
+          const pasted = e.clipboardData.getData('text');
+          if (!pasted.trim()) return;
+          e.preventDefault();
+          void addChats(`${bulkText}\n${pasted}`);
+        }}
+        onBlur={() => { if (bulkText.trim() && !adding) void addChats(); }}
+        rows={3}
+        placeholder={'По одной ссылке на строку:\nt.me/chat_name\n@another_chat'}
+        className="block w-full resize-y rounded-lg border border-gray-300/70 bg-white/50 px-2.5 py-1.5 font-mono text-[11px] outline-none focus:border-indigo-400"
       />
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => { void addChats(); }}
-          disabled={adding || !bulkText.trim()}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-[11px] font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {adding ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
-          Добавить
-        </button>
-        <span className="text-[10px] text-gray-400">Закрытые чаты по приглашениям не поддерживаются</span>
-      </div>
+      {warning && (
+        <div className="flex items-start gap-1.5 rounded-lg border border-amber-300/60 bg-amber-400/10 px-2.5 py-1.5 text-[11px] text-amber-600">
+          <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+          {warning}
+        </div>
+      )}
+      {adding && (
+        <div className="flex items-center gap-1.5 text-[11px] text-gray-500"><Loader2 className="h-3 w-3 animate-spin" />Добавляю…</div>
+      )}
 
       {error && (
         <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>

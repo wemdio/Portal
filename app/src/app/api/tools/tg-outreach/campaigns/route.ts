@@ -42,8 +42,19 @@ export async function GET(req: NextRequest) {
       for (const row of (warmingRows ?? []) as { campaign_id: string }[]) {
         warmingByCampaign.set(row.campaign_id, (warmingByCampaign.get(row.campaign_id) ?? 0) + 1);
       }
+      // Активные аккаунты — колонка в списке кампаний.
+      const { data: activeRows } = await supabase
+        .from('tg_outreach_accounts')
+        .select('campaign_id')
+        .eq('is_active', true);
+      const activeByCampaign = new Map<string, number>();
+      for (const row of (activeRows ?? []) as { campaign_id: string }[]) {
+        activeByCampaign.set(row.campaign_id, (activeByCampaign.get(row.campaign_id) ?? 0) + 1);
+      }
+
       for (const c of items) {
         c.warming_accounts = warmingByCampaign.get(c.id as string) ?? 0;
+        c.active_accounts = activeByCampaign.get(c.id as string) ?? 0;
       }
 
       return NextResponse.json({ items });

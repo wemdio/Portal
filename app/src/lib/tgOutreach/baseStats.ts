@@ -91,6 +91,8 @@ export interface BaseStats {
   leadList: BaseLead[];
   /** Аккаунты, которыми база рассылалась за период. */
   accountIds: string[];
+  /** Последняя отправка из базы за всё время — по ней видно, какая база рассылает сейчас. */
+  lastSentAt: string | null;
   /** Среднесуточные отправки за период, один знак. */
   perDay: number;
   /**
@@ -243,6 +245,10 @@ export function buildBaseStats(input: BaseStatsInput): BaseStats[] {
     }
 
     const remaining = contacts.filter((c) => !c.sent_at).length;
+    const lastSentMs = contacts.reduce<number | null>((max, c) => {
+      const t = ts(c.sent_at);
+      return t !== null && (max === null || t > max) ? t : max;
+    }, null);
     // Делим на прошедшие сутки периода, а не на его номинальную длину: у базы,
     // залитой три дня назад, «за 30 дней» занизило бы темп в десять раз.
     const spanDays = Math.max(Math.round((lastDay - firstDay) / DAY_MS) + 1, 1);
@@ -263,9 +269,98 @@ export function buildBaseStats(input: BaseStatsInput): BaseStats[] {
       // Свежие сверху: разметку смотрят «что там нового», а не с начала базы.
       leadList: leadList.sort((x, y) => (y.at ?? '').localeCompare(x.at ?? '')),
       accountIds: [...accountIds],
+      lastSentAt: lastSentMs === null ? null : new Date(lastSentMs).toISOString(),
       perDay,
       daysLeft: perDay > 0 ? Math.round((remaining / perDay) * 10) / 10 : null,
       days: [...days.values()],
     };
   });
 }
+
+export interface ForecastBase {
+  /** Когда при текущем темпе кончится этап этой базы, ISO начала местных суток. null — не посчитать. */
+  endsAt: string | null;
+}
+
+export interface ForecastStage {
+  /** Номер этапа для экрана: 1, 2, 3… по порядку. */
+  rank: number;
+  baseIds: string[];
+  /** Не отправленных контактов в базах этапа. */
+  remaining: number;
+  /** Когда этап выдаст всё при текущем темпе. null — контактов нет или темп нулевой. */
+  endsAt: string | null;
+}
+
+export interface SendForecast {
+  /** Темп кампании, отправок в сутки: рассылающие аккаунты × норма одного аккаунта в сутки. */
+  perDay: number;
+  /** Сколько аккаунтов рассылает сейчас (живы, включены, не в кулдауне) и сколько каждому можно в сутки. null — не считалось. */
+  accounts: number | null;
+  perAccount: number | null;
+  /** Не отправленных контактов во всех включённых базах. */
+  remaining: number;
+  /** До какой даты хватит всех этапов вместе. null — темп нулевой или контактов не осталось. */
+  endsAt: string | null;
+  stages: ForecastStage[];
+  /** Этап, из которого идут отправки сейчас: первый с остатком. */
+  currentStage: ForecastStage | null;
+  bases: Record<string, ForecastBase>;
+}
+
+/**
+ * Даты, до которых хватит баз кампании при текущем темпе.
+ *
+ * Темп один на всю кампанию: рассылают общие аккаунты. Этапы расходуются по
+ * очереди, поэтому дата каждого — накопленный остаток до него, делённый на
+ * темп. Базы одного этапа идут параллельно и кончаются вместе с этапом.
+ *
+ * `items` — включённые в рассылку базы с этапом; выключенные из кампании базы
+ * не рассылаются и в прогноз не входят.
+ */
+export function buildSendForecast(
+  stats: BaseStats[],
+  items: Array<{ baseId: string; stage: number }>,
+  nowMs: number,
+  tzOffsetHours = 3,
+  pace?: { perDay: number; accounts: number; perAccount: number },
+): SendForecast {
+  const byId = new Map(stats.map((s) => [s.baseId, s]));
+  const active = items.filter((i) => byId.has(i.baseId));
+  // Темп — мощность парка (приходит снаружи); без него — сумма фактических темпов баз.
+  const perDay = pace?.perDay ?? Math.round(active.reduce((sum, i) => sum + byId.get(i.baseId)!.perDay, 0) * 10) / 10;
+  const remaining = active.reduce((sum, i) => sum + byId.get(i.baseId)!.remaining, 0);
+
+  const dateAfter = (days: number): string => new Date(dayStart(nowMs + days * DAY_MS, tzOffsetHours)).toISOString();
+  const dateFor = (left: number): string | null => (left > 0 && perDay > 0 ? dateAfter(left / perDay) : null);
+
+  const stageNumbers = [...new Set(active.map((i) => i.stage))].sort((x, y) => x - y);
+  const bases: Record<string, ForecastBase> = {};
+  const stages: ForecastStage[] = [];
+  let cumulative = 0;
+  stageNumbers.forEach((stage, index) => {
+    const baseIds = active.filter((i) => i.stage === stage).map((i) => i.baseId);
+    const left = baseIds.reduce((sum, id) => sum + byId.get(id)!.remaining, 0);
+    cumulative += left;
+    const endsAt = left > 0 ? dateFor(cumulative) : null;
+    stages.push({ rank: index + 1, baseIds, remaining: left, endsAt });
+    for (const id of baseIds) bases[id] = { endsAt };
+  });
+
+  return {
+    perDay,
+    accounts: pace?.accounts ?? null,
+    perAccount: pace?.perAccount ?? null,
+    remaining,
+    endsAt: dateFor(remaining),
+    stages,
+    currentStage: stages.find((st) => st.remaining > 0) ?? null,
+    bases,
+  };
+}
+
+/** «27.10» — дата из прогноза по Москве (ISO — начало местных суток). */
+export function formatForecastDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', timeZone: 'Europe/Moscow' });
+}
+

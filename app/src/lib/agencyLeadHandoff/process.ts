@@ -22,6 +22,7 @@ interface HandoffRow {
 }
 
 class SkipHandoff extends Error {}
+const MAX_HISTORY_PAGES = 20;
 const norm = (s: string) => s.trim().toLowerCase();
 const stamp = (e: { timestamp_email?: string; timestamp_created?: string }) =>
   Date.parse(e.timestamp_email ?? e.timestamp_created ?? '') || 0;
@@ -102,13 +103,26 @@ async function queueSender(db: SupabaseClient, row: HandoffRow, settings: Agency
 }
 
 async function sendInstantly(db: SupabaseClient, row: HandoffRow, settings: AgencyHandoffSettings): Promise<void> {
-  const { data: q, error } = await db.from('own_reply_qualifications')
-    .select('status, campaign_id, campaign_name, lead_email, thread_id').eq('email_id', row.source_id).maybeSingle();
-  if (error) throw new Error(error.message);
-  const { data: own, error: ownError } = await db.from('own_reply_lead_settings').select('enabled').eq('id', 1).maybeSingle();
-  if (ownError) throw new Error(ownError.message);
-  if (!own?.enabled || q?.status !== 'lead' || !isOwnAgencyCampaign(q.campaign_name) || norm(q.lead_email) !== norm(row.lead_email)) {
-    throw new SkipHandoff('Квалификация выключена или лид снят с обработки');
+  // OutreachOS: лид из кабинета клиента — проверяем по его очереди, а не по таблицам наших кампаний.
+  let q: { campaign_id: string; lead_email: string };
+  if (row.scope === 'outreachos') {
+    const { data, error } = await db.from('outreachos_lead_pushes')
+      .select('lead_email, instantly_campaign_id').eq('instantly_email_id', row.source_id).eq('kind', 'reply').maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data?.instantly_campaign_id || norm(data.lead_email) !== norm(row.lead_email)) {
+      throw new SkipHandoff('Лид OutreachOS не найден в очереди');
+    }
+    q = { campaign_id: data.instantly_campaign_id, lead_email: data.lead_email };
+  } else {
+    const { data, error } = await db.from('own_reply_qualifications')
+      .select('status, campaign_id, campaign_name, lead_email, thread_id').eq('email_id', row.source_id).maybeSingle();
+    if (error) throw new Error(error.message);
+    const { data: own, error: ownError } = await db.from('own_reply_lead_settings').select('enabled').eq('id', 1).maybeSingle();
+    if (ownError) throw new Error(ownError.message);
+    if (!own?.enabled || data?.status !== 'lead' || !isOwnAgencyCampaign(data.campaign_name) || norm(data.lead_email) !== norm(row.lead_email)) {
+      throw new SkipHandoff('Квалификация выключена или лид снят с обработки');
+    }
+    q = data;
   }
   const requestOptions = { accountId: 'main', consumer: 'agency_lead_handoff',
     requestPriority: 'bulk' as const, retryRateLimits: false, timeoutMs: 20_000, timeoutIncludesBody: true };
@@ -119,10 +133,18 @@ async function sendInstantly(db: SupabaseClient, row: HandoffRow, settings: Agen
   if (!sender || !replier.includes('@') || replier === norm(sender) || original.campaign_id !== q.campaign_id) {
     throw new SkipHandoff('Не удалось подтвердить отправителя и кампанию переписки');
   }
-  const response = await listEmails({ campaign_id: q.campaign_id, search: q.lead_email,
-    mode: 'emode_all', sort_order: 'desc', limit: 100 }, requestOptions);
-  if (response.next_starting_after) throw new Error('Переписка слишком длинная для автоматической передачи');
-  const thread = (response.items ?? []).filter(e => original.thread_id
+  // Читаем всю переписку постранично: менеджеру нужна она целиком, а не первые 100 писем.
+  const all: Awaited<ReturnType<typeof listEmails>>['items'] = [];
+  let after: string | undefined;
+  for (let page = 0; page < MAX_HISTORY_PAGES; page++) {
+    const response = await listEmails({ campaign_id: q.campaign_id, search: q.lead_email,
+      mode: 'emode_all', sort_order: 'desc', limit: 100, starting_after: after }, requestOptions);
+    all.push(...(response.items ?? []));
+    after = response.next_starting_after || undefined;
+    if (!after) break;
+  }
+  if (after) throw new Error(`Переписка длиннее ${MAX_HISTORY_PAGES * 100} писем — нужна ручная передача`);
+  const thread = all.filter(e => original.thread_id
     ? e.thread_id === original.thread_id
     : [norm(row.lead_email), replier].includes(norm(e.from_address_email ?? '')) || norm(e.lead ?? '') === norm(row.lead_email));
   if (!thread.some(e => e.id === original.id)) throw new Error('Входящее не найдено в живой переписке');

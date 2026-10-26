@@ -9,6 +9,7 @@ import { variantLabel } from '@/lib/sender/variants';
 import {
   createCampaign,
   fetchCampaign,
+  fetchMailboxTags,
   fetchSenderClients,
   fetchSenderProjects,
   fetchTestLetter,
@@ -18,6 +19,7 @@ import {
   updateCampaign,
   uploadRecipients,
   type CampaignDto,
+  type MailboxTagDto,
   type PreviewSampleDto,
   type RecipientColumnsDto,
   type SenderClientDto,
@@ -32,9 +34,13 @@ import {
   WORKDAYS,
   letterAccent,
   letterIssues,
+  LetterToolsContext,
+  SharedLetterToolbar,
+  type LetterTools,
   type LetterVariant,
 } from './CampaignSteps';
 import { LetterText } from './LetterLinks';
+import { TagChip, tagTones } from './MailboxTags';
 import { MailboxPickerModal, type PickedMailbox } from './MailboxPickerModal';
 import { SenderModal } from './SenderModal';
 
@@ -113,6 +119,18 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
 
   const [name, setName] = useState('');
   const [mailboxes, setMailboxes] = useState<PickedMailbox[]>([]);
+  // Действия письма, в котором стоит курсор, — их зовёт общая панель оформления.
+  const letterTools = useRef<(() => LetterTools) | null>(null);
+  const registerLetterTools = useCallback((get: () => LetterTools, onlyIfEmpty?: boolean) => {
+    if (onlyIfEmpty && letterTools.current) return;
+    letterTools.current = get;
+  }, []);
+  // Теги, привязанные к кампании целиком: новые ящики тега доливаются в идущую кампанию.
+  const [tagIds, setTagIds] = useState<string[]>([]);
+  const [allTags, setAllTags] = useState<MailboxTagDto[]>([]);
+  useEffect(() => {
+    void fetchMailboxTags().then((res) => setAllTags(res.tags)).catch(() => undefined);
+  }, []);
   const [pickerOpen, setPickerOpen] = useState(false);
   // Файл сразу разбирается на сервере (без записи): какие колонки нашлись и
   // какие переменные можно вставить в письмо. Файл без колонки почты не
@@ -218,6 +236,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
       setName(details.campaign.name);
       setStatus(details.campaign.status);
       setMailboxes(details.mailboxes);
+      setTagIds(details.tagIds ?? []);
       setHourFrom(details.campaign.send_hour_from);
       setHourTo(details.campaign.send_hour_to);
       setWeekdays(details.campaign.send_weekdays ?? []);
@@ -352,6 +371,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   const campaignPayload = {
     name,
     mailboxIds: mailboxes.map((m) => m.id),
+    tagIds,
     steps: stepsPayload,
     timezone,
     sendHourFrom: hourFrom ?? 9,
@@ -608,8 +628,16 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
     else await create();
   };
 
-  const shown = mailboxes.slice(0, SHOWN_MAILBOXES);
-  const rest = mailboxes.length - shown.length;
+  // Тег, взятый целиком, показываем одним чипом, а не россыпью его адресов.
+  const tagged = new Set(tagIds);
+  const single = mailboxes.filter((m) => !m.tagId || !tagged.has(m.tagId));
+  const shown = single.slice(0, SHOWN_MAILBOXES);
+  const rest = single.length - shown.length;
+  const tagToneById = tagTones(allTags);
+  const linkedTags = tagIds
+    .map((id) => allTags.find((t) => t.id === id))
+    .filter((t): t is NonNullable<typeof t> => Boolean(t))
+    .map((t) => ({ tag: t, inCampaign: mailboxes.filter((m) => m.tagId === t.id).length }));
   const statusHint = editing ? STATUS_HINT[status] : STATUS_HINT.draft;
 
   /**
@@ -723,7 +751,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
     <div className="mx-auto max-w-[1600px]">
       {/* Шапка не уезжает при прокрутке: что мешает сохранить и сама кнопка
           нужны из любого места длинной формы. */}
-      <div className="sticky top-0 z-20 mb-4 border-b border-zinc-200 backdrop-blur-xl">
+      <div className="mb-4 border-b border-zinc-200">
         <div className="flex flex-wrap items-center gap-3 px-4 py-3">
           <button
             type="button"
@@ -939,6 +967,12 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
                 <span className="text-sm text-zinc-500">Ни одного не выбрано</span>
               ) : (
                 <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  {linkedTags.map(({ tag, inCampaign }) => (
+                    <span key={tag.id} className="inline-flex items-center gap-1.5" title="Тег целиком: новые ящики под этим тегом добавляются в кампанию сами">
+                      <TagChip name={tag.name} tone={tagToneById.get(tag.id)} />
+                      <span className="text-xs text-zinc-500">{Math.max(inCampaign, 0) || tag.mailboxes} ящ.</span>
+                    </span>
+                  ))}
                   {shown.map((mailbox) => (
                     <span
                       key={mailbox.id}
@@ -978,6 +1012,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
           />
         </div>
 
+        <LetterToolsContext.Provider value={registerLetterTools}>
         <div className="space-y-3">
           {letters.map((step, index) => (
             <LetterStep
@@ -1132,15 +1167,22 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
               </span>
             </div>
           </div>
+
+          {/* Одна панель оформления на все письма: внизу блока, при прокрутке остаётся
+              у нижнего края окна, а в конце страницы стоит под предпросмотром. */}
+          <SharedLetterToolbar active={letterTools} disabled={readOnly} />
         </div>
+        </LetterToolsContext.Provider>
       </div>
 
       {pickerOpen ? (
         <MailboxPickerModal
           initial={mailboxes}
+          initialTagIds={tagIds}
           onClose={() => setPickerOpen(false)}
-          onSave={(picked) => {
+          onSave={(picked, pickedTagIds) => {
             setMailboxes(picked);
+            setTagIds(pickedTagIds);
             setPickerOpen(false);
           }}
         />
@@ -1182,7 +1224,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
                         иначе не с чем сверить. */}
                     <LetterText
                       text={step.body}
-                      className="mt-1 whitespace-pre-wrap break-words text-sm text-zinc-700"
+                      className="mt-1 break-words text-sm text-zinc-700"
                     />
                   </div>
                 ))}
