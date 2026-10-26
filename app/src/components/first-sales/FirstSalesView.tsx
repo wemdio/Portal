@@ -360,6 +360,7 @@ export default function FirstSalesView() {
               <TimeSeriesChart
                 series={data.series}
                 groupBy={filters.groupBy}
+                cohort={filters.cohort}
                 selectedKey={selectedBucket}
                 onSelectKey={setSelectedBucket}
               />

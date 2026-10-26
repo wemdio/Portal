@@ -26,15 +26,18 @@ type MetricKey = 'leads' | 'qualified' | 'meetings' | 'sales';
 
 const LABELS: Record<MetricKey, string> = {
   leads: 'Лиды',
-  // Не просто «Квал»: qualified кладётся в корзину по дате ПРИХОДА лида
-  // (когортно — «из пришедших в этот день скольких квалифицировали»), а
-  // meetings/sales ниже — по дате самого события. Без пояснения в легенде
-  // все четыре числа читаются как «что случилось в этот день», и это неверно
-  // для этого столбца.
+  // Подпись для режима «без когорты»: там qualified кладётся в корзину по
+  // дате ПРИХОДА лида («из пришедших в этот день скольких квалифицировали»),
+  // а meetings/sales — по дате самого события. «По когорте» квал тоже по
+  // дате события, и ряд зовётся просто «Квал» — см. `labelsFor`.
   qualified: 'Квал (из пришедших)',
   meetings: 'Встречи',
   sales: 'Продажи',
 };
+
+function labelsFor(cohort: boolean): Record<MetricKey, string> {
+  return cohort ? { ...LABELS, qualified: 'Квал' } : LABELS;
+}
 
 /** Порядок рядов = порядок слотов палитры: ряд всегда своего цвета, даже погашенный. */
 const METRICS: MetricKey[] = ['leads', 'qualified', 'meetings', 'sales'];
@@ -93,6 +96,7 @@ function buildOption(
   animate: boolean,
   selectedIndex: number,
   visible: ReadonlySet<MetricKey>,
+  names: Record<MetricKey, string>,
 ): EChartsCoreOption {
   const labels = data.map((b) => formatKey(b.key, groupBy));
   const keys = data.map((b) => b.key);
@@ -106,7 +110,7 @@ function buildOption(
   const line = (key: MetricKey, index: number) => {
     const color = colorOf(key);
     return {
-      name: LABELS[key],
+      name: names[key],
       type: 'line' as const,
       data: data.map((b) => b[key]),
       smooth: true,
@@ -193,9 +197,12 @@ export default function TimeSeriesChart({
   groupBy,
   selectedKey = null,
   onSelectKey,
+  cohort,
 }: {
   series: SeriesBucket[];
   groupBy: GroupBy;
+  /** Режим счёта: от него зависит, по какой дате лежит квал. */
+  cohort: boolean;
   /** Выбранная корзина — подсвечивается полосой. */
   selectedKey?: string | null;
   /** Клик по корзине. Повторный клик по той же снимает выбор. */
@@ -208,11 +215,12 @@ export default function TimeSeriesChart({
   // запросе за данными, это только про то, что сейчас на холсте.
   const [visible, setVisible] = useState<ReadonlySet<MetricKey>>(() => new Set(METRICS));
 
+  const names = useMemo(() => labelsFor(cohort), [cohort]);
   const selectedIndex = selectedKey ? series.findIndex((b) => b.key === selectedKey) : -1;
 
   const option = useMemo(
-    () => (theme ? buildOption(series, groupBy, theme, !reducedMotion, selectedIndex, visible) : null),
-    [series, groupBy, theme, reducedMotion, selectedIndex, visible],
+    () => (theme ? buildOption(series, groupBy, theme, !reducedMotion, selectedIndex, visible, names) : null),
+    [series, groupBy, theme, reducedMotion, selectedIndex, visible, names],
   );
 
   const toggle = useCallback((key: MetricKey) => {
@@ -237,10 +245,10 @@ export default function TimeSeriesChart({
   const pickerItems = useMemo(
     () => METRICS.map((key, slot) => ({
       key,
-      label: LABELS[key],
+      label: names[key],
       color: theme ? seriesColor(theme, slot) : 'transparent',
     })),
-    [theme],
+    [theme, names],
   );
 
   return (
@@ -258,7 +266,9 @@ export default function TimeSeriesChart({
         <div style={{ height: CHART_HEIGHT }} />
       )}
       <p className="mt-2 text-[11px] text-zinc-400">
-        «Квал» — от лидов, пришедших в этот отрезок; встречи и договоры — по дате события.
+        {cohort
+          ? 'Квал, встречи и договоры — по дате события.'
+          : '«Квал» — от лидов, пришедших в этот отрезок; встречи и договоры — по дате события.'}
       </p>
       <p className="mt-1 text-[11px] text-amber-700">
         Встречи — по записям из чата встреч, с 01.05.2026. Договоры — с 30.07.2026. Раньше данные недостоверны, поэтому линий нет.

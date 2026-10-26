@@ -6,6 +6,8 @@ import {
   type ChannelSummaryConfig,
 } from '@/lib/leadsReport/channels';
 import { extractCustomField } from '@/lib/leadsReport/extractCustomField';
+import { fetchTaskMeetings } from '@/lib/firstSales/meetings';
+import { fetchRequalified } from '@/lib/firstSales/requalified';
 import {
   dedupeLeadMagnets,
   isExcludedLeadName,
@@ -76,12 +78,61 @@ export type AmoMeetingTaskRow = {
   complete_till: string | null;
 };
 
+/**
+ * Даты этапов сделки из `amo_lead_stage_dates_v` — того же view, по которому
+ * считает дашборд первички. Квал и встречи отчёт берёт отсюда, чтобы одна и
+ * та же неделя давала одну цифру и в боте, и на дашборде.
+ */
+export type AmoStageDatesRow = {
+  amo_deal_id: number;
+  created_at: string | null;
+  first_qualified_at: string | null;
+  first_meeting_at: string | null;
+  history_complete: boolean;
+};
+
+/** Название и поля сделки — для канала и отсева своих тестовых заявок. */
+export type AmoDealInfoRow = {
+  amo_id: number;
+  name: string | null;
+  raw: unknown;
+};
+
+/**
+ * Всё для квалов и встреч «по когорте / без когорты» (с 26.10.2026).
+ *
+ * `stageDates` — каждая сделка воронки, у которой в окне что-то случилось:
+ * заведена, впервые стала квалом, впервые дошла до встречи, переведена в
+ * «Встреча назначена» или закрыта задача-встреча. `deals` — их название и
+ * поля. `scheduledDealIds` — переведённые в «Встреча назначена» внутри окна.
+ * `taskMeetings` — встречи по закрытой задаче, ровно как на дашборде
+ * (`fetchTaskMeetings`). `requalified` — повторные квалы недели, тоже как на
+ * дашборде (`fetchRequalified`).
+ */
+export type CohortInputs = {
+  stageDates: AmoStageDatesRow[];
+  deals: AmoDealInfoRow[];
+  scheduledDealIds: number[];
+  taskMeetings: Map<number, string>;
+  requalified?: Map<number, string>;
+};
+
+/**
+ * Метрики канала. «По когорте» — всё, что случилось за неделю, когда бы
+ * сделку ни завели; «без когорты» — только по сделкам, пришедшим за неделю.
+ * Термины те же, что у переключателя на дашборде первички.
+ */
 export type ChannelMetrics = {
   channel: ChannelSummaryConfig;
   arrived: number;
   qualifiedLeads: number;
+  qualifiedLeadsCohort: number;
+  /** Из `qualifiedLeadsCohort` — повторные квалы (сделка уже была квалом). */
+  requalifiedCohort: number;
   meetingsScheduled: number;
+  meetingsScheduledCohort: number;
   meetingsHeld: number;
+  meetingsHeldCohort: number;
 };
 
 type Thresholds = {
@@ -278,17 +329,27 @@ export function computeMetricsFromRows(
   start: Date,
   end: Date,
   meetingTasks: AmoMeetingTaskRow[] = [],
+  cohortInputs: CohortInputs = {
+    stageDates: [],
+    deals: [],
+    scheduledDealIds: [],
+    taskMeetings: new Map(),
+  },
 ): ChannelMetrics[] {
   const thresholds = buildThresholds(statuses);
-  const metrics = new Map(
+  const metrics = new Map<string, ChannelMetrics>(
     channels.map((channel) => [
       channel.name,
       {
         channel,
         arrived: 0,
         qualifiedLeads: 0,
+        qualifiedLeadsCohort: 0,
+        requalifiedCohort: 0,
         meetingsScheduled: 0,
+        meetingsScheduledCohort: 0,
         meetingsHeld: 0,
+        meetingsHeldCohort: 0,
       },
     ]),
   );
@@ -322,11 +383,10 @@ export function computeMetricsFromRows(
     const channel = detectSummaryChannel(lead.raw);
     if (!channel || !metrics.has(channel)) continue;
 
-    // Все метрики считаются ТОЛЬКО по сделкам, ПРИШЕДШИМ на этой неделе
-    // (created_at в окне). Старые backlog-сделки с активностью на этой неделе
-    // не считаются: иначе массовые обновления полей раздуют цифры и они станут
-    // несопоставимы с прошлыми отчётами продаж (Егор, 2026-07-24; подтверждено
-    // Дмитрием 10.08.2026).
+    // «Пришло» считается ТОЛЬКО по сделкам, ПРИШЕДШИМ на этой неделе
+    // (created_at в окне) — Егор, 2026-07-24; подтверждено Дмитрием
+    // 10.08.2026. Квал и встречи старых сделок — отдельным проходом,
+    // в разрезе «по когорте» (`countCohortMetrics`).
     if (!isInWindow(lead.created_at, start, end)) continue;
 
     // Свои люди, тестирующие бота и форму, не считаются нигде и ни в одном
@@ -368,22 +428,14 @@ export function computeMetricsFromRows(
     const bucket = metrics.get(item.channel);
     if (!bucket) continue;
 
-    // Встреча считается проведённой по этапу ИЛИ по закрытой задаче-встрече
-    // (Дмитрий, 31.08.2026). Второй признак нужен там, где карточку просто не
-    // двигают: у 60 из 66 сделок на этапе «Встреча проведена» такая задача
-    // есть, а на «Первом контакте» — у 2 из 160, то есть ложных срабатываний
-    // почти нет, зато находятся встречи, потерянные из-за необновлённого
-    // этапа.
-    const meetingHeld = item.peak >= thresholds.meetingHeldSort
-      || item.heldByTask;
-
-    // Лидом считается сделка, дошедшая до «Квалифицированный лид» или дальше.
-    // Успешно закрытая — лид всегда: до «Успешно» иначе не доходят. Как и
-    // сделка с проведённой встречей: встречу не проводят с неквалифицированным
-    // лидом, а этап карточки может отставать.
+    // Квал здесь нужен только правилу лид-магнита ниже; цифры «Лидов» и
+    // встреч считает `countCohortMetrics`. Лидом здесь считается сделка,
+    // дошедшая до «Квалифицированный лид» или дальше, успешно закрытая или
+    // с проведённой встречей — по этапу либо по закрытой задаче.
     const qualified = item.peak >= thresholds.qualifiedSort
       || item.wonByEnd
-      || meetingHeld;
+      || item.peak >= thresholds.meetingHeldSort
+      || item.heldByTask;
 
     // Лид-магниты («Бот:...») попадают в «Пришло» только когда прошли
     // квалификацию — иначе они раздувают воронку, ведь бот создаёт много
@@ -391,26 +443,101 @@ export function computeMetricsFromRows(
     if (!isLeadMagnet(item.name) || qualified) {
       bucket.arrived += 1;
     }
-
-    if (qualified) {
-      bucket.qualifiedLeads += 1;
-    }
-
-    if (meetingHeld) {
-      bucket.meetingsHeld += 1;
-    } else if (item.peak >= thresholds.meetingScheduledSort) {
-      // Встреча запланирована — дошли до «Назначена встреча», но не до
-      // проведённой. Сюда же попадает «Не вышел на звонок»: встречу назначали,
-      // клиент не пришёл.
-      bucket.meetingsScheduled += 1;
-    }
   }
+
+  countCohortMetrics(metrics, leads, eventsByDeal, cohortInputs, start, end);
 
   return channels.map((channel) => {
     const value = metrics.get(channel.name);
     if (!value) throw new Error(`Metrics bucket missing: ${channel.name}`);
     return value;
   });
+}
+
+/** Этап, на котором сделку завели: `from_value` первого перехода, без переходов — текущий. */
+function creationStatusId(
+  lead: AmoLeadMetricRow,
+  events: AmoStatusEventRow[],
+): number | null {
+  if (events.length === 0) return lead.status_id;
+  const first = events.reduce((a, b) => (
+    Date.parse(b.changed_at) < Date.parse(a.changed_at) ? b : a
+  ));
+  return toStatusId(first.from_value);
+}
+
+/**
+ * Квал и встречи по каналам — «по когорте» и «без когорты» (Дмитрий,
+ * 26.10.2026). Правила те же, что у дашборда первички, чтобы неделя давала
+ * одну цифру в обоих местах:
+ *
+ *   * квал — первая квалификация (`first_qualified_at`) внутри окна или,
+ *     только по когорте, повторная: сделку, уже бывшую квалом, вернули ниже и
+ *     снова перевели в квал (requalified.ts). Повторные показываются в
+ *     скобках. Несколько переводов одной сделки за неделю — один квал: за
+ *     19–23.10 в AMO 31 событие — это 28 сделок;
+ *   * встреча была — первая встреча по этапу (`first_meeting_at`) в окне или
+ *     закрытая задача-встреча при карточке, оставшейся на «Встреча назначена»
+ *     (`fetchTaskMeetings`). Этап «Встреча проведена» сам по себе засорён;
+ *   * встреча запланирована — сделку перевели в «Встреча назначена» за
+ *     неделю (или завели сразу на нём), а встречи не было ни в окне, ни
+ *     раньше: вторую встречу дашборд не считает, и «запланировано» её не ждёт.
+ *
+ * «Без когорты» — те же сделки, но только заведённые в окне. До 26.10.2026
+ * отчёт показывал только этот разрез, и встречи старых сделок (12 из 23 за
+ * неделю 16–23.10) не попадали никуда.
+ */
+function countCohortMetrics(
+  metrics: Map<string, ChannelMetrics>,
+  leads: AmoLeadMetricRow[],
+  eventsByDeal: Map<number, AmoStatusEventRow[]>,
+  inputs: CohortInputs,
+  start: Date,
+  end: Date,
+): void {
+  const infoById = new Map(inputs.deals.map((deal) => [deal.amo_id, deal]));
+  const scheduled = new Set(inputs.scheduledDealIds);
+  for (const lead of leads) {
+    if (!isInWindow(lead.created_at, start, end)) continue;
+    const events = eventsByDeal.get(lead.amo_id) ?? [];
+    if (creationStatusId(lead, events) === MEETING_SCHEDULED_STATUS.id) {
+      scheduled.add(lead.amo_id);
+    }
+  }
+
+  for (const row of inputs.stageDates) {
+    const info = infoById.get(row.amo_deal_id);
+    if (!info || isExcludedLeadName(info.name)) continue;
+    const channel = detectSummaryChannel(info.raw);
+    const bucket = channel ? metrics.get(channel) : undefined;
+    if (!bucket) continue;
+
+    const createdInWindow = isInWindow(row.created_at, start, end);
+    const firstQualified = row.history_complete
+      && isInWindow(row.first_qualified_at, start, end);
+    const requalified = !firstQualified
+      && isInWindow(inputs.requalified?.get(row.amo_deal_id) ?? null, start, end);
+    const held = isInWindow(row.first_meeting_at, start, end)
+      || inputs.taskMeetings.has(row.amo_deal_id);
+    const metBefore = row.first_meeting_at !== null
+      && Date.parse(row.first_meeting_at) < start.getTime();
+    const waiting = !held && !metBefore && scheduled.has(row.amo_deal_id);
+
+    if (firstQualified) {
+      bucket.qualifiedLeadsCohort += 1;
+      if (createdInWindow) bucket.qualifiedLeads += 1;
+    } else if (requalified) {
+      bucket.qualifiedLeadsCohort += 1;
+      bucket.requalifiedCohort += 1;
+    }
+    if (held) {
+      bucket.meetingsHeldCohort += 1;
+      if (createdInWindow) bucket.meetingsHeld += 1;
+    } else if (waiting) {
+      bucket.meetingsScheduledCohort += 1;
+      if (createdInWindow) bucket.meetingsScheduled += 1;
+    }
+  }
 }
 
 export async function computeAllChannelMetrics(
@@ -491,6 +618,8 @@ export async function computeAllChannelMetrics(
   warnOnUnknownStatuses(statusEvents, thresholds);
   warnOnUnknownSources(leads);
 
+  const cohortInputs = await fetchCohortInputs(db, thresholds.pipelineId, start, end);
+
   return computeMetricsFromRows(
     channels,
     statuses,
@@ -499,7 +628,103 @@ export async function computeAllChannelMetrics(
     start,
     end,
     meetingTaskChunks.flat(),
+    cohortInputs,
   );
+}
+
+const STAGE_DATE_COLUMNS =
+  'amo_deal_id, created_at, first_qualified_at, first_meeting_at, history_complete';
+
+/**
+ * Данные для `countCohortMetrics`: сделки воронки, у которых в окне что-то
+ * случилось, — теми же запросами, что у дашборда первички.
+ *
+ * Воронка — исходная (`pipeline_id` из `amo_lead_stage_dates_v`), как на
+ * дашборде, а не текущая: перенесённая сделка иначе теряла бы свою встречу.
+ * Задачи-встречи — `fetchTaskMeetings` дашборда целиком, без копии правила.
+ */
+async function fetchCohortInputs(
+  db: SupabaseClient,
+  pipelineId: number,
+  start: Date,
+  end: Date,
+): Promise<CohortInputs> {
+  const startIso = start.toISOString();
+  const endIso = end.toISOString();
+
+  const [stageRes, scheduledRes, taskMeetings, requalified] = await Promise.all([
+    db
+      .from('amo_lead_stage_dates_v')
+      .select(STAGE_DATE_COLUMNS)
+      .eq('pipeline_id', pipelineId)
+      .or(
+        `and(created_at.gte.${startIso},created_at.lt.${endIso}),`
+          + `and(first_qualified_at.gte.${startIso},first_qualified_at.lt.${endIso}),`
+          + `and(first_meeting_at.gte.${startIso},first_meeting_at.lt.${endIso})`,
+      ),
+    db
+      .from('amo_status_events_v')
+      .select('amo_deal_id')
+      .eq('event_type', 'lead_status_changed')
+      .eq('to_value', String(MEETING_SCHEDULED_STATUS.id))
+      .gte('changed_at', startIso)
+      .lt('changed_at', endIso),
+    // Окно у задач закрытое справа (`lte`), у отчёта — открытое; совпадение
+    // секунда в секунду с пятничными 18:00 на практике не встречается.
+    fetchTaskMeetings(db, pipelineId, start, end),
+    // Правая граница там включительно — отступаем на миллисекунду.
+    fetchRequalified(db, pipelineId, start, new Date(end.getTime() - 1)),
+  ]);
+  if (stageRes.error) throw stageRes.error;
+  if (scheduledRes.error) throw scheduledRes.error;
+
+  const stageDates = (stageRes.data ?? []) as AmoStageDatesRow[];
+  const scheduledDealIds = [
+    ...new Set(
+      ((scheduledRes.data ?? []) as Array<{ amo_deal_id: number }>)
+        .map((row) => Number(row.amo_deal_id)),
+    ),
+  ];
+
+  // Назначенные и задачи-встречи окно по датам этапов не ловит — дотягиваем
+  // их даты по id. Фильтр воронки здесь же отсекает чужие воронки.
+  const seen = new Set(stageDates.map((row) => Number(row.amo_deal_id)));
+  const missing = [
+    ...new Set([...scheduledDealIds, ...taskMeetings.keys(), ...requalified.keys()]),
+  ]
+    .filter((id) => !seen.has(id));
+  const extraChunks = await Promise.all(
+    chunkArray(missing, IN_CHUNK_SIZE).map(async (chunk) => {
+      const { data, error } = await db
+        .from('amo_lead_stage_dates_v')
+        .select(STAGE_DATE_COLUMNS)
+        .eq('pipeline_id', pipelineId)
+        .in('amo_deal_id', chunk);
+      if (error) throw error;
+      return (data ?? []) as AmoStageDatesRow[];
+    }),
+  );
+  stageDates.push(...extraChunks.flat());
+
+  const dealIds = stageDates.map((row) => Number(row.amo_deal_id));
+  const dealChunks = await Promise.all(
+    chunkArray(dealIds, IN_CHUNK_SIZE).map(async (chunk) => {
+      const { data, error } = await db
+        .from('amo_leads')
+        .select('amo_id, name, raw')
+        .in('amo_id', chunk);
+      if (error) throw error;
+      return (data ?? []) as AmoDealInfoRow[];
+    }),
+  );
+
+  return {
+    stageDates,
+    deals: dealChunks.flat(),
+    scheduledDealIds,
+    taskMeetings,
+    requalified,
+  };
 }
 
 /**
