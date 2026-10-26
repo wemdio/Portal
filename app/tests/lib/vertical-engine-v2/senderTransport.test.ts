@@ -43,6 +43,14 @@ import {
 } from '@/lib/verticalEngineV2/senderTransport/labels';
 import { summarizeVeSenderPool } from '@/lib/verticalEngineV2/senderTransport/senderPool';
 import { startVeSenderBundle } from '@/lib/verticalEngineV2/senderTransport/senderStart';
+import { loadSenderThread } from '@/lib/senderLeads/context';
+import { qualifyReply } from '@/lib/instantly/leadQualifier';
+import { runSenderLeadsPass } from '@/lib/senderLeads/process';
+import { loadCampaignSettings } from '@/lib/senderLeads/settings';
+import { isClientPartyReply, withProjectLeadSettings } from '@/lib/senderLeads/projectScope';
+import { runSenderProjectLeadCardsPass } from '@/lib/senderLeads/projectLeadCards';
+import { handleSenderProjectLeadCallback } from '@/lib/senderLeads/projectLeadCallbacks';
+import { signSenderLeadAction, verifySenderLeadAction } from '@/lib/senderLeads/projectLeadTelegram';
 import {
   decideVeLaunchTransport,
   resolveVeLaunchTransport,
@@ -67,6 +75,11 @@ jest.mock('@/lib/clientReports/ledgerStore', () => ({
   startAppendLedgerBatch: jest.fn(async () => ({ batchId: 'batch-1' })),
   completeAppendLedgerBatch: jest.fn(async () => undefined),
   failAppendLedgerBatch: jest.fn(async () => undefined),
+}));
+jest.mock('@/lib/senderLeads/context', () => ({ loadSenderThread: jest.fn() }));
+jest.mock('@/lib/instantly/leadQualifier', () => ({
+  ...jest.requireActual('@/lib/instantly/leadQualifier'),
+  qualifyReply: jest.fn(),
 }));
 jest.mock('@/lib/sender/campaignOps', () => {
   class SenderOpError extends Error {
@@ -640,5 +653,387 @@ describe('экраны VE2 для «Рассылки»', () => {
     await db.from('ve_launch_queue_items').update({ status: 'released' }).eq('id', 'i1');
     expect(await loadContactUploadStatus(db as never, 've1', 't1')).toMatchObject({ transport: 'sender', launch_closed: true });
     expect(await loadContactUploadStatus(db as never, 've1', 't2')).not.toHaveProperty('transport');
+  });
+});
+
+describe('лиды кампаний Движка в «Рассылке» — как у Instantly (этап 5)', () => {
+  const RID = '11111111-1111-4111-8111-111111111111';
+  const REPLY = '22222222-2222-4222-8222-222222222222';
+  const TOKEN = 'bot-token';
+  const ENV = {
+    LEAD_ALERTS_TELEGRAM_BOT_TOKEN: TOKEN, LEAD_ALERTS_TELEGRAM_CHAT_ID: '-100500', LEAD_HANDOFF_ENABLED: 'true',
+    PORTAL_PUBLIC_URL: 'https://portal.test',
+  } as unknown as NodeJS.ProcessEnv;
+  const project = (extra: Record<string, unknown> = {}) => ({
+    id: 'pp1', client: 'ООО Клиент', specialist_user_id: 'u-spec', specialist: null, manager: null,
+    handoff_email: 'client@client.ru', handoff_legend: 'Добрый день, [Имя]! Передаю вас коллегам.', handoff_auto_send: false,
+    handoff_ai_adapt: false, tag_project_lead_in_telegram: false, brief_text: 'Продаём CRM клиникам', lead_criteria: 'Лид — просит КП',
+    client_user_id: 'client-1', ...extra,
+  });
+
+  /** Таблицы основной базы и функции миграции 20261026_0010 поверх них. */
+  function leadDb(
+    projectExtra: Record<string, unknown> = {},
+    extra: Record<string, Record<string, unknown>[]> = {},
+    errorUpdates: Record<string, { message: string; patchIncludes?: Record<string, unknown> }> = {},
+  ) {
+    return createMockSupabase({
+      errorUpdates,
+      tables: {
+        sender_project_lead_settings: [{ id: true, enabled: true, enabled_at: '2026-10-26T00:00:00Z' }],
+        projects: [project(projectExtra)],
+        profiles: [
+          { id: 'u-spec', full_name: 'Анна Специалист', email: 'anna@polza.ru', role: 'manager' },
+          { id: 'u-other', full_name: 'Пётр Другой', email: 'petr@polza.ru', role: 'manager' },
+        ],
+        telegram_links: [{ user_id: 'u-spec', telegram_id: 111, telegram_username: 'anna' }, { user_id: 'u-other', telegram_id: 222, telegram_username: 'petr' }],
+        sender_campaigns: [
+          { id: 'c1', name: 'Клиники · 26.10', source_kind: 've2', project_id: 'pp1', client_user_id: 'client-1', sender_folders: null },
+          { id: 'cf', name: 'Папка', source_kind: 'polza_ru', project_id: null, client_user_id: null,
+            sender_folders: { id: 'f1', key: 'auto_ru', name: 'Авто', lead_criteria: null, leads_enabled: true, leads_telegram: true } },
+        ],
+        sender_recipients: [{
+          id: RID, campaign_id: 'c1', email: 'lead@acme.ru', name: 'Иван', vars: { company_name: 'Acme', website: 'acme.ru' },
+          mailbox_id: 'm1', thread_message_id: '<t1@x>', status: 'replied', lead_verdict: 'lead', lead_verdict_source: 'ai', last_step_sent: 2,
+        }],
+        sender_mailboxes: [{ id: 'm1', email: 'box@x.ru', status: 'verified', enabled: true }],
+        sender_messages: [{ recipient_id: RID, step_no: 1, subject: 'Предложение' }],
+        sender_replies: [{
+          id: REPLY, recipient_id: RID, kind: 'human', from_email: 'lead@acme.ru', from_name: 'Иван', subject: 'Re: Предложение',
+          body: 'Пришлите КП. Тел. +7 999 123-45-67', message_id: '<r1@acme>', received_at: '2026-10-26T10:00:00Z',
+          created_at: '2026-10-26T10:00:01Z', to_emails: ['box@x.ru'], cc_emails: [],
+        }],
+        sender_reply_qualifications: [{ reply_id: REPLY, recipient_id: RID, campaign_id: 'c1', status: 'lead', ai_reason: 'Просит КП', qualified_at: '2026-10-26T10:01:00Z' }],
+        sender_manual_messages: [],
+        sender_project_lead_cards: [],
+        notifications: [],
+        deadline_notification_log: [],
+        ...extra,
+      },
+      rpcHandlers: {
+        sender_project_lead_candidates: (_params, db) => {
+          const settings = db.getRows('sender_project_lead_settings')[0];
+          if (!settings?.enabled) return { data: [] };
+          const cards = db.getRows('sender_project_lead_cards');
+          const data = db.getRows('sender_reply_qualifications').flatMap((q) => {
+            const campaign = db.getRows('sender_campaigns').find((c) => c.id === q.campaign_id);
+            const recipient = db.getRows('sender_recipients').find((r) => r.id === q.recipient_id);
+            const card = cards.find((c) => c.recipient_id === q.recipient_id);
+            const fresh = String(q.qualified_at) >= String(settings.enabled_at);
+            const manualNotLead = recipient?.lead_verdict === 'not_lead' && recipient?.lead_verdict_source === 'manual';
+            const open = !card || (!(card.merged_reply_ids as string[]).includes(String(q.reply_id))
+              && ((card.board_written_at && ['card_sent', 'queued', 'sent'].includes(String(card.status))) || card.status === 'undelivered'));
+            return q.status === 'lead' && fresh && campaign?.source_kind === 've2' && campaign.project_id && recipient && !manualNotLead && open
+              ? [{ reply_id: q.reply_id, recipient_id: q.recipient_id, campaign_id: q.campaign_id, project_id: campaign.project_id, has_card: Boolean(card), card_status: card?.status ?? null }]
+              : [];
+          });
+          return { data };
+        },
+        sender_project_lead_card_events: (_params, db) => {
+          const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+          const handoffs = (recipientId: unknown) => db.getRows('sender_manual_messages')
+            .filter((m) => m.recipient_id === recipientId && m.handoff)
+            .sort((a, b) => String(a.created_at ?? '').localeCompare(String(b.created_at ?? '')));
+          const data = db.getRows('sender_project_lead_cards').flatMap((card) => {
+            const h = handoffs(card.recipient_id).at(-1);
+            const recipient = db.getRows('sender_recipients').find((r) => r.id === card.recipient_id)!;
+            const status = String(card.status);
+            const hOpen = !h || h.status === 'failed';
+            const kind = h?.status === 'sent' && !['sent', 'pending'].includes(status) ? 'sent'
+              : h?.status === 'sent' && status === 'pending' && card.board_written_at && !card.board_published_at ? 'publish'
+                : h?.status === 'failed'
+                  && ((status === 'queued' && (h.id === card.manual_message_id || String(h.created_at) >= String(card.decided_at ?? card.created_at)))
+                    || (status === 'card_sent' && card.handoff_mode === 'auto' && String(h.created_at) >= String(card.created_at))) ? 'failed'
+                  : ['card_sent', 'handoff_failed', 'undelivered'].includes(status)
+                    && recipient.lead_verdict === 'not_lead' && recipient.lead_verdict_source === 'manual' && hOpen ? 'not_lead'
+                    : status === 'card_sent' && card.handoff_mode === 'auto' && card.blocked_reason && !card.manual_message_id
+                      && (!h || (h.status === 'failed' && String(h.created_at) < String(card.created_at)))
+                      && String(card.next_attempt_at ?? '') <= new Date().toISOString() ? 'auto_retry'
+                      : status === 'queued' && !card.manual_message_id && String(card.updated_at) < minutesAgo(10)
+                        && !handoffs(card.recipient_id).some((m) => String(m.created_at ?? '') >= String(card.decided_at ?? card.created_at)) ? 'stuck'
+                        : status !== 'pending' && card.tg_message_id && card.tg_rendered_status !== status && String(card.updated_at) < minutesAgo(2) ? 'render'
+                          : null;
+            return kind ? [{
+              recipient_id: card.recipient_id, kind, status, handoff_id: h?.id ?? null, handoff_status: h?.status ?? null,
+              handoff_error: h?.error ?? null, handoff_cc: h?.cc_emails ?? null,
+              lead_verdict: recipient.lead_verdict, lead_verdict_source: recipient.lead_verdict_source,
+            }] : [];
+          });
+          return { data };
+        },
+        enqueue_sender_auto_leads_crm: () => ({ data: null }),
+      },
+    });
+  }
+  // База Instantly: доска лидов и пустые стоп-листы клиента.
+  const boardDb = () => createMockSupabase({
+    tables: { project_lead_boards: [], project_lead_board_rows: [], project_contact_blocks: [] },
+    rpcHandlers: { client_blocklist_snapshot: () => ({ data: { count: 0, emails: [] } }) },
+  });
+  const log = () => undefined;
+  const passDeps = (db: ReturnType<typeof leadDb>, instantlyDb: ReturnType<typeof boardDb>) => {
+    const post = jest.fn(async (_card: unknown) => 777);
+    const edit = jest.fn(async (_card: unknown) => undefined);
+    const draft = jest.fn(async () => 'Иван, передаю вас клиенту.');
+    return { deps: { db: db as never, instantlyDb: instantlyDb as never, log, env: ENV, post, edit, draft }, post, edit, draft };
+  };
+  const press = (data: string, telegramId = 111, messageId = 777) => ({
+    callback_query: { id: 'cq1', data, from: { id: telegramId }, message: { message_id: messageId, chat: { id: -100500 } } },
+  });
+  const previousSecret = process.env.GUEST_TOKEN_SECRET;
+  beforeAll(() => { process.env.GUEST_TOKEN_SECRET = 'board-secret'; });
+  afterAll(() => { process.env.GUEST_TOKEN_SECRET = previousSecret; });
+
+  it('ответ кампании Движка оценивается по брифу и критерию проекта, письмо клиента проекта — не лид, папки — как были', async () => {
+    const db = leadDb({}, {
+      sender_lead_queue: [
+        { reply_id: 'r-lead', recipient_id: RID, campaign_id: 'c1', created_at: '2026-10-26T10:00:00Z' },
+        { reply_id: 'r-client', recipient_id: RID, campaign_id: 'c1', created_at: '2026-10-26T10:05:00Z' },
+        { reply_id: 'r-folder', recipient_id: 'rf', campaign_id: 'cf', created_at: '2026-10-26T10:06:00Z' },
+      ],
+      sender_reply_qualifications: [],
+    });
+    const thread = (from: string) => ({ context: { replyEmail: { timestamp_email: '2026-10-26T10:00:00Z' } }, replyFrom: from, replySubject: 'Re', replyBody: 'текст' });
+    jest.mocked(loadSenderThread).mockImplementation(async (_db, replyId) => (
+      replyId === 'r-client' ? thread('Boss@Client.ru') : thread(replyId === 'r-folder' ? 'x@folder.ru' : 'lead@acme.ru')) as never);
+    jest.mocked(qualifyReply).mockReset().mockResolvedValue({ isLead: true, reason: 'Просит КП', interestSignals: [] } as never);
+    const previous = process.env.SENDER_LEADS_AI_API_KEY;
+    process.env.SENDER_LEADS_AI_API_KEY = 'ai-key';
+    try {
+      await runSenderLeadsPass(db as never, log);
+    } finally {
+      process.env.SENDER_LEADS_AI_API_KEY = previous;
+    }
+    const calls = jest.mocked(qualifyReply).mock.calls;
+    expect(calls.map((call) => call[0])).toEqual(['c1', 'cf']);
+    expect(calls[0][3]).toMatchObject({ briefText: 'Продаём CRM клиникам', leadCriteria: 'Лид — просит КП' });
+    expect(calls[1][3]).toMatchObject({ briefText: '', leadCriteria: null });
+    // Письмо с домена клиента после передачи — не оценивается и не меняет итог переписки лида.
+    expect(db.getRows('sender_reply_qualifications').find((row) => row.reply_id === 'r-client'))
+      .toMatchObject({ status: 'skipped', last_error: expect.stringContaining('ответ клиента проекта') });
+    expect(isClientPartyReply('someone@gmail.com', { addresses: ['owner@gmail.com'], domains: [] })).toBe(false);
+
+    // Проект не прочитан — ждут только ответы кампаний Движка.
+    const broken = createMockSupabase({ tables: { sender_campaigns: db.getRows('sender_campaigns') }, errorTables: { projects: 'нет связи' } });
+    const settings = await withProjectLeadSettings(broken as never, await loadCampaignSettings(broken as never, ['c1', 'cf']));
+    expect(settings.get('c1')?.settings).toMatchObject({ route: 'project', projectError: expect.stringContaining('нет связи') });
+    expect(settings.get('cf')?.settings).not.toHaveProperty('projectError');
+  });
+
+  it('лид — одна карточка специалисту с «Передать» и «Не лид», строка доски скрыта до передачи; кнопки — только ответственному', async () => {
+    const db = leadDb();
+    const instantlyDb = boardDb();
+    const { deps, post, edit } = passDeps(db, instantlyDb);
+    await runSenderProjectLeadCardsPass(deps);
+    await runSenderProjectLeadCardsPass(deps);
+    expect(post).toHaveBeenCalledTimes(1);
+    const card = post.mock.calls[0][0] as unknown as { html: string; keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>>; threadId: number | null };
+    expect(card.html).toContain('Новый лид из «Рассылки»');
+    expect(card.html).toContain('<a href="tg://user?id=111">Анна Специалист</a>');
+    expect(card.html).toContain('Иван, передаю вас клиенту.');
+    expect(card.html).toContain('client@client.ru');
+    expect(card.threadId).toBeNull();
+    expect(card.keyboard.map((row) => row[0].text)).toEqual(['➡️ Передать клиенту', 'Не лид', 'Открыть переписку']);
+    expect(verifySenderLeadAction(card.keyboard[0][0].callback_data, TOKEN)).toEqual({ action: 'p', recipientId: RID });
+    expect(card.keyboard[0][0].callback_data!.length).toBeLessThanOrEqual(64);
+    expect(db.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'card_sent', handoff_mode: 'manual', tg_message_id: 777, tg_rendered_status: 'card_sent' });
+    expect(instantlyDb.getRows('project_lead_board_rows')).toEqual([expect.objectContaining({
+      qualification_id: RID, project_id: 'pp1', specialist_review_required: true, source: 'sender', lead_email: 'lead@acme.ru',
+      phone: expect.stringContaining('999'), request_text: expect.stringContaining('КП'),
+    })]);
+    expect(db.getRows('notifications')).toEqual([expect.objectContaining({ user_id: 'u-spec', type: 'lead_new', entity_id: REPLY, title: 'Новый квалифицированный лид' })]);
+
+    const answer = jest.fn(async () => undefined);
+    const callbackDeps = { main: db as never, instantlyDb: instantlyDb as never, env: ENV, edit, answer, log };
+    expect(await handleSenderProjectLeadCallback(press('h.whatever'), TOKEN, callbackDeps)).toBe(false);
+    await handleSenderProjectLeadCallback(press(`p.${RID}.${'A'.repeat(24)}`), TOKEN, callbackDeps);
+    await handleSenderProjectLeadCallback(press(signSenderLeadAction('p', RID, TOKEN), 222), TOKEN, callbackDeps);
+    expect(answer.mock.calls.map((call) => (call as unknown[])[2])).toEqual(['Некорректная кнопка', 'Нажать может ответственный за проект']);
+    expect(db.getRows('sender_manual_messages')).toEqual([]);
+
+    // «Передать» — письмо в очереди «Рассылки» с клиентом в копии; второе нажатие — «уже передано».
+    await handleSenderProjectLeadCallback(press(signSenderLeadAction('p', RID, TOKEN)), TOKEN, callbackDeps);
+    await handleSenderProjectLeadCallback(press(signSenderLeadAction('x', RID, TOKEN)), TOKEN, callbackDeps);
+    expect(answer.mock.calls.slice(2).map((call) => (call as unknown[])[2])).toEqual(['Передача в очереди — письмо уйдёт из «Рассылки», клиент в копии', 'Уже передано']);
+    const [handoff] = db.getRows('sender_manual_messages');
+    expect(handoff).toMatchObject({ recipient_id: RID, to_email: 'lead@acme.ru', cc_emails: ['client@client.ru'], status: 'queued', created_by: 'u-spec' });
+    expect(String(handoff.body)).toContain('Иван, передаю вас клиенту.');
+    expect(db.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'queued', decided_by_telegram_id: 111 });
+
+    // Письмо ушло — строка открывается клиенту, карточка закрывается, эскалации больше нет.
+    await db.from('sender_manual_messages').update({ status: 'sent' }).eq('id', handoff.id);
+    await runSenderProjectLeadCardsPass(deps);
+    expect(instantlyDb.getRows('project_lead_board_rows')[0]).toMatchObject({ specialist_review_required: false });
+    expect(db.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'sent', tg_rendered_status: 'sent', board_published_at: expect.any(String) });
+    expect(db.getRows('notifications')[0]).toMatchObject({ is_read: true });
+    expect(String((edit.mock.calls.at(-1) as unknown as [{ html: string }])[0].html)).toContain('✅ <b>Передано клиенту</b>');
+  });
+
+  it('без настроенной передачи лид сразу у клиента, «Не лид» скрывает его; автопередача ставит письмо сама; выключатель останавливает новые карточки', async () => {
+    const db = leadDb({ handoff_legend: '' });
+    const instantlyDb = boardDb();
+    const { deps, post, edit } = passDeps(db, instantlyDb);
+    await runSenderProjectLeadCardsPass(deps);
+    const card = post.mock.calls[0][0] as unknown as { keyboard: Array<Array<{ text: string }>> };
+    expect(card.keyboard.map((row) => row[0].text)).toEqual(['Не лид', 'Открыть переписку']);
+    expect(instantlyDb.getRows('project_lead_board_rows')[0]).not.toHaveProperty('specialist_review_required');
+    const answer = jest.fn(async () => undefined);
+    await handleSenderProjectLeadCallback(press(signSenderLeadAction('x', RID, TOKEN)), TOKEN, { main: db as never, instantlyDb: instantlyDb as never, env: ENV, edit, answer, log });
+    expect(answer).toHaveBeenLastCalledWith(TOKEN, 'cq1', 'Сохранено: не лид', false);
+    expect(instantlyDb.getRows('project_lead_board_rows')[0]).toMatchObject({ specialist_review_required: true });
+    expect(db.getRows('sender_recipients')[0]).toMatchObject({ lead_verdict: 'not_lead', lead_verdict_source: 'manual', lead_verdict_by: 'u-spec' });
+    expect(db.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'rejected', tg_rendered_status: 'rejected' });
+
+    // Итог переписки не записался — карточка снова ждёт решения, строка доски не тронута.
+    const failDb = leadDb({ handoff_legend: '' }, {}, { sender_recipients: { message: 'нет связи', patchIncludes: { lead_verdict: 'not_lead' } } });
+    const failBoard = boardDb();
+    const failed = passDeps(failDb, failBoard);
+    await runSenderProjectLeadCardsPass(failed.deps);
+    const failAnswer = jest.fn(async () => undefined);
+    await handleSenderProjectLeadCallback(press(signSenderLeadAction('x', RID, TOKEN)), TOKEN, { main: failDb as never, instantlyDb: failBoard as never, env: ENV, edit: failed.edit, answer: failAnswer, log });
+    expect(failAnswer).toHaveBeenLastCalledWith(TOKEN, 'cq1', 'Не удалось — повторите', true);
+    expect(failDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'card_sent', decided_at: null });
+    expect(failBoard.getRows('project_lead_board_rows')[0]).not.toHaveProperty('specialist_review_required');
+
+    // Автопередача: письмо в очереди раньше карточки, на карточке нет кнопок решения.
+    const autoDb = leadDb({ handoff_auto_send: true });
+    const auto = passDeps(autoDb, boardDb());
+    await runSenderProjectLeadCardsPass(auto.deps);
+    expect(autoDb.getRows('sender_manual_messages')).toEqual([expect.objectContaining({ recipient_id: RID, status: 'queued', created_by: 'u-spec' })]);
+    const autoCard = auto.post.mock.calls[0][0] as unknown as { html: string; keyboard: Array<Array<{ text: string }>> };
+    expect(autoCard.html).toContain('Автопередача включена');
+    expect(autoCard.keyboard.map((row) => row[0].text)).toEqual(['Открыть переписку']);
+    expect(autoDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'queued' });
+    // Письмо не ушло — карточка говорит об этом, передать можно заново.
+    await autoDb.from('sender_manual_messages').update({ status: 'failed', error: 'Ящик недоступен' }).eq('recipient_id', RID);
+    await runSenderProjectLeadCardsPass(auto.deps);
+    expect(autoDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'handoff_failed' });
+    expect(String((auto.edit.mock.calls.at(-1) as unknown as [{ html: string }])[0].html)).toContain('Письмо передачи не ушло');
+
+    // Ящик переписки недоступен — карточка приходит с причиной, автопередача повторяется сама после починки.
+    const boxDb = leadDb({ handoff_auto_send: true }, { sender_mailboxes: [{ id: 'm1', email: 'box@x.ru', status: 'verified', enabled: false }] });
+    const box = passDeps(boxDb, boardDb());
+    await runSenderProjectLeadCardsPass(box.deps);
+    expect(boxDb.getRows('sender_manual_messages')).toEqual([]);
+    expect(boxDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'card_sent', blocked_reason: expect.stringContaining('Ящик переписки недоступен') });
+    expect(String((box.post.mock.calls[0][0] as unknown as { html: string }).html)).toContain('Автопередача отложена');
+    // Ящик всё ещё лежит — ждём дальше; неделю спустя карточка честно говорит, что автопередачи не будет.
+    await boxDb.from('sender_project_lead_cards').update({ next_attempt_at: '2000-01-01T00:00:00Z' }).eq('recipient_id', RID);
+    await runSenderProjectLeadCardsPass(box.deps);
+    expect(String(boxDb.getRows('sender_project_lead_cards')[0].next_attempt_at) > new Date().toISOString()).toBe(true);
+    expect(box.edit).not.toHaveBeenCalled();
+    await boxDb.from('sender_project_lead_cards').update({ next_attempt_at: '2000-01-01T00:00:00Z', created_at: '2000-01-01T00:00:00Z' }).eq('recipient_id', RID);
+    await runSenderProjectLeadCardsPass(box.deps);
+    expect(boxDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'card_sent', next_attempt_at: '9999-01-01T00:00:00.000Z', tg_rendered_status: 'card_sent' });
+    expect(String((box.edit.mock.calls.at(-1) as unknown as [{ html: string }])[0].html)).toContain('Автопередача не состоится');
+    await boxDb.from('sender_mailboxes').update({ enabled: true }).eq('id', 'm1');
+    await boxDb.from('sender_project_lead_cards').update({ next_attempt_at: '2000-01-01T00:00:00Z', created_at: new Date().toISOString() }).eq('recipient_id', RID);
+    await runSenderProjectLeadCardsPass(box.deps);
+    expect(boxDb.getRows('sender_manual_messages')).toEqual([expect.objectContaining({ recipient_id: RID, status: 'queued', created_by: 'u-spec' })]);
+    expect(boxDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'queued', blocked_reason: null });
+
+    // Передано из «Писем» ещё до карточки — карточка сразу «передано», строка открыта, эскалации нет.
+    const sentDb = leadDb({}, { sender_manual_messages: [{
+      id: 'h0', recipient_id: RID, handoff: { by: 'letters' }, status: 'sent', cc_emails: ['client@client.ru'], created_at: '2026-10-26T10:30:00Z',
+    }] });
+    const sentBoard = boardDb();
+    const early = passDeps(sentDb, sentBoard);
+    await runSenderProjectLeadCardsPass(early.deps);
+    expect(sentDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'sent', manual_message_id: 'h0', board_published_at: expect.any(String) });
+    expect(sentBoard.getRows('project_lead_board_rows')[0]).toMatchObject({ specialist_review_required: false });
+    expect([sentDb.getRows('notifications'), sentDb.getRows('deadline_notification_log')]).toEqual([[], []]);
+    expect(String((early.post.mock.calls[0][0] as unknown as { html: string }).html)).toContain('✅ <b>Передано клиенту</b>');
+
+    // «Не лид» из Telegram оборвался после захвата карточки — воркер дописывает итог и скрывает строку.
+    const halfDb = leadDb({ handoff_legend: '' });
+    const halfBoard = boardDb();
+    const half = passDeps(halfDb, halfBoard);
+    await runSenderProjectLeadCardsPass(half.deps);
+    await halfDb.from('sender_project_lead_cards').update({ status: 'rejected', decided_by_user_id: 'u-spec', decided_at: '2026-10-26T12:00:00Z' }).eq('recipient_id', RID);
+    await halfDb.from('notifications').update({ is_read: false }).eq('entity_id', REPLY);
+    // Пока нажатие могло не закончиться, воркер не вмешивается.
+    await runSenderProjectLeadCardsPass(half.deps);
+    expect(halfDb.getRows('sender_recipients')[0]).toMatchObject({ lead_verdict: 'lead' });
+    await halfDb.from('sender_project_lead_cards').update({ updated_at: '2000-01-01T00:00:00Z' }).eq('recipient_id', RID);
+    await runSenderProjectLeadCardsPass(half.deps);
+    expect(halfDb.getRows('sender_recipients')[0]).toMatchObject({ lead_verdict: 'not_lead', lead_verdict_source: 'manual', lead_verdict_by: 'u-spec' });
+    expect(halfBoard.getRows('project_lead_board_rows')[0]).toMatchObject({ specialist_review_required: true });
+    expect(halfDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ tg_rendered_status: 'rejected' });
+    expect(halfDb.getRows('notifications')[0]).toMatchObject({ is_read: true });
+    // Оборвалось, а передача из «Писем» уже стоит в очереди — карточка возвращается к кнопкам, итог не трогаем.
+    const queuedDb = leadDb({}, { sender_manual_messages: [{
+      id: 'h1', recipient_id: RID, handoff: { by: 'letters' }, status: 'queued', cc_emails: ['client@client.ru'], created_at: '2026-10-26T13:00:00Z',
+    }] });
+    const queuedRun = passDeps(queuedDb, boardDb());
+    await runSenderProjectLeadCardsPass(queuedRun.deps);
+    await queuedDb.from('sender_project_lead_cards').update({
+      status: 'rejected', decided_by_user_id: 'u-spec', decided_at: '2026-10-26T14:00:00Z', tg_rendered_status: 'card_sent', updated_at: '2000-01-01T00:00:00Z',
+    }).eq('recipient_id', RID);
+    await runSenderProjectLeadCardsPass(queuedRun.deps);
+    expect(queuedDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'card_sent', decided_at: null });
+    expect(queuedDb.getRows('sender_recipients')[0]).toMatchObject({ lead_verdict: 'lead', lead_verdict_source: 'ai' });
+
+    // Карточку так и не доставили, а в «Рассылке» отметили «Не лид» — открытая строка всё равно скрывается.
+    const lostDb = leadDb({ handoff_legend: '' });
+    const lostBoard = boardDb();
+    await runSenderProjectLeadCardsPass(passDeps(lostDb, lostBoard).deps);
+    await lostDb.from('sender_project_lead_cards').update({ status: 'undelivered', tg_message_id: null }).eq('recipient_id', RID);
+    await lostDb.from('sender_recipients').update({ lead_verdict: 'not_lead', lead_verdict_source: 'manual' }).eq('id', RID);
+    await runSenderProjectLeadCardsPass(passDeps(lostDb, lostBoard).deps);
+    expect(lostDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'rejected' });
+    expect(lostBoard.getRows('project_lead_board_rows')[0]).toMatchObject({ specialist_review_required: true });
+
+    // Выключатель: новые карточки не заводятся; лид, оценённый до отсечки, — тоже.
+    const offDb = leadDb({}, { sender_project_lead_settings: [{ id: true, enabled: false, enabled_at: '2026-10-26T00:00:00Z' }] });
+    const off = passDeps(offDb, boardDb());
+    await runSenderProjectLeadCardsPass(off.deps);
+    const oldDb = leadDb({}, { sender_project_lead_settings: [{ id: true, enabled: true, enabled_at: '2026-10-27T00:00:00Z' }] });
+    const old = passDeps(oldDb, boardDb());
+    await runSenderProjectLeadCardsPass(old.deps);
+    expect([off.post, old.post].map((fn) => fn.mock.calls.length)).toEqual([0, 0]);
+    expect([...offDb.getRows('sender_project_lead_cards'), ...oldDb.getRows('sender_project_lead_cards')]).toEqual([]);
+  });
+
+  it('«Не лид» из «Рассылки» закрывает карточку и скрывает строку; второй ответ-лид дописывается в ту же строку без второй карточки', async () => {
+    const db = leadDb();
+    const instantlyDb = boardDb();
+    const { deps, post } = passDeps(db, instantlyDb);
+    await runSenderProjectLeadCardsPass(deps);
+    // Версия строки доски — значение по умолчанию в Postgres, мок его не ставит.
+    await instantlyDb.from('project_lead_board_rows').update({ updated_at: '2026-10-26T10:02:00Z' }).eq('qualification_id', RID);
+    // Ещё один ответ-лид той же переписки.
+    await db.from('sender_replies').insert({
+      id: 'r2', recipient_id: RID, kind: 'human', from_email: 'lead@acme.ru', from_name: 'Иван', subject: 'Re', body: 'И ещё вопрос по цене',
+      message_id: '<r2@acme>', received_at: '2026-10-26T11:00:00Z', created_at: '2026-10-26T11:00:00Z',
+    });
+    await db.from('sender_reply_qualifications').insert({ reply_id: 'r2', recipient_id: RID, campaign_id: 'c1', status: 'lead', ai_reason: 'Цена', qualified_at: '2026-10-26T11:01:00Z' });
+    await runSenderProjectLeadCardsPass(deps);
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(db.getRows('sender_project_lead_cards')[0].merged_reply_ids).toEqual([REPLY, 'r2']);
+    expect(instantlyDb.getRows('project_lead_board_rows')[0].request_text).toContain('по цене');
+
+    // Позже ИИ счёл ответ «не лидом» («спасибо, получили») — настоящего лида это не отменяет.
+    await db.from('sender_recipients').update({ lead_verdict: 'not_lead', lead_verdict_source: 'ai' }).eq('id', RID);
+    await runSenderProjectLeadCardsPass(deps);
+    expect(db.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'card_sent' });
+
+    await db.from('sender_recipients').update({ lead_verdict: 'not_lead', lead_verdict_source: 'manual' }).eq('id', RID);
+    await runSenderProjectLeadCardsPass(deps);
+    expect(db.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'rejected', tg_rendered_status: 'rejected' });
+    expect(instantlyDb.getRows('project_lead_board_rows')[0]).toMatchObject({ specialist_review_required: true });
+
+    // Карточка ушла в Telegram, а итог не записался — следующая попытка правит ту же карточку, второй нет.
+    const flaky: Record<string, { message: string; patchIncludes?: Record<string, unknown> }> = {
+      sender_project_lead_cards: { message: 'сбой записи', patchIncludes: { tg_rendered_status: 'card_sent' } },
+    };
+    const dupDb = leadDb({}, {}, flaky);
+    const dup = passDeps(dupDb, boardDb());
+    await runSenderProjectLeadCardsPass(dup.deps);
+    expect(dupDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'pending', tg_message_id: 777 });
+    delete flaky.sender_project_lead_cards;
+    await dupDb.from('sender_project_lead_cards').update({ next_attempt_at: '2000-01-01T00:00:00Z' }).eq('recipient_id', RID);
+    await runSenderProjectLeadCardsPass(dup.deps);
+    expect([dup.post.mock.calls.length, dup.edit.mock.calls.length]).toEqual([1, 1]);
+    expect(dupDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'card_sent', tg_message_id: 777, tg_rendered_status: 'card_sent' });
   });
 });

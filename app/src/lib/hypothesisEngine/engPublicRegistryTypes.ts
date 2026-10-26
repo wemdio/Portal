@@ -1,5 +1,5 @@
 /** Server-generated ENG discovery inputs. Registry records are never validated contacts. */
-export type HeEngRegistryProvider = 'brreg' | 'france' | 'fdic' | 'nppes' | 'fmcsa' | 'companies_house' | 'gleif' | 'osm' | 'pra' | 'esma';
+export type HeEngRegistryProvider = 'brreg' | 'france' | 'fdic' | 'nppes' | 'fmcsa' | 'companies_house' | 'gleif' | 'osm' | 'pra' | 'esma' | 'eba';
 
 export interface HeEngRegistryTask {
   id: string;
@@ -38,6 +38,8 @@ export interface HeEngRegistryCandidate {
   employeeYear?: number;
   /** GLEIF: the entity's number in its local register («HRB 7876»), checked on its own site. */
   localRegistryId?: string;
+  /** EBA: the supervisor's own reference («F0038» at DNB, «C58301» at the Central Bank of Ireland), checked on its own site. */
+  supervisorReference?: string;
   website: string;
   emails: string[];
   description: string;

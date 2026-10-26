@@ -7,6 +7,7 @@ import { sendHandoffNow, type PendingHandoffRow } from '@/lib/instantly/handoffS
 import { handleHandoffEditor, type HandoffEditUpdate } from '@/lib/instantly/handoffEditor';
 import { canActOnManualHandoff } from '@/lib/instantly/handoffAuthorization';
 import { rejectManualHandoff, rejectLeadFromAlert } from '@/lib/instantly/handoffRejection';
+import { handleSenderProjectLeadCallback } from '@/lib/senderLeads/projectLeadCallbacks';
 
 export const dynamic = 'force-dynamic';
 
@@ -47,6 +48,8 @@ export async function POST(req: NextRequest) {
   }
 
   if (await handleHandoffEditor(update, token)) return OK();
+  // Кнопки карточек лидов «Рассылки» (p., x.) — до разбора кнопок Instantly.
+  if (await handleSenderProjectLeadCallback(update, token, { main: supabaseAdmin, instantlyDb: supabaseInstantly })) return OK();
   const cq = update.callback_query;
   if (!cq?.id) return OK();
 

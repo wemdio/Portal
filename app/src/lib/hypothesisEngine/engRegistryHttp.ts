@@ -2,13 +2,15 @@ import { sliceWholeChars, stripUnstorableJsonChars } from '../jsonbSafe';
 import { validLei } from './engRegistryIdentity';
 
 /**
- * One bounded GET of a public registry file or list (PRA CSV, ESMA register).
- * Same rules as the JSON registry pages: a fixed URL chosen by our code, no
- * redirects, size and time limits, and the registry_* error codes the
- * collection treats as transient (timeout, network, 408/429/5xx) or final.
+ * One bounded request for a public registry file or list (PRA CSV, ESMA and
+ * EBA registers). Same rules as the JSON registry pages: a fixed URL chosen by
+ * our code, no redirects, size and time limits, and the registry_* error codes
+ * the collection treats as transient (timeout, network, 408/429/5xx) or final.
+ * A body (the EBA register's search) makes it a POST.
  */
 export async function readHeEngRegistryText(url: string, options: {
   signal?: AbortSignal; fetch?: typeof fetch; accept: string; maxBytes: number; timeoutMs: number;
+  body?: string; contentType?: string;
 }): Promise<string> {
   const fail = (code: string): never => { throw new Error(code); };
   const controller = new AbortController();
@@ -17,8 +19,10 @@ export async function readHeEngRegistryText(url: string, options: {
   options.signal?.addEventListener('abort', onAbort, { once: true });
   const timer = setTimeout(() => controller.abort(), options.timeoutMs);
   try {
-    const response = await (options.fetch ?? fetch)(url, { method: 'GET', redirect: 'error', signal: controller.signal,
-      headers: { Accept: options.accept, 'User-Agent': 'Portal ENG public-company-discovery/1.0 (+https://app.outreachos.xyz)' } });
+    const response = await (options.fetch ?? fetch)(url, { method: options.body === undefined ? 'GET' : 'POST', redirect: 'error',
+      signal: controller.signal, ...(options.body === undefined ? {} : { body: options.body }),
+      headers: { Accept: options.accept, 'User-Agent': 'Portal ENG public-company-discovery/1.0 (+https://app.outreachos.xyz)',
+        ...(options.contentType ? { 'Content-Type': options.contentType } : {}) } });
     if (!response.ok) fail(`registry_http_${response.status}`);
     if (!response.body) fail('registry_invalid_response');
     const reader = response.body!.getReader();
@@ -77,4 +81,33 @@ export async function readHeEngGleifRegisteredAs(leis: readonly string[], option
     }
   }
   return found;
+}
+
+/**
+ * The same number for a register that carries no LEI (EBA): GLEIF's record of
+ * the entity with exactly this legal name, ignoring case, in this country. A
+ * name with a comma is not asked (GLEIF reads a comma as «or»); two records of
+ * the name, an inactive entity or no number give ''. A failed read throws.
+ */
+export async function readHeEngGleifRegisteredAsByName(name: string, iso2: string, options: {
+  signal?: AbortSignal; fetch?: typeof fetch; maxBytes: number; timeoutMs: number;
+}): Promise<string> {
+  const text = (raw: unknown, max = 60) => typeof raw === 'string'
+    ? sliceWholeChars(stripUnstorableJsonChars(raw).replace(/[\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim(), 0, max) : '';
+  const key = (raw: unknown) => text(raw, 500).normalize('NFKC').toLowerCase();
+  if (!name || name.includes(',') || !/^[a-z]{2}$/i.test(iso2)) return '';
+  const url = new URL(GLEIF);
+  url.searchParams.set('filter[entity.legalName]', name);
+  url.searchParams.set('filter[entity.legalAddress.country]', iso2.toUpperCase());
+  url.searchParams.set('page[size]', '5');
+  let body: { data?: unknown } | null = null;
+  try { body = JSON.parse(await readHeEngRegistryText(url.href, { ...options, accept: 'application/vnd.api+json' })) as { data?: unknown }; }
+  catch (error) { if (error instanceof SyntaxError) throw new Error('registry_invalid_response'); throw error; }
+  if (!Array.isArray(body?.data)) throw new Error('registry_invalid_response');
+  const same = (body.data as unknown[]).map(raw => (raw as { attributes?: { lei?: unknown; entity?: {
+    legalName?: { name?: unknown }; registeredAs?: unknown; status?: unknown } } } | null)?.attributes)
+    .filter(attributes => key(attributes?.entity?.legalName?.name) === key(name));
+  const entity = same.length === 1 && validLei(text(same[0]?.lei).toUpperCase()) ? same[0]?.entity : undefined;
+  const number = entity?.status === 'ACTIVE' ? text(entity.registeredAs) : '';
+  return number.toUpperCase() === text(same[0]?.lei).toUpperCase() ? '' : number;
 }
