@@ -438,9 +438,11 @@ export async function readHeEngDncCampaigns(
 
     const own = launches.filter((l) => presetWorkspace.has(l.preset_id));
     const foreignLaunches = launches.length - own.length;
-    const ownCampaigns = own.flatMap((l) =>
-      heEngLaunchCampaigns(l).map((c) => ({ campaignId: c.campaignId, presetId: l.preset_id })),
-    );
+    const ownCampaigns = own.flatMap((l) => [
+      ...heEngLaunchCampaigns(l).map((c) => ({ campaignId: c.campaignId, presetId: l.preset_id })),
+      // Кампания непроверенных адресов (только для команды) — «Do not contact» и для неё.
+      ...(l.unverified_campaign ? [{ campaignId: l.unverified_campaign.campaign_id, presetId: l.preset_id }] : []),
+    ]);
     const rows = await readHeEngCampaignStatusRows(
       portalDb,
       ownCampaigns.map((c) => c.campaignId),

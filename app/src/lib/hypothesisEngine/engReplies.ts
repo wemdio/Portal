@@ -159,6 +159,9 @@ export function heEngReplyCampaignsFromRows(
     const list = launch.campaigns?.length
       ? launch.campaigns.map((c) => ({ id: c.campaign_id, name: c.campaign_name }))
       : [{ id: launch.campaign_id, name: launch.campaign_name }];
+    // Кампания непроверенных адресов клиенту не видна, а ответы в ней — его
+    // лиды: они приходят под именем основной кампании запуска.
+    if (launch.unverified_campaign) list.push({ id: launch.unverified_campaign.campaign_id, name: launch.campaign_name });
     for (const c of list) {
       if (!c.id || out.has(c.id)) continue;
       out.set(c.id, {
