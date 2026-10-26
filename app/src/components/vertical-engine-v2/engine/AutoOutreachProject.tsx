@@ -6,7 +6,12 @@ import type { VeOutreachRun } from '@/lib/verticalEngineV2/outreachLaunch';
 import type { VeBaseAudienceSummary } from '@/lib/verticalEngineV2/baseAudienceSummary';
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
 import { parseLaunchInfo } from '@/lib/verticalEngineV2/launchHandoff';
-import { senderRunItemLabel, senderRunLabel } from '@/lib/verticalEngineV2/senderTransport/labels';
+import {
+  parseVeSenderOption,
+  senderRunItemLabel,
+  senderRunLabel,
+  type VeSenderOption,
+} from '@/lib/verticalEngineV2/senderTransport/labels';
 import {
   VE_API,
   veEngineCall,
@@ -18,6 +23,7 @@ import {
   type VeBaseSummary,
   type VePreparationAction,
   type VeContinuationCheck,
+  type VeOutreachSenderOptionField,
 } from './api';
 import { HE } from './design';
 import { StatusBox, formatDate, prettyProjectName } from './ui';
@@ -215,8 +221,10 @@ export function AudienceSummary({
 export function AutoOutreachProject({ projectId, onBack }: { projectId: string; onBack: () => void }) {
   const [detail, setDetail] = useState<ProjectData | null>(null);
   const [snapshot, setSnapshot] = useState<VeOutreachSetupResponse | null>(null);
+  // Можно ли выбрать «Рассылку» для нового автоаутрича (этап 7, по умолчанию Instantly).
   // Отдельно от snapshot: ответы POST его заменяют без этого поля.
-  const [launchToSender, setLaunchToSender] = useState(false);
+  const [senderOption, setSenderOption] = useState<VeSenderOption | null>(null);
+  const senderChoice = senderOption?.allowed === true;
   const [run, setRun] = useState<VeOutreachRun | null>(null);
   const [step, setStep] = useState(1);
   const [error, setError] = useState('');
@@ -287,7 +295,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           dossiers: project.data.dossiers ?? [],
           cases: project.data.cases ?? [],
         });
-      if (setup.ok) setLaunchToSender((setup.data as { launch_transport?: unknown }).launch_transport === 'sender');
+      if (setup.ok) setSenderOption(parseVeSenderOption((setup.data as VeOutreachSetupResponse & VeOutreachSenderOptionField).sender));
       if (setup.ok)
         setSnapshot((current) =>
           !current || setup.data.setup.revision >= current.setup.revision ? setup.data : current,
@@ -1082,7 +1090,9 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                 <h3 className="ve2-h3">Одобрены и готовы к запуску: {readyForLaunchCount}</h3>
                 <p className={HE.muted}>
                   Выберите одну или несколько одобренных баз. Остальные могут продолжать подготовку.
-                  На следующем шаге выберите клиента и подготовьте кампанию. Отправку вы включите в {launchToSender ? '«Рассылке»' : 'Instantly'}.
+                  {senderChoice
+                    ? 'На следующем шаге выберите клиента и подготовьте кампании: в Instantly (по умолчанию) или черновиками в «Рассылке» — способ выбирается при запуске.'
+                    : 'На следующем шаге выберите клиента и подготовьте кампанию. Отправку вы включите в Instantly.'}
                 </p>
                 <div className="divide-y divide-[var(--ve2-line)]">
                   {visibleHypotheses.filter((h) => launchStates[h.id]?.ready || launchHypothesisIds.includes(h.id)).map((h) => {
@@ -1147,7 +1157,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                         }}>Управлять добором</button>
                     ) : null}
                     {!launchStates[h.id]?.launched ? <PreparationProgress compact preparation={p} base={base} jobs={detail.jobs} approved={approved}
-                      launchToSender={launchToSender}
+                      senderChoice={senderChoice}
                       preparationSelected={selectedIds.includes(h.id)} hypothesisTitle={h.title}
                       canPauseOrphan={canPauseOrphan && h.status !== 'rejected' && !!h.vertical_id}
                       onStart={() => void change({ action: 'prepare', hypothesis_id: h.id })}
@@ -1267,6 +1277,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
               templates={detail.templates}
               titles={titles}
               hypothesisIds={launchHypothesisIds}
+              senderOption={senderOption}
+              onSenderOptionReload={() => void refresh()}
               onBack={() => jump(3)}
               onPresetChange={setPresetId}
               onStarted={(value) => {
@@ -1288,7 +1300,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                 disabled={busy || ['queued', 'running', 'waiting'].includes(run.status)} onSaved={() => void refresh()} /> : null}
               {run?.request.preset_id && run.items.length ? <DeliveryRatePanel projectId={projectId}
                 presetId={run.request.preset_id} templateIds={run.items.map(item => item.template_id)}
-                disabled={busy || ['queued', 'running'].includes(run.status)} supplyOnly={uploadMode === 'all_ready'} /> : null}
+                disabled={busy || ['queued', 'running'].includes(run.status)} supplyOnly={uploadMode === 'all_ready'}
+                transport={runToSender ? 'sender' : 'instantly'} /> : null}
               {!locked && resultTemplates.length ? (
                 <button
                   type="button"

@@ -12,7 +12,6 @@ import { isVeTwoGisLead, isVeTwoGisRow } from './twoGisQuarantine';
 import { ContactDeliveryAnalyticsUnavailableError, loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows } from './contactDeliveryInventory';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
-import { resolveVeLaunchTransport } from './senderTransport/transport';
 import {
   describePortalProjectTerm,
   findManualFactIssue,
@@ -31,6 +30,11 @@ export type ContactDeliveryPreviewRequest = {
   targetContacts: number;
   presetId: string;
   segmentationAuditId?: string | null;
+  /**
+   * Способ отправки, выбранный специалистом (этап 7); нет — Instantly. Только
+   * подпись обзора: разрешено ли — проверяет вызывающий до обзора.
+   */
+  requestedTransport?: 'instantly' | 'sender';
   now?: Date;
 };
 
@@ -384,8 +388,8 @@ export async function buildVeContactDeliveryPreview(
   const effectiveDaily = plan.days[0]?.quota ?? 0;
   const portalProjectName = projectDisplayName(project);
   const portalPeriodLabel = period ? cleanString(period.name) || null : null;
-  // Куда пойдут кампании запуска: обзор показывает, запуск возвращает это обратно.
-  const { transport } = await resolveVeLaunchTransport(portalDb, base.project_id);
+  // Куда пойдут кампании запуска — выбор специалиста; обзор показывает, запуск возвращает обратно.
+  const transport = input.requestedTransport === 'sender' ? 'sender' : 'instantly';
 
   return {
     status: 200,

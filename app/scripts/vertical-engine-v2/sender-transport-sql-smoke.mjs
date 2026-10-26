@@ -1,5 +1,5 @@
 /** Executable PostgreSQL smoke for VE2 launches through «Рассылка» (migrations
- * 20261024_0020, 20261024_0030, 20261024_0070, 20261026_0010, 20261026_0020); never connects to Portal/prod.
+ * 20261024_0020, 20261024_0030, 20261024_0070, 20261026_0010, 20261026_0020, 20261026_0040); never connects to Portal/prod.
  *
  * Run from app/: node scripts/vertical-engine-v2/sender-transport-sql-smoke.mjs
  * Supply PGLITE_MODULE when @electric-sql/pglite is installed outside this repo.
@@ -532,6 +532,22 @@ try {
     'uploads switched off by psql record the moment', JSON.stringify(psqlUploads));
   await rows(`update public.ve_launch_transport_settings set sender_uploads_enabled = true where market = 'ru'`);
   await expectError('unknown resume mode is refused', `select public.ve_sender_resume_finish($1, 'other', null, 'x')`, [pauseD], /unknown resume mode/);
+
+  // ── Выбор специалиста при запуске (этап 7) ──
+  const choiceMigration = `begin; ${migration('20261026_0040_ve_launch_transport_choice.sql')} commit;`;
+  await db.exec(choiceMigration);
+  await db.exec(choiceMigration);
+  const marketsAfter = await rows('select market, mode, mode_before_stop from public.ve_launch_transport_settings order by market');
+  check(marketsAfter.every((row) => row.mode === 'instantly' && row.mode_before_stop === null),
+    'the choice migration changes no market (applied twice)', JSON.stringify(marketsAfter));
+  await rows(`update public.ve_launch_transport_settings set mode = 'choice' where market = 'ru'`);
+  await rows(`update public.ve_launch_transport_settings set mode = 'instantly', mode_before_stop = 'choice' where market = 'ru'`);
+  check((await one(`select mode_before_stop from public.ve_launch_transport_settings where market = 'ru'`)).mode_before_stop === 'choice',
+    'ru accepts the choice mode and remembers it before «только Instantly»');
+  await rows(`update public.ve_launch_transport_settings set mode = 'instantly', mode_before_stop = null where market = 'ru'`);
+  await expectError('US cannot get the choice', `update public.ve_launch_transport_settings set mode = 'choice' where market = 'us'`, [], /us_instantly/);
+  await expectError('US cannot remember a sender mode', `update public.ve_launch_transport_settings set mode_before_stop = 'choice' where market = 'us'`, [], /us_instantly/);
+  await expectError('unknown modes stay refused', `update public.ve_launch_transport_settings set mode = 'other' where market = 'ru'`, [], /mode_check/);
 } finally {
   await db.close();
 }

@@ -89,6 +89,81 @@ function count(value: number, forms: [string, string, string]): string {
   return `${value.toLocaleString('ru-RU')} ${form}`;
 }
 
+// ─── Выбор способа отправки при запуске (этап 7) ───────────────────────────
+
+/**
+ * Можно ли выбрать «Рассылку» для нового запуска — ответ сервера (GET
+ * launch-transport у шаблона, GET /outreach у проекта). offered — показывать
+ * ли вариант вообще; allowed — можно ли выбрать сейчас; reason — почему нет.
+ */
+export interface VeSenderOption {
+  offered: boolean;
+  allowed: boolean;
+  reason: string | null;
+  /** Не прочитали выключатели — проверку стоит повторить. */
+  retryable?: boolean;
+}
+
+/** Поле sender ответа → вариант; нет поля или не тот вид — null: «Рассылку» не предлагаем. */
+export function parseVeSenderOption(value: unknown): VeSenderOption | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const row = value as { offered?: unknown; allowed?: unknown; reason?: unknown; retryable?: unknown };
+  if (typeof row.offered !== 'boolean' || typeof row.allowed !== 'boolean') return null;
+  return {
+    offered: row.offered, allowed: row.allowed, reason: typeof row.reason === 'string' && row.reason.trim() ? row.reason : null,
+    ...(row.retryable === true ? { retryable: true } : {}),
+  };
+}
+
+/**
+ * Что показывает переключатель «Instantly / «Рассылка»»:
+ * - show — есть ли переключатель (нет — экран как раньше, только Instantly);
+ * - senderDisabled — «Рассылку» выбрать нельзя (выбранная остаётся выбранной);
+ * - blocked — выбрана «Рассылка», а запускать в неё нельзя: запуск закрыт;
+ * - note — строка под переключателем.
+ * Экран сам выбор не меняет: при отказе специалист выбирает Instantly сам.
+ */
+export function veLaunchTransportSwitchView(input: {
+  choice: 'instantly' | 'sender';
+  option: VeSenderOption | null | undefined;
+  refusal: string | null;
+}): { show: boolean; senderDisabled: boolean; blocked: boolean; note: string | null } {
+  const { choice, option, refusal } = input;
+  const show = option?.offered === true || choice === 'sender';
+  const senderDisabled = option?.allowed !== true;
+  const blocked = choice === 'sender' && (senderDisabled || Boolean(refusal));
+  const note = blocked
+    ? `${refusal ?? option?.reason ?? 'Не удалось проверить, доступна ли «Рассылка».'} Чтобы продолжить, выберите Instantly.`
+    : (option?.offered === true && option.allowed !== true && option.reason ? option.reason : null);
+  return { show, senderDisabled, blocked, note };
+}
+
+/** Отказ 503 «не удалось проверить» — своими словами: под ним кнопка «Повторить проверку». */
+export const VE_SENDER_CHECK_FAILED = 'Не удалось проверить, доступна ли «Рассылка» — повторите проверку.';
+
+/**
+ * Отказ сервера выбору «Рассылки» (обзор, запуск, обзор и старт автоаутрича) —
+ * по коду ответа, не по статусу: 409 бывает и у других отказов. retryable —
+ * не прочитали выключатели, повтор может пройти. null — это не такой отказ.
+ */
+export function veSenderRefusal(data: { error?: unknown; code?: unknown } | null | undefined): { message: string; retryable: boolean } | null {
+  if (data?.code === 'VE_LAUNCH_SENDER_DISABLED') {
+    return { message: typeof data.error === 'string' && data.error.trim() ? data.error.trim() : 'Выбрать «Рассылку» сейчас нельзя.', retryable: false };
+  }
+  if (data?.code === 'VE_LAUNCH_TRANSPORT_UNAVAILABLE') return { message: VE_SENDER_CHECK_FAILED, retryable: true };
+  return null;
+}
+
+/**
+ * Отказы, которые даёт только «Рассылка» (коды VE_SENDER_*: длинная цепочка,
+ * варианты, неподдерживаемый шаблон, пустое первое письмо, нет ящиков), —
+ * с подсказкой, что Instantly эти письма примет.
+ */
+export function veSenderRefusalText(error: string, code: unknown): string {
+  if (typeof code !== 'string' || !code.startsWith('VE_SENDER_') || /Instantly/.test(error)) return error;
+  return `${error.trimEnd()} Можно запустить через Instantly.`;
+}
+
 /** Строка о ящиках пресета в «Рассылке»; null — проверить не вышло. */
 export function senderPoolLine(pool: VeSenderPoolSummary | null | undefined): string {
   if (!pool) return 'Не удалось проверить ящики пресета в «Рассылке». Обновите обзор.';
@@ -189,22 +264,42 @@ export function senderPanelWho(name: string | null | undefined, at: string | nul
 }
 
 function launchModeName(mode: string | null | undefined): string {
+  if (mode === 'choice') return 'выбор специалиста при запуске';
   return mode === 'pilot' ? 'пилот' : '«Рассылка»';
 }
+
+/** США: «Рассылку» не выбрать никогда — вместо кнопок запусков. */
+export const SENDER_PANEL_US_INSTANTLY_ONLY = 'США — только Instantly';
 
 /**
  * Куда идут новые запуски рынка. envKill — запасной выключатель в настройках
  * портала включён: режим рынка в базе тогда не действует, всё идёт в Instantly.
+ * С этапа 7 способ выбирает специалист при запуске (по умолчанию Instantly);
+ * pilot и sender больше не отправляют запуски в «Рассылку» сами — только
+ * разрешают выбор (pilot — проектам пилота). sendingStopped — отправка
+ * кампаний Движка остановлена: тогда, как и при выключенной подаче, выбрать
+ * «Рассылку» сейчас нельзя.
  */
 export function senderPanelLaunchLine(
-  market: { label: string; mode: string; mode_before_stop: string | null },
+  market: { label: string; mode: string; mode_before_stop: string | null; sender_uploads_enabled?: boolean },
   envKill = false,
+  sendingStopped = false,
 ): string {
   const head = `${market.label}: новые запуски —`;
   const killed = envKill ? ' Пока включён запасной выключатель в настройках портала, все новые запуски идут в Instantly.' : '';
-  if (market.mode === 'pilot') return `${head} пилот: в «Рассылку» идут только выбранные проекты, остальные — в Instantly.${killed}`;
-  if (market.mode === 'sender') return `${head} в «Рассылку», кроме проектов, оставленных на Instantly.${killed}`;
-  if (market.mode_before_stop === 'pilot' || market.mode_before_stop === 'sender') {
+  const why = [market.sender_uploads_enabled === false ? 'подача выключена' : null, sendingStopped ? 'отправка остановлена' : null]
+    .filter(Boolean).join(' и ');
+  const now = why ? ` — сейчас выбрать нельзя: ${why}` : '';
+  if (market.mode === 'choice') {
+    return `${head} специалист выбирает при запуске: Instantly или «Рассылка» (по умолчанию Instantly)${now}.${killed}`;
+  }
+  if (market.mode === 'pilot') {
+    return `${head} специалист выбирает при запуске (только проекты пилота; по умолчанию Instantly)${now}.${killed}`;
+  }
+  if (market.mode === 'sender') {
+    return `${head} специалист выбирает при запуске (кроме проектов, оставленных на Instantly; по умолчанию Instantly)${now}.${killed}`;
+  }
+  if (market.mode_before_stop === 'pilot' || market.mode_before_stop === 'sender' || market.mode_before_stop === 'choice') {
     return `${head} только Instantly (выключено этой панелью; до выключения — ${launchModeName(market.mode_before_stop)}).`;
   }
   return `${head} только Instantly.`;
@@ -279,23 +374,67 @@ export function senderPanelLeadCardsLine(cards: {
   return `Карточки лидов проектов Движка: выключены${who ? ` (${who})` : ''} — ${missed}.`;
 }
 
+/**
+ * Идущие запуски автоаутрича в «Рассылку» (только их ещё не созданные гипотезы
+ * останавливает выключение выбора; Instantly не проверяется).
+ */
 function outreachRunsSentence(runs: number | null, tail: string): string {
-  if (runs == null) return ` Сколько запусков автоаутрича идёт — ${SENDER_PANEL_UNREAD}; у идущих ещё не созданные гипотезы остановятся${tail}.`;
+  if (runs == null) {
+    return ` Сколько запусков автоаутрича в «Рассылку» идёт — ${SENDER_PANEL_UNREAD}; у идущих ещё не созданные гипотезы остановятся${tail}.`;
+  }
   if (runs <= 0) return '';
   const verb = runs % 10 === 1 && runs % 100 !== 11 ? 'Идёт' : 'Идут';
-  return ` ${verb} ${count(runs, ['запуск', 'запуска', 'запусков'])} автоаутрича — их ещё не созданные гипотезы остановятся${tail}.`;
+  return ` ${verb} ${count(runs, ['запуск', 'запуска', 'запусков'])} автоаутрича в «Рассылку» — их ещё не созданные гипотезы остановятся${tail}.`;
 }
 
-/** «Новые запуски — только Instantly». */
-export function senderStopLaunchesConfirm(label: string, inflightRuns: number | null): string {
-  return `Новые запуски рынка ${label} пойдут только в Instantly. Уже идущие запуски в «Рассылке» продолжат получать контакты и `
+/** «Новые запуски — только Instantly» (аварийная остановка: что было — запоминается). */
+export function senderStopLaunchesConfirm(label: string, inflightRuns: number | null, mode?: string | null): string {
+  const head = mode === 'choice'
+    ? `Специалисты рынка ${label} не смогут выбрать «Рассылку» при запуске — новые запуски пойдут только в Instantly. `
+      + 'Выбор запомнится: «Вернуть запуски как было» вернёт его.'
+    : `Новые запуски рынка ${label} пойдут только в Instantly.`
+      + (mode === 'pilot' || mode === 'sender' ? ` Режим запомнится: «Вернуть запуски как было» вернёт его (${launchModeName(mode)}).` : '');
+  return `${head} Уже идущие запуски в «Рассылке» продолжат получать контакты и `
     + 'отправлять письма — для них «Выключить подачу» и «Остановить отправку». Запуск, начатый в эти секунды, может успеть создать черновики.'
-    + outreachRunsSentence(inflightRuns, ', их нужно будет запустить заново');
+    + outreachRunsSentence(inflightRuns, ', их нужно будет запустить заново через Instantly');
 }
 
-/** «Вернуть запуски как было». */
-export function senderRestoreLaunchesConfirm(label: string, modeBeforeStop: string | null, inflightRuns: number | null): string {
-  return `Новые запуски рынка ${label} снова пойдут как было: ${launchModeName(modeBeforeStop)}.` + outreachRunsSentence(inflightRuns, '');
+/**
+ * «Вернуть запуски как было». Возврат ничего не останавливает: Instantly
+ * разрешён всегда, поэтому про идущие запуски автоаутрича здесь ни слова.
+ */
+export function senderRestoreLaunchesConfirm(label: string, modeBeforeStop: string | null, _inflightRuns?: number | null): string {
+  if (modeBeforeStop === 'choice') {
+    return `Специалисты рынка ${label} снова смогут выбрать «Рассылку» при запуске. По умолчанию — Instantly. Идущие запуски не меняются.`;
+  }
+  const where = modeBeforeStop === 'pilot' ? 'в проектах пилота' : 'во всех проектах, кроме оставленных на Instantly';
+  return `На рынке ${label} «Рассылку» снова можно будет выбрать при запуске — ${where}. По умолчанию — Instantly. Идущие запуски не меняются.`;
+}
+
+/** «Разрешить выбор «Рассылки»» (только РФ). envKill — запасной выключатель в настройках портала включён. */
+export function senderAllowChoiceConfirm(label: string, envKill: boolean): string {
+  return `Специалисты ${label} смогут при запуске гипотезы и автоаутрича выбрать «Рассылку» вместо Instantly. По умолчанию `
+    + 'останется Instantly; идущие запуски не меняются. «Рассылку» нельзя выбрать, пока выключена подача или остановлена отправка, и '
+    + 'для писем, которые она не принимает (больше 5 писем или 4 вариантов).'
+    + (envKill ? ' Сейчас включён запасной выключатель в настройках портала — выбор появится только после его снятия.' : '');
+}
+
+/** «Запретить выбор «Рассылки»» — конец пилота, ничего не запоминается. */
+export function senderForbidChoiceConfirm(label: string, inflightRuns: number | null): string {
+  const head = `Специалисты ${label} больше не смогут выбрать «Рассылку».`;
+  if (inflightRuns == null) {
+    return `${head} Идущие запуски не меняются. Сколько запусков автоаутрича в «Рассылку» идёт — ${SENDER_PANEL_UNREAD}; `
+      + 'у идущих ещё не созданные гипотезы остановятся — их нужно будет запустить заново через Instantly.';
+  }
+  if (inflightRuns <= 0) return `${head} Идущие запуски не меняются.`;
+  return `${head} Идущие запуски не меняются; ещё не созданные гипотезы `
+    + `${count(inflightRuns, ['идущего запуска', 'идущих запусков', 'идущих запусков'])} автоаутрича в «Рассылку» остановятся — `
+    + 'их нужно будет запустить заново через Instantly.';
+}
+
+/** Пока подача выключена или отправка остановлена: что с выбором «Рассылки» и принятыми запусками. */
+function senderChoicePausedSentence(what: 'подача выключена' | 'отправка остановлена'): string {
+  return ` Пока ${what}, специалисты не смогут выбрать «Рассылку» для нового запуска; уже принятые запуски автоаутрича в «Рассылку» подождут.`;
 }
 
 /** «Выключить подачу» / «Включить подачу». */
@@ -310,11 +449,8 @@ export function senderUploadsConfirm(
   let text = `Новые контакты в кампании «Рассылки» рынка ${label} перестанут подаваться (через минуту; подача, которая уже идёт, допишет `
     + 'свою порцию). Уже загруженные получатели продолжат получать письма. Статусы кампаний на карточках Движка перестанут обновляться, '
     + 'кнопка «Запустить в «Рассылке»» будет отказывать. Платный добор встанет через 5 минут.';
-  if (context.inflight_outreach_runs == null || context.inflight_outreach_runs > 0) {
-    text += ' Запуск автоаутрича, который ждёт кампаний «Рассылки», будет ждать включения подачи, а новый запуск автоаутрича в таком проекте не начнётся.';
-  }
-  if (context.mode !== 'instantly') {
-    text += ' Новые запуски в «Рассылку» при этом создаются и остаются пустыми — чтобы не создавались, «Новые запуски — только Instantly».';
+  if (context.mode !== 'instantly' || context.inflight_outreach_runs == null || context.inflight_outreach_runs > 0) {
+    text += senderChoicePausedSentence('подача выключена');
   }
   return text;
 }
@@ -328,7 +464,8 @@ export function senderStopSendingConfirm(running: number | null, alreadyStopped:
   return `Все идущие кампании Движка в «Рассылке»${now} встанут на паузу, назначенные запуски снимутся. Письма, которые почтовый воркер `
     + 'уже взял в работу, уйдут (обычно секунды, в худшем случае несколько минут). Ответы операторов и письма передачи лидов клиенту '
     + 'продолжат уходить; автопередачу останавливает выключатель карточек. Запустить кампанию Движка будет нельзя, пока отправку не '
-    + 'вернут. Кампании Instantly и папок «Рассылки» не затрагиваются.';
+    + 'вернут. Кампании Instantly и папок «Рассылки» не затрагиваются.'
+    + senderChoicePausedSentence('отправка остановлена');
 }
 
 /**

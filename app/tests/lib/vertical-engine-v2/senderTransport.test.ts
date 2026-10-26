@@ -27,6 +27,7 @@ import { validateStoredAuditSnapshot } from '@/lib/verticalEngineV2/stages/segme
 import {
   veSenderScheduleFromPreset,
   veSenderSyntaxIssue,
+  veSenderTemplateIssue,
   veSequenceToSenderSteps,
 } from '@/lib/verticalEngineV2/senderTransport/senderLaunchPlan';
 import {
@@ -39,6 +40,7 @@ import {
   senderPoolLine,
   senderStartButtonLabel,
   senderStartReport,
+  veLaunchTransportSwitchView,
   veTransportView,
 } from '@/lib/verticalEngineV2/senderTransport/labels';
 import { summarizeVeSenderPool } from '@/lib/verticalEngineV2/senderTransport/senderPool';
@@ -53,6 +55,8 @@ import { handleSenderProjectLeadCallback } from '@/lib/senderLeads/projectLeadCa
 import { signSenderLeadAction, verifySenderLeadAction } from '@/lib/senderLeads/projectLeadTelegram';
 import { readVe2SendingSwitch, ve2SendingRefusal } from '@/lib/sender/ve2SendingSwitch';
 import {
+  allowVeLaunchChoice,
+  forbidVeLaunchChoice,
   keepVeCampaignPaused,
   readVeSenderSwitchState,
   restoreVeLaunches,
@@ -64,7 +68,10 @@ import {
 } from '@/lib/verticalEngineV2/senderTransport/switches';
 import {
   decideVeLaunchTransport,
+  readVeSenderLaunchAvailability,
+  resolveRequestedVeLaunchTransport,
   resolveVeLaunchTransport,
+  veSenderLaunchAvailability,
   senderRemoteStatus,
   transportExpectationIssue,
   transportOf,
@@ -477,9 +484,11 @@ describe('запуск VE2 в «Рассылку»', () => {
 
   it('при «Рассылке» запуск создаёт черновики с ящиками пресета и пишет transport в запуск — Instantly не трогается', async () => {
     const { portal, instantly, launch } = launchDbs();
-    // Обзор показывал Instantly, а переключатель уже на «Рассылке» — отказ до любой записи.
-    expect((await launch()).body).toMatchObject({ code: 'VE_LAUNCH_TRANSPORT_CHANGED' });
+    // Специалист выбрал «Рассылку», а администратор оставил запуски только в Instantly — отказ до любой записи (этап 7).
+    await portal.from('ve_launch_transport_settings').update({ mode: 'instantly' }).eq('market', 'ru');
+    expect((await launch('sender')).body).toMatchObject({ code: 'VE_LAUNCH_SENDER_DISABLED' });
     expect(portal.rpcCalls).toEqual([]);
+    await portal.from('ve_launch_transport_settings').update({ mode: 'pilot' }).eq('market', 'ru');
 
     const outcome = await launch('sender');
     expect(outcome.status).toBe(200);
@@ -1080,7 +1089,12 @@ describe('выключатели запусков Движка через «Ра
           { market: 'us', mode: 'instantly', mode_before_stop: null, sender_uploads_enabled: true, updated_at: null, updated_by: null, note: null },
         ],
         profiles: [{ id: 'u-admin', full_name: 'Сергей', email: 's@polza.ru' }],
-        ve_outreach_runs: [{ project_id: 'vp1', status: 'running' }, { project_id: 'vp2', status: 'active' }],
+        // Смена режима останавливает только запуски автоаутрича в «Рассылку»: их и считаем (этап 7).
+        ve_outreach_runs: [
+          { project_id: 'vp1', status: 'running', request: { expected_transport: 'sender' } },
+          { project_id: 'vp1', status: 'waiting', request: {} },
+          { project_id: 'vp2', status: 'active', request: { expected_transport: 'sender' } },
+        ],
         ve_projects: [{ id: 'vp1', market: 'ru' }, { id: 'vp2', market: 'ru' }],
         ve_sender_global_settings: [{ id: true, sending_enabled: true, sending_changed_at: null, sending_changed_by: null, sending_note: null }],
         ve_sender_sending_pauses: [],
@@ -1243,5 +1257,80 @@ describe('выключатели запусков Движка через «Ра
     // Вторая остановка снова взяла A и C (идут) и снятый запуск D; ни одна строка не закрыта «пропущенной».
     expect(db.getRows('ve_sender_sending_pauses').filter((pause) => !pause.resumed_at).map((pause) => pause.campaign_id).sort()).toEqual(['A', 'C', 'D', 'E']);
     expect(db.getRows('sender_campaigns').filter((c) => c.source_kind === 've2' && c.status === 'running')).toEqual([]);
+  });
+});
+
+describe('выбор специалиста «Instantly / «Рассылка»» при запуске (этап 7)', () => {
+  it('Instantly всегда без чтения настроек; «Рассылку» разрешают выключатели, принятый автоаутрич проверяет только разрешение; панель включает выбор только для РФ', async () => {
+    const base = { killed: false, market: 'ru', mode: 'choice', override: null, sendingEnabled: true, uploadsEnabled: true };
+    expect(veSenderLaunchAvailability(base)).toEqual({ allowed: true, offered: true });
+    // Не предлагаем вовсе: запасной выключатель, США, проект на Instantly, выбор не включён, пилот на других проектах.
+    for (const input of [{ killed: true }, { market: 'us' }, { override: 'instantly' }, { mode: 'instantly' }, { mode: 'pilot' }]) {
+      expect(veSenderLaunchAvailability({ ...base, ...input })).toMatchObject({ allowed: false, offered: false, code: 'VE_LAUNCH_SENDER_DISABLED' });
+    }
+    expect(veSenderLaunchAvailability({ ...base, mode: 'pilot', override: 'sender' })).toMatchObject({ allowed: true });
+    // Предлагаем, но сейчас нельзя: выбор временно снят «только Instantly», отправка остановлена, подача выключена; не прочитали — 503.
+    expect(veSenderLaunchAvailability({ ...base, mode: 'instantly', modeBeforeStop: 'choice' })).toMatchObject({ allowed: false, offered: true, status: 409 });
+    expect(veSenderLaunchAvailability({ ...base, sendingEnabled: false })).toMatchObject({ allowed: false, offered: true, reason: expect.stringContaining('остановлена') });
+    expect(veSenderLaunchAvailability({ ...base, uploadsEnabled: false })).toMatchObject({ allowed: false, offered: true, reason: expect.stringContaining('Подача') });
+    expect(veSenderLaunchAvailability({ ...base, sendingEnabled: null })).toMatchObject({ allowed: false, status: 503, code: 'VE_LAUNCH_TRANSPORT_UNAVAILABLE' });
+    // Принятый запуск автоаутрича: подача и отправка его не отменяют (гипотезы ждут), «только Instantly» — отменяет.
+    expect(veSenderLaunchAvailability({ ...base, sendingEnabled: false, uploadsEnabled: false }, 'accepted')).toMatchObject({ allowed: true });
+    expect(veSenderLaunchAvailability({ ...base, mode: 'instantly', modeBeforeStop: 'choice' }, 'accepted')).toMatchObject({ allowed: false });
+
+    // Instantly — ни одного чтения: база, которая падает на любом запросе, не мешает.
+    const exploding = { from: () => { throw new Error('reads are not allowed for Instantly'); }, rpc: () => { throw new Error('no'); } };
+    await expect(resolveRequestedVeLaunchTransport(exploding as never, 've1', undefined, {})).resolves.toEqual({ ok: true, transport: 'instantly', source: 'requested' });
+    await expect(resolveRequestedVeLaunchTransport(exploding as never, 've1', 'instantly', {})).resolves.toMatchObject({ ok: true, transport: 'instantly' });
+    await expect(resolveRequestedVeLaunchTransport(exploding as never, 've1', 'other', {})).resolves.toMatchObject({ ok: false, status: 400 });
+    const db = createMockSupabase({
+      tables: {
+        ve_projects: [{ id: 've1', market: 'ru', launch_transport_override: null }, { id: 've-us', market: 'us', launch_transport_override: null }],
+        ve_launch_transport_settings: [
+          { market: 'ru', mode: 'instantly', mode_before_stop: null, sender_uploads_enabled: true, updated_at: null, updated_by: null, note: null },
+          { market: 'us', mode: 'instantly', mode_before_stop: null, sender_uploads_enabled: true, updated_at: null, updated_by: null, note: null },
+        ],
+        ve_sender_global_settings: [{ id: true, sending_enabled: true }],
+      },
+    });
+    await expect(resolveRequestedVeLaunchTransport(db as never, 've1', 'sender', {})).resolves.toMatchObject({ ok: false, status: 409, code: 'VE_LAUNCH_SENDER_DISABLED' });
+    expect(await readVeSenderLaunchAvailability(db as never, 've1', {})).toMatchObject({ offered: false });
+
+    // Панель: «Разрешить выбор» — только РФ; «только Instantly» запоминает выбор, «Вернуть» его возвращает, «Запретить» — без памяти.
+    const who = { userId: 'u-admin', note: null, now: new Date('2026-10-26T12:00:00Z'), env: {} };
+    await expect(allowVeLaunchChoice(db as never, { ...who, market: 'us' })).rejects.toMatchObject({ status: 409 });
+    expect(await allowVeLaunchChoice(db as never, { ...who, market: 'ru' })).toMatchObject({ changed: true });
+    expect(db.getRows('ve_launch_transport_settings')[0]).toMatchObject({ mode: 'choice', mode_before_stop: null, updated_by: 'u-admin' });
+    await expect(resolveRequestedVeLaunchTransport(db as never, 've1', 'sender', {})).resolves.toEqual({ ok: true, transport: 'sender', source: 'requested' });
+    await expect(resolveRequestedVeLaunchTransport(db as never, 've-us', 'sender', {})).resolves.toMatchObject({ ok: false, code: 'VE_LAUNCH_SENDER_DISABLED' });
+    await expect(resolveRequestedVeLaunchTransport(db as never, 've1', 'sender', { VE2_SENDER_LAUNCHES_DISABLED: '1' })).resolves.toMatchObject({ ok: false });
+    await db.from('ve_sender_global_settings').update({ sending_enabled: false }).eq('id', true);
+    await expect(resolveRequestedVeLaunchTransport(db as never, 've1', 'sender', {})).resolves.toMatchObject({ ok: false, error: expect.stringContaining('остановлена') });
+    await expect(resolveRequestedVeLaunchTransport(db as never, 've1', 'sender', {}, 'accepted')).resolves.toMatchObject({ ok: true, transport: 'sender' });
+    await db.from('ve_sender_global_settings').update({ sending_enabled: true }).eq('id', true);
+    expect(await allowVeLaunchChoice(db as never, { ...who, market: 'ru' })).toMatchObject({ changed: false });
+    expect(await stopVeLaunches(db as never, { ...who, market: 'ru' })).toMatchObject({ changed: true });
+    expect(db.getRows('ve_launch_transport_settings')[0]).toMatchObject({ mode: 'instantly', mode_before_stop: 'choice' });
+    expect(await readVeSenderLaunchAvailability(db as never, 've1', {})).toMatchObject({ allowed: false, offered: true });
+    expect(await restoreVeLaunches(db as never, { ...who, market: 'ru' })).toMatchObject({ changed: true });
+    expect(db.getRows('ve_launch_transport_settings')[0]).toMatchObject({ mode: 'choice', mode_before_stop: null });
+    expect(await forbidVeLaunchChoice(db as never, { ...who, market: 'ru' })).toMatchObject({ changed: true });
+    expect(db.getRows('ve_launch_transport_settings')[0]).toMatchObject({ mode: 'instantly', mode_before_stop: null });
+
+    // Письма, которые «Рассылка» не примет, — до запуска; подходящие — без замечаний.
+    const letter = { subject: 'Тема', body: 'Текст', wait_days: 2 };
+    expect(veSenderTemplateIssue([letter, letter])).toBeNull();
+    expect(veSenderTemplateIssue(Array.from({ length: 6 }, () => letter))).toMatchObject({ code: 'VE_SENDER_CHAIN_TOO_LONG' });
+    expect(veSenderTemplateIssue([])).toMatchObject({ code: 'VE_SENDER_TEMPLATE_UNSUPPORTED' });
+
+    // Переключатель на экране: экран сам не возвращает Instantly — выбор остаётся, запуск закрыт, причина видна.
+    const allowed = { offered: true, allowed: true, reason: null };
+    expect(veLaunchTransportSwitchView({ choice: 'instantly', option: null, refusal: null })).toEqual({ show: false, senderDisabled: true, blocked: false, note: null });
+    expect(veLaunchTransportSwitchView({ choice: 'instantly', option: allowed, refusal: null })).toEqual({ show: true, senderDisabled: false, blocked: false, note: null });
+    expect(veLaunchTransportSwitchView({ choice: 'instantly', option: { offered: true, allowed: false, reason: 'Подача выключена.' }, refusal: null }))
+      .toEqual({ show: true, senderDisabled: true, blocked: false, note: 'Подача выключена.' });
+    expect(veLaunchTransportSwitchView({ choice: 'sender', option: { offered: false, allowed: false, reason: 'Только Instantly.' }, refusal: 'Выключено администратором.' }))
+      .toEqual({ show: true, senderDisabled: true, blocked: true, note: 'Выключено администратором. Чтобы продолжить, выберите Instantly.' });
+    expect(veLaunchTransportSwitchView({ choice: 'sender', option: allowed, refusal: null })).toMatchObject({ blocked: false, note: null });
   });
 });

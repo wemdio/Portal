@@ -2554,7 +2554,13 @@ VE2_LIST_LIMIT = 5
 _VE2_TAIL_RESERVE = 400
 
 _VE2_MARKET_LABELS = {"ru": "РФ", "us": "США"}
-_VE2_MODE_LABELS = {"pilot": "пилот — только проекты с «Рассылкой»", "sender": "«Рассылка» для всех проектов"}
+# Этап 7: способ отправки выбирает специалист при запуске (по умолчанию Instantly); режим рынка
+# лишь разрешает выбрать «Рассылку».
+_VE2_MODE_LABELS = {
+    "choice": "специалист выбирает при запуске (Instantly или «Рассылка», по умолчанию Instantly)",
+    "pilot": "«Рассылку» можно выбрать только в проектах пилота",
+    "sender": "«Рассылку» можно выбрать во всех проектах",
+}
 _VE2_LEADS_LOGS = "<code>docker logs portal-worker-sender-leads --tail 200</code>"
 _VE2_ENGINE_LOGS = "<code>docker logs portal-worker-vertical-engine-v2 --tail 200</code>"
 _VE2_MAIL_HOST_LOGS = "на почтовом хосте <code>docker ps -a | grep sender-worker</code>"
@@ -3015,7 +3021,7 @@ async def _ve2_switch_alerts(conn) -> list[str]:
         if not state:
             # Всё включено, строку меняли за 7 суток — одно сообщение на изменение.
             mode = _VE2_MODE_LABELS.get(str(row["mode"]), "только Instantly (режим рынка)")
-            line = (f"• Рынок {label}: выключатели включены — новые запуски: {_ve2_text(mode)}; подача "
+            line = (f"• Рынок {label}: настройки изменены — новые запуски: {_ve2_text(mode)}; подача "
                     f"контактов в «Рассылку» включена — {_msk(changed)}{_ve2_who(row)}.")
             if await _ve2_claim(conn, f"ve2sw:market:{market}:{_ve2_iso(changed)}:on"):
                 lines.append(line)

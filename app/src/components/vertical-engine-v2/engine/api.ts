@@ -7,7 +7,7 @@
 
 import { authFetch } from '@/lib/authFetch';
 import type { ClientBriefFields } from '@/lib/clientBrief';
-import type { VeSenderMarketView, VeSenderPoolSummary } from '@/lib/verticalEngineV2/senderTransport/labels';
+import type { VeSenderMarketView, VeSenderOption, VeSenderPoolSummary } from '@/lib/verticalEngineV2/senderTransport/labels';
 import type { VeSenderSwitchState } from '@/lib/verticalEngineV2/senderTransport/switches';
 import type {
   VeBase,
@@ -534,6 +534,11 @@ export interface VeDeliveryPlanPreviewRequest {
   target_contacts: number;
   preset_id: string;
   segmentation_audit_id?: string;
+  /**
+   * Специалист выбрал «Рассылку» (этап 7); нет поля — Instantly. Только
+   * 'sender': тело обзора Instantly не меняется.
+   */
+  expected_transport?: 'sender';
 }
 
 /** Серверный расчёт, общий для preview и финального запуска. */
@@ -558,12 +563,28 @@ export interface VeDeliveryPlanPreviewDto {
   capacity_deficit: number;
   delivery_timezone?: string | null;
   delivery_schedule_days?: number[] | null;
-  /** Куда пойдут кампании запуска; запуск возвращает это значение обратно (expected_transport). */
+  /** Способ отправки этого обзора — эхо выбора специалиста (expected_transport); нет поля — Instantly. */
   transport?: 'instantly' | 'sender';
   /** Только у запуска в «Рассылку»: ящики пресета там; null — проверить не вышло. */
   sender_pool?: VeSenderPoolSummary | null;
   /** Только без периода: карточка проекта для показа. */
   project_term?: Omit<VePortalProjectTermDto, 'issue'> | null;
+}
+
+/**
+ * GET templates/{id}/launch-transport (этап 7): можно ли выбрать «Рассылку» для
+ * нового запуска шаблона. transport — для вкладок, открытых до выкладки
+ * (всегда Instantly); нет sender — «Рассылку» не предлагаем.
+ */
+export interface VeLaunchTransportOptionResponse {
+  transport?: 'instantly' | 'sender';
+  sender?: VeSenderOption;
+  error?: string;
+}
+
+/** GET projects/{id}/outreach: sender — можно ли выбрать «Рассылку» для нового автоаутрича проекта (без писем). */
+export interface VeOutreachSenderOptionField {
+  sender?: VeSenderOption;
 }
 
 export interface VeDeliveryPlanPreviewResponse {

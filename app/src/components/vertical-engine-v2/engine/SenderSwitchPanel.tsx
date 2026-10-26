@@ -7,7 +7,10 @@
  * /api/admin/ve2-sender, перед каждым — подтверждение «что встанет и что
  * продолжит идти», после — отчёт строками под панелью. Остальные сотрудники
  * видят панель, только когда что-то не по умолчанию (выключено, остановлено,
- * запасной выключатель, или рынок уже идёт в «Рассылку» — бывшая плашка этапа 4).
+ * запасной выключатель, или рынку разрешена «Рассылка» — бывшая плашка этапа 4).
+ * Этап 7: «Разрешить выбор «Рассылки»» (только РФ) — специалист выбирает
+ * способ при запуске, по умолчанию Instantly; «Запретить выбор» снимает его,
+ * ничего не запоминая. США — только Instantly.
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -15,6 +18,9 @@ import {
   SENDER_LEAD_CARDS_OFF_CONFIRM,
   SENDER_PANEL_ENV_KILL_LINE,
   SENDER_PANEL_UNREAD,
+  SENDER_PANEL_US_INSTANTLY_ONLY,
+  senderAllowChoiceConfirm,
+  senderForbidChoiceConfirm,
   senderKeepPausedConfirm,
   senderLeadCardsMissedButton,
   senderLeadCardsOnConfirm,
@@ -180,17 +186,34 @@ export function SenderSwitchPanel() {
   function marketButtons(market: Market) {
     const stopKey = `stop_launches:${market.market}`;
     const restoreKey = `restore_launches:${market.market}`;
+    const allowKey = `allow_choice:${market.market}`;
+    const forbidKey = `forbid_choice:${market.market}`;
     const uploadsKey = `set_uploads:${market.market}`;
-    return <div className="flex flex-wrap gap-2 pt-1">
-      {market.mode !== 'instantly' ? <button type="button" className={`${HE.btnSmall} ve2-b-dan`} disabled={locked}
+    // США — только Instantly: кнопок запусков нет, выбор «Рассылки» там не включается.
+    const us = market.market === 'us';
+    return <div className="flex flex-wrap items-center gap-2 pt-1">
+      {us ? <span className={HE.muted}>{SENDER_PANEL_US_INSTANTLY_ONLY}</span> : null}
+      {!us && market.mode === 'instantly' && !market.mode_before_stop ? <button type="button" className={HE.btnSmall} disabled={locked}
+        aria-label={`${market.label}: разрешить выбор «Рассылки»`}
+        onClick={() => void run(allowKey, { action: 'allow_choice', market: market.market },
+          senderAllowChoiceConfirm(market.label, state?.env_kill === true))}>
+        {label(allowKey, 'Разрешить выбор «Рассылки»')}
+      </button> : null}
+      {!us && market.mode === 'choice' ? <button type="button" className={HE.btnSmall} disabled={locked}
+        aria-label={`${market.label}: запретить выбор «Рассылки»`}
+        onClick={() => void run(forbidKey, { action: 'forbid_choice', market: market.market },
+          senderForbidChoiceConfirm(market.label, market.inflight_outreach_runs))}>
+        {label(forbidKey, 'Запретить выбор «Рассылки»')}
+      </button> : null}
+      {us ? null : market.mode !== 'instantly' ? <button type="button" className={`${HE.btnSmall} ve2-b-dan`} disabled={locked}
         aria-label={`${market.label}: новые запуски — только Instantly`}
         onClick={() => void run(stopKey, { action: 'stop_launches', market: market.market },
-          senderStopLaunchesConfirm(market.label, market.inflight_outreach_runs))}>
+          senderStopLaunchesConfirm(market.label, market.inflight_outreach_runs, market.mode))}>
         {label(stopKey, 'Новые запуски — только Instantly')}
       </button> : market.mode_before_stop ? <button type="button" className={HE.btnSmall} disabled={locked}
         aria-label={`${market.label}: вернуть запуски как было`}
         onClick={() => void run(restoreKey, { action: 'restore_launches', market: market.market },
-          senderRestoreLaunchesConfirm(market.label, market.mode_before_stop, market.inflight_outreach_runs))}>
+          senderRestoreLaunchesConfirm(market.label, market.mode_before_stop))}>
         {label(restoreKey, 'Вернуть запуски как было')}
       </button> : null}
       <button type="button" className={market.sender_uploads_enabled ? `${HE.btnSmall} ve2-b-dan` : HE.btnSmall} disabled={locked}
@@ -212,7 +235,7 @@ export function SenderSwitchPanel() {
         : state.markets.map((market) => {
           const changed = senderPanelChangedLine(market.updated_by_name, market.updated_at, market.note);
           return <div key={market.market} className="space-y-1">
-            <p>{senderPanelLaunchLine(market, state.env_kill)}</p>
+            <p>{senderPanelLaunchLine(market, state.env_kill, state.sending?.enabled === false)}</p>
             <p>{senderPanelUploadsLine(market)}</p>
             {changed ? <p className={HE.muted}>{changed}</p> : null}
             {canManage ? marketButtons(market) : null}

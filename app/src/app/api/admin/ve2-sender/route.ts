@@ -7,6 +7,11 @@
  *   - stop_launches { market }      — новые запуски рынка только в Instantly
  *                                      (что было — запоминается);
  *   - restore_launches { market }   — вернуть, как было до stop_launches;
+ *   - allow_choice { market: 'ru' }  — этап 7: специалисты РФ выбирают при
+ *                                      запуске Instantly или «Рассылку» (по
+ *                                      умолчанию Instantly); США — 400;
+ *   - forbid_choice { market: 'ru' } — снять выбор (конец пилота): только
+ *                                      Instantly, ничего не запоминается;
  *   - set_uploads { market, enabled } — подача контактов в «Рассылку»;
  *   - stop_sending                  — флаг + пауза идущих кампаний Движка и
  *                                      снятие назначенных запусков (повтор —
@@ -31,7 +36,9 @@ import { SenderOpError } from '@/lib/sender/campaignOps';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import {
+  allowVeLaunchChoice,
   cleanVeSenderNote,
+  forbidVeLaunchChoice,
   keepVeCampaignPaused,
   readVeSenderSwitchState,
   restoreVeLaunches,
@@ -53,14 +60,15 @@ const RESUME_BUDGET_MS = 45_000;
 const MARKET_LABELS: Record<VeSenderMarket, string> = { ru: 'РФ', us: 'США' };
 
 type ParsedAction =
-  | { action: 'stop_launches' | 'restore_launches'; market: VeSenderMarket; note: string | null }
+  | { action: 'stop_launches' | 'restore_launches' | 'allow_choice' | 'forbid_choice'; market: VeSenderMarket; note: string | null }
   | { action: 'set_uploads'; market: VeSenderMarket; enabled: boolean; note: string | null }
   | { action: 'stop_sending' | 'resume_sending'; note: string | null }
   | { action: 'keep_paused'; pauseId: string; note: string | null }
   | { action: 'set_lead_cards'; enabled: boolean; includeMissed: boolean; note: string | null };
 
 const ACTIONS = new Set<ParsedAction['action']>([
-  'stop_launches', 'restore_launches', 'set_uploads', 'stop_sending', 'resume_sending', 'keep_paused', 'set_lead_cards',
+  'stop_launches', 'restore_launches', 'allow_choice', 'forbid_choice', 'set_uploads', 'stop_sending', 'resume_sending', 'keep_paused',
+  'set_lead_cards',
 ]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -86,6 +94,14 @@ function parseAction(raw: unknown): ParsedAction | string {
       const m = market();
       if (m !== 'ru' && m !== 'us') return m;
       return { action: action as 'stop_launches' | 'restore_launches', market: m, note };
+    }
+    case 'allow_choice':
+    case 'forbid_choice': {
+      const m = market();
+      if (m !== 'ru' && m !== 'us') return m;
+      // США — только Instantly: выбора «Рассылки» там нет ни включить, ни снять.
+      if (m !== 'ru') return 'Для США — только Instantly';
+      return { action: action as 'allow_choice' | 'forbid_choice', market: m, note };
     }
     case 'set_uploads': {
       const m = market();
@@ -124,6 +140,10 @@ function auditMessage(input: ParsedAction, changed: boolean): string {
       return `Новые запуски ${MARKET_LABELS[input.market]} — только Instantly${again}`;
     case 'restore_launches':
       return `Новые запуски ${MARKET_LABELS[input.market]} — как было до выключения${again}`;
+    case 'allow_choice':
+      return `Выбор «Рассылки» при запуске ${MARKET_LABELS[input.market]} разрешён${again}`;
+    case 'forbid_choice':
+      return `Выбор «Рассылки» при запуске ${MARKET_LABELS[input.market]} запрещён${again}`;
     case 'set_uploads':
       return `Подача контактов в «Рассылку» ${MARKET_LABELS[input.market]} ${input.enabled ? 'включена' : 'выключена'}${again}`;
     case 'stop_sending':
@@ -157,6 +177,10 @@ async function runAction(db: SupabaseClient, input: ParsedAction, userId: string
       return stopVeLaunches(db, { market: input.market, userId, note: input.note });
     case 'restore_launches':
       return restoreVeLaunches(db, { market: input.market, userId, note: input.note });
+    case 'allow_choice':
+      return allowVeLaunchChoice(db, { market: input.market, userId, note: input.note });
+    case 'forbid_choice':
+      return forbidVeLaunchChoice(db, { market: input.market, userId, note: input.note });
     case 'set_uploads':
       return setVeSenderUploads(db, { market: input.market, enabled: input.enabled, userId, note: input.note });
     case 'stop_sending': {

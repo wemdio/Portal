@@ -9,8 +9,11 @@ import { killedByEnv } from './transport';
  * Что видит панель над списком проектов Движка и что делают её кнопки.
  *
  * - Новые запуски — только Instantly: режим рынка 'instantly'; что было —
- *   в mode_before_stop, «вернуть» восстанавливает его. Включить «Рассылку»
- *   впервые отсюда нельзя (это пилот, этап 7).
+ *   в mode_before_stop, «вернуть» восстанавливает его.
+ * - Выбор специалиста (этап 7): «Разрешить выбор «Рассылки»» ставит рынку РФ
+ *   режим 'choice' — при запуске гипотезы специалист выбирает Instantly или
+ *   «Рассылку», по умолчанию Instantly. «Запретить выбор» снимает его, ничего
+ *   не запоминая (конец пилота, без напоминаний). США — только Instantly.
  * - Подача контактов в «Рассылку»: sender_uploads_enabled рынка.
  * - Отправка кампаний Движка: сначала флаг (своей транзакцией — запуск, уже
  *   проверивший флаг, держит его строку до своего коммита), потом пауза идущих
@@ -35,7 +38,7 @@ export interface VeSenderMarketSwitch {
   market: string;
   label: string;
   mode: string;
-  mode_before_stop: 'pilot' | 'sender' | null;
+  mode_before_stop: 'pilot' | 'sender' | 'choice' | null;
   sender_uploads_enabled: boolean;
   updated_at: string | null;
   updated_by_name: string | null;
@@ -117,10 +120,11 @@ async function readMarkets(db: SupabaseClient): Promise<VeSenderMarketSwitch[] |
     updated_at: string | null; updated_by: string | null; note: string | null;
   }>;
   const names = await profileNames(db, rows.map((row) => row.updated_by));
-  // Идущие запуски автоаутрича — по проектам рынка.
+  // Идущие запуски автоаутрича в «Рассылку» — по проектам рынка: только их ещё не
+  // созданные гипотезы и останавливает «только Instantly» (Instantly не проверяется).
   const runs = new Map<string, number | null>();
   const { data: active, error: runsError } = await db.from('ve_outreach_runs')
-    .select('project_id').in('status', ['queued', 'running', 'waiting']);
+    .select('project_id').in('status', ['queued', 'running', 'waiting']).eq('request->>expected_transport', 'sender');
   if (runsError) {
     for (const row of rows) runs.set(row.market, null);
   } else {
@@ -141,7 +145,8 @@ async function readMarkets(db: SupabaseClient): Promise<VeSenderMarketSwitch[] |
       market: row.market,
       label: marketLabel(row.market),
       mode: row.mode,
-      mode_before_stop: row.mode_before_stop === 'pilot' || row.mode_before_stop === 'sender' ? row.mode_before_stop : null,
+      mode_before_stop: row.mode_before_stop === 'pilot' || row.mode_before_stop === 'sender' || row.mode_before_stop === 'choice'
+        ? row.mode_before_stop : null,
       sender_uploads_enabled: row.sender_uploads_enabled === true,
       updated_at: row.updated_at,
       updated_by_name: row.updated_by ? names.get(row.updated_by) ?? null : null,
@@ -278,7 +283,7 @@ export async function stopVeLaunches(
   const { data, error } = await db.from('ve_launch_transport_settings')
     .update({
       mode: 'instantly',
-      mode_before_stop: row.mode === 'pilot' || row.mode === 'sender' ? row.mode : null,
+      mode_before_stop: row.mode === 'pilot' || row.mode === 'sender' || row.mode === 'choice' ? row.mode : null,
       updated_at: (input.now ?? new Date()).toISOString(),
       updated_by: input.userId,
       note: input.note,
@@ -296,7 +301,7 @@ export async function restoreVeLaunches(
   const label = marketLabel(input.market);
   const row = await readMarketRow(db, input.market);
   const before = row.mode_before_stop;
-  if (row.mode !== 'instantly' || (before !== 'pilot' && before !== 'sender')) {
+  if (row.mode !== 'instantly' || (before !== 'pilot' && before !== 'sender' && before !== 'choice')) {
     return { changed: false, lines: [`${label}: возвращать нечего — запуски не выключались этой панелью.`] };
   }
   const { data, error } = await db.from('ve_launch_transport_settings')
@@ -304,7 +309,58 @@ export async function restoreVeLaunches(
     .eq('market', input.market).eq('mode', 'instantly').eq('mode_before_stop', before).select('market');
   if (error) throw new SenderOpError(`Не записалось: ${error.message}`, 500);
   if (!data?.length) throw new SenderOpError('Режим рынка только что поменяли — обновите панель', 409);
-  return { changed: true, lines: [`${label}: новые запуски снова идут как было — ${before === 'pilot' ? 'пилот' : 'в «Рассылку»'}.`] };
+  return {
+    changed: true,
+    lines: [before === 'choice'
+      ? `${label}: специалисты снова могут выбрать «Рассылку» при запуске (по умолчанию Instantly).`
+      : `${label}: «Рассылку» снова можно выбрать при запуске, как было — ${before === 'pilot' ? 'в проектах пилота' : 'во всех проектах'}.`],
+  };
+}
+
+// ─── Выбор специалиста при запуске (этап 7) ────────────────────────────────
+
+export async function allowVeLaunchChoice(
+  db: SupabaseClient,
+  input: { market: VeSenderMarket; userId: string | null; note: string | null; now?: Date; env?: Record<string, string | undefined> },
+): Promise<VeSenderSwitchResult> {
+  if (input.market !== 'ru') throw new SenderOpError('Для США — только Instantly: выбор «Рассылки» не включается.', 409);
+  const label = marketLabel(input.market);
+  const row = await readMarketRow(db, input.market);
+  if (row.mode === 'choice') return { changed: false, lines: [`${label}: выбор «Рассылки» уже разрешён.`] };
+  if (row.mode === 'pilot' || row.mode === 'sender') {
+    return { changed: false, lines: [`${label}: режим рынка — ${row.mode === 'pilot' ? 'пилот' : '«Рассылка»'}, «Рассылку» и так можно выбрать при запуске.`] };
+  }
+  if (row.mode_before_stop) {
+    return { changed: false, lines: [`${label}: запуски выключены панелью — сначала «Вернуть запуски как было».`] };
+  }
+  const { data, error } = await db.from('ve_launch_transport_settings')
+    .update({ mode: 'choice', mode_before_stop: null, updated_at: (input.now ?? new Date()).toISOString(), updated_by: input.userId, note: input.note })
+    .eq('market', input.market).eq('mode', 'instantly').is('mode_before_stop', null).select('market');
+  if (error) throw new SenderOpError(`Не записалось: ${error.message}`, 500);
+  if (!data?.length) throw new SenderOpError('Режим рынка только что поменяли — обновите панель', 409);
+  const lines = [`${label}: специалисты могут выбирать «Рассылку» при запуске. По умолчанию — Instantly.`];
+  if (killedByEnv(input.env ?? process.env)) {
+    lines.push('Сейчас включён запасной выключатель в настройках портала — выбор появится только после его снятия.');
+  }
+  return { changed: true, lines };
+}
+
+export async function forbidVeLaunchChoice(
+  db: SupabaseClient,
+  input: { market: VeSenderMarket; userId: string | null; note: string | null; now?: Date },
+): Promise<VeSenderSwitchResult> {
+  const label = marketLabel(input.market);
+  const row = await readMarketRow(db, input.market);
+  if (row.mode !== 'choice') return { changed: false, lines: [`${label}: выбор «Рассылки» и так не разрешён.`] };
+  const { data, error } = await db.from('ve_launch_transport_settings')
+    .update({ mode: 'instantly', mode_before_stop: null, updated_at: (input.now ?? new Date()).toISOString(), updated_by: input.userId, note: input.note })
+    .eq('market', input.market).eq('mode', 'choice').select('market');
+  if (error) throw new SenderOpError(`Не записалось: ${error.message}`, 500);
+  if (!data?.length) throw new SenderOpError('Режим рынка только что поменяли — обновите панель', 409);
+  return {
+    changed: true,
+    lines: [`${label}: выбор «Рассылки» снят — новые запуски только в Instantly. Созданные кампании не меняются; ещё не созданные гипотезы автоаутрича в «Рассылку» остановятся.`],
+  };
 }
 
 // ─── Подача контактов ──────────────────────────────────────────────────────
