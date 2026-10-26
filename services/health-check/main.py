@@ -3481,16 +3481,139 @@ async def check_ve2_sender() -> list[str]:
         return kept
 
 
+# ── 2ГИС → VE2 (план docs/reports/2026-10-26-2gis-ve2-plan.md, шаг «Мон») ─────
+# Свой пользователь VE2 в базе 2ГИС (twogis_ve2, Ш3) и модуль 2ГИС воркера (R3).
+# 1) строки pg_hba для twogis_ve2: файл живёт в контейнере main-postgres и
+#    пропадает при его пересоздании — тогда роль войдёт и в основную базу;
+# 2) twogis_ve2 держит оба своих соединения 3 цикла подряд, инстанс у предела;
+# 3) ve_twogis_source_status (R2): пауза или серия ошибок, пока mode ≠ off.
+# Ключи — по эпизоду; когда проблемы нет, ключи эпизода удаляются.
+TWOGIS_VE2_REPEAT_MINUTES = _env_int("HEALTH_TWOGIS_VE2_REPEAT_MIN", 1440, 60)
+_TWOGIS_VE2_FULL_POOL_CYCLES: list[int] = [0]
+_TWOGIS_VE2_FULL_POOL_SINCE: list[datetime | None] = [None]
+
+
+async def _twogis_ve2_recovered(conn, prefix: str) -> None:
+    await conn.execute(f"DELETE FROM {JOB_ALERTS_TABLE} WHERE alert_key LIKE $1", f"twogis-ve2:{prefix}:%")
+
+
+async def _check_twogis_ve2(conn) -> list[str]:
+    problems: list[str] = []
+    role = await conn.fetchrow("SELECT oid, rolconnlimit FROM pg_roles WHERE rolname = 'twogis_ve2'")
+    if role is None:
+        return []  # Ш3 ещё не сделан или откачен: проверять нечего.
+
+    # 1. pg_hba: запрет для twogis_ve2 должен стоять раньше первой общей строки host.
+    rules = await conn.fetch(
+        "SELECT line_number, type, database, user_name, auth_method, error FROM pg_hba_file_rules ORDER BY line_number"
+    )
+    first_general = next((r["line_number"] for r in rules if r["type"] == "host"
+                          and "all" in (r["user_name"] or []) and r["auth_method"] != "reject"), None)
+    reject = next((r["line_number"] for r in rules if r["type"] == "host" and r["auth_method"] == "reject"
+                   and "twogis_ve2" in (r["user_name"] or []) and "all" in (r["database"] or [])), None)
+    hba_ok = reject is not None and (first_general is None or reject < first_general) and not any(r["error"] for r in rules)
+    if hba_ok:
+        await _twogis_ve2_recovered(conn, "hba")
+    else:
+        loaded = await conn.fetchval("SELECT pg_conf_load_time()")
+        key = f"twogis-ve2:hba:{loaded.isoformat()}:{_repeat_bucket(loaded, TWOGIS_VE2_REPEAT_MINUTES)}"
+        if await _claim_job_alert(conn, key):
+            problems.append(
+                "🔓 <b>pg_hba main-postgres</b>: нет строк для <code>twogis_ve2</code> выше общих правил "
+                "(пересоздан контейнер?). Пользователь VE2 сейчас может войти и в основную базу.\n"
+                "Вернуть две строки из <code>app/scripts/2gis-dataset/README.md</code> («VE2 user»), "
+                "затем <code>SELECT pg_reload_conf();</code>"
+            )
+
+    # 2. Соединения: twogis_ve2 у своего предела 3 цикла подряд; инстанс у предела.
+    counts = await conn.fetchrow(
+        "SELECT count(*) FILTER (WHERE usename = 'twogis_ve2')::int AS ve2, count(*)::int AS total, "
+        "current_setting('max_connections')::int AS max_conn FROM pg_stat_activity"
+    )
+    limit = role["rolconnlimit"] if role["rolconnlimit"] and role["rolconnlimit"] > 0 else 2
+    if counts["ve2"] >= limit:
+        _TWOGIS_VE2_FULL_POOL_CYCLES[0] += 1
+        _TWOGIS_VE2_FULL_POOL_SINCE[0] = _TWOGIS_VE2_FULL_POOL_SINCE[0] or datetime.now(timezone.utc)
+    else:
+        _TWOGIS_VE2_FULL_POOL_CYCLES[0] = 0
+        _TWOGIS_VE2_FULL_POOL_SINCE[0] = None
+        await _twogis_ve2_recovered(conn, "pool")
+    since = _TWOGIS_VE2_FULL_POOL_SINCE[0]
+    if _TWOGIS_VE2_FULL_POOL_CYCLES[0] >= 3 and since is not None:
+        key = f"twogis-ve2:pool:{since.isoformat()}:{_repeat_bucket(since, TWOGIS_VE2_REPEAT_MINUTES)}"
+        if await _claim_job_alert(conn, key):
+            problems.append(f"🧵 <b>2ГИС VE2</b>: <code>twogis_ve2</code> держит {counts['ve2']} из {limit} соединений "
+                            f"с {_msk(since)} — модуль 2ГИС, вероятно, завис.")
+    threshold = min(85, int(counts["max_conn"] * 0.85))
+    if counts["total"] >= threshold:
+        key = f"twogis-ve2:instance:{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H')}"
+        if await _claim_job_alert(conn, key):
+            problems.append(f"📈 <b>main-postgres</b>: {counts['total']} соединений из {counts['max_conn']} "
+                            f"(порог {threshold}); у VE2 к 2ГИС — {counts['ve2']}.")
+
+    # 3. Состояние модуля 2ГИС (таблицы R2; до их деплоя — пропуск).
+    try:
+        status = await conn.fetchrow(
+            "SELECT s.mode, t.paused_until, t.consecutive_errors, t.error_since, t.last_error_kind, t.updated_at "
+            "FROM public.ve_twogis_source_settings s JOIN public.ve_twogis_source_status t USING (market) "
+            "WHERE s.market = 'ru'"
+        )
+    except asyncpg.exceptions.UndefinedTableError:
+        return problems
+    now = datetime.now(timezone.utc)
+    fresh = status is not None and status["updated_at"] is not None and now - status["updated_at"] <= timedelta(minutes=15)
+    paused = fresh and status["paused_until"] is not None and status["paused_until"] > now
+    failing = fresh and status["error_since"] is not None and (status["consecutive_errors"] >= 3
+                                                             or status["last_error_kind"] == "role_limit")
+    if status is None or status["mode"] == "off" or not (paused or failing):
+        await _twogis_ve2_recovered(conn, "status")
+        return problems
+    anchor = status["error_since"] or status["paused_until"]
+    kind = status["last_error_kind"] or "pause"
+    key = f"twogis-ve2:status:{kind}:{anchor.isoformat()}:{_repeat_bucket(anchor, TWOGIS_VE2_REPEAT_MINUTES)}"
+    if await _claim_job_alert(conn, key):
+        what = {"role_limit": "упёрся в лимит соединений роли", "connect": "не подключается", "timeout": "тайм-ауты",
+                "snapshot": "снимок 2ГИС сменился", "other": "ошибки чтения"}.get(kind, "пауза чтения")
+        until = f", пауза до {_msk(status['paused_until'])}" if paused else ""
+        problems.append(f"🗺 <b>2ГИС VE2</b>: {what} — {status['consecutive_errors']} подряд с {_msk(anchor)}{until}. "
+                        "Базы ждут, не останавливаются; выключить чтение: "
+                        "<code>update ve_twogis_source_settings set reads_enabled = false where market = 'ru'</code>")
+    return problems
+
+
+async def check_twogis_ve2() -> list[str]:
+    """Монитор «2ГИС → VE2» — см. run_job_monitor. Не бросает исключений: gather без return_exceptions."""
+    try:
+        if not DATABASE_URL:
+            return []
+        try:
+            conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        except Exception as e:
+            print(f"[health] twogis-ve2 connect error: {_normalize_network_error(e)}")
+            return []
+        try:
+            return await _check_twogis_ve2(conn)
+        finally:
+            try:
+                await conn.close()
+            except Exception as e:
+                print(f"[health] twogis-ve2 close error: {_format_exception_message(e)}")
+    except Exception as e:
+        print(f"[health] twogis-ve2 monitor error: {_format_exception_message(e, 300)}")
+        return []
+
+
 async def run_job_monitor() -> None:
     """Run parser, pipeline, sender, base and VE2-sender checks independently from general health."""
     try:
-        stuck, failed, pipelines, sender, bases, ve2_sender = await asyncio.gather(
+        stuck, failed, pipelines, sender, bases, ve2_sender, twogis_ve2 = await asyncio.gather(
             check_stuck_jobs(),
             check_failed_jobs(),
             check_pipeline_runs(),
             check_sender(),
             check_failed_bases(),
             check_ve2_sender(),
+            check_twogis_ve2(),
         )
         if sender:
             mention = f"\n{html.escape(SENDER_ALERT_MENTION)}" if SENDER_ALERT_MENTION else ""
@@ -3502,6 +3625,9 @@ async def run_job_monitor() -> None:
         if ve2_sender:
             await send_telegram(_ve2_sender_header() + "\n\n".join(ve2_sender) + _ve2_sender_mention())
             print(f"[health] VE2 SENDER ALERT sent: {len(ve2_sender)} block(s)")
+        if twogis_ve2:
+            await send_telegram(f"⚠️ <b>2ГИС → VE2</b> — {_now_msk()}\n\n" + "\n\n".join(twogis_ve2))
+            print(f"[health] 2GIS VE2 ALERT sent: {len(twogis_ve2)} problem(s)")
         problems = [*pipelines, *stuck, *failed]
         if not problems:
             print(f"[health] job monitor OK at {_now_msk()}")
