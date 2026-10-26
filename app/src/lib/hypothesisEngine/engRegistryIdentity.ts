@@ -36,6 +36,9 @@ export function heEngRegistryRecordValid(provider: unknown, id: unknown, country
       url.searchParams.get('query_param') === 'USDOT' && url.searchParams.get('query_string') === id;
     case 'companies_house': return country === 'united kingdom' && /^[A-Z0-9]{8}$/.test(id) &&
       url.href === `https://find-and-update.company-information.service.gov.uk/company/${id}`;
+    // A PRA-authorised firm by its FCA firm reference number on the public FCA register.
+    case 'pra': return country === 'united kingdom' && /^\d{6,7}$/.test(id) &&
+      url.href === `https://register.fca.org.uk/s/search?q=${id}&type=Companies`;
     // Global sources: the country comes from the record itself (GLEIF headquarters,
     // or the OpenStreetMap country boundary containing the premises).
     case 'gleif': return engCountry(country) && validLei(id) && url.href === `https://api.gleif.org/api/v1/lei-records/${id}`;

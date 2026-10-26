@@ -39,7 +39,7 @@ const DIRECTORY_HOSTS = new Set(['linkedin.com', 'facebook.com', 'instagram.com'
   'thomsonlocal.com', '192.com', 'cylex-uk.co.uk', 'cylex.de', 'hackforddata.com', 'rooplex.co.uk',
   'scoriff.co.uk', 'businessmad.com', 'northdata.com', 'northdata.de', 'bloomberg.com', 'rocketreach.co',
   'apollo.io', 'signalhire.com', 'lusha.com', 'cbinsights.com', 'pitchbook.com', 'preqin.com', 'legal500.com',
-  'chambers.com', 'vat-search.ie', 'solocheck.ie', 'societe.com', 'pappers.fr', 'infogreffe.fr', 'verif.com',
+  'chambers.com', 'vat-search.ie', 'solocheck.ie', 'societe.com', 'pappers.fr', 'infogreffe.fr', 'verif.com', 'bankofengland.co.uk',
   'manageo.fr', 'proff.no', 'purehelp.no', '1881.no', 'gulesider.no', 'bizapedia.com', 'manta.com',
   'buzzfile.com', 'yelp.com', 'bbb.org', 'sophymarine.com', 'experian.com', 'ebay.com', 'amazon.com']);
 // Legal-form words: the register says «LTD», the company's own footer «Limited».
@@ -138,8 +138,9 @@ function hasRegistryCountry(candidate: HeEngRegistryCandidate): boolean {
   // The adapter validates the record address; never infer country from the
   // discovery task. UK and French adapters supply validated domestic
   // registered offices; accepting their country does not claim a local team.
+  // The PRA lists state incorporation in the UK instead of an address.
   return (candidate.addressKind === 'business' ||
-      (['companies_house', 'france'].includes(candidate.provider) && candidate.addressKind === 'registered')) &&
+      (['companies_house', 'france', 'pra'].includes(candidate.provider) && candidate.addressKind === 'registered')) &&
     text(candidate.address).length >= 5 &&
     heEngRegistryRecordValid(candidate.provider, candidate.recordId, country(candidate.country), candidate.sourceUrl);
 }
@@ -298,6 +299,14 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
     gleif: 'lei|legal\\s+entity\\s+identifier',
     // An OpenStreetMap element id never appears on a company site.
     osm: '(?!)',
+    // UK-regulated firms state their FCA firm reference number: «Firm Reference
+    // Number 202153», «(FRN: 202153)», «Financial Services Register No. 117659»,
+    // «FCA No. 202153», «under firm reference number 202153».
+    pra: ['firm\\s+reference\\s+(?:number|no|nr)(?:\\s+is)?', 'frn',
+      'financial\\s+services\\s+register[\\s,(]{1,4}(?:under\\s+)?(?:registration\\s+)?(?:number|no|nr|reference)(?:\\s+is)?',
+      'fs\\s+register\\s+(?:number|no)', '(?:fca|pra)\\s+(?:firm\\s+)?(?:registration\\s+|register\\s+|reference\\s+)?(?:number|no|nr)',
+      'financial\\s+conduct\\s+authority\\s+(?:registration\\s+|reference\\s+)?(?:number|no)',
+      'under\\s+(?:firm\\s+)?(?:reference|registration)\\s+(?:number|no)'].join('|'),
   };
   const id = identifierKey(candidate.recordId);
   const digits = candidate.provider === 'companies_house' ? companiesHouseDigits(id) : id;
@@ -305,6 +314,8 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
   // A labelled registry identifier in the company's own legal footer is a
   // second identity fact. Arbitrary numbers in articles/testimonials are not.
   const end = '(?![\\p{L}\\p{N}]|[\\s.-]{1,3}\\d)';
+  // «Firm Reference Number (FRN) 202153» and «(FRN: 202153)» bracket the number.
+  const gap = candidate.provider === 'pra' ? '(?:\\s*\\(frn\\))?[\\s:./#()-]{0,12}' : '[\\s:./#-]{0,12}';
   const registryNumber = candidate.provider === 'france' ? ([
     ['siren', 'SIREN', '\\d(?:[\\s.-]*\\d){8}'],
     ['siret', 'SIRET', '\\d(?:[\\s.-]*\\d){13}'],
@@ -312,7 +323,7 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
   ] as const).some(([namespace, label, pattern]) => {
     const matches = value.matchAll(new RegExp(`\\b${label}\\b[\\s:./#-]{0,12}(${pattern})${end}`, 'giu'));
     return [...matches].some(match => frenchIdentifierMatches(match[1], id, namespace));
-  }) : id.length >= 5 && new RegExp(`\\b(?:${labels[candidate.provider]})\\b[\\s:./#-]{0,12}(${idPattern})${end}`, 'iu').test(value);
+  }) : id.length >= 5 && new RegExp(`\\b(?:${labels[candidate.provider]})\\b${gap}(${idPattern})${end}`, 'iu').test(value);
   if (registryNumber && options.numberAlone) return true;
   if (!legalName || !named.includes(` ${legalName} `)) return false;
   if (registryNumber || localRegistryNumber(value, candidate)) return true;

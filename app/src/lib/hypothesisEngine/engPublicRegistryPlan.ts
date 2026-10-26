@@ -14,11 +14,13 @@ export const HE_ENG_REGISTRY_CATEGORIES: Readonly<Record<HeEngRegistryProvider, 
   fmcsa: ['freight_carriers'],
   gleif: Object.keys(HE_ENG_GLEIF_TERMS),
   osm: Object.keys(HE_ENG_OSM_TAGS),
+  // Bank of England lists of PRA-authorised firms (engPraRegistry.ts).
+  pra: ['insurers', 'banks'],
 };
 
 type NationalProvider = Exclude<HeEngRegistryProvider, 'gleif' | 'osm'>;
 const PROVIDER_ISO: Readonly<Record<NationalProvider, string>> = {
-  brreg: 'no', france: 'fr', companies_house: 'gb', fdic: 'us', nppes: 'us', fmcsa: 'us',
+  brreg: 'no', france: 'fr', companies_house: 'gb', fdic: 'us', nppes: 'us', fmcsa: 'us', pra: 'gb',
 };
 /** Sources covering any country: one slice per sector reads all allowed countries. */
 export const HE_ENG_GLOBAL_REGISTRY_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set(['gleif', 'osm']);
@@ -38,13 +40,13 @@ const SECTORS: readonly Sector[] = [
   { match: /\b(?:banks?|banking institutions|credit institutions|building societies)\b/i,
     // Custody specialists do not authorize scanning every retail/commercial bank.
     omit: /\b(?:custodian|custodial|custody|depositary|depository)[ -]+banks?\b/gi,
-    sources: { brreg: ['64'], france: ['64.19Z'], companies_house: ['64191', '64192'], fdic: ['banks'], gleif: ['banks'], osm: ['banks'] } },
+    sources: { brreg: ['64'], france: ['64.19Z'], companies_house: ['64191', '64192'], fdic: ['banks'], gleif: ['banks'], osm: ['banks'], pra: ['banks'] } },
   { match: /\b(?:fund (?:services?|administrators?|administration)|custodians?|depositar(?:y|ies)|transfer agents?|investor services?|mancos?)\b/i,
     sources: { brreg: ['66'], france: ['66.19B', '66.30Z'], companies_house: ['66190', '66300'], gleif: ['fund_services'] } },
   { match: /\b(?:(?:asset|wealth|investment|fund) manag(?:ers?|ement)|investment advisers?|investment advisors?)\b/i,
     sources: { brreg: ['66'], france: ['66.30Z'], companies_house: ['66300'], gleif: ['asset_management'] } },
   { match: /\b(?:insurers?|reinsurers?|insurance (?:carriers?|companies))\b/i,
-    sources: { brreg: ['65'], france: ['65.12Z'], companies_house: ['65120'], gleif: ['insurance'], osm: ['insurance'] } },
+    sources: { brreg: ['65'], france: ['65.12Z'], companies_house: ['65120'], gleif: ['insurance'], osm: ['insurance'], pra: ['insurers'] } },
   { match: /\b(?:dentists?|dental (?:clinics?|practices?|groups?|offices?))\b/i,
     sources: { brreg: ['86.23'], france: ['86.23Z'], companies_house: ['86230'], nppes: ['Dentist'], osm: ['dental'] } },
   { match: /\bhospitals?\b/i,
