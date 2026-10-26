@@ -6,6 +6,9 @@ export const LEAD_DATED_ATTRIBUTION = /^.{1,160}\s+(?:писал(?:а|\(а\))?|�
 export const LEAD_DATE_FIRST_ATTRIBUTION = /^(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4})\s+\d{1,2}:\d{2},?\s+[^\n]{1,160}\s+(?:пишет|писал(?:а|\(а\))?|wrote):\s*$/iu;
 // Month-first localized mail attribution (not a date mentioned in prose).
 export const LEAD_MONTH_FIRST_ATTRIBUTION = /^(?:пн|вт|ср|чт|пт|сб|вс),\s+(?:янв|февр?|мар|апр|май|мая|июн|июл|авг|сент?|окт|нояб?|дек)\.?\s+\d{1,2},\s+\d{4}\s+в\s+\d{1,2}:\d{2}[^\n]{1,200}\s+(?:написал(?:а|\(а\))?|писал(?:а|\(а\))?|wrote):\s*$/iu;
+// Board/contact projection only: an explicit standalone manual quotation label,
+// not a mention of an earlier email in ordinary authored prose.
+export const LEAD_MANUAL_QUOTE_ATTRIBUTION = /^вот[^\S\r\n]+ваше[^\S\r\n]+письмо[^\S\r\n]+ниже[^\S\r\n]*[.:…]*[^\S\r\n]*$/iu;
 const YOU_WROTE = /^Вы\s+писали\s+(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[а-яё]{3,})(?:[^\n]{0,120})?:\s*$/iu;
 
 function previousContent($: CheerioAPI, node: AnyNode): AnyNode | null {

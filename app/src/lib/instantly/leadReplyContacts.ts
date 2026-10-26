@@ -1,7 +1,7 @@
 import { load } from 'cheerio';
 import { isPersonName, isRoleTitle } from '../enrich/extractors/nameQuality';
 import { joinLeadPhones, leadPhoneCandidates, normalizeLeadWebsite } from './leadContactValues';
-import { LEAD_DATED_ATTRIBUTION, LEAD_DATE_FIRST_ATTRIBUTION, LEAD_MONTH_FIRST_ATTRIBUTION, removeLeadReplyQuotes } from './leadReplyHtml';
+import { LEAD_DATED_ATTRIBUTION, LEAD_DATE_FIRST_ATTRIBUTION, LEAD_MONTH_FIRST_ATTRIBUTION, LEAD_MANUAL_QUOTE_ATTRIBUTION, removeLeadReplyQuotes } from './leadReplyHtml';
 import type { Email } from './types';
 
 export interface LeadReplyContacts {
@@ -61,6 +61,7 @@ const HISTORY_BOUNDARIES = [
   LEAD_DATED_ATTRIBUTION,
   LEAD_DATE_FIRST_ATTRIBUTION,
   LEAD_MONTH_FIRST_ATTRIBUTION,
+  LEAD_MANUAL_QUOTE_ATTRIBUTION,
   /^(?:Van|Verzonden|Aan|Onderwerp|De|Envoyé|À|Objet|Von|Gesendet|An|Betreff):\s+.+$/iu,
   /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4},?\s+\d{1,2}:\d{2}.*(?:@|mailto:)/iu,
   /^(?:От|От кого|From|Sent|Отправлено|Кому|To|Subject|Тема):\s+.+$/i,
@@ -232,7 +233,12 @@ function phoneInLine(line: string, signature: boolean): string | null {
     const contactName = (line.slice(0, start) + line.slice(end))
       .replace(/\S+@\S+/gu, '').replace(/\([^)]*(?:\)|$)/gu, '')
       .replace(/[:;,|/<>.]/gu, ' ').trim();
-    if (!signature && !framed && !onlyPhoneRow && residue && !isPersonName(residue) && !signatureNameInLine(contactName)) continue;
+    // A terse authored reply can be just a greeting and one full phone.
+    // Do not broaden this to arbitrary prose, identifiers or quoted history.
+    const greetingPhoneRow = candidates.length === 1 && russianFull &&
+      /^(?:добрый\s+(?:день|вечер)|доброе\s+утро|здравствуйте)[,.!]?[ \t]*$/iu.test(before) &&
+      /^[ \t]*[.!]?[ \t]*$/u.test(after);
+    if (!signature && !framed && !onlyPhoneRow && !greetingPhoneRow && residue && !isPersonName(residue) && !signatureNameInLine(contactName)) continue;
     phones.push(value);
   }
   return joinLeadPhones(phones);
