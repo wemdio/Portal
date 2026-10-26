@@ -22,11 +22,12 @@ import html
 import io
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from collections import deque
+from collections import Counter, deque
 from urllib.parse import urlparse
 
 try:
@@ -2262,19 +2263,207 @@ async def check_sender() -> list[str]:
         await conn.close()
 
 
-async def run_job_monitor() -> None:
-    """Run parser queue/failure checks independently from general health."""
+# ── Упавшие базы VE2 и ENG ──────────────────────────────────────────────────
+#
+# Сборщики пишут status='failed' в ve_bases (русские вертикали) и he_bases
+# (ENG и старый движок гипотез). За 30 дней до 26.10.2026 так упали 15 баз VE2
+# и 8 баз ENG, а узнавали об этом только из карточки проекта. Одно сообщение на
+# падение: ключ — база и текст ошибки. Когда база выходит из 'failed' (её
+# продолжили), ключ снимается, и следующее падение снова придёт в чат. Пачка баз
+# с одной ошибкой (13.10 кончился баланс Requesty — 7 баз за час) приходит одним
+# сообщением со списком проектов.
+
+_BASE_FAILURE_BASELINE_KEY = "base-monitor:v1:initialized"
+_BASE_FAILURE_GROUP_MIN = 3
+# Telegram отвергает сообщение длиннее 4096 символов целиком, а ключи дедупа к
+# этому моменту уже взяты: блоков в одном сообщении не больше этого числа.
+_BASE_FAILURE_MAX_ITEMS = 6
+
+
+@dataclass(frozen=True)
+class BaseMonitorSpec:
+    key: str
+    table: str
+    log_hint: str
+    select_sql: str
+
+
+_BASE_MONITOR_SPECS: tuple[BaseMonitorSpec, ...] = (
+    BaseMonitorSpec(
+        "ve", "ve_bases", "portal-worker-vertical-engine-v2",
+        "SELECT b.id::text AS id, b.updated_at, 'VE2' AS engine, p.name AS project_name, "
+        "       h.title AS detail, coalesce(nullif(btrim(b.error), ''), pr.last_error) AS error "
+        "FROM public.ve_bases b "
+        "LEFT JOIN public.ve_projects p ON p.id = b.project_id "
+        "LEFT JOIN public.ve_hypotheses h ON h.id = b.hypothesis_id "
+        "LEFT JOIN LATERAL (SELECT nullif(btrim(o.last_error), '') AS last_error "
+        "  FROM public.ve_outreach_preparations o WHERE o.base_id = b.id LIMIT 1) pr ON true "
+        "WHERE b.status = 'failed'",
+    ),
+    BaseMonitorSpec(
+        "he", "he_bases", "portal-worker-hypothesis-engine-eng / portal-worker-hypothesis-engine",
+        "SELECT b.id::text AS id, b.updated_at, "
+        "       CASE WHEN p.market = 'us' THEN 'ENG' ELSE 'движка гипотез' END AS engine, "
+        "       p.name AS project_name, v.name AS detail, nullif(btrim(b.error), '') AS error "
+        "FROM public.he_bases b "
+        "LEFT JOIN public.he_projects p ON p.id = b.project_id "
+        "LEFT JOIN public.he_verticals v ON v.id = b.vertical_id "
+        "WHERE b.status = 'failed'",
+    ),
+)
+
+# A base that left 'failed' (or was deleted) frees its keys for the next failure.
+_BASE_FAILURE_RECOVERED_SQL = (
+    "DELETE FROM {alerts} a WHERE a.alert_key LIKE $1 "
+    "AND NOT EXISTS (SELECT 1 FROM public.{table} b "
+    "  WHERE b.id::text = split_part(a.alert_key, ':', 3) AND b.status = 'failed')"
+)
+
+
+def _base_failure_key(spec: BaseMonitorSpec, row) -> str:
+    digest = hashlib.sha1(str(row["error"] or "").encode()).hexdigest()[:10]
+    return f"base-failed:{spec.key}:{row['id']}:{digest}"
+
+
+def _bases_word(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return "база"
+    if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        return "базы"
+    return "баз"
+
+
+def _base_error_group(error: str) -> str:
+    """Same error with different request ids or numbers groups together."""
+    text = re.sub(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "#", error.lower())
+    return re.sub(r"\d+", "#", text)[:120]
+
+
+def _base_failure_hint(error: str) -> str:
+    text = error.lower()
+    if "requesty" in text and ("402" in text or "balance" in text):
+        return "Похоже, кончился баланс Requesty — пополните его."
+    if "serper" in text and ("402" in text or "credit" in text):
+        return "Похоже, кончились кредиты Serper."
+    return ""
+
+
+def _format_failed_bases(items: list[tuple[BaseMonitorSpec, object]]) -> list[str]:
+    """One block per failed base; three or more with one error become one block."""
+    groups: dict[tuple[str, str, str], list[tuple[BaseMonitorSpec, object, str]]] = {}
+    for spec, row in items:
+        error = str(row["error"] or "ошибка не записана")
+        groups.setdefault((spec.key, str(row["engine"]), _base_error_group(error)), []).append((spec, row, error))
+    blocks: list[str] = []
+    for (_, engine, _), members in groups.items():
+        spec, _, error = members[0]
+        hint = _base_failure_hint(error)
+        logs = " / ".join(
+            f"<code>docker logs {html.escape(container.strip())} --tail 200</code>"
+            for container in spec.log_hint.split(" / ")
+        )
+        tail = (f"{hint}\n" if hint else "") + f"Логи: {logs}"
+        if len(members) >= _BASE_FAILURE_GROUP_MIN:
+            word = _bases_word(len(members))
+            projects = Counter(str(row["project_name"] or "без проекта") for _, row, _ in members)
+            shown = projects.most_common(_BASE_FAILURE_MAX_ITEMS)
+            listed = ", ".join(html.escape(name) + (f" ({count})" if count > 1 else "") for name, count in shown)
+            if len(projects) > len(shown):
+                listed += f" и ещё {len(projects) - len(shown)}"
+            blocks.append(
+                f"🔴 <b>{'Упала' if word == 'база' else 'Упали'} {len(members)} {word} {html.escape(engine)} "
+                f"с одной ошибкой</b>\n"
+                f"Проекты: {listed}\n"
+                f"Ошибка: <code>{html.escape(error[:300])}</code>\n{tail}"
+            )
+            continue
+        for _, row, row_error in members:
+            detail = f" · {html.escape(str(row['detail']))}" if row["detail"] else ""
+            blocks.append(
+                f"🔴 <b>Упала база {html.escape(engine)}</b>\n"
+                f"Проект: <b>{html.escape(str(row['project_name'] or 'без проекта'))}</b>{detail}\n"
+                f"Ошибка: <code>{html.escape(row_error[:300])}</code>\n"
+                f"<code>#{html.escape(str(row['id'])[:8])}</code> · {_msk(row['updated_at'])}\n{tail}"
+            )
+    if len(blocks) > _BASE_FAILURE_MAX_ITEMS:
+        rest = len(blocks) - _BASE_FAILURE_MAX_ITEMS
+        blocks = blocks[:_BASE_FAILURE_MAX_ITEMS] + [f"…и ещё {rest} — подробности в карточках проектов."]
+    return blocks
+
+
+async def _baseline_failed_bases(conn) -> bool:
+    """Mark failures from before this monitor as seen. Returns True once the baseline exists."""
+    if await conn.fetchval(f"SELECT 1 FROM {JOB_ALERTS_TABLE} WHERE alert_key = $1", _BASE_FAILURE_BASELINE_KEY):
+        return True
+    for spec in _BASE_MONITOR_SPECS:
+        try:
+            rows = await conn.fetch(spec.select_sql)
+        except Exception as e:
+            print(f"[health] failed-bases baseline {spec.table} skipped: {e}")
+            continue
+        if rows:
+            await conn.executemany(
+                f"INSERT INTO {JOB_ALERTS_TABLE} (alert_key) VALUES ($1) ON CONFLICT (alert_key) DO NOTHING",
+                [(_base_failure_key(spec, row),) for row in rows],
+            )
+    await conn.execute(
+        f"INSERT INTO {JOB_ALERTS_TABLE} (alert_key) VALUES ($1) ON CONFLICT (alert_key) DO NOTHING",
+        _BASE_FAILURE_BASELINE_KEY,
+    )
+    return False
+
+
+async def check_failed_bases() -> list[str]:
+    """Return alerts for VE2 and ENG bases that newly failed with an error."""
+    if not DATABASE_URL:
+        return []
     try:
-        stuck, failed, pipelines, sender = await asyncio.gather(
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+    except Exception as e:
+        print(f"[health] failed-bases connect error: {_normalize_network_error(e)}")
+        return []
+    fresh: list[tuple[BaseMonitorSpec, object]] = []
+    try:
+        if not await _baseline_failed_bases(conn):
+            print("[health] failed-bases baseline initialized")
+            return []
+        for spec in _BASE_MONITOR_SPECS:
+            try:
+                await conn.execute(
+                    _BASE_FAILURE_RECOVERED_SQL.format(alerts=JOB_ALERTS_TABLE, table=spec.table),
+                    f"base-failed:{spec.key}:%",
+                )
+                rows = await conn.fetch(spec.select_sql)
+            except Exception as e:
+                print(f"[health] failed-bases query {spec.table} skipped: {e}")
+                continue
+            for row in rows:
+                if _is_manual_stop_error(row["error"]):
+                    continue
+                if await _claim_job_alert(conn, _base_failure_key(spec, row)):
+                    fresh.append((spec, row))
+    finally:
+        await conn.close()
+    return _format_failed_bases(fresh)
+
+
+async def run_job_monitor() -> None:
+    """Run parser, pipeline, sender and base failure checks independently from general health."""
+    try:
+        stuck, failed, pipelines, sender, bases = await asyncio.gather(
             check_stuck_jobs(),
             check_failed_jobs(),
             check_pipeline_runs(),
             check_sender(),
+            check_failed_bases(),
         )
         if sender:
             mention = f"\n{html.escape(SENDER_ALERT_MENTION)}" if SENDER_ALERT_MENTION else ""
             await send_telegram(f"⚠️ <b>РАССЫЛКА</b> — {_now_msk()}\n\n" + "\n\n".join(sender) + mention)
             print(f"[health] SENDER ALERT sent: {len(sender)} problem(s)")
+        if bases:
+            await send_telegram(f"⚠️ <b>БАЗЫ</b> — {_now_msk()}\n\n" + "\n\n".join(bases))
+            print(f"[health] BASE ALERT sent: {len(bases)} problem(s)")
         problems = [*pipelines, *stuck, *failed]
         if not problems:
             print(f"[health] job monitor OK at {_now_msk()}")
