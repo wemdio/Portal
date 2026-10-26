@@ -152,6 +152,7 @@ export type RowState = 'ok' | 'warn' | 'bad' | 'off';
 /** Строка таблицы «Кто где живёт»: один адрес сервера и что на нём. */
 export interface AddressRow {
   key: string;
+  serverId: string;
   /** Порядок адреса в отчёте сервера: основной адрес сервера — первым. */
   pos: number;
   ip: string;
@@ -195,7 +196,7 @@ export function addressRows(rows: MailServerRow[], now: Date): AddressRow[] {
         stateText = `сервер молчит ${silentFor(row.received_at, now)}`;
       } else if (kind === 'paused' || kind === 'idle') {
         state = 'off';
-        stateText = listedHere ? `на паузе: ${listedHere} дом. в чёрных списках` : kind === 'idle' ? 'свободен' : 'на паузе';
+        stateText = listedHere ? `${listedHere} дом. в чёрных списках` : kind === 'idle' ? 'свободен' : 'на паузе';
       } else if (listedHere) {
         state = 'warn';
         stateText = `${listedHere} дом. в чёрных списках`;
@@ -206,6 +207,7 @@ export function addressRows(rows: MailServerRow[], now: Date): AddressRow[] {
       const clients = ipClients(ip);
       out.push({
         key: `${row.server_id}|${ip.ip}`,
+        serverId: row.server_id,
         pos,
         ip: ip.ip,
         ptr: ip.ptr,
