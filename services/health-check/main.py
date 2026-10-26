@@ -3485,7 +3485,8 @@ async def check_ve2_sender() -> list[str]:
 # Свой пользователь VE2 в базе 2ГИС (twogis_ve2, Ш3) и модуль 2ГИС воркера (R3).
 # 1) строки pg_hba для twogis_ve2: файл живёт в контейнере main-postgres и
 #    пропадает при его пересоздании — тогда роль войдёт и в основную базу;
-# 2) twogis_ve2 держит оба своих соединения 3 цикла подряд, инстанс у предела;
+# 2) twogis_ve2 занят (не idle) всеми своими соединениями 3 цикла подряд,
+#    инстанс у предела;
 # 3) ve_twogis_source_status (R2): пауза или серия ошибок, пока mode ≠ off.
 # Ключи — по эпизоду; когда проблемы нет, ключи эпизода удаляются.
 TWOGIS_VE2_REPEAT_MINUTES = _env_int("HEALTH_TWOGIS_VE2_REPEAT_MIN", 1440, 60)
@@ -3525,9 +3526,12 @@ async def _check_twogis_ve2(conn) -> list[str]:
                 "затем <code>SELECT pg_reload_conf();</code>"
             )
 
-    # 2. Соединения: twogis_ve2 у своего предела 3 цикла подряд; инстанс у предела.
+    # 2. Соединения: twogis_ve2 занят всеми своими соединениями 3 цикла подряд; инстанс у предела.
+    # Простаивающие (idle) не считаем: пул может держать их между тиками, а зависнуть
+    # дольше 10–15 с роль не может (statement_timeout, idle_in_transaction_session_timeout).
     counts = await conn.fetchrow(
-        "SELECT count(*) FILTER (WHERE usename = 'twogis_ve2')::int AS ve2, count(*)::int AS total, "
+        "SELECT count(*) FILTER (WHERE usename = 'twogis_ve2' AND state IS DISTINCT FROM 'idle')::int AS ve2, "
+        "count(*)::int AS total, "
         "current_setting('max_connections')::int AS max_conn FROM pg_stat_activity"
     )
     limit = role["rolconnlimit"] if role["rolconnlimit"] and role["rolconnlimit"] > 0 else 2
@@ -3542,7 +3546,7 @@ async def _check_twogis_ve2(conn) -> list[str]:
     if _TWOGIS_VE2_FULL_POOL_CYCLES[0] >= 3 and since is not None:
         key = f"twogis-ve2:pool:{since.isoformat()}:{_repeat_bucket(since, TWOGIS_VE2_REPEAT_MINUTES)}"
         if await _claim_job_alert(conn, key):
-            problems.append(f"🧵 <b>2ГИС VE2</b>: <code>twogis_ve2</code> держит {counts['ve2']} из {limit} соединений "
+            problems.append(f"🧵 <b>2ГИС VE2</b>: <code>twogis_ve2</code> занят {counts['ve2']} из {limit} соединений "
                             f"с {_msk(since)} — модуль 2ГИС, вероятно, завис.")
     threshold = min(85, int(counts["max_conn"] * 0.85))
     if counts["total"] >= threshold:

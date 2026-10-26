@@ -25,7 +25,8 @@ and `facet_subcategories`. Run it as `postgres` in `2gis_dataset`; it is safe
 to re-run and sets no password.
 
 - **Password.** Set it only as a SCRAM verifier, in a session with
-  `SET log_statement = 'none'` and `SET pg_stat_statements.track_utility = off`.
+  `SET log_statement = 'none'`, `SET pgaudit.log = 'none'` and
+  `SET pg_stat_statements.track_utility = off`.
   Production logs DDL and tracks utility statements, so a plain
   `ALTER ROLE … PASSWORD` would land in the server log and in
   `pg_stat_statements`. The plain password lives only in the worker's
