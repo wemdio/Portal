@@ -169,7 +169,7 @@ import { hasUsableCampaignSequences } from '@/lib/clientLaunch/campaignSequences
 import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { filterBlockedContacts, getBlockedContactSnapshot } from '@/lib/clientBlocklist/blockedDomains';
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
-import { createCampaign, createLeads, updateCampaign } from '@/lib/instantly/client';
+import { createCampaign, createLeads, pauseCampaign, updateCampaign } from '@/lib/instantly/client';
 import type { CampaignCreatePayload } from '@/lib/instantly/types';
 import { InstantlyApiError, isInstantlyContactCapacityError } from '@/lib/instantly/errors';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
@@ -220,6 +220,7 @@ import { HE_ENG_POOL_CAMPAIGN_SETTINGS } from './engSendingPreset';
 import { HE_RESEARCH_STAGES } from './researchJob';
 import {
   HE_ENG_CAMPAIGN_NAMING,
+  HE_ENG_UNVERIFIED_DAILY_NEW_LEADS,
   HE_LAUNCH_LEASE_MS,
   HE_LAUNCH_MAX_LEADS,
   buildLaunchCampaignName,
@@ -227,6 +228,7 @@ import {
   findCompanyKeyColumns,
   findEmailColumn,
   heConstructContactCap,
+  heEngUnverifiedSendEnabled,
   heLaunchEmailStrength,
   heLaunchEmailVerdict,
   heLaunchIsIncomplete,
@@ -242,6 +244,7 @@ import {
   type HeTemplateLaunchPending,
 } from './launchHandoff';
 import { HE_ENG_UNVERIFIED_SITE_EMAIL } from './engCollectionTarget';
+import { heCompanySiteIdentity, normalizeCompanyForDedup } from './collectionIdentity';
 
 export type HeLaunchLocale = 'ru' | 'en';
 
@@ -297,8 +300,6 @@ interface HeLaunchMessages {
   segmentSplitInfo: (campaignsCount: number) => string;
   rowsSkippedNote: (invalid: number, irrelevant: number) => string;
   unverifiedSkippedNote: (unverified: number) => string;
-  /** ENG: адреса с сайта компании, которые почтовый сервер не дал проверить, — не в этой кампании. */
-  unverifiedSiteHeldNote: (held: number) => string;
   /** RU: строки без вердикта ОТПРАВЛЕНЫ (как до 26.09.2026) — назвать вслух. */
   unverifiedSentNote: (unverified: number) => string;
   unparsedEmailNote: (multiAddress: number, malformed: number) => string;
@@ -555,9 +556,6 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     unverifiedSkippedNote: (unverified) =>
       `Не отправлено строк без вердикта валидации email: ${unverified.toLocaleString('ru-RU')} — ` +
       'непроверенный адрес в рассылку не идёт.',
-    unverifiedSiteHeldNote: (held) =>
-      `Отложено адресов без проверки: ${held.toLocaleString('ru-RU')} — компания опубликовала их на своём сайте, ` +
-      'но её почтовый сервер не дал их проверить; в эту кампанию они не входят.',
     unverifiedSentNote: (unverified) =>
       `ОТПРАВЛЕНО строк без вердикта валидации email: ${unverified.toLocaleString('ru-RU')} — ` +
       'у этой базы конструктор не дошёл до шага валидации почт. Правило RU-инструмента прежнее ' +
@@ -810,9 +808,6 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     unverifiedSkippedNote: (unverified) =>
       `Rows left out because their address has no validation verdict: ${unverified.toLocaleString('en-US')}. ` +
       'An unverified address is never contacted.',
-    unverifiedSiteHeldNote: (held) =>
-      `Held back: ${held.toLocaleString('en-US')} addresses the company publishes on its own site, ` +
-      'but whose mail server refused verification. They are not part of this campaign.',
     // Недостижимо в en-контуре: у us-проекта вердикт обязателен, поэтому
     // строка без вердикта никогда не отправляется (шаг 5). Пара к RU-ключу
     // нужна типу словаря, и врать в ней нельзя — текст честный.
@@ -2020,7 +2015,8 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   const gateEmailColumn = filterRows ? detectedEmailColumn : null;
   let skippedInvalid = 0;
   let skippedUnverified = 0;
-  let heldUnverifiedSite = 0;
+  // Строки кампании непроверенных адресов (шаг 6b); клиенту о них не говорится.
+  const heldSiteRows: Array<Record<string, unknown>> = [];
   let unverifiedSent = 0;
   let skippedIrrelevant = 0;
   let skippedCompanyQualification = 0;
@@ -2042,7 +2038,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
         // Marked by the ENG collection (engCollectionTarget): kept in the base,
         // never sent together with the checked addresses.
         if (verdict === 'rejected' && allowCatchAll && r._email_unverified === HE_ENG_UNVERIFIED_SITE_EMAIL) {
-          heldUnverifiedSite += 1;
+          heldSiteRows.push(r);
           return false;
         }
         if (verdict === 'rejected') {
@@ -2153,6 +2149,8 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   let blockedContacts = 0;
   // Из них — закрытых доменной записью (адрес, сайт лида или сайт строки).
   let blockedByDomain = 0;
+  // Тот же снимок режет и кампанию непроверенных адресов (шаг 6b).
+  let blockedSnapshot: Awaited<ReturnType<typeof getBlockedContactSnapshot>> | null = null;
   try {
     if (!clientUserId) {
       throw new Error(`пресет ${effectivePresetId}: пустой client_user_id — чей чёрный список применять, неизвестно`);
@@ -2162,6 +2160,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     // базы — колонку сайта ищет findCompanyKeyColumns, а не жёсткое имя.
     // Ошибка снимка (в том числе список сверх лимита) — тот же отказ ниже.
     const snapshot = await getBlockedContactSnapshot(instantlyDb, clientUserId);
+    blockedSnapshot = snapshot;
     const websiteColumn = findCompanyKeyColumns(columns).website;
     const rowIndicesBefore = leadRowIndices;
     // filterBlockedContacts — единственный носитель правил совпадения; `kept`
@@ -2759,6 +2758,9 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   }
 
   const campaigns: HeTemplateLaunchCampaign[] = [];
+  // Кампания непроверенных адресов (шаг 6b): у достройки — её прошлой попытки.
+  let unverifiedCampaign: HeTemplateLaunchCampaign | null =
+    resumeLaunch ? existingLaunch?.unverified_campaign ?? null : null;
   // Сегменты, решённые как недоехавшие в ЭТОЙ попытке (отказ, ёмкость, ноль
   // принятых у свежей кампании) — с адресами, которые они ещё должны.
   const settledPending: HeTemplateLaunchPending[] = [];
@@ -2906,6 +2908,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       // Пустого массива не пишем: ключ означает «запуск не закончен», и запись
       // без него читается как законченная — в том числе все записи до 28.09.2026.
       ...(pendingNow.length > 0 ? { pending: pendingNow } : {}),
+      ...(unverifiedCampaign ? { unverified_campaign: unverifiedCampaign } : {}),
     };
   };
 
@@ -3247,6 +3250,126 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     }
   }
 
+  // 6b. Кампания непроверенных адресов — только для команды (решение владельца
+  //     26.10.2026, HeTemplateLaunchInfo.unverified_campaign). Создаётся
+  //     ПОСЛЕДНЕЙ: её отказ не трогает группы клиента и не делает запуск
+  //     незаконченным — в pending она не попадает, ошибка уходит в журнал.
+  //     Старт и пауза — engUnverifiedCampaign.ts по состоянию основных кампаний.
+  if (!resumeLaunch && existingLaunch?.unverified_campaign) {
+    // Force-перезапуск: прошлая такая кампания уходит из записи, и её больше
+    // никто не ведёт — на паузу сразу.
+    try {
+      await pauseCampaign(existingLaunch.unverified_campaign.campaign_id, instantlyRequestOptions);
+    } catch (err) {
+      await logError(`${eventPrefix}.unverified_campaign_orphan_pause_failed`, err, {
+        userId,
+        templateId,
+        campaignId: existingLaunch.unverified_campaign.campaign_id,
+      });
+    }
+  }
+  if (allowCatchAll && heldSiteRows.length > 0 && blockedSnapshot && !capacityStopped && heEngUnverifiedSendEnabled()) {
+    try {
+      // Компании, которым этот запуск уже пишет на проверенный адрес, сюда не
+      // идут: ответ в одной кампании другую не останавливает (stop_for_company
+      // рассыльщика — внутри кампании).
+      const keyColumns = findCompanyKeyColumns(columns);
+      const companyOf = (row: Record<string, unknown>): string => {
+        const site = keyColumns.website ? heCompanySiteIdentity(row[keyColumns.website])?.registrable : undefined;
+        const name = keyColumns.company && typeof row[keyColumns.company] === 'string'
+          ? normalizeCompanyForDedup(row[keyColumns.company] as string) : '';
+        return site ? `site:${site}` : name ? `name:${name}` : '';
+      };
+      // По всем отправляемым строкам базы, а не по адресам этой попытки: у
+      // достройки здесь только долг, а компании прошлой попытки уже в рассылке.
+      const covered = new Set(rows.map(companyOf).filter(Boolean));
+      const candidates = heldSiteRows.filter((row) => {
+        const key = companyOf(row);
+        return key !== '' && !covered.has(key);
+      });
+      const mapped = mapBaseRowsToLeads({
+        rows: candidates,
+        columns,
+        emailColumn: detectedEmailColumn,
+        operatorMapping,
+        standardFields: true,
+      });
+      const filtered = filterBlockedContacts(mapped.leads, blockedSnapshot, (_lead, i) =>
+        keyColumns.website ? candidates[mapped.leadRowIndices[i]]?.[keyColumns.website] : null,
+      );
+      const mainEmails = new Set(leads.map((lead) => lead.email.toLowerCase()));
+      const unverifiedLeads = filtered.kept
+        .filter((lead) => !mainEmails.has(lead.email.toLowerCase()))
+        .slice(0, HE_LAUNCH_MAX_LEADS);
+      const sequence = unverifiedLeads.length > 0 ? buildLaunchSequence(templateLetters) : null;
+      if (sequence) {
+        if (!unverifiedCampaign) {
+          const name = `${buildLaunchCampaignName(base.filename, new Date(), null, campaignNaming)} · unverified`;
+          const presetPayload = buildCampaignPayloadFromPreset({
+            preset,
+            sequence: { name, steps: sequence.steps },
+            ...(sendingWindow ? { scheduleOverride: sendingWindow } : {}),
+          });
+          const payload = {
+            ...presetPayload,
+            ...(campaignSettings ?? {}),
+            daily_max_leads: HE_ENG_UNVERIFIED_DAILY_NEW_LEADS,
+          };
+          const created = await createCampaign(payload, instantlyRequestOptions);
+          const createdId = (created as { id?: string }).id ?? null;
+          if (!createdId) throw new Error('Instantly вернул кампанию без идентификатора');
+          createdCampaignIds.push(createdId);
+          unverifiedCampaign = {
+            campaign_id: createdId,
+            campaign_name: name,
+            campaign_url: instantlyCampaignUrl(createdId),
+            segment: null,
+            leads_count: 0,
+            leads_requested: 0,
+            leads_attempted: 0,
+          };
+          if (!hasUsableCampaignSequences(created.sequences)) {
+            await updateCampaign(createdId, { sequences: payload.sequences }, instantlyRequestOptions);
+          }
+        }
+        const target = unverifiedCampaign;
+        for (let from = 0; from < unverifiedLeads.length; from += HE_LAUNCH_UPLOAD_CHUNK) {
+          const chunk = unverifiedLeads.slice(from, from + HE_LAUNCH_UPLOAD_CHUNK);
+          // Всегда с skip_if_in_campaign: адрес, который уже лежит в кампаниях
+          // воркспейса, второй раз не пишется.
+          const result = await createLeads(
+            chunk,
+            { campaign_id: target.campaign_id, skip_if_in_workspace: false, skip_if_in_campaign: true, skip_if_in_list: false },
+            instantlyRequestOptions,
+          );
+          const present = Math.min(result.skipped_count, Math.max(0, result.total_sent - result.leads_uploaded));
+          target.leads_requested = (target.leads_requested ?? target.leads_count) + chunk.length;
+          target.leads_attempted = (target.leads_attempted ?? target.leads_count) + result.total_sent;
+          target.leads_count += result.leads_uploaded;
+          if (present > 0) target.leads_already_present = (target.leads_already_present ?? 0) + present;
+        }
+      }
+      await logAudit(`${eventPrefix}.unverified_campaign`, 'Staff-only campaign of unverified own-site addresses', {
+        userId,
+        templateId,
+        heldRows: heldSiteRows.length,
+        coveredCompaniesSkipped: heldSiteRows.length - candidates.length,
+        blocked: filtered.blockedCount,
+        uploaded: unverifiedLeads.length,
+        campaignId: unverifiedCampaign?.campaign_id ?? null,
+      });
+    } catch (err) {
+      // Созданная до отказа кампания остаётся в записи (unverifiedCampaign уже
+      // присвоен) — следящий проход её найдёт; адресов в ней может быть меньше.
+      await logError(`${eventPrefix}.unverified_campaign_failed`, err, {
+        userId,
+        templateId,
+        heldRows: heldSiteRows.length,
+        campaignId: unverifiedCampaign?.campaign_id ?? null,
+      });
+    }
+  }
+
   // 7. Итоговая запись о запуске — та же сборка, что у промежуточных, без
   //    аренды (запуск закончен этой попыткой) и без групп «в полёте». Кампании
   //    прошлой попытки, которым в ЭТОМ запуске не нашлось группы, переносятся
@@ -3313,9 +3436,6 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   // staff во внутреннем UI), а новые появляются только когда реально отсеяли.
   if (skippedUnverified > 0) {
     warnings.push(t.unverifiedSkippedNote(skippedUnverified));
-  }
-  if (heldUnverifiedSite > 0) {
-    warnings.push(t.unverifiedSiteHeldNote(heldUnverifiedSite));
   }
   // RU: строки без вердикта уехали (правило инструмента прежнее) — но теперь
   // сотрудник видит, сколько именно. Раньше это был молчаливый риск.
