@@ -33,6 +33,9 @@ import { getVeScopedJobClaim, getVeScopedJobSignal, withVeActiveJobSignal } from
 import { createVeStageSupabase, describeVeStageDbActivity } from '@/lib/verticalEngineV2/stageDb';
 import { supabaseAdminFetchWithRetry } from '@/lib/supabaseAdmin';
 import { withVeCostTelemetry } from '@/lib/verticalEngineV2/costTelemetry';
+import { closeVeTwoGisPool } from '@/lib/verticalEngineV2/twoGisSource';
+import { releaseVeTwoGisClaims, VeTwoGisJournalError } from '@/lib/verticalEngineV2/twoGisJournal';
+import { readVeTwoGisSourceFlag } from '@/lib/verticalEngineV2/twoGisSettings';
 import { normalizeVeMarket } from '@/lib/verticalEngineV2/market';
 import { clearVeJobInterruptions, planVeJobFailure, VE_JOB_FREE_INTERRUPTIONS } from '@/lib/verticalEngineV2/jobRetry';
 import { retryVeJobFinalization, transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
@@ -587,7 +590,7 @@ async function failJob(job: VeJob, err: unknown, failedAt: string) {
   if (finalFail && job.stage === 'base_collect') {
     const baseId = typeof job.payload?.base_id === 'string' ? job.payload.base_id : null;
     if (baseId) {
-      const { error: baseError } = await db
+      const { data: failedBase, error: baseError } = await db
         .from('ve_bases')
         .update({
           status: 'failed',
@@ -595,8 +598,15 @@ async function failJob(job: VeJob, err: unknown, failedAt: string) {
           updated_at: new Date().toISOString(),
         })
         .eq('id', baseId)
-        .eq('status', 'collecting').lte('updated_at', failedAt).abortSignal(AbortSignal.timeout(10_000));
+        .eq('status', 'collecting').lte('updated_at', failedAt)
+        .select('id, two_gis:collect_info->two_gis_source').abortSignal(AbortSignal.timeout(10_000)).maybeSingle();
       if (baseError) throw new Error(`ve_bases failure save: ${baseError.message}`);
+      // 2ГИС: база с флагом вышла из сбора — её claimed в журнале линии освобождаются. Не бросает:
+      // финальный фейл повторяется под retryVeJobFinalization; запасной путь — перехват следующей базой.
+      if (failedBase && readVeTwoGisSourceFlag((failedBase as { two_gis?: unknown }).two_gis)) {
+        try { await releaseVeTwoGisClaims(db, baseId); }
+        catch (error) { log('warn', `[2gis] release after final fail: ${error instanceof VeTwoGisJournalError ? error.code : 'error'}`); }
+      }
     }
   }
 
@@ -693,6 +703,8 @@ async function main() {
     clearInterval(outreachPreparationTimer);
     clearInterval(contactCapTimer);
     await jobPool.drain();
+    // После drain: закрытие раньше дало бы идущим близнецам 'busy'.
+    await closeVeTwoGisPool();
     if (activeContactDeliveryTick) await activeContactDeliveryTick;
     if (activeOutreachPreparationTick) await activeOutreachPreparationTick;
     if (activeContactCapSweep) await activeContactCapSweep;

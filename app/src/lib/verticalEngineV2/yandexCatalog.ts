@@ -22,6 +22,8 @@ export interface VeYandexCatalogCheckpoint {
 
 const normalized = (value: string) => value.trim().toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/\s+/g, ' ');
 const wordForms = (value: string): string[] => normalized(value).match(/[\p{L}\p{N}]{3,}/gu) ?? [];
+/** Контекст для sharesRootWith: формы слов каждой фразы (как у Яндекса ниже); близнец 2ГИС берёт тот же. */
+export const veRubricContext = (phrases: readonly string[]): string[][] => phrases.map(wordForms).filter((phrase) => phrase.length);
 const words = (value: string) => [...new Set(wordForms(value).map((word) => word.slice(0, 4)))];
 
 /** Окончания, которыми различаются формы одного слова («агентство/агентства»,
@@ -74,18 +76,18 @@ export function isVeRubricVariant(label: string, query: string): boolean {
 
 /** Дешёвая защита от промаха модели («Клининг» на запрос «детская клиника»):
  * хотя бы одно слово рубрики родственно слову запросов или описания задачи. */
-function sharesRootWith(label: string, context: string[][]): boolean {
+export function sharesRootWith(label: string, context: string[][]): boolean {
   return wordForms(label).some((word) => context.some((phrase) => phrase.some((other, index) =>
     sameWordForm(word, other) || commonPrefix(word, other) >= 6
     || (index + 1 < phrase.length && compoundOf(word, other, phrase[index + 1])))));
 }
 
-interface VeCatalogRubric { label: string; companies: number }
+export interface VeCatalogRubric { label: string; companies: number }
 
 /** Keep distinctive query terms ahead of generic words such as «ремонт».
  * This selects a prompt shortlist, not the admitted audience. Terms match
  * inside words too: compound rubrics («Медлаборатории») must reach the model. */
-function rubricCandidates(rubrics: VeCatalogRubric[], queries: string[]): VeCatalogRubric[] {
+export function rubricCandidates(rubrics: VeCatalogRubric[], queries: string[]): VeCatalogRubric[] {
   const labels = rubrics.map((rubric) => normalized(rubric.label)), terms = words(queries.join(' '));
   const weights = new Map(terms.map((term) => [term, Math.log(1 + rubrics.length / (1 + labels.filter((label) => label.includes(term)).length))]));
   const ranked = rubrics.map((rubric, index) => ({ rubric, index,

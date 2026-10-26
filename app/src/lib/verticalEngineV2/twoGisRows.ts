@@ -147,3 +147,32 @@ export function mapTwoGisRow(card: VeTwoGisCardRow, snapshotId: number): VeTwoGi
     [VE_TWO_GIS_ROW_FIELD]: { card_id: card.card_id, snapshot_id: snapshotId },
   };
 }
+
+/**
+ * Рубрики с особым смыслом для флагов card_features (is_non_company, is_private_rubric,
+ * is_government). Флаг карточки — true, только если ВСЕ её рубрики в наборе; разрешение
+ * базы (veTwoGisAllow, twoGisTwin.ts) — true, если в наборе ХОТЬ ОДНА выбранная рубрика.
+ * Списки пусты: точные значения facet_subcategories утверждает Сергей до mode=on (план
+ * «R3, часть 3: проект и замер»). Сборщик Ш5 берёт этот же модуль: версия списков — в
+ * VE_TWO_GIS_RUBRIC_SETS_VERSION, сборщик и воркер выкатываются одной версией.
+ */
+export const VE_TWO_GIS_RUBRIC_SETS_VERSION = 1;
+export const VE_TWO_GIS_RUBRIC_SETS: { nonCompany: readonly string[]; privateRubric: readonly string[]; government: readonly string[] } = {
+  nonCompany: [], privateRubric: [], government: [],
+};
+
+/** Ключ сравнения рубрик: регистр, ё и пробелы не различают. */
+export const veTwoGisRubricKey = (label: string) => label.trim().toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/\s+/g, ' ');
+
+/**
+ * Хосты госорганов и госучреждений (дизайн §2): без разрешения базы карточка с таким сайтом
+ * не берётся. Список — на подтверждение владельцу (Сергей) до mode=on.
+ */
+export const VE_TWO_GIS_GOVERNMENT_HOSTS: readonly string[] = ['gov.ru', 'mvd.ru', 'sudrf.ru', 'mil.ru', 'mos.ru', 'gosuslugi.ru',
+  'edusite.ru', 'mskobr.ru', 'tvoysadik.ru', 'tvoyashkola.ru', 'kremlin.ru'];
+
+/** Сайт на домене госоргана или его поддомене (school5.gosuslugi.ru, mvd.ru). */
+export function isVeTwoGisGovernmentHost(raw: unknown): boolean {
+  const host = veTwoGisWebsiteHost(raw);
+  return !!host && VE_TWO_GIS_GOVERNMENT_HOSTS.some((domain) => onHost(host, domain));
+}

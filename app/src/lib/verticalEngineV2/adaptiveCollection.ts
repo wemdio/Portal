@@ -215,7 +215,7 @@ export function veDryLiveSources(completed: VeAdaptiveResult[], liveKeys: Iterab
 const VE_DRY_SOURCE_FROM: Record<string, string> = {
   companies_directory: 'реестра', yandex_maps: 'Яндекс Карт', google_maps: 'Google Maps', hh_live: 'вакансий hh.ru',
   eng_hiring: 'вакансий', pdl: 'каталога PDL', funded: 'каталога стартапов',
-  known_websites: 'официальных сайтов платформ',
+  known_websites: 'официальных сайтов платформ', two_gis: 'справочника организаций',
 };
 const ruPlural = (value: number, one: string, few: string, many: string) => {
   const tens = value % 100, units = value % 10;

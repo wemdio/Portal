@@ -2,6 +2,8 @@ import type { PoolClient } from 'pg';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { TWO_GIS_IMPORT_LOCK } from '@/lib/twoGis/importSnapshot';
 import { VeTwoGisSnapshotError, withVeTwoGisReadOnly } from './twoGisSource';
+// baseCollect берёт 2ГИС только отсюда: twoGisSource напрямую импортируют лишь этот модуль и воркер.
+export { VeTwoGisUnavailableError } from './twoGisSource';
 import { veTwoGisCityKey, type VeTwoGisCardRow } from './twoGisRows';
 
 /**
@@ -21,10 +23,11 @@ import { veTwoGisCityKey, type VeTwoGisCardRow } from './twoGisRows';
  * страницами: журнал пишется по странице, курсор — один раз в конце диспатча,
  * после сбоя повтор перечитывает свои заявки (решение чата VE2, п.8).
  *
- * Для 3b: строка http-only сайта несёт website 'http://host'. dedupUnifiedRows
- * при слиянии с той же компанией из другого источника (голый host) оставляет
- * website первой строки, и схема http может потеряться — читатель сайта тогда
- * пойдёт на https. Решает 3b (порядок слияния или перенос схемы).
+ * Строка http-only сайта несёт website 'http://host'. В 3b строки близнеца со
+ * строками других источников не сливаются: каждая точка слияния их снимает, а сам
+ * близнец dedupUnifiedRows не зовёт. Когда карантин снимут (часть 5), слияние с
+ * голым host той же компании из другого источника оставит website первой строки —
+ * порядок слияния или перенос схемы решает часть 5.
  */
 export const VE_TWO_GIS_WINDOW_IDS = 20_000;
 export const VE_TWO_GIS_PAGE_ROWS = 500;
@@ -118,11 +121,12 @@ export function nextVeTwoGisCursor(after: string, page: { rows: readonly { card_
 
 const count = (value: unknown) => (value == null ? null : Number(value));
 
-/** Внутри read-only транзакции withVeTwoGisReadOnly: сам ничего не перехватывает. */
-export async function readVeTwoGisPageWith(client: QueryClient, input: VeTwoGisPageInput): Promise<VeTwoGisPageResult> {
-  const query = buildVeTwoGisPageQuery(input); // неверный вход — до первого запроса
-  // Окно — Merge Append → Unique; HashAggregate+Sort на проде втрое медленнее (EXPLAIN 26.10).
-  await client.query('SET LOCAL enable_hashagg = off');
+/**
+ * Проверка сборки внутри транзакции: тихо — идёт ли импорт, затем сборка против текущего
+ * снимка и флага базы. Глобальная рассинхронизация — VeTwoGisSnapshotError.
+ */
+async function readVeTwoGisBuildWith(client: QueryClient, flag: VeTwoGisPageInput['flag']):
+  Promise<{ kind: 'import' } | { kind: 'stale'; build: VeTwoGisBuild } | { kind: 'current'; build: VeTwoGisBuild }> {
   const lock = await client.query('SELECT pg_try_advisory_xact_lock_shared(hashtext($1)) AS locked', [TWO_GIS_IMPORT_LOCK]);
   if (lock.rows[0]?.locked !== true) return { kind: 'import' };
   // Чтение card_features держит AccessShareLock до конца транзакции: подмена сборки не встанет между проверкой и страницей.
@@ -139,9 +143,19 @@ FROM ve2.build_state bs WHERE bs.singleton`);
   if (count(row.table_features_version) !== build.featuresVersion) {
     throw new VeTwoGisSnapshotError('2ГИС: ve2.card_features не совпадает с build_state');
   }
-  if (input.flag.snapshot_id !== build.snapshotId || input.flag.features_version !== build.featuresVersion) {
+  if (flag.snapshot_id !== build.snapshotId || flag.features_version !== build.featuresVersion) {
     return { kind: 'stale', build };
   }
+  return { kind: 'current', build };
+}
+
+/** Внутри read-only транзакции withVeTwoGisReadOnly: сам ничего не перехватывает. */
+export async function readVeTwoGisPageWith(client: QueryClient, input: VeTwoGisPageInput): Promise<VeTwoGisPageResult> {
+  const query = buildVeTwoGisPageQuery(input); // неверный вход — до первого запроса
+  // Окно — Merge Append → Unique; HashAggregate+Sort на проде втрое медленнее (EXPLAIN 26.10).
+  await client.query('SET LOCAL enable_hashagg = off');
+  const checked = await readVeTwoGisBuildWith(client, input.flag);
+  if (checked.kind !== 'current') return checked;
   const page = await client.query(query.text, query.values);
   const rows = (page.rows as Array<Record<string, unknown>>).filter((item) => item.card_id != null).map((item): VeTwoGisCardRow => ({
     card_id: String(item.card_id), registrable_domain: String(item.registrable_domain), host: String(item.host),
@@ -161,4 +175,50 @@ export async function readVeTwoGisPage(input: VeTwoGisPageInput,
   options: { db?: SupabaseClient; now?: () => Date } = {}): Promise<VeTwoGisPageResult> {
   buildVeTwoGisPageQuery(input);
   return withVeTwoGisReadOnly((client) => readVeTwoGisPageWith(client, input), options);
+}
+
+/** Словарь рубрик для подбора: больше этого — отказ у вызывающего (как у каталога Яндекса). */
+export const VE_TWO_GIS_DICTIONARY_MAX = 5000;
+export interface VeTwoGisRubricCount { label: string; cards: number }
+export type VeTwoGisDictionaryResult = { kind: 'import' } | { kind: 'stale'; build: VeTwoGisBuild }
+  | { kind: 'dictionary'; rubrics: VeTwoGisRubricCount[] };
+
+/**
+ * Рубрики снимка с числом карточек по стране (facet_subcategories) — под той же проверкой
+ * импорта и сборки: импортёр очищает facet_subcategories в своей транзакции. Лишняя строка
+ * (LIMIT 5001) показывает переполнение; отказ — у вызывающего, не исключением здесь:
+ * исключение внутри транзакции считается сбоем базы.
+ */
+export async function readVeTwoGisRubricDictionaryWith(client: QueryClient, flag: VeTwoGisPageInput['flag']): Promise<VeTwoGisDictionaryResult> {
+  const checked = await readVeTwoGisBuildWith(client, flag);
+  if (checked.kind !== 'current') return checked;
+  const result = await client.query(`SELECT fs.value AS label, sum(fs.row_count)::bigint AS cards FROM public.facet_subcategories fs
+WHERE btrim(fs.value) <> '' GROUP BY fs.value ORDER BY fs.value LIMIT ${VE_TWO_GIS_DICTIONARY_MAX + 1}`);
+  return { kind: 'dictionary', rubrics: (result.rows as Array<Record<string, unknown>>).map((row) => ({
+    label: String(row.label), cards: Number(row.cards) || 0 })) };
+}
+
+const DICTIONARY_TTL_MS = 10 * 60_000;
+let dictionaryCache: { key: string; at: number; read: Promise<VeTwoGisDictionaryResult> } | null = null;
+
+/**
+ * Один вызов withVeTwoGisReadOnly (заметка 18). Кэш процесса — одна запись на снимок и таблицу
+ * сайтов, 10 мин, общий для одновременных вызовов; хранится только прочитанный словарь —
+ * импорт, устаревший флаг и сбой запись снимают. Результат общий: вызывающий его не меняет.
+ */
+export async function readVeTwoGisRubricDictionary(flag: VeTwoGisPageInput['flag'],
+  options: { db?: SupabaseClient; now?: () => Date } = {}): Promise<VeTwoGisDictionaryResult> {
+  const key = `${flag.snapshot_id}:${flag.features_version}`;
+  const at = (options.now ?? (() => new Date()))().getTime();
+  if (dictionaryCache?.key === key && at - dictionaryCache.at < DICTIONARY_TTL_MS) return dictionaryCache.read;
+  const entry = { key, at, read: withVeTwoGisReadOnly((client) => readVeTwoGisRubricDictionaryWith(client, flag), options) };
+  dictionaryCache = entry;
+  try {
+    const result = await entry.read;
+    if (result.kind !== 'dictionary' && dictionaryCache === entry) dictionaryCache = null;
+    return result;
+  } catch (error) {
+    if (dictionaryCache === entry) dictionaryCache = null;
+    throw error;
+  }
 }

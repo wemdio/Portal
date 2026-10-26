@@ -32,6 +32,12 @@ jest.mock('@/lib/verticalEngineV2/relevanceEvidence', () => ({
   ...jest.requireActual('@/lib/verticalEngineV2/relevanceEvidence'),
   fetchVeRelevanceEvidence: jest.fn(async () => ({ status: 'unavailable', text: '', url: '', reason: 'offline_fixture' })),
 }));
+// 2ГИС: частичный мок — проверки части 3а идут по настоящим функциям страницы, диспатч близнеца — по подменённым.
+jest.mock('@/lib/verticalEngineV2/twoGisPage', () => {
+  const actual = jest.requireActual<typeof import('@/lib/verticalEngineV2/twoGisPage')>('@/lib/verticalEngineV2/twoGisPage');
+  return { ...actual, readVeTwoGisPage: jest.fn(actual.readVeTwoGisPage),
+    readVeTwoGisRubricDictionary: jest.fn(async () => { throw new Error('unmocked 2ГИС dictionary read'); }) };
+});
 
 const mockFindIrrelevantRows = jest.fn();
 
@@ -55,9 +61,15 @@ import { addVeKnownWebsiteSource, VE_KNOWN_ADULT_WEBSITES } from '@/lib/vertical
 import { finalizeVeTwoGisTwins, pairVeTwoGisStates, veCountedPlanTasks, veTwoGisTwinKeys, VE_TWO_GIS_PAIR_LOST_NOTE, withVeTwoGisTwins } from '@/lib/verticalEngineV2/twoGisQuarantine';
 import { applyVeCollectionGeographyToPlan, veTwoGisQueryScope } from '@/lib/verticalEngineV2/collectionGeography';
 import { veCanWidenPlan } from '@/lib/verticalEngineV2/planWidening';
-import { mapTwoGisRow, veTwoGisAddress, veTwoGisCompanyName, veTwoGisSiteDomain, veTwoGisSiteKind, veTwoGisWebsite,
+import { isVeTwoGisGovernmentHost, mapTwoGisRow, veTwoGisAddress, veTwoGisCompanyName, veTwoGisSiteDomain, veTwoGisSiteKind, veTwoGisWebsite,
   veTwoGisWebsiteHost } from '@/lib/verticalEngineV2/twoGisRows';
-import { buildVeTwoGisPageQuery, nextVeTwoGisCursor, readVeTwoGisPage, readVeTwoGisPageWith } from '@/lib/verticalEngineV2/twoGisPage';
+import { buildVeTwoGisPageQuery, nextVeTwoGisCursor, readVeTwoGisPage, readVeTwoGisPageWith, readVeTwoGisRubricDictionary,
+  readVeTwoGisRubricDictionaryWith } from '@/lib/verticalEngineV2/twoGisPage';
+import { resolveVeTwoGisRubrics, veTwoGisMappingFailure, VeTwoGisRubricsUnavailableError } from '@/lib/verticalEngineV2/twoGisRubrics';
+import { claimVeTwoGisRows, releaseVeTwoGisClaims } from '@/lib/verticalEngineV2/twoGisJournal';
+import { readVeTwoGisTwinState, veTwoGisAllow, VE_TWO_GIS_TWIN_NOTES } from '@/lib/verticalEngineV2/twoGisTwin';
+import { VeLlmRateLimitError } from '@/lib/verticalEngineV2/llmRateLimit';
+import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { VeTwoGisSnapshotError, VeTwoGisUnavailableError } from '@/lib/verticalEngineV2/twoGisSource';
 import type { PoolClient } from 'pg';
 import { createHash } from 'node:crypto';
@@ -4597,6 +4609,8 @@ describe('base_collect: план кончился раньше цели', () => 
     }
     expect(veTwoGisWebsiteHost('https://www.Кафе.РФ/menu')).toBe('xn--80akn5b.xn--p1ai');
     expect(veTwoGisWebsiteHost('http://www.www.romashka.ru')).toBe('romashka.ru'); // CHECK host !~ '^www\.' в ve2
+    expect(['mos.ru', 'dogm.mos.ru', 'school5.gosuslugi.ru', '77.mvd.ru', 'notmos.ru', 'romashka.ru'].map(isVeTwoGisGovernmentHost))
+      .toEqual([true, true, true, true, false, false]);
     // Название — до первой запятой вне «», "", “”, „“, () и []; апостроф — не кавычка.
     for (const [name, company] of [['Ромашка, мебельная фабрика', 'Ромашка'], ['«Рога, копыта», ООО', '«Рога, копыта»'],
       ['ООО "Альфа, Бета", склад', 'ООО "Альфа, Бета"'], ['Сервис (ремонт, продажа), магазин', 'Сервис (ремонт, продажа)'],
@@ -4715,6 +4729,350 @@ describe('base_collect: план кончился раньше цели', () => 
     const empty = await readVeTwoGisPageWith(fake(built, true, [{ window_ids: 0, window_last: null, card_id: null }]).client,
       { ...input, after: '7000000000000500' });
     expect(empty).toEqual({ kind: 'page', rows: [], cursor: '7000000000000500', exhausted: true, windowIds: 0 });
+
+    // Часть 3б: словарь, подбор рубрик, разрешения, курсор, диспатч близнеца, журнал линии.
+    const actualPage = jest.requireActual<typeof import('@/lib/verticalEngineV2/twoGisPage')>('@/lib/verticalEngineV2/twoGisPage');
+    try {
+      // (а) Словарь — под той же проверкой импорта и сборки, без SET LOCAL.
+      const dictionaryRead = fake(built, true, [{ label: 'Кафе', cards: '9000' }, { label: 'Мясокомбинаты', cards: '120' }]);
+      expect(await readVeTwoGisRubricDictionaryWith(dictionaryRead.client, input.flag)).toEqual({ kind: 'dictionary',
+        rubrics: [{ label: 'Кафе', cards: 9000 }, { label: 'Мясокомбинаты', cards: 120 }] });
+      expect(dictionaryRead.calls).toHaveLength(3); // импорт, build_state, словарь
+      expect(dictionaryRead.calls[2].text).toMatch(/FROM public\.facet_subcategories fs[\s\S]*GROUP BY fs\.value ORDER BY fs\.value LIMIT 5001$/);
+      expect(await readVeTwoGisRubricDictionaryWith(fake(built, false).client, input.flag)).toEqual({ kind: 'import' });
+      expect(await readVeTwoGisRubricDictionaryWith(fake(built).client, { snapshot_id: 7, features_version: 2 })).toMatchObject({ kind: 'stale' });
+      await expect(readVeTwoGisRubricDictionaryWith(fake(null).client, input.flag)).rejects.toBeInstanceOf(VeTwoGisSnapshotError);
+
+      // (б) Рубрики: точная форма — без модели; иначе короткий список, модель и проверка корня; не больше 8.
+      const dictionary = [{ label: 'Мясокомбинаты', cards: 120 }, { label: 'Колбасные изделия', cards: 40 },
+        { label: 'Цеховые столовые', cards: 10 }, { label: 'Кафе', cards: 9000 }];
+      jest.mocked(callLLMWithSchema).mockClear();
+      expect(await resolveVeTwoGisRubrics({ dictionary, queries: ['мясокомбинат'] })).toEqual({ rubrics: ['Мясокомбинаты'], viaModel: false });
+      expect(callLLMWithSchema).not.toHaveBeenCalled();
+      jest.mocked(callLLMWithSchema).mockImplementationOnce(async (messages, schema) => {
+        const prompt = JSON.parse(String(messages.at(-1)?.content)) as { categories: Array<{ id: number }> };
+        return { data: schema.parse({ category_ids: prompt.categories.map((category) => category.id) }), tokensUsed: 5, costUsd: 0.001,
+          promptTokens: 4, completionTokens: 1, rawResponse: '' };
+      });
+      expect(await resolveVeTwoGisRubrics({ dictionary, queries: ['колбасный цех'], context: MEAT.title }))
+        .toEqual({ rubrics: ['Колбасные изделия'], viaModel: true }); // «Цеховые столовые» снимает проверка корня
+      expect(jest.mocked(callLLMWithSchema).mock.calls[0][2]).toMatchObject({ model: 'test-gate-model', requireCompleteJson: true });
+      expect((JSON.parse(String(jest.mocked(callLLMWithSchema).mock.calls[0][0].at(-1)?.content)) as { categories: Array<{ label: string }> })
+        .categories.map((category) => category.label)).toEqual(['Колбасные изделия', 'Цеховые столовые']);
+      jest.mocked(callLLMWithSchema).mockClear();
+      await expect(resolveVeTwoGisRubrics({ dictionary, queries: ['ювелир'] })).rejects.toBeInstanceOf(VeTwoGisRubricsUnavailableError);
+      const oversize = resolveVeTwoGisRubrics({ dictionary: Array.from({ length: 5001 }, (_, index) => ({ label: `Рубрика ${index}`, cards: 1 })),
+        queries: ['мясокомбинат'] });
+      await expect(oversize).rejects.toBeInstanceOf(VeTwoGisRubricsUnavailableError);
+      await expect(oversize).rejects.toMatchObject({ reason: 'oversize' }); // своя заметка: предел словаря, а не «нет рубрик»
+      await expect(resolveVeTwoGisRubrics({ dictionary, queries: ['ювелир'] })).rejects.toMatchObject({ reason: 'none' });
+      expect(callLLMWithSchema).not.toHaveBeenCalled();
+      const words = ['Альфа', 'Бетон', 'Гамма', 'Дельта', 'Эпсилон', 'Зета', 'Тета', 'Каппа', 'Лямбда', 'Омега'];
+      expect(await resolveVeTwoGisRubrics({ dictionary: words.map((label) => ({ label, cards: 1 })), queries: words.map((word) => word.toLowerCase()) }))
+        .toEqual({ rubrics: words.slice(0, 8), viaModel: false });
+      jest.mocked(callLLMWithSchema).mockRejectedValueOnce(new VeLlmRateLimitError(Date.now() + 60_000, false));
+      await expect(resolveVeTwoGisRubrics({ dictionary, queries: ['колбасный цех'] })).rejects.toBeInstanceOf(VeLlmRateLimitError);
+      jest.mocked(callLLMWithSchema).mockRejectedValueOnce(new Error('Requesty 402: insufficient balance'));
+      await expect(resolveVeTwoGisRubrics({ dictionary, queries: ['колбасный цех'] })).rejects.toThrow(/^Requesty 402/);
+      expect([new Error('Requesty 401: bad key'), new Error('Requesty 503: upstream'), new Error('x')].map(veTwoGisMappingFailure))
+        .toEqual(['retire', 'pending', 'count']);
+
+      // (в) Разрешения: рубрика — хоть одна в наборе; ИП — только задача реестра плана с includeIp (не расширенная).
+      const sets = { nonCompany: ['Банкоматы'], privateRubric: ['Нотариусы'], government: ['Школы'] };
+      const directoryState = (includeIp: boolean, widened?: 'replan' | 'second_queue') => ({ source: 'companies_directory' as const,
+        status: 'done' as const, child_job_id: null, rows: 0,
+        task: { ...MEAT_TASK, directory_filters: { ...MEAT_TASK.directory_filters, includeIp }, ...(widened ? { widened } : {}) } });
+      expect(veTwoGisAllow({ rubrics: ['Нотариусы', 'Школы'], tasks: [] }, sets))
+        .toEqual({ nonCompany: false, privateRubric: true, ipName: false, government: true });
+      expect(veTwoGisAllow({ rubrics: ['банкоматы'], tasks: [directoryState(true)] }, sets))
+        .toEqual({ nonCompany: true, privateRubric: true, ipName: true, government: false });
+      for (const tasks of [[directoryState(true, 'replan')], [directoryState(true, 'second_queue')], [directoryState(false)], []]) {
+        expect(veTwoGisAllow({ rubrics: ['Мясокомбинаты'], tasks }, sets)).toEqual({ nonCompany: false, privateRubric: false, ipName: false, government: false });
+      }
+
+      // (г) Курсор: целый и на снимке флага; чужие поля будущих частей сохраняются.
+      const cursorOf = (extra: Record<string, unknown> = {}) => ({ version: 1, snapshot_id: 7, features_version: 1, mapping_revision: 1,
+        rubrics: ['Мясокомбинаты'], after: '', claimed: 0, pages: 0, ...extra });
+      expect(readVeTwoGisTwinState(undefined, TWO_GIS_FLAG)).toEqual({ kind: 'none', mappingFailures: 0 });
+      expect(readVeTwoGisTwinState({ version: 1, cursor: 1 }, TWO_GIS_FLAG)).toEqual({ kind: 'invalid' });
+      expect(readVeTwoGisTwinState(cursorOf({ not_before: 'x' }), TWO_GIS_FLAG)).toEqual({ kind: 'cursor', cursor: cursorOf({ not_before: 'x' }) });
+      expect(readVeTwoGisTwinState(cursorOf({ snapshot_id: 8 }), TWO_GIS_FLAG)).toEqual({ kind: 'invalid' });
+      expect(readVeTwoGisTwinState({ version: 1, mapping_failures: 2 }, TWO_GIS_FLAG)).toEqual({ kind: 'none', mappingFailures: 2 });
+
+      // (д) Тик: подбор без модели, две страницы, фильтры строк, журнал (повтор, перехват, занято, дубль), одна запись базы.
+      const [twinMaps, twinTask] = withVeTwoGisTwins({ tasks: [twoGisMaps('мясокомбинат')] }).tasks;
+      const hour = (offset: number) => `${String((new Date().getUTCHours() + offset) % 24).padStart(2, '0')}:00`;
+      const twinSettings = { market: 'ru', mode: 'on', reads_enabled: true, client_use: 'all', internal_projects: [], excluded_projects: [],
+        quiet_start_utc: hour(2), quiet_end_utc: hour(3), max_candidates: 1000, snapshot_id: 7, features_version: 1, built_at: '2026-10-26T10:00:00Z' };
+      const twinCatalog = { version: 1 as const, filters: { categories: ['Мясокомбинаты'], countries: ['Россия'] } };
+      const twinInfo = (flagged = true): VeCollectInfo => ({ collection_mode: 'preview', ...(flagged ? { two_gis_source: TWO_GIS_FLAG } : {}),
+        target_progress: createCollectionTarget('preview'), plan: { tasks: [twinMaps, twinTask] },
+        tasks: [{ source: 'yandex_maps', task: twinMaps, status: 'done', child_job_id: null, rows: 0, exhausted: true, catalog: twinCatalog,
+          two_gis_pair_id: 'p' }, { source: 'two_gis', task: twinTask, status: 'pending', child_job_id: null, rows: 0, two_gis_pair_id: 'p' }] });
+      const journalRow = (id: number, domain: string, baseId: string, cardId: string, outcome = 'claimed') => ({ id, project_id: 'p1',
+        hypothesis_id: 'h1', base_id: baseId, registrable_domain: domain, host: domain, card_id: cardId, snapshot_id: 7, outcome });
+      const twinDb = (info: VeCollectInfo, extra: Record<string, Array<Record<string, unknown>>> = {},
+        errorUpserts?: Record<string, { code: string; message: string }>) => createMockSupabase({
+        tables: { ve_verticals: [VERTICAL], ve_projects: [PROJECT], ve_jobs: [makeJob() as unknown as Record<string, unknown>],
+          ...hypothesis({ ...MEAT, broad: false }), ve_twogis_source_settings: [twinSettings],
+          ve_project_exclusions: [{ project_id: 'p1', revision: 1, inns: [], domains: ['blocked-meat.ru'], emails: [], updated_at: '2026-10-26T10:00:00Z' }],
+          ve_bases: [makeBase(info), { ...makeBase({}), id: 'b0-old', status: 'analyzed' }, { ...makeBase({}), id: 'b9-live', source: 'manual' }],
+          ve_twogis_rows: [journalRow(1, 'held.ru', 'b9-live', 'c-h'), journalRow(2, 'old-owner.ru', 'b0-old', 'c-o'),
+            journalRow(3, 'replay.ru', 'b1', '7000000000000007'), journalRow(4, 'rejected.ru', 'b1', '7000000000000008', 'rejected'), journalRow(5, 'twice.ru', 'b1', 'c-old')],
+          ...extra },
+        ...(errorUpserts ? { errorUpserts } : {}),
+        rpcHandlers: { ve_directory_plan_population: () => ({ data: { directory_rows_total: 0, companies_unique_total: 0, companies_available: 0,
+          companies_with_email: 0, companies_with_phone: 0, slice_companies: [] } }) } });
+      const twinCard = (n: number, domain: string, name = `Мясокомбинат ${domain}, производство`, windowIds = 20_000, windowLast = '7000000000000099') => ({
+        window_ids: windowIds, window_last: windowLast, card_id: `7${String(n).padStart(15, '0')}`, registrable_domain: domain, host: domain,
+        site_scheme: 'https', region_code: '77', name, city_name: 'Москва' });
+      const twinPages: Record<string, Array<Record<string, unknown>>> = {
+        '': [twinCard(1, 'meat1.ru'), twinCard(2, '2gis.ru'), twinCard(3, 'blocked-meat.ru'), twinCard(4, 'meat4.ru', 'ООО'), twinCard(5, 'held.ru'),
+          twinCard(6, 'old-owner.ru'), twinCard(7, 'replay.ru'), twinCard(8, 'rejected.ru'), twinCard(9, 'twice.ru'),
+          twinCard(10, 'school5.gosuslugi.ru')],
+        '7000000000000099': [twinCard(101, 'meat9.ru', undefined, 50, '7000000000000150')],
+      };
+      jest.mocked(readVeTwoGisRubricDictionary).mockReset().mockResolvedValue({ kind: 'dictionary', rubrics: dictionary });
+      jest.mocked(readVeTwoGisPage).mockReset().mockImplementation(async (query) =>
+        actualPage.readVeTwoGisPageWith(fake(built, true, twinPages[query.after] ?? []).client, query));
+      const tick = async (tickDb: MockSupabaseClient) => {
+        jest.mocked(readVeTwoGisPage).mockClear();
+        jest.mocked(readVeTwoGisRubricDictionary).mockClear();
+        jest.mocked(callLLMWithSchema).mockClear();
+        await runBaseCollectStage(makeJob(), { supabase: tickDb as unknown as SupabaseClient });
+        const saved = tickDb.getRows('ve_bases').find((row) => row.id === 'b1')!;
+        return { saved, twin: (saved.collect_info as VeCollectInfo).tasks![1] };
+      };
+      const journalOf = (tickDb: MockSupabaseClient) => Object.fromEntries(tickDb.getRows('ve_twogis_rows')
+        .map((row) => [row.registrable_domain, [row.base_id, row.card_id, row.outcome]]));
+      const journalMutations = (tickDb: MockSupabaseClient) => tickDb.mutations.filter((mutation) => mutation.table === 've_twogis_rows');
+      const websites = (rows: VeUnifiedRow[] | undefined) => (rows ?? []).map((row) => row.website).sort();
+
+      const mainDb = twinDb(twinInfo());
+      // Решение (а): от чтения словаря до последней записи журнала база не пишется.
+      let atDictionary = -1;
+      jest.mocked(readVeTwoGisRubricDictionary).mockImplementationOnce(async () => {
+        atDictionary = mainDb.mutations.length;
+        return { kind: 'dictionary', rubrics: dictionary };
+      });
+      const main = await tick(mainDb);
+      expect(main.saved.status).toBe('collecting');
+      expect(callLLMWithSchema).not.toHaveBeenCalled();
+      expect(readVeTwoGisRubricDictionary).toHaveBeenCalledTimes(1);
+      expect(mainDb.selects.filter((read) => read.table === 've_twogis_source_settings')).toHaveLength(1);
+      expect(jest.mocked(readVeTwoGisPage).mock.calls.map(([query]) => [query.after, query.limit])).toEqual([['', 100], ['7000000000000099', 97]]);
+      expect(jest.mocked(readVeTwoGisPage).mock.calls[0][0]).toEqual({ flag: { snapshot_id: 7, features_version: 1 }, rubrics: ['Мясокомбинаты'],
+        after: '', scope: {}, allow: { nonCompany: false, privateRubric: false, ipName: false, government: false }, limit: 100 });
+      // 2gis.ru, «ООО», сайт госоргана и занятый held — вне; rejected (тот же card_id, итог) и twice — дубли;
+      // blocked-meat (правило проекта) — без счётчика.
+      expect(main.twin).toMatchObject({ status: 'done', exhausted: true, rows: 4, excluded_during_fetch: 4, already_seen_during_fetch: 2 });
+      expect(main.twin.unavailable).toBeUndefined();
+      expect(websites(main.twin.harvest)).toEqual(['meat1.ru', 'meat9.ru', 'old-owner.ru', 'replay.ru']);
+      expect(main.twin.harvest!.every((row) => row.source_detail === 'справочник организаций' && '_ve_two_gis' in row)).toBe(true);
+      expect(main.twin.two_gis).toEqual({ version: 1, snapshot_id: 7, features_version: 1, mapping_revision: 1, rubrics: ['Мясокомбинаты'],
+        after: '7000000000000150', claimed: 4, pages: 2 });
+      const mainJournal = journalOf(mainDb);
+      expect(mainJournal).toEqual({ 'held.ru': ['b9-live', 'c-h', 'claimed'], 'old-owner.ru': ['b1', '7000000000000006', 'claimed'],
+        'replay.ru': ['b1', '7000000000000007', 'claimed'], 'rejected.ru': ['b1', '7000000000000008', 'rejected'], 'twice.ru': ['b1', 'c-old', 'claimed'],
+        'meat1.ru': ['b1', '7000000000000001', 'claimed'], 'meat9.ru': ['b1', '7000000000000101', 'claimed'] });
+      expect(mainDb.getRows('ve_twogis_rows').find((row) => row.registrable_domain === 'replay.ru')?.id).toBe(3);
+      const mainMutations = journalMutations(mainDb);
+      expect(mainMutations.map((mutation) => mutation.kind)).toEqual(['upsert', 'delete', 'upsert', 'upsert']);
+      for (const mutation of mainMutations) {
+        if (mutation.kind !== 'upsert') continue;
+        expect(mutation.onConflict).toBe('project_id,hypothesis_id,registrable_domain');
+        expect(mutation.rows.every((row) => !('id' in row) && row.hypothesis_id === 'h1' && row.base_id === 'b1' && row.outcome === 'claimed')).toBe(true);
+      }
+      expect(mainMutations[0].kind === 'upsert' && mainMutations[0].rows.map((row) => row.registrable_domain))
+        .toEqual(['meat1.ru', 'held.ru', 'old-owner.ru', 'replay.ru', 'rejected.ru', 'twice.ru']);
+      expect(mainMutations[1].kind === 'delete' && mainMutations[1].rows.map((row) => row.id)).toEqual([2]); // claimed базы b0-old
+      // Решение (а): журнал — по странице, запись базы — одна, после последней записи журнала (и не после подбора).
+      const journalAt = mainDb.mutations.flatMap((mutation, index) => mutation.table === 've_twogis_rows' ? [index] : []);
+      expect(atDictionary).toBeGreaterThanOrEqual(0);
+      expect(mainDb.mutations.slice(atDictionary, journalAt.at(-1)).some((mutation) => mutation.table === 've_bases')).toBe(false);
+      expect(mainDb.mutations.slice(journalAt.at(-1)).some((mutation) => mutation.table === 've_bases' && mutation.kind === 'update')).toBe(true);
+
+      // Текст гипотезы ИП не разрешает: «индивидуальные предприниматели» без includeIp в плане — ipName false.
+      const ipText = { id: 'h1', project_id: 'p1', vertical_id: 'v1', status: 'accepted', broad: false,
+        title: 'Индивидуальные предприниматели — мясные лавки', description: 'ИП и самозанятые с собственной мясной лавкой и сайтом.' };
+      const ipTextDb = twinDb({ ...twinInfo(), hypotheses: [ipText] }, { ve_hypotheses: [ipText] });
+      await tick(ipTextDb);
+      expect(jest.mocked(readVeTwoGisPage).mock.calls[0][0].allow).toEqual({ nonCompany: false, privateRubric: false, ipName: false, government: false });
+
+      // (е) Повтор после потерянной записи базы: те же заявки узнаются по base_id и card_id, журнал не меняется.
+      const replayDb = twinDb(twinInfo(), { ve_twogis_rows: mainDb.getRows('ve_twogis_rows').map((row) => ({ ...row })) });
+      const replay = await tick(replayDb);
+      expect(journalOf(replayDb)).toEqual(mainJournal);
+      expect(journalMutations(replayDb).some((mutation) => mutation.kind === 'delete')).toBe(false);
+      expect(websites(replay.twin.harvest)).toEqual(['meat1.ru', 'meat9.ru', 'old-owner.ru', 'replay.ru']);
+      expect(replay.twin.two_gis).toMatchObject({ claimed: 4, pages: 2 });
+
+      // Два близнеца одной базы с одними рубриками: второй доменов первого не берёт (повтор своей claim — не для соседа).
+      const [siblingMapsA, siblingTwinA, siblingMapsB, siblingTwinB] = withVeTwoGisTwins({ tasks: [twoGisMaps('мясокомбинат'),
+        twoGisMaps('мясокомбинаты')] }).tasks;
+      const siblingState = (task: typeof siblingTwinA, pair: string, twin: boolean) => twin
+        ? { source: 'two_gis' as const, task, status: 'pending' as const, child_job_id: null, rows: 0, two_gis_pair_id: pair }
+        : { source: 'yandex_maps' as const, task, status: 'done' as const, child_job_id: null, rows: 0, exhausted: true, catalog: twinCatalog,
+          two_gis_pair_id: pair };
+      const siblingDb = twinDb({ ...twinInfo(), plan: { tasks: [siblingMapsA, siblingTwinA, siblingMapsB, siblingTwinB] },
+        tasks: [siblingState(siblingMapsA, 'pa', false), siblingState(siblingTwinA, 'pa', true), siblingState(siblingMapsB, 'pb', false),
+          siblingState(siblingTwinB, 'pb', true)] });
+      const sibling = await tick(siblingDb);
+      const [, firstTwin, , secondTwin] = (sibling.saved.collect_info as VeCollectInfo).tasks!;
+      expect(websites(firstTwin.harvest)).toEqual(['meat1.ru', 'meat9.ru', 'old-owner.ru', 'replay.ru']);
+      expect(firstTwin.two_gis).toMatchObject({ claimed: 4 });
+      expect(secondTwin).toMatchObject({ status: 'done', exhausted: true, rows: 0, already_seen_during_fetch: 6, two_gis: { claimed: 0, pages: 2 } });
+      expect(secondTwin.harvest ?? []).toEqual([]);
+      expect(journalOf(siblingDb)).toEqual(mainJournal);
+
+      // (ж) Исходы: близнец закрыт или отложен, база не failed.
+      const outcome = async (arrange: () => void, errorUpserts?: Record<string, { code: string; message: string }>) => {
+        const caseDb = twinDb(twinInfo(), {}, errorUpserts);
+        jest.mocked(readVeTwoGisPage).mockClear();
+        arrange();
+        const result = await tick(caseDb);
+        expect(result.saved.status).not.toBe('failed');
+        return { ...result, caseDb };
+      };
+      const dictionaryImport = await outcome(() => jest.mocked(readVeTwoGisRubricDictionary).mockResolvedValueOnce({ kind: 'import' }));
+      expect(dictionaryImport.twin).toMatchObject({ status: 'pending' });
+      expect(dictionaryImport.twin.two_gis).toBeUndefined();
+      expect(readVeTwoGisPage).not.toHaveBeenCalled();
+      expect(journalMutations(dictionaryImport.caseDb)).toEqual([]);
+      const mappingFails = await outcome(() => {
+        jest.mocked(readVeTwoGisRubricDictionary).mockResolvedValueOnce({ kind: 'dictionary', rubrics: [{ label: 'Мясоперерабатывающие предприятия', cards: 50 }] });
+        jest.mocked(callLLMWithSchema).mockRejectedValueOnce(new Error('LLM вернул невалидный JSON'));
+      });
+      expect(mappingFails.twin).toMatchObject({ status: 'pending' });
+      expect(mappingFails.twin.two_gis).toEqual({ version: 1, mapping_failures: 1 });
+      const oversizeDictionary = await outcome(() => jest.mocked(readVeTwoGisRubricDictionary).mockResolvedValueOnce({ kind: 'dictionary',
+        rubrics: Array.from({ length: 5001 }, (_, index) => ({ label: `Рубрика ${index}`, cards: 1 })) }));
+      expect(oversizeDictionary.twin).toMatchObject({ status: 'done', unavailable: true, note: VE_TWO_GIS_TWIN_NOTES.dictionarySize });
+      // Оплата и лимит запросов при подборе — не сбой подбора: тик падает той же ошибкой, маркера нет, близнец ждёт.
+      for (const error of [new Error('Requesty 402: insufficient balance'), new VeLlmRateLimitError(Date.now() + 60_000, false)]) {
+        const billingDb = twinDb(twinInfo());
+        jest.mocked(readVeTwoGisRubricDictionary).mockResolvedValueOnce({ kind: 'dictionary', rubrics: [{ label: 'Мясоперерабатывающие предприятия', cards: 50 }] });
+        jest.mocked(callLLMWithSchema).mockRejectedValueOnce(error);
+        await expect(runBaseCollectStage(makeJob(), { supabase: billingDb as unknown as SupabaseClient })).rejects.toBe(error);
+        const billingTwin = (billingDb.getRows('ve_bases').find((row) => row.id === 'b1')!.collect_info as VeCollectInfo).tasks![1];
+        expect(billingTwin).toMatchObject({ status: 'pending' });
+        expect(billingTwin.two_gis).toBeUndefined();
+      }
+      const snapshotChanged = await outcome(() => jest.mocked(readVeTwoGisPage).mockRejectedValueOnce(new VeTwoGisUnavailableError('snapshot', '2ГИС: snapshot (x)')));
+      expect(snapshotChanged.twin).toMatchObject({ status: 'done', unavailable: true, note: VE_TWO_GIS_TWIN_NOTES.snapshot, two_gis: { after: '' } });
+      const staleFlag = await outcome(() => jest.mocked(readVeTwoGisPage).mockResolvedValueOnce({ kind: 'stale', build: { snapshotId: 8, featuresVersion: 1 } }));
+      expect(staleFlag.twin).toMatchObject({ status: 'done', unavailable: true });
+      const paused = await outcome(() => jest.mocked(readVeTwoGisPage).mockRejectedValueOnce(new VeTwoGisUnavailableError('paused', '2ГИС: пауза')));
+      expect(paused.twin).toMatchObject({ status: 'pending', two_gis: { after: '' } });
+      expect(paused.twin.two_gis).not.toHaveProperty('errors');
+      const codeError = await outcome(() => jest.mocked(readVeTwoGisPage).mockRejectedValueOnce(new VeTwoGisUnavailableError('other', '2ГИС: other (x)')));
+      expect(codeError.twin).toMatchObject({ status: 'pending', two_gis: { errors: 1 } });
+      const journalCheck = await outcome(() => undefined, { ve_twogis_rows: { code: '23514', message: 'check violation' } });
+      expect(journalCheck.twin).toMatchObject({ status: 'pending', rows: 0, two_gis: { errors: 1, after: '' } });
+      expect(journalCheck.twin.harvest).toBeUndefined();
+      const journalBlip = await outcome(() => undefined, { ve_twogis_rows: { code: '08006', message: 'connection failure' } });
+      expect(journalBlip.twin).toMatchObject({ status: 'pending', two_gis: { after: '' } });
+      expect(journalBlip.twin.two_gis).not.toHaveProperty('errors');
+
+      // (з) Правило проекта по ИНН: в карточках ИНН нет — закрыт без чтений 2ГИС.
+      const innDb = twinDb(twinInfo(), { ve_project_exclusions: [{ project_id: 'p1', revision: 1, inns: ['7700000101'], domains: [], emails: [],
+        updated_at: '2026-10-26T10:00:00Z' }] });
+      const innRules = await tick(innDb);
+      expect(innRules.twin).toMatchObject({ status: 'done', unavailable: true, note: VE_TWO_GIS_TWIN_NOTES.projectInns });
+      expect(innDb.selects.some((read) => read.table === 've_twogis_source_settings' || read.table === 've_twogis_rows')).toBe(false);
+      expect(readVeTwoGisRubricDictionary).not.toHaveBeenCalled();
+      expect(readVeTwoGisPage).not.toHaveBeenCalled();
+
+      // (и) Без флага — защита R1: «Источник недоступен в этой версии», к таблицам 2ГИС не обращаемся.
+      const flaglessDb = twinDb(twinInfo(false));
+      const flagless = await tick(flaglessDb);
+      expect(flagless.twin).toMatchObject({ status: 'done', unavailable: true, note: 'Источник недоступен в этой версии' });
+      expect([...flaglessDb.selects, ...flaglessDb.mutations].some((entry) => entry.table.startsWith('ve_twogis_'))).toBe(false);
+
+      // (к) Вышедшее из ветки близнеца (здесь — сбой кода на странице): закрыт один близнец, не failed и не повтор
+      // всей джобы; сбой учёта расходов и временный сбой БД — ожидание и повтор тика, как у других источников.
+      const brokenPage = (rows: () => never) => ({ kind: 'page' as const, get rows(): never { return rows(); }, cursor: 'x', exhausted: false, windowIds: 1 });
+      const escaped = await outcome(() => jest.mocked(readVeTwoGisPage).mockResolvedValueOnce(brokenPage(() => { throw new TypeError('rows is not iterable'); })));
+      expect(escaped.saved.status).toBe('collecting');
+      expect(escaped.twin).toMatchObject({ status: 'done', unavailable: true, note: VE_TWO_GIS_TWIN_NOTES.readError });
+      expect(escaped.twin.error).toBeUndefined();
+      for (const error of [new ProviderUsageWriteError(), new Error('fetch failed'),
+        new Error('ve_bases exclusion read: VE2 database GET request timeout after 120000ms (no response headers)')]) {
+        const retryDb = twinDb(twinInfo());
+        jest.mocked(readVeTwoGisPage).mockResolvedValueOnce(brokenPage(() => { throw error; }));
+        await expect(runBaseCollectStage(makeJob(), { supabase: retryDb as unknown as SupabaseClient })).rejects.toBe(error);
+        expect((retryDb.getRows('ve_bases').find((row) => row.id === 'b1')!.collect_info as VeCollectInfo).tasks![1]).toMatchObject({ status: 'pending' });
+      }
+
+      // (л) Выход базы из сбора освобождает её claimed после записи статуса — и простой записью, и CAS превью.
+      const exitOf = (extra: Partial<VeCollectInfo>) => {
+        const info = exhaustedInfo(MEAT_TASK, { two_gis_source: TWO_GIS_FLAG, adaptive_collection: { ...newVeAdaptiveCollection(),
+          replan_attempts: 2, widenings: 2, active_source: veSourceStrategyKey(MEAT_TASK) }, ...extra });
+        info.tasks!.push({ source: 'yandex_maps', task: twinMaps, status: 'done', child_job_id: null, rows: 0, exhausted: true, catalog: twinCatalog,
+          two_gis_pair_id: 'p' }, { source: 'two_gis', task: twinTask, status: 'done', exhausted: true, child_job_id: null, rows: 1, two_gis_pair_id: 'p',
+          harvest: [mapTwoGisRow({ card_id: '7000000000000001', registrable_domain: 'meat1.ru', host: 'meat1.ru', site_scheme: 'https', region_code: '77',
+            name: 'Мясокомбинат 1', city_name: 'Москва' }, 7)],
+          two_gis: { version: 1, snapshot_id: 7, features_version: 1, mapping_revision: 1, rubrics: ['Мясокомбинаты'], after: '7000000000000001', claimed: 1, pages: 1 } });
+        info.plan = { tasks: info.tasks!.map((state) => state.task) };
+        return info;
+      };
+      // CAS — путь прода: у превью с флагом всегда preview_pipeline (с job_ids он переживает проверку совместимости).
+      for (const extra of [{}, { preview_pipeline: { version: 1 as const, revision: 0, batches: [], job_ids: ['prev-batch'], completed_batches: 1 } }]) {
+        const exitInfo = exitOf(extra);
+        const exitDb = seed(exitInfo, { ...hypothesis({ ...MEAT, broad: false }), ve_bases: [{ ...makeBase(exitInfo), data: ready, row_count: ready.length,
+          columns: [...VE_AUTO_COLLECT_COLUMNS] }], ve_twogis_rows: [journalRow(10, 'meat1.ru', 'b1', '7000000000000001'),
+          journalRow(11, 'rejected.ru', 'b1', 'c-r', 'rejected'), journalRow(12, 'held.ru', 'b9-live', 'c-h')] });
+        await runBaseCollectStage(makeJob(), { supabase: exitDb as unknown as SupabaseClient });
+        expect(exitDb.getRows('ve_bases')[0].status).toBe('analyzing');
+        if (extra.preview_pipeline) expect((exitDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).preview_pipeline?.revision).toBeGreaterThan(0);
+        expect(exitDb.getRows('ve_twogis_rows').map((row) => row.id)).toEqual([11, 12]);
+        const releasedAt = exitDb.mutations.findIndex((mutation) => mutation.table === 've_twogis_rows' && mutation.kind === 'delete');
+        const analyzingAt = exitDb.mutations.findIndex((mutation) => mutation.table === 've_bases' && mutation.kind === 'update'
+          && mutation.patch.status === 'analyzing');
+        expect(analyzingAt).toBeGreaterThanOrEqual(0);
+        expect(releasedAt).toBeGreaterThan(analyzingAt);
+      }
+      // База без флага и близнецов выходит из сбора без единого обращения к таблицам 2ГИС.
+      const plainExit = exhaustedInfo(MEAT_TASK, { adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, widenings: 2,
+        active_source: veSourceStrategyKey(MEAT_TASK) } });
+      const plainDb = seed(plainExit, { ...hypothesis({ ...MEAT, broad: false }), ve_bases: [{ ...makeBase(plainExit), data: ready, row_count: ready.length,
+        columns: [...VE_AUTO_COLLECT_COLUMNS] }] });
+      await runBaseCollectStage(makeJob(), { supabase: plainDb as unknown as SupabaseClient });
+      expect(plainDb.getRows('ve_bases')[0].status).toBe('analyzing');
+      expect([...plainDb.selects, ...plainDb.mutations].some((entry) => entry.table.startsWith('ve_twogis_'))).toBe(false);
+
+      // (м) Журнал напрямую, линия без гипотезы: своё — повтор, новое — вставка; фильтр линии — .is(null), не .eq(null);
+      // чужое claimed — всегда занято, без перехвата (уникальный индекс собирающих баз такую линию не сериализует).
+      const nullDb = createMockSupabase({ tables: { ve_twogis_rows: [{ ...journalRow(20, 'meat1.ru', 'b1', 'c-1'), hypothesis_id: null },
+        { ...journalRow(21, 'meat3.ru', 'b-dead', 'c-3'), hypothesis_id: null }] } });
+      const lineFilters: string[] = [];
+      const recorded = (builder: object): object => new Proxy(builder, { get(target, prop) {
+        const value = Reflect.get(target, prop) as unknown;
+        if (typeof value !== 'function') return value;
+        return (...args: unknown[]) => {
+          if ((prop === 'is' || prop === 'eq') && args[0] === 'hypothesis_id') lineFilters.push(`${String(prop)}(${String(args[1])})`);
+          const out = (value as (...rest: unknown[]) => unknown).apply(target, args);
+          return out === target ? recorded(target) : out;
+        };
+      } });
+      const recordingDb = { from: (table: string) => recorded(nullDb.from(table)) } as unknown as SupabaseClient;
+      const nullClaim = await claimVeTwoGisRows(recordingDb, { projectId: 'p1', hypothesisId: null, baseId: 'b1', snapshotId: 7 },
+        [{ registrable_domain: 'meat1.ru', host: 'meat1.ru', card_id: 'c-1' }, { registrable_domain: 'meat2.ru', host: 'meat2.ru', card_id: 'c-2' },
+          { registrable_domain: 'meat3.ru', host: 'meat3.ru', card_id: 'c-x' }]);
+      expect([...nullClaim.accepted].sort()).toEqual(['meat1.ru', 'meat2.ru']);
+      expect(nullClaim).toMatchObject({ inserted: 1, replayed: 1, held: 1, takenOver: 0 });
+      expect(lineFilters).toContain('is(null)');
+      expect(lineFilters).not.toContain('eq(null)');
+      expect(nullDb.mutations.some((mutation) => mutation.kind === 'delete')).toBe(false);
+      expect(nullDb.getRows('ve_twogis_rows').find((row) => row.id === 21)?.base_id).toBe('b-dead');
+      expect(nullDb.getRows('ve_twogis_rows')).toHaveLength(3);
+      await releaseVeTwoGisClaims(nullDb as unknown as SupabaseClient, 'b1');
+      expect(nullDb.getRows('ve_twogis_rows').map((row) => row.id)).toEqual([21]);
+    } finally {
+      jest.mocked(readVeTwoGisPage).mockReset().mockImplementation(actualPage.readVeTwoGisPage);
+      jest.mocked(readVeTwoGisRubricDictionary).mockReset().mockImplementation(async () => { throw new Error('unmocked 2ГИС dictionary read'); });
+      jest.mocked(callLLMWithSchema).mockReset(); // beforeEach ставит обычный ответ CONSTRUCT заново
+    }
   });
 
   it('analyzed-база с исчерпанным реестром с порогами продолжается и открывает расширенный срез', async () => {

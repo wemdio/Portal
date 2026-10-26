@@ -143,8 +143,17 @@ import { recoverVeSavedEmails, needsVeSavedEmailReview, hasPendingVeSavedEmailRe
 import { finalizeVeTwoGisTwins, isVeTwoGisRow, isVeTwoGisTask, pairVeTwoGisStates, retireVeOrphanTwoGisTwins, retireVeTwoGisTwin,
   veCountedPlanTasks, veTwoGisImportMarker, veTwoGisInputMarkers, veTwoGisTwinKeys, VE_TWO_GIS_ROW_FIELD, withoutVeTwoGisRows,
   withVeTwoGisTwins } from '../twoGisQuarantine';
-import { readVeTwoGisSettings, readVeTwoGisSourceFlag, veTwoGisFlagAllowed, veTwoGisFlagCurrent,
-  type VeTwoGisSourceFlag } from '../twoGisSettings';
+import { readVeTwoGisSettings, readVeTwoGisSourceFlag, veTwoGisFlagAllowed, veTwoGisFlagCurrent, veTwoGisOutputState, veTwoGisReadBlock,
+  type VeTwoGisSettings, type VeTwoGisSourceFlag } from '../twoGisSettings';
+// 2ГИС только через twoGisPage: twoGisSource (pg) напрямую из стадии не импортируется.
+import { readVeTwoGisPage, readVeTwoGisRubricDictionary, VeTwoGisUnavailableError, VE_TWO_GIS_PAGE_ROWS } from '../twoGisPage';
+import { resolveVeTwoGisRubrics, veTwoGisMappingFailure, VeTwoGisRubricsUnavailableError, VE_TWO_GIS_MAPPING_REVISION } from '../twoGisRubrics';
+import { claimVeTwoGisRows, releaseVeTwoGisClaims, VeTwoGisJournalError, type VeTwoGisClaim, type VeTwoGisClaimResult } from '../twoGisJournal';
+import { readVeTwoGisTwinState, fitVeTwoGisCursor, veTwoGisClaimedByBase, veTwoGisAllow, compactVeTwoGisAllow, expandVeTwoGisAllow,
+  VE_TWO_GIS_MAX_ERRORS, VE_TWO_GIS_TWIN_NOTES, type VeTwoGisCursor } from '../twoGisTwin';
+import { mapTwoGisRow, veTwoGisWebsiteHost, veTwoGisSiteKind, veTwoGisSiteDomain, isVeTwoGisGovernmentHost } from '../twoGisRows';
+import { isVeNonOfficialWebsiteHost } from '../relevanceEvidence';
+import { isVeStageDbInterruption } from '../stageDb';
 import { singleVeSavedEmail } from '../savedEmailReviewEligibility';
 import { companyNameSource, isCompanyNameReady, VE_COMPANY_NAME_FIELD, type VeCompanyNameCleanupSummary } from '../companyNames';
 import { prepareSegmentationAudience } from '../segmentationAudit';
@@ -593,8 +602,8 @@ async function estimatePlanDirectorySegment(
   excludeInns: Iterable<string> = [],
 ): Promise<NonNullable<VeCollectInfo['estimate']>> {
   const slices = plan.tasks.map(veDirectoryPopulationSlice).filter((slice) => slice !== null);
-  // Близнец two_gis в R1 не источник: в подписи «без размера рынка» его нет (R3 даст ему метку).
-  const unsized = veUnsizedSourceLabels(plan.tasks.filter((task) => !isVeTwoGisTask(task)));
+  // Близнец two_gis — «справочник организаций» (directoryPopulation): размера рынка у снимка нет.
+  const unsized = veUnsizedSourceLabels(plan.tasks);
   const provenance = { version: 2 as const, population_method: 'plan_union' as const,
     population_as_of: new Date().toISOString(), population_filters: directoryEstimateScope(plan),
     ...(unsized.length ? { unsized_sources: unsized } : {}) };
@@ -697,7 +706,7 @@ export interface VeCollectTaskState {
   note?: string;
   /** Связь Яндекс-задачи и её близнеца `two_gis`: один id в обоих состояниях. */
   two_gis_pair_id?: string;
-  /** Курсор и отсрочка близнеца `two_gis`; форму задаёт модуль 2ГИС, здесь — только перенос. */
+  /** Курсор и отсрочка близнеца `two_gis`: форма — twoGisTwin.ts (VeTwoGisCursor или маркер сбоев подбора). */
   two_gis?: { version: 1 } & Record<string, unknown>;
 }
 
@@ -1006,6 +1015,18 @@ function isChildFailed(source: VeCollectSource, status: string): boolean {
 // Each invocation receives its own context object. Never reuse policy state
 // across projects, worker wakes or concurrent jobs, and never fetch identities.
 const collectionProjectRules = new WeakMap<VeStageContext, { rules: VeProjectExclusions; info: VeCollectInfo }>();
+// Настройки 2ГИС — одно чтение за вызов стадии (тот же принцип: ctx — свой объект на вызов).
+const tickTwoGisSettings = new WeakMap<VeStageContext, Promise<VeTwoGisSettings | null>>();
+
+/** Настройки 2ГИС тика, общие для близнецов и копии флага поставки. readVeTwoGisSettings не бросает. */
+function readTickVeTwoGisSettings(ctx: VeStageContext): Promise<VeTwoGisSettings | null> {
+  let read = tickTwoGisSettings.get(ctx);
+  if (!read) {
+    read = readVeTwoGisSettings(ctx.supabase);
+    tickTwoGisSettings.set(ctx, read);
+  }
+  return read;
+}
 
 async function refreshCollectionProjectRules(ctx: VeStageContext): Promise<void> {
   const current = collectionProjectRules.get(ctx);
@@ -1060,6 +1081,24 @@ function recordProjectExclusionCoverage(ctx: VeStageContext, rows: Array<Record<
 
 /** A failed/unknown save must not stamp its error over a newer base snapshot. */
 class VePreviewCheckpointSaveError extends VeRelevanceCheckpointError {}
+
+/**
+ * 2ГИС: база вышла из сбора (сохранён статус не collecting) — её claimed в журнале линии
+ * освобождаются. Лучшее усилие: сбой — только код в лог; запасной путь — перехват следующей
+ * базой линии. До onCheckpoint: после запроса остановки он бросает VeWorkerShutdownError.
+ */
+async function releaseTwoGisClaimsOnExit(ctx: VeStageContext, baseId: string, info: VeCollectInfo,
+  patch: Record<string, unknown>): Promise<void> {
+  if (patch.status === undefined || patch.status === 'collecting') return;
+  // two_gis_source покрывает и ремонт географии (близнецы ушли в previous_tasks).
+  if (info.two_gis_source === undefined && !info.tasks?.some(isVeTwoGisTask)) return;
+  if (ctx.signal?.aborted) return;
+  try {
+    await releaseVeTwoGisClaims(ctx.supabase, baseId, ctx.signal);
+  } catch (error) {
+    stageLog(ctx, `[base_collect] 2gis release: ${error instanceof VeTwoGisJournalError ? error.code : 'error'}`);
+  }
+}
 
 async function persistCollectInfo(
   ctx: VeStageContext,
@@ -1129,6 +1168,7 @@ async function persistCollectInfo(
         ctx.signal?.throwIfAborted();
         info.preview_pipeline.revision = revision + 1;
         info.preview_pipeline.checkpoint_id = checkpointId;
+        await releaseTwoGisClaimsOnExit(ctx, baseId, info, patch);
         ctx.onCheckpoint?.();
         return;
       }
@@ -1146,6 +1186,7 @@ async function persistCollectInfo(
     .update({ ...patch, collect_info: stored, updated_at: new Date().toISOString() })
     .eq('id', baseId);
   if (error) throw new Error(`ve_bases collect_info update: ${error.message}`);
+  await releaseTwoGisClaimsOnExit(ctx, baseId, info, patch);
   ctx.onCheckpoint?.();
 }
 
@@ -2069,6 +2110,225 @@ async function fetchEngHiringRows(
   return out;
 }
 
+/* ─────────────── 2ГИС: близнец two_gis (план 26.10, R3 часть 3б) ─────────────── */
+
+/** Только для близнеца базы с флагом; рынок RU — по построению (DISPATCH). */
+interface VeTwoGisDispatch {
+  flag: VeTwoGisSourceFlag;
+  projectId: string;
+  hypothesisId: string | null;
+  baseId: string;
+  /** Потолок доменов, которые база заявляет в журнале линии (флаг или max_candidates цели). */
+  candidateCap: number;
+  /** Живой info.tasks: claimed близнецов считается по нему сразу после страницы. */
+  tasks: readonly VeCollectTaskState[];
+}
+
+/** Не сбой источника: остановка, чекпоинт, лимит и оплата Requesty, учёт расходов — выше близнеца. */
+const isVeTwoGisRethrow = (e: unknown) => (e instanceof Error && e.name === 'VeWorkerShutdownError') || e instanceof VeRelevanceCheckpointError
+  || e instanceof VeLlmRateLimitError || isVeProviderBillingError(e) || e instanceof ProviderUsageWriteError;
+
+const TWO_GIS_DOMAIN = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/;
+
+/**
+ * Близнец two_gis базы с флагом: подбор рубрик (один раз, в курсор), до 4 страниц снимка, фильтры
+ * строк, claim в журнале линии по странице. Никогда не failed: закрыть (done + unavailable с
+ * заметкой), отложить (pending, без записи) или сосчитать сбой (третий подряд закрывает).
+ * Записи collect_info здесь нет: её делает вызывающий один раз за диспатч (решение чата VE2 п.8);
+ * журнал пишется по странице, повтор после потерянной записи узнаёт свои claim.
+ */
+async function dispatchVeTwoGisTwin(ctx: VeStageContext, state: VeCollectTaskState, limit: number,
+  getExcludedKeys: () => Promise<VeBaseExclusionKeys>, usage: VeUsage, audienceContext: string | undefined,
+  twoGis: VeTwoGisDispatch, profiled: boolean): Promise<void> {
+  const notes = VE_TWO_GIS_TWIN_NOTES;
+  const retire = (note: string) => { retireVeTwoGisTwin(state, note); };
+  if (limit < 1) { state.status = 'done'; return; }
+  // Профилям близнеца не дают (buildPlan): у него нет фильтра рубрик профиля.
+  if (profiled) return retire(notes.profile);
+  // В карточках ИНН нет: правило проекта по ИНН строку 2ГИС не поймало бы.
+  if (collectionProjectRules.get(ctx)?.rules.inns.length) return retire(notes.projectInns);
+  const query = state.task.two_gis_query;
+  const scope = query?.from_queries?.length ? veTwoGisQueryScope(query) : null;
+  if (!query || !scope) return retire(notes.scope);
+  const saved = readVeTwoGisTwinState(state.two_gis, twoGis.flag);
+  if (saved.kind === 'invalid') return retire(notes.cursor);
+  const settings = await readTickVeTwoGisSettings(ctx);
+  if (!settings) return;
+  if (settings.mode !== 'on') return retire(notes.off);
+  if (!veTwoGisFlagCurrent(twoGis.flag, settings)) return retire(notes.snapshot);
+  const output = veTwoGisOutputState(settings, twoGis.projectId);
+  if (output === 'removed') return retire(notes.removed);
+  if (output !== 'open' || veTwoGisReadBlock(settings, new Date())) return;
+  const cap = twoGis.candidateCap;
+  if (veTwoGisClaimedByBase(twoGis.tasks) >= cap) {
+    state.hit_ceiling = true; state.status = 'done'; state.note = notes.ceiling;
+    return;
+  }
+  // Чтение исключений — не сбой близнеца (его ошибки уходят в DISPATCH) и до платного подбора.
+  const excluded = await getExcludedKeys();
+  const flag = { snapshot_id: twoGis.flag.snapshot_id, features_version: twoGis.flag.features_version };
+
+  let cursor: VeTwoGisCursor;
+  if (saved.kind === 'cursor') cursor = saved.cursor;
+  else {
+    const failedMapping = (what: string) => {
+      const failures = saved.mappingFailures + 1;
+      stageLog(ctx, `[base_collect] 2gis: ${what}, сбой подбора ${failures} из ${VE_TWO_GIS_MAX_ERRORS}`);
+      if (failures >= VE_TWO_GIS_MAX_ERRORS) retire(notes.mapping);
+      else state.two_gis = { version: 1, mapping_failures: failures };
+    };
+    let dictionary: Awaited<ReturnType<typeof readVeTwoGisRubricDictionary>>;
+    try {
+      dictionary = await readVeTwoGisRubricDictionary(flag, { db: ctx.supabase });
+      ctx.signal?.throwIfAborted();
+    } catch (error) {
+      ctx.signal?.throwIfAborted();
+      if (isVeTwoGisRethrow(error)) throw error;
+      if (error instanceof VeTwoGisUnavailableError && error.kind === 'snapshot') return retire(notes.snapshot);
+      if (error instanceof VeTwoGisUnavailableError && error.kind !== 'other') return;
+      return failedMapping('словарь рубрик не прочитан');
+    }
+    if (dictionary.kind === 'import') return;
+    if (dictionary.kind === 'stale') return retire(notes.snapshot);
+    const pair = twoGis.tasks.find((other) => other !== state && !isVeTwoGisTask(other)
+      && !!state.two_gis_pair_id && other.two_gis_pair_id === state.two_gis_pair_id);
+    let resolved: Awaited<ReturnType<typeof resolveVeTwoGisRubrics>>;
+    try {
+      // Контекст — гипотезы базы или задача пары; своё rationale близнеца — служебный текст.
+      resolved = await resolveVeTwoGisRubrics({ dictionary: dictionary.rubrics, queries: query.from_queries,
+        context: audienceContext ?? pair?.task.rationale, signal: ctx.signal, onUsage: (used) => addUsage(usage, used) });
+    } catch (error) {
+      ctx.signal?.throwIfAborted();
+      if (isVeTwoGisRethrow(error)) throw error;
+      const verdict = veTwoGisMappingFailure(error);
+      if (verdict === 'pending') return;
+      if (verdict === 'retire') {
+        if (error instanceof VeTwoGisRubricsUnavailableError) stageLog(ctx, `[base_collect] 2gis: ${error.message}`);
+        return retire(error instanceof VeTwoGisRubricsUnavailableError
+          ? error.reason === 'oversize' ? notes.dictionarySize : notes.dictionary : notes.modelConfig);
+      }
+      return failedMapping('рубрики не подобраны');
+    }
+    const marks = compactVeTwoGisAllow(veTwoGisAllow({ rubrics: resolved.rubrics, tasks: twoGis.tasks }));
+    const fitted = fitVeTwoGisCursor({ version: 1, ...flag, mapping_revision: VE_TWO_GIS_MAPPING_REVISION,
+      rubrics: resolved.rubrics, ...(marks ? { allow: marks } : {}), after: '', claimed: 0, pages: 0 });
+    if (!fitted) return retire(notes.cursor);
+    cursor = fitted;
+    state.two_gis = cursor;
+    stageLog(ctx, `[base_collect] 2gis: рубрик ${cursor.rubrics.length}${resolved.viaModel ? ' (модель)' : ''}`);
+  }
+
+  const line = { projectId: twoGis.projectId, hypothesisId: twoGis.hypothesisId, baseId: twoGis.baseId, snapshotId: flag.snapshot_id };
+  const allow = expandVeTwoGisAllow(cursor.allow);
+  // Домены всех близнецов базы, и закрытых: домен соседа — «уже просмотрен» и в журнал не идёт. Иначе
+  // правило повтора (свой base_id и тот же card_id) приняло бы его второй раз, и потолок считался бы дважды.
+  // Часть 4: когда продвижение страницы очищает harvest, домены соседей нужно хранить иначе или считать
+  // потолок по строкам журнала с base_id.
+  const domains = new Set(twoGis.tasks.filter(isVeTwoGisTask).flatMap((twin) => twin.harvest ?? [])
+    .map((row) => veTwoGisSiteDomain(row.website)).filter((domain): domain is string => !!domain));
+  const harvested = () => state.harvest?.length ?? 0;
+  /** Сбой страницы или журнала: курсор и строки страницы не меняются; третий подряд закрывает. */
+  const countError = (what: string): boolean => {
+    const errors = (cursor.errors ?? 0) + 1;
+    stageLog(ctx, `[base_collect] 2gis: ${what}, сбой ${errors} из ${VE_TWO_GIS_MAX_ERRORS}`);
+    if (errors >= VE_TWO_GIS_MAX_ERRORS) { retire(notes.errors); return true; }
+    cursor = { ...cursor, errors };
+    state.two_gis = cursor;
+    return false;
+  };
+  let applied = 0;
+  for (let page = 0; page < 4 && harvested() < limit && !state.exhausted; page++) {
+    const room = cap - veTwoGisClaimedByBase(twoGis.tasks);
+    if (room < 1) { state.hit_ceiling = true; state.note = notes.ceiling; break; }
+    const take = Math.min(VE_TWO_GIS_PAGE_ROWS, limit - harvested(), room);
+    if (take < 1) break;
+    let read: Awaited<ReturnType<typeof readVeTwoGisPage>>;
+    try {
+      read = await readVeTwoGisPage({ flag, rubrics: cursor.rubrics, after: cursor.after, scope, allow, limit: take },
+        { db: ctx.supabase });
+      ctx.signal?.throwIfAborted();
+      ctx.onActivity?.();
+    } catch (error) {
+      ctx.signal?.throwIfAborted();
+      if (isVeTwoGisRethrow(error)) throw error;
+      if (error instanceof VeTwoGisUnavailableError && error.kind === 'snapshot') return retire(notes.snapshot);
+      if (error instanceof VeTwoGisUnavailableError && error.kind !== 'other') break;
+      // 'other' — и ошибки кода внутри транзакции (курсор не продвинулся), и неверный вход страницы.
+      if (countError(`страница не прочитана: ${error instanceof VeTwoGisUnavailableError ? error.kind : 'вход'}`)) return;
+      break;
+    }
+    if (read.kind === 'import') break;
+    if (read.kind === 'stale') return retire(notes.snapshot);
+
+    // Фильтры строк — по порядку страницы; счётчики применяются только вместе со страницей.
+    let filterExcluded = 0;
+    let filterSeen = 0;
+    const candidates: Array<{ claim: VeTwoGisClaim; row: VeUnifiedRow }> = [];
+    for (const card of read.rows) {
+      const row = mapTwoGisRow(card, flag.snapshot_id);
+      const host = veTwoGisWebsiteHost(card.host);
+      const domain = card.registrable_domain;
+      const kind = host ? veTwoGisSiteKind(host) : null;
+      // Корни конструкторов и ссылки справочника — 'catalog'; соцсети и сам 2ГИС — isVeNonOfficialWebsiteHost.
+      if (!host || !TWO_GIS_DOMAIN.test(domain) || isVeNonOfficialWebsiteHost(host) || (kind !== 'own' && kind !== 'builder')
+        || !normalizeCompanyForDedup(row.company) || (!allow.government && isVeTwoGisGovernmentHost(host))) {
+        filterExcluded += 1;
+        continue;
+      }
+      if (!allowedByProject(ctx, row)) continue;
+      const kept = pruneBaseRowAgainstExclusion(excluded, row);
+      if (!kept) {
+        if (excludedByOtherBases(excluded, row)) filterExcluded += 1; else filterSeen += 1;
+        continue;
+      }
+      if (domains.has(domain)) { filterSeen += 1; continue; }
+      candidates.push({ claim: { registrable_domain: domain, host, card_id: card.card_id }, row: kept });
+    }
+    let claim: VeTwoGisClaimResult | null = null;
+    if (candidates.length) {
+      try {
+        claim = await claimVeTwoGisRows(ctx.supabase, line, candidates.map((candidate) => candidate.claim), ctx.signal);
+      } catch (error) {
+        ctx.signal?.throwIfAborted();
+        if (isVeTwoGisRethrow(error)) throw error;
+        // Страница не применяется: курсор, строки, счётчики и claimed прежние, прошлые страницы — в памяти.
+        if (error instanceof VeTwoGisJournalError && error.transient) {
+          stageLog(ctx, `[base_collect] 2gis журнал: ${error.step} ${error.code}, отложено`);
+          break;
+        }
+        if (countError(`журнал: ${error instanceof VeTwoGisJournalError ? `${error.step} ${error.code}` : 'error'}`)) return;
+        break;
+      }
+    }
+    const accepted = claim?.accepted ?? new Set<string>();
+    const taken = candidates.filter((candidate) => accepted.has(candidate.claim.registrable_domain));
+    if (taken.length) {
+      state.harvest ??= [];
+      for (const candidate of taken) {
+        state.harvest.push(candidate.row);
+        domains.add(candidate.claim.registrable_domain);
+      }
+    }
+    const excludedCount = filterExcluded + (claim?.held ?? 0);
+    const seenCount = filterSeen + (claim?.duplicate ?? 0);
+    if (excludedCount) state.excluded_during_fetch = (state.excluded_during_fetch ?? 0) + excludedCount;
+    if (seenCount) state.already_seen_during_fetch = (state.already_seen_during_fetch ?? 0) + seenCount;
+    cursor = { ...cursor, after: read.cursor, claimed: cursor.claimed + accepted.size, pages: cursor.pages + 1 };
+    delete cursor.errors; // удачная страница обнуляет серию сбоев
+    state.two_gis = cursor;
+    if (read.exhausted) state.exhausted = true;
+    state.rows = harvested();
+    applied += 1;
+    // Без доменов: в логе только счёт.
+    stageLog(ctx, `[base_collect] 2gis page ${cursor.pages}: окно ${read.windowIds}, строк ${read.rows.length}, взято ${taken.length}, `
+      + `повтор ${claim?.replayed ?? 0}, перехвачено ${claim?.takenOver ?? 0}, занято ${claim?.held ?? 0}${read.exhausted ? ', исчерпано' : ''}`);
+  }
+  if (state.exhausted || harvested() >= limit || state.hit_ceiling) state.status = 'done';
+  if (state.exhausted) state.note = notes.exhausted;
+  else if (state.hit_ceiling) state.note = notes.ceiling;
+  else if (applied) state.note = notes.progress;
+}
+
 async function dispatchTask(
   ctx: VeStageContext,
   state: VeCollectTaskState,
@@ -2084,6 +2344,7 @@ async function dispatchTask(
   mediaProfile?: VeMediaSourceProfile | null,
   savedSourceInfo?: Pick<VeCollectInfo, 'source_contact_recovery' | 'search_policy'>,
   retailProfile?: VeRetailSourceProfile | null,
+  twoGis?: VeTwoGisDispatch | null,
 ): Promise<void> {
   const { task } = state;
 
@@ -2326,6 +2587,14 @@ async function dispatchTask(
     state.status = 'done';
     state.rows = state.harvest.length;
     state.child_job_id = null;
+    return;
+  }
+
+  // 2ГИС (R3 3б): близнец базы с флагом читает снимок; без флага — защита R1 ниже. До created_by: дочерней джобы нет.
+  // Запись — у вызывающего (DISPATCH), один раз за диспатч (решение чата VE2 п.8).
+  if (task.source === 'two_gis' && twoGis) {
+    await dispatchVeTwoGisTwin(ctx, state, limit, getExcludedKeys, usage, audienceContext, twoGis,
+      !!(sourceProfile || clinicProfile || mediaProfile || retailProfile));
     return;
   }
 
@@ -3121,7 +3390,8 @@ function applyCollectionGeography(info: VeCollectInfo): boolean {
   let changed = false;
   info.tasks.forEach((state, index) => {
     if (JSON.stringify(state.task) === JSON.stringify(tasks[index])) return;
-    const progressed = state.status !== 'pending' || !!state.child_job_id || state.rows > 0 || !!state.harvest?.length;
+    const progressed = state.status !== 'pending' || !!state.child_job_id || state.rows > 0 || !!state.harvest?.length
+      || (isVeTwoGisTask(state) && veTwoGisClaimedByBase([state]) > 0);
     if (progressed && isVeTwoGisTask(state)) {
       // Близнеца с прогрессом по прежней географии не пересчитывают (заметка R1 № 8) и базу им не валят:
       // закрыт, harvest/курсор/пара остаются; задача прежняя — атрибуция строк не меняется. Повтор — no-op.
@@ -3150,11 +3420,11 @@ function applyCollectionGeography(info: VeCollectInfo): boolean {
 
 /** 2ГИС (R3 «Флаг»): база поставки берёт флаг одобренного превью, только если сейчас mode=on, снимок
  * проверен, выдача проекту открыта и снимок с таблицей сайтов — те же, что во флаге. Зовётся только до
- * плана (isNew) и только при флаге в линии: прочие базы поставки нового чтения не получают. Часть 4
- * заменит чтение настройками тика из ctx. */
+ * плана (isNew) и только при флаге в линии: прочие базы поставки нового чтения не получают. Настройки
+ * тика из ctx (readTickVeTwoGisSettings), общие с близнецом. */
 async function inheritVeSupplyTwoGisSource(ctx: VeStageContext, projectId: string, info: VeCollectInfo,
   flag: VeTwoGisSourceFlag, market: VeMarket): Promise<boolean> {
-  const settings = market === 'ru' ? await readVeTwoGisSettings(ctx.supabase) : null;
+  const settings = market === 'ru' ? await readTickVeTwoGisSettings(ctx) : null;
   const allowed = veTwoGisFlagAllowed(settings, projectId);
   const current = allowed && veTwoGisFlagCurrent(flag, settings);
   const before = JSON.stringify(info.two_gis_source ?? null);
@@ -5884,6 +6154,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     }
   }
 
+  const twoGisFlag = target && market === 'ru' ? readVeTwoGisSourceFlag(info.two_gis_source) : null;
   // ─── DISPATCH ───
   for (const state of tasks) {
     if (state.status !== 'pending' || info.adaptive_collection?.pending || veTaskAcquisitionDeferred(info, state)) continue;
@@ -5904,7 +6175,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
         clinicProfileForInfo(info, market, base.hypothesis_id),
         base.hypothesis_id && !info.audience_snapshot?.hypotheses.some((h) => h.audience_scope)
           ? detectVeMediaSourceProfile({ market, hypotheses: info.hypotheses ?? [] }) : null, info,
-        info.audience_snapshot && market === 'ru' ? veAudienceRetailProfile(info.audience_snapshot.hypotheses) : null);
+        info.audience_snapshot && market === 'ru' ? veAudienceRetailProfile(info.audience_snapshot.hypotheses) : null,
+        isVeTwoGisTask(state) && twoGisFlag && target ? { flag: twoGisFlag, projectId: job.project_id,
+          hypothesisId: base.hypothesis_id ?? null, baseId, candidateCap: twoGisFlag.max_candidates ?? target.max_candidates,
+          tasks: info.tasks ?? [] } : null);
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
@@ -5919,9 +6193,19 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       if (e instanceof VeLlmRateLimitError || isVeProviderBillingError(e)) throw e;
       if ((state.source === 'companies_directory' && isVeTransientDirectoryError(e))
         || (state.source === 'yandex_maps' && isVeTransientCatalogError(e))) throw e;
-      state.status = 'failed';
-      state.error = e instanceof Error ? e.message : String(e);
-      stageLog(ctx, `[base_collect] dispatch ${state.source} упал: ${state.error}`);
+      if (isVeTwoGisTask(state)) {
+        // 2ГИС: близнец не становится failed (его failed сделал бы раунд 'error'). Сбой учёта расходов и
+        // временный сбой БД (чтение исключений) — ожидание и повтор, как выше; прочее — закрыт один близнец,
+        // а не повтор всей джобы по кругу.
+        if (e instanceof ProviderUsageWriteError || isTransientDbError(e)
+          || isVeStageDbInterruption(e instanceof Error ? e.message : String(e))) throw e;
+        retireVeTwoGisTwin(state, VE_TWO_GIS_TWIN_NOTES.readError);
+        stageLog(ctx, `[base_collect] dispatch two_gis закрыт: ${e instanceof Error ? e.message : String(e)}`);
+      } else {
+        state.status = 'failed';
+        state.error = e instanceof Error ? e.message : String(e);
+        stageLog(ctx, `[base_collect] dispatch ${state.source} упал: ${state.error}`);
+      }
     }
     await persistCollectInfo(ctx, baseId, info);
   }
