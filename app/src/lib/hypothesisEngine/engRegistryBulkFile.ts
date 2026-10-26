@@ -9,16 +9,15 @@ import { setImmediate as yieldLoop } from 'node:timers/promises';
 /**
  * Whole-file national registers (Czech statistical register, Estonian open
  * data): one public file per source, kept on local disk and read as a stream.
- * In production the files sit on the ENG workers' Companies House volume, so a
- * redeploy does not download them again.
+ * Not on the Companies House volume: its importer counts every file there
+ * against its 2 GB budget. A new container downloads the files again.
  */
 const USER_AGENT = 'Portal ENG public-company-discovery/1.0 (+https://app.outreachos.xyz)';
 // A download older than this is left over from a process that stopped mid-file.
 const STALE_PART_MS = 60 * 60_000;
 
 export function heEngRegistryCacheFile(name: string): string {
-  return path.join(process.env.HE_ENG_REGISTRY_CACHE_DIR ?? (process.env.NODE_ENV === 'production'
-    ? '/var/lib/portal-eng-companies-house/registries' : path.join(tmpdir(), 'portal-eng-registries')), name);
+  return path.join(process.env.HE_ENG_REGISTRY_CACHE_DIR ?? path.join(tmpdir(), 'portal-eng-registries'), name);
 }
 
 /** A file whose contents failed the reader's checks: the next read downloads it again instead of reusing it for a week. */
