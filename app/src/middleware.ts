@@ -83,6 +83,7 @@ function isPublicApiPath(p: string): boolean {
     p.startsWith('/api/telegram/link') ||
     p.startsWith('/api/database-review/guest/') ||
     p.startsWith('/api/lead-board/') || // гостевая таблица лидов — auth по токену
+    p === '/api/mail-servers/heartbeat' || // отчёты почтовых серверов — auth по токену серверов в самом роуте
     p.startsWith('/api/cron/')
   )
 }
