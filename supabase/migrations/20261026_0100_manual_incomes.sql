@@ -52,6 +52,36 @@ grant all on public.manual_incomes to service_role, postgres;
 comment on table public.manual_incomes is
   'Доход из источников, которые не синкаются (наличные, личная карта и т.п.), внесённый руками кнопкой «+ Доход». Всегда выручка. В витрину incomes_v попадает с source=manual.';
 
+-- ─── Уведомление «Поступила оплата» о ручном доходе ──────────────────────
+-- Решение владельца: ручной доход идёт в ветку «Оплаты» так же, как банковский
+-- платёж. Журнал повторяет crypto_income_notifications
+-- (20261021_0011_crypto_income_notifications.sql), рассылает его тот же
+-- services/portal-external-sync/bank_income.py. Своего baseline нет: истории
+-- у таблицы нет, а записи до включения уведомлений отсекаются по
+-- bank_income_notification_state.started_at.
+--
+-- on delete cascade: удалённая до отправки запись не должна уйти в чат.
+
+create table if not exists public.manual_income_notifications (
+  manual_income_id uuid primary key references public.manual_incomes(id) on delete cascade,
+  chat_id bigint not null,
+  thread_id integer not null check (thread_id > 0),
+  status text not null default 'pending'
+    check (status in ('pending','sending','sent','failed','unknown','skipped')),
+  attempts integer not null default 0,
+  next_attempt_at timestamptz not null default now(),
+  message_id bigint,
+  error text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  sent_at timestamptz
+);
+create index if not exists manual_income_notifications_due_idx
+  on public.manual_income_notifications(next_attempt_at) where status = 'pending';
+alter table public.manual_income_notifications enable row level security;
+revoke all on public.manual_income_notifications from anon, authenticated;
+grant all on public.manual_income_notifications to service_role;
+
 -- ─── Привязка ручного расхода ────────────────────────────────────────────
 
 alter table public.manual_expenses
