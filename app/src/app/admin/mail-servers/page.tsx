@@ -200,7 +200,6 @@ export default function AdminMailServersPage() {
                   <th className="px-4 py-2 font-medium">Отчёт</th>
                   <th className="px-4 py-2 font-medium">Почта за сутки</th>
                   <th className="px-4 py-2 font-medium">Диск</th>
-                  <th className="px-4 py-2 font-medium">Оплачен до</th>
                 </tr>
               </thead>
               <tbody>
@@ -223,7 +222,6 @@ export default function AdminMailServersPage() {
                         {m.bounced_other > 0 && <span className="text-amber-700"> · отказов «спам» {m.bounced_other}</span>}
                       </td>
                       <td className={`px-4 py-3 ${s.disk_used_pct >= 80 ? 'font-medium text-red-600' : 'text-gray-700'}`}>{s.disk_used_pct}%</td>
-                      <td className="px-4 py-3 text-gray-700">{s.pay_due || '—'}</td>
                     </tr>
                   );
                 })}
@@ -238,7 +236,7 @@ export default function AdminMailServersPage() {
         <ul className="mt-3 space-y-2 list-disc pl-5 leading-relaxed">
           <li>У каждого клиента свой адрес сервера; на одном сервере не больше двух клиентов. Чёрный список одного адреса не задевает остальных.</li>
           <li>Instantly подключается к ящикам по имени пары доменов (pN.&lt;домен сервера&gt;). Пару можно перевезти на другой сервер одной правкой DNS — прогрев не сбрасывается.</li>
-          <li>Бот на каждом сервере раз в 15 минут проверяет службы, отказы, диск, чёрные списки, оплату и ящики в Instantly и пишет в Telegram; ошибки подключения в Instantly после простоя снимает сам.</li>
+          <li>Бот на каждом сервере раз в 15 минут проверяет службы, отказы, диск, чёрные списки и ящики в Instantly и пишет в Telegram; ошибки подключения в Instantly после простоя снимает сам.</li>
           <li>Каждую ночь с серверов забирается зашифрованная копия (настройки, ключи, ящики, письма), хранится 14 дней; сервер поднимается из неё за несколько минут.</li>
           <li>Новый клиент: домены в Reg.ru → add_domain.sh на сервере → записи DNS → проверки wait_dns_and_test.sh → instantly_add_pending.py с тегом клиента. Скрипты и инструкции — в папке mail-pilot.</li>
         </ul>

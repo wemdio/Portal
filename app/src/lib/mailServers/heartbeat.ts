@@ -52,7 +52,6 @@ export interface MailServerReport {
     cert_days_left: number | null;
     cert_names: string[];
     services: Record<string, string>;
-    pay_due: string;
     boxes: number;
     paused: number;
     pending: number;
@@ -134,10 +133,11 @@ export function ipClients(ip: MailIp): string[] {
 
 /**
  * Тревоги бота без листингов доменов (ключи «bl:…»): чёрные списки страница показывает из
- * отчёта dnsbl, иначе каждый листинг выводится дважды.
+ * отчёта dnsbl, иначе каждый листинг выводится дважды. Оплату серверов страница не показывает
+ * (Сергей 26.10: «про оплату убери всю информацию») — напоминания о ней остаются в Telegram.
  */
 export function activeAlerts(report: MailServerReport): MailAlert[] {
-  return report.alerts.filter((a) => !a.key.startsWith('bl:'));
+  return report.alerts.filter((a) => !a.key.startsWith('bl:') && a.key !== 'pay');
 }
 
 /** Провайдер для группировки: из отчёта, иначе «без провайдера». */
@@ -226,7 +226,6 @@ export function addressRows(rows: MailServerRow[], now: Date): AddressRow[] {
 
 /** Названия тревог бота, если текст ещё не записан (состояние старше, чем запись текста в state.json). */
 const ALERT_FALLBACK: Record<string, string> = {
-  pay: 'скоро оплата сервера',
   bounces: 'много отказов «спам» при отправке',
   queue: 'растёт очередь писем',
   disk: 'заканчивается место на диске',
@@ -245,7 +244,7 @@ export interface AttentionItem {
 
 /**
  * Что требует внимания — обычными словами, без повторов: одна и та же тревога с нескольких
- * серверов (например, оплата общего баланса) — одной строкой со списком серверов.
+ * серверов — одной строкой со списком серверов.
  */
 export function attentionItems(rows: MailServerRow[], now: Date): AttentionItem[] {
   const items: AttentionItem[] = [];
@@ -260,7 +259,7 @@ export function attentionItems(rows: MailServerRow[], now: Date): AttentionItem[
       if (st !== 'active') items.push({ level: 'bad', text: `${name}: служба ${svc} не работает` });
     }
     for (const a of activeAlerts(r)) {
-      const text = (a.text || ALERT_FALLBACK[a.key] || a.key).replace(/\s*\(после оплаты[^)]*\)\s*$/, '');
+      const text = a.text || ALERT_FALLBACK[a.key] || a.key;
       sameAlert.set(text, [...(sameAlert.get(text) ?? []), name]);
     }
     const listed = r.dnsbl?.listed?.length ?? 0;
