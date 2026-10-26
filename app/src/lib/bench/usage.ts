@@ -17,16 +17,40 @@ export interface BenchKeyUsage {
   rows_today: number;
 }
 
+/** Расход за сутки по одному инструменту. */
+export interface BenchToolDayUsage {
+  /** id инструмента; null — обращения без инструмента (список, статус ключа). */
+  tool: string | null;
+  requests: number;
+  jobs: number;
+  rows: number;
+  /** Отказы по лимиту (429). */
+  limited: number;
+  /** Прочие ошибки: 4xx кроме 429 и 5xx. */
+  errors: number;
+}
+
 export interface BenchDayUsage {
   /** Календарная дата по Москве, YYYY-MM-DD. */
   date: string;
   jobs: number;
   rows: number;
   requests: number;
+  /**
+   * Больше всего запросов за одну календарную минуту этих суток — то же, что
+   * «в минуту» за сегодня, только задним числом: видно, подходил ли ключ к
+   * потолку rpm в прошлые дни.
+   */
+  peak_per_minute: number;
+  limited: number;
+  errors: number;
+  /** Разбивка по инструментам, самые расходные сверху. */
+  tools: BenchToolDayUsage[];
 }
 
 interface JournalRow {
   key_id: string;
+  tool?: string | null;
   action: string;
   status_code: number;
   rows_returned: number | null;
@@ -100,7 +124,7 @@ export async function loadBenchHistory(
 
   const { data } = await admin
     .from('bench_api_requests')
-    .select('key_id, action, status_code, rows_returned, created_at')
+    .select('key_id, tool, action, status_code, rows_returned, created_at')
     .eq('key_id', keyId)
     .gte('created_at', from.toISOString())
     .limit(MAX_JOURNAL_ROWS);
@@ -108,15 +132,50 @@ export async function loadBenchHistory(
   const byDate = new Map<string, BenchDayUsage>();
   for (let i = 0; i < days; i += 1) {
     const date = mskDate(new Date(from.getTime() + i * DAY_MS).toISOString());
-    byDate.set(date, { date, jobs: 0, rows: 0, requests: 0 });
+    byDate.set(date, {
+      date, jobs: 0, rows: 0, requests: 0, peak_per_minute: 0, limited: 0, errors: 0, tools: [],
+    });
   }
 
+  const perMinute = new Map<string, number>();
+  const toolsByDate = new Map<string, Map<string, BenchToolDayUsage>>();
   for (const row of (data ?? []) as JournalRow[]) {
-    const bucket = byDate.get(mskDate(row.created_at));
+    const date = mskDate(row.created_at);
+    const bucket = byDate.get(date);
     if (!bucket) continue;
+
+    const job = row.action === 'create_job' && row.status_code < 300;
+    const rows = Number(row.rows_returned ?? 0);
+    const limited = row.status_code === 429;
+    const failed = row.status_code >= 400 && !limited;
+
     bucket.requests += 1;
-    if (row.action === 'create_job' && row.status_code < 300) bucket.jobs += 1;
-    bucket.rows += Number(row.rows_returned ?? 0);
+    if (job) bucket.jobs += 1;
+    bucket.rows += rows;
+    if (limited) bucket.limited += 1;
+    if (failed) bucket.errors += 1;
+
+    const minute = row.created_at.slice(0, 16);
+    const inMinute = (perMinute.get(minute) ?? 0) + 1;
+    perMinute.set(minute, inMinute);
+    if (inMinute > bucket.peak_per_minute) bucket.peak_per_minute = inMinute;
+
+    const tools = toolsByDate.get(date) ?? new Map<string, BenchToolDayUsage>();
+    toolsByDate.set(date, tools);
+    const toolKey = row.tool ?? '';
+    const tool = tools.get(toolKey) ?? { tool: row.tool ?? null, requests: 0, jobs: 0, rows: 0, limited: 0, errors: 0 };
+    tools.set(toolKey, tool);
+    tool.requests += 1;
+    if (job) tool.jobs += 1;
+    tool.rows += rows;
+    if (limited) tool.limited += 1;
+    if (failed) tool.errors += 1;
+  }
+
+  for (const [date, tools] of toolsByDate) {
+    const bucket = byDate.get(date);
+    if (!bucket) continue;
+    bucket.tools = [...tools.values()].sort((a, b) => b.rows - a.rows || b.requests - a.requests);
   }
 
   // Свежие дни сверху — так же, как в журнале обращений рядом.
