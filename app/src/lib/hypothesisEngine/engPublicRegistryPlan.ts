@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
 import { sliceWholeChars, stripUnstorableJsonChars } from '../jsonbSafe';
 import { engCountryIso2, normalizeEngCountry } from './engCountries';
+import { HE_ENG_CHARITY_COMMISSION_CATEGORIES } from './engCharityCommissionRegistry';
+import { HE_ENG_CQC_CATEGORIES } from './engCqcRegistry';
 import { HE_ENG_ESMA_MEMBER_STATES } from './engEsmaRegistry';
+import { HE_ENG_GIAS_CATEGORIES } from './engGiasRegistry';
 import { HE_ENG_GLEIF_TERMS, HE_ENG_OSM_TAGS } from './engGlobalRegistryCatalog';
 import { HE_ENG_IRS_CATEGORIES } from './engIrsRegistry';
 import { HE_ENG_NACE_CLASSES, heEngNaceSources } from './engNaceRegistryCatalog';
@@ -42,12 +45,15 @@ export const HE_ENG_REGISTRY_CATEGORIES: Readonly<Record<HeEngRegistryProvider, 
   // in the US (engIrsRegistry.ts, engNcesRegistry.ts).
   sec_companies: Object.keys(HE_ENG_SEC_SIC_SECTORS), sec_advisers: ['investment_advisers'],
   irs: Object.keys(HE_ENG_IRS_CATEGORIES), nces: HE_ENG_NCES_CATEGORIES,
+  // UK lists: charities in England and Wales (Charity Commission), schools, colleges and academy trusts in England
+  // (GIAS), health and social care providers in England (CQC); US credit unions (NCUA call reports).
+  charity_commission: HE_ENG_CHARITY_COMMISSION_CATEGORIES, gias: HE_ENG_GIAS_CATEGORIES, cqc: HE_ENG_CQC_CATEGORIES, ncua: ['credit_unions'],
 };
 
 type NationalProvider = Exclude<HeEngRegistryProvider, 'gleif' | 'osm' | 'esma' | 'eba' | 'wikidata' | 'sec_companies' | 'sec_advisers'>;
 const PROVIDER_ISO: Readonly<Record<NationalProvider, string>> = {
   brreg: 'no', france: 'fr', companies_house: 'gb', fdic: 'us', nppes: 'us', fmcsa: 'us', pra: 'gb',
-  prh: 'fi', czso: 'cz', cro: 'ie', ariregister: 'ee', irs: 'us', nces: 'us',
+  prh: 'fi', czso: 'cz', cro: 'ie', ariregister: 'ee', irs: 'us', nces: 'us', charity_commission: 'gb', gias: 'gb', cqc: 'gb', ncua: 'us',
 };
 /** Sources covering many countries: one slice per sector reads all allowed countries. */
 export const HE_ENG_GLOBAL_REGISTRY_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set(['gleif', 'osm', 'esma', 'eba', 'wikidata',
@@ -79,9 +85,12 @@ type Sector = { match: RegExp; omit?: RegExp; sources: Partial<Record<HeEngRegis
 const SELLERS = String.raw`(?!\s+(?:software|technology|tech|edtech|ed-tech|platforms?|solutions?|vendors?|suppliers?|providers?|service\s+providers?|administrat\w*|marketing|market|apps?|tools?|products?|publishers?|curriculum))`;
 // After an education segment, «companies» and «businesses» sell to it too.
 const EDUCATION_SELLERS = String.raw`(?!\s+(?:companies|businesses|firms|startups|software|technology|tech|edtech|ed-tech|platforms?|solutions?|vendors?|suppliers?|service\s+providers?|marketing|market|apps?|tools?|products?|publishers?|curriculum|consult\w*))`;
+// After a care segment, «providers» and «operators» are the segment itself; software, suppliers and agencies sell to it
+// («care home management software», «care home staffing agencies», «GP practice management systems»).
+const CARE_SELLERS = String.raw`(?!\s+(?:(?:management|scheduling|rostering|staffing|recruitment|training|booking|planning|monitoring|compliance|payroll|hr|crm|erp|records?|food|catering|cleaning|laundry|medication|pharmacy|nurse\s+call|call|insurance|furniture|it(?:\s+support)?|telecare|transport|legal|accounting)\s+(?:software|systems?|platforms?|solutions?|vendors?|suppliers?|providers?|agenc(?:y|ies)|companies|firms|services|brokers?)|software|technology|tech|platforms?|solutions?|vendors?|suppliers?|marketing|market|apps?|tools?|products?|equipment|consult\w*))`;
 const PRIVATE_SCHOOL_KINDS = 'private|independent|boarding|parochial|catholic|christian|religious|montessori|waldorf';
 // «Schools» on its own counts at the start of a phrase or after «and»/«or»/a comma; «trade schools», «dental schools» and «schools of nursing» do not.
-const BARE_SCHOOLS = String.raw`|(?:^|[,;/&(]\s*|\b(?:and|or)\s+)schools\b(?!\s+of\b)`;
+const BARE_SCHOOLS = String.raw`|(?:^|[,;/&(]\s*|\b(?:and|or)\s+)schools\b(?!\s+of\b)${EDUCATION_SELLERS}`;
 // Official classifications: Brreg SN, INSEE NAF rev.2, Companies House condensed
 // SIC, CMS taxonomy. These are discovery categories, not evidence of suitability.
 const SECTORS: readonly Sector[] = [
@@ -90,10 +99,12 @@ const SECTORS: readonly Sector[] = [
     sources: { brreg: ['58.29', '62'], france: ['58.29A', '58.29B', '58.29C', '62.01Z', '62.02A'], companies_house: ['58290', '62012', '62020'],
       gleif: ['software'], osm: ['software'], wikidata: ['software'], sec_companies: ['software'], ...heEngNaceSources('software') } },
   { match: /\b(?:banks?|banking institutions|credit institutions|building societies)\b/i,
-    // Custody specialists do not authorize scanning every retail/commercial bank.
-    omit: /\b(?:custodian|custodial|custody|depositary|depository)[ -]+banks?\b/gi,
+    // Custody specialists do not authorize scanning every retail/commercial bank; food, blood and data banks are not banks.
+    omit: /\b(?:custodian|custodial|custody|depositary|depository|food|blood|data|power|memory|sperm|seed|milk|tissue|organ|eye|gene|diaper|baby|clothing|toy|time|piggy)[ -]+banks?\b/gi,
     sources: { brreg: ['64'], france: ['64.19Z'], companies_house: ['64191', '64192'], fdic: ['banks'], gleif: ['banks'], osm: ['banks'], pra: ['banks'], wikidata: ['banks'],
-      sec_companies: ['banks'], ...heEngNaceSources('banks') } },
+      sec_companies: ['banks'], ncua: ['credit_unions'], ...heEngNaceSources('banks') } },
+  { match: /\bcredit unions?\b/i,
+    sources: { ncua: ['credit_unions'] } },
   { match: /\b(?:fund (?:services?|administrators?|administration)|custodians?|depositar(?:y|ies)|transfer agents?|investor services?|mancos?)\b/i,
     // Third-party management companies are fund service providers; ESMA lists them.
     sources: { brreg: ['66'], france: ['66.19B', '66.30Z'], companies_house: ['66190', '66300'], gleif: ['fund_services'], esma: ['fund_managers'],
@@ -110,13 +121,21 @@ const SECTORS: readonly Sector[] = [
   { match: /\b(?:payments? (?:institutions?|companies|firms|providers?|processors?|platforms?|gateways?|service providers?|fintechs?)|psps?|e-?money (?:institutions?|issuers?|providers?)|electronic money (?:institutions?|issuers?)|(?:merchant|card|payment) acquir(?:ers?|ing (?:banks?|companies|providers?))|money (?:transfer|remittance) (?:operators?|companies|providers?|services?)|remittance (?:companies|providers?|operators?)|paytech (?:companies|firms|providers?)|account information (?:service )?providers?|open banking (?:providers?|platforms?|companies))\b/i,
     sources: { eba: ['payment_institutions'] } },
   { match: /\b(?:dentists?|dental (?:clinics?|practices?|groups?|offices?))\b/i,
-    sources: { brreg: ['86.23'], france: ['86.23Z'], companies_house: ['86230'], nppes: ['Dentist'], osm: ['dental'], wikidata: ['dental'], ...heEngNaceSources('dental') } },
+    sources: { brreg: ['86.23'], france: ['86.23Z'], companies_house: ['86230'], nppes: ['Dentist'], osm: ['dental'], wikidata: ['dental'], cqc: ['dental'], ...heEngNaceSources('dental') } },
   { match: /\bhospitals?\b/i,
     sources: { brreg: ['86.10'], france: ['86.10Z'], companies_house: ['86101'], nppes: ['General Acute Care Hospital'],
-      gleif: ['hospitals'], osm: ['hospitals'], wikidata: ['hospitals'], irs: ['hospitals'], sec_companies: ['hospitals'], ...heEngNaceSources('hospitals') } },
+      gleif: ['hospitals'], osm: ['hospitals'], wikidata: ['hospitals'], irs: ['hospitals'], sec_companies: ['hospitals'], cqc: ['hospitals'],
+      ...heEngNaceSources('hospitals') } },
   { match: /\b(?:(?:medical|outpatient|healthcare|primary care) (?:clinics?|cent(?:er|re)s?|practices?)|physician groups)\b/i,
     sources: { brreg: ['86.2'], france: ['86.21Z'], companies_house: ['86210'], nppes: ['Clinic/Center'], osm: ['clinics'], wikidata: ['clinics'], irs: ['clinics'],
-      sec_companies: ['clinics'], ...heEngNaceSources('clinics') } },
+      sec_companies: ['clinics'], cqc: ['clinics'], ...heEngNaceSources('clinics') } },
+  { match: new RegExp(String.raw`\b(?:gp (?:practices?|surger(?:y|ies))|general (?:medical )?practices?|general practitioners?|doctors'? surger(?:y|ies)|family (?:medicine|practice) (?:practices?|clinics?))${CARE_SELLERS}\b`, 'i'),
+    // «General practice» is also a law, accounting or surveying firm's: «general practice (chartered) surveyors», «solicitors in general practice».
+    omit: /\b(?:solicitors?|lawyers?|law\s+firms?|attorneys?|accountants?|accounting\s+firms?|cpas?|surveyors?|vets?|veterinar\w*)\s+in\s+general\s+practices?\b|\bgeneral\s+practices?\s+(?:(?!(?:and|or)\b)[a-z]+\s+){0,2}?(?:solicitors?|lawyers?|law|legal|attorneys?|firms?|account\w*|cpas?|surveyors?|veterinar\w*|vets?)\b/gi,
+    sources: { cqc: ['gp_practices'] } },
+  // Residential and home care: CQC-registered providers in England.
+  { match: new RegExp(String.raw`\b(?:care homes?|nursing homes?|residential care (?:homes?|providers?)|home ?care (?:providers?|agenc(?:y|ies)|companies)|domiciliary care|supported living|social care providers?|adult social care|assisted living|elderly care (?:homes?|providers?)|retirement homes?)${CARE_SELLERS}\b`, 'i'),
+    sources: { cqc: ['care_homes', 'home_care'] } },
   { match: /\b(?:clinical|medical|diagnostic) laborator(?:y|ies)\b/i,
     sources: { nppes: ['Clinical Medical Laboratory'], gleif: ['laboratories'], osm: ['laboratories'], wikidata: ['laboratories'], sec_companies: ['laboratories'] } },
   { match: /\b(?:trucking|road (?:freight|haulage)|freight carriers?|haulage (?:companies|operators)|truck (?:fleets?|operators?))\b/i,
@@ -181,19 +200,22 @@ const SECTORS: readonly Sector[] = [
     sources: { sec_companies: ['public_companies'] } },
   // The organisations themselves, not «nonprofit hospitals»: their own sector reads them.
   { match: new RegExp(String.raw`\b(?:nonprofits|non-profits|not-for-profits|(?:nonprofit|non-profit|not-for-profit|charitable|voluntary) (?:organi[sz]ations?|sector|groups?)|charities|ngos?)${SELLERS}\b|\b501\(c\)\(3\)(?:s\b|(?!\w))`, 'i'),
-    sources: { irs: ['charities'] } },
+    sources: { irs: ['charities'], charity_commission: ['charities'] } },
   { match: /\b(?:(?:private|family|charitable|philanthropic|grant-?making|community|corporate) foundations?|grant-?makers?|philanthropic organi[sz]ations?)\b/i,
-    sources: { irs: ['foundations'] } },
+    sources: { irs: ['foundations'], charity_commission: ['foundations'] } },
   { match: /\b(?:trade (?:associations?|bodies|organi[sz]ations)|industry (?:associations?|bodies)|business (?:associations?|leagues?)|professional (?:associations?|bodies|societies)|membership (?:associations?|organi[sz]ations)|chambers? of commerce)\b/i,
     sources: { irs: ['trade_associations'] } },
   // Plurals and named kinds only: «college graduates» or «university hospitals» are not buyers here.
   { match: new RegExp(String.raw`\b(?:universities|colleges|community colleges?|higher[ -]education(?:\s+(?:institutions?|providers?|organi[sz]ations))?|institutions? of higher (?:education|learning)|(?:private|public|state|liberal arts|technical|research) (?:universit(?:y|ies)|colleges?))${EDUCATION_SELLERS}\b`, 'i'),
-    sources: { nces: ['colleges'], irs: ['higher_education'] } },
+    sources: { nces: ['colleges'], irs: ['higher_education'], gias: ['colleges'] } },
   // Schools: public ones are bought for by their district; a private school buys for itself.
-  { match: new RegExp(String.raw`\b(?:k-?12 (?:schools?|school districts?|districts?|education)${EDUCATION_SELLERS}|school districts?|public schools?|charter schools?|(?:primary|secondary|elementary|middle|high) schools|public (?:and|or|&) private schools|private (?:and|or|&) public schools)\b${BARE_SCHOOLS}`, 'i'),
-    sources: { nces: ['school_districts'] } },
-  { match: new RegExp(String.raw`\b(?:k-?12 (?:schools?(?!\s+districts?)|education)${EDUCATION_SELLERS}|(?:${PRIVATE_SCHOOL_KINDS})(?:(?:,| and| or| &)\s+(?:${PRIVATE_SCHOOL_KINDS}))* schools?|(?:primary|secondary|elementary|middle|high) schools|public (?:and|or|&) private schools|private (?:and|or|&) public schools)\b${BARE_SCHOOLS}`, 'i'),
-    sources: { nces: ['private_schools'], irs: ['schools'] } },
+  { match: new RegExp(String.raw`\b(?:k-?12 (?:schools?|school districts?|districts?|education)|school districts?|public schools?|charter schools?|(?:primary|secondary|elementary|middle|high) schools|public (?:and|or|&) private schools|private (?:and|or|&) public schools)${EDUCATION_SELLERS}\b${BARE_SCHOOLS}`, 'i'),
+    sources: { nces: ['school_districts'], gias: ['state_schools', 'academy_trusts'] } },
+  // English terms: an academy trust runs state schools; in American usage a «state school» is a state university.
+  { match: new RegExp(String.raw`\b(?:(?:multi-?)?academy trusts?|state schools)${EDUCATION_SELLERS}\b`, 'i'),
+    sources: { gias: ['state_schools', 'academy_trusts'] } },
+  { match: new RegExp(String.raw`\b(?:k-?12 (?:schools?(?!\s+districts?)|education)|(?:${PRIVATE_SCHOOL_KINDS})(?:(?:,| and| or| &)\s+(?:${PRIVATE_SCHOOL_KINDS}))* schools?|(?:primary|secondary|elementary|middle|high) schools|public (?:and|or|&) private schools|private (?:and|or|&) public schools)${EDUCATION_SELLERS}\b${BARE_SCHOOLS}`, 'i'),
+    sources: { nces: ['private_schools'], irs: ['schools'], gias: ['independent_schools'] } },
   { match: /\b(?:co-?working (?:spaces?|operators?|cent(?:er|re)s?)|shared office (?:spaces?|providers?))\b/i,
     sources: { osm: ['coworking'] } },
   { match: /\bnotar(?:y|ies)\b/i,

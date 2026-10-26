@@ -47,6 +47,9 @@ const DIRECTORY_HOSTS = new Set(['linkedin.com', 'facebook.com', 'instagram.com'
   'sec.gov', 'finra.org', 'irs.gov', 'propublica.org', 'guidestar.org', 'candid.org', 'charitynavigator.org', 'causeiq.com',
   'nces.ed.gov', 'niche.com', 'greatschools.org', 'privateschoolreview.com', 'publicschoolreview.com', 'usnews.com',
   'stockanalysis.com', 'macrotrends.net', 'marketscreener.com', 'seekingalpha.com', 'prnewswire.com', 'businesswire.com', 'globenewswire.com',
+  // UK registers and care, school and credit union directories.
+  'charitycommission.gov.uk', 'get-information-schools.service.gov.uk', 'compare-school-performance.service.gov.uk', 'ofsted.gov.uk',
+  'cqc.org.uk', 'carehome.co.uk', 'homecare.co.uk', 'ncua.gov', 'mycreditunion.gov', 'creditunionsonline.com',
   'manageo.fr', 'proff.no', 'purehelp.no', '1881.no', 'gulesider.no', 'bizapedia.com', 'manta.com',
   'buzzfile.com', 'yelp.com', 'bbb.org', 'sophymarine.com', 'experian.com', 'ebay.com', 'amazon.com']);
 // Legal-form words: the register says «LTD», the company's own footer «Limited».
@@ -151,9 +154,9 @@ function hasRegistryCountry(candidate: HeEngRegistryCandidate): boolean {
   // registered offices; accepting their country does not claim a local team.
   // The PRA lists state incorporation in the UK instead of an address; the
   // Finnish, Czech, Irish and Estonian registers hold only domestic companies,
-  // as do the IRS and NCES lists (a mailing address in a US state).
+  // as do the IRS, NCES and NCUA lists (a mailing address in a US state) and the Charity Commission's (England and Wales).
   return (candidate.addressKind === 'business' ||
-      (['companies_house', 'france', 'pra', 'prh', 'czso', 'cro', 'ariregister', 'irs', 'nces'].includes(candidate.provider) &&
+      (['companies_house', 'france', 'pra', 'prh', 'czso', 'cro', 'ariregister', 'irs', 'nces', 'ncua', 'charity_commission'].includes(candidate.provider) &&
         candidate.addressKind === 'registered')) &&
     text(candidate.address).length >= 5 &&
     heEngRegistryRecordValid(candidate.provider, candidate.recordId, country(candidate.country), candidate.sourceUrl);
@@ -202,7 +205,9 @@ function websiteVariants(site: string): string[] {
 }
 const GENERIC_NAME_WORDS = new Set(['insurance', 'services', 'service', 'financial', 'finance', 'group', 'holdings',
   'holding', 'management', 'capital', 'investments', 'investment', 'international', 'global', 'solutions',
-  'consulting', 'partners', 'company', 'limited', 'brokers', 'broking', 'underwriting', 'risk', 'uk', 'europe']);
+  'consulting', 'partners', 'company', 'limited', 'brokers', 'broking', 'underwriting', 'risk', 'uk', 'europe',
+  // «Example Trust» is not named by trustpilot.com.
+  'trust', 'charity', 'charitable', 'foundation', 'friends', 'society', 'association']);
 /** Search hits whose domain carries the company's own words come first. */
 function brandScore(site: string, company: string): number {
   const label = (heCompanySiteIdentity(site)?.registrable ?? '').split('.')[0].replace(/[^a-z0-9]/g, '');
@@ -312,6 +317,13 @@ const PRA_THIRD_PARTY = /\b(?:underwritten|insured|provided|arranged|issued|admi
 // An adviser representative's own site names the firm it works through: «Advisory services offered through
 // Example Advisors, LLC, a registered investment adviser (CRD# 123456)». That site is not the firm's.
 const ADVISER_THIRD_PARTY = /\b(?:offered|provided|conducted|transacted)\s+(?:through|by)\b|\b(?:registered|investment\s+advis[eo]r)\s+representatives?\s+(?:of|with)\b|\bin\s+association\s+with\b|\baffiliated\s+with\b/i;
+// A fundraiser's, a shop's or a trading company's site names the charity it works for: «All proceeds go to
+// Example Trust, registered charity no. 1062876», «in aid of …», «a subsidiary of …».
+// Not «in partnership with» or «on behalf of»: a charity's own footer says them too («We work in partnership with the NHS»).
+const CHARITY_THIRD_PARTY = /\b(?:in\s+aid\s+of|in\s+support\s+of|proudly\s+support(?:s|ing)|rais(?:e|es|ed|ing)\s+(?:funds|money)\s+for|fundrais\w*\s+(?:for|on\s+behalf\s+of)|proceeds\s+(?:go|goes|will\s+go|are\s+(?:donated|given|going))\s+to|subsidiary\s+of|trading\s+(?:arm|company)\s+of|(?:charity|charitable)\s+partners?|(?:official|chosen|nominated|partner)\s+charity|charity\s+of\s+the\s+year)\b/i;
+const THIRD_PARTY: Partial<Record<HeEngRegistryCandidate['provider'], RegExp>> = {
+  pra: PRA_THIRD_PARTY, sec_advisers: ADVISER_THIRD_PARTY, charity_commission: CHARITY_THIRD_PARTY,
+};
 /**
  * A legal block names this entity. With `numberAlone` (the site's own footer) a
  * labelled registry number is enough by itself: the number is unique, and a
@@ -359,9 +371,15 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
     irs: 'ein|employer\\s+identification\\s+(?:number|no)|(?:federal\\s+)?tax[\\s-]+(?:id|identification)(?:\\s+(?:number|no))?|tax[\\s-]+exempt\\s+(?:id|number)|federal\\s+id(?:\\s+(?:number|no))?',
     // NCES ids never appear on a school's site; colleges and districts bring their website.
     nces: '(?!)',
+    // «Registered charity number 1062876», «Charity No. 1062876», «Registered charity 1062876».
+    charity_commission: 'registered\\s+charity(?:\\s+(?:no|number|reg(?:istration)?\\s+(?:no|number)))?|charity\\s+(?:no|number|reg(?:istration)?\\s+(?:no|number))|charity\\s+commission\\s+(?:no|number)',
+    // A school's URN or DfE number is rarely printed; academy trusts print their company number (matched below).
+    gias: 'urn|unique\\s+reference\\s+number|dfe\\s+(?:no|number)',
+    cqc: 'cqc\\s+(?:provider\\s+)?(?:id|registration(?:\\s+(?:no|number))?)',
+    ncua: '(?:ncua\\s+)?charter(?:\\s+(?:no|number))?',
   };
   const id = identifierKey(candidate.recordId);
-  const thirdParty = candidate.provider === 'pra' ? PRA_THIRD_PARTY : candidate.provider === 'sec_advisers' ? ADVISER_THIRD_PARTY : null;
+  const thirdParty = THIRD_PARTY[candidate.provider] ?? null;
   const digits = candidate.provider === 'companies_house' ? companiesHouseDigits(id) : id;
   // EDGAR pads a CIK to ten digits («CIK 0000320193»); Companies House numbers lose their padding on sites.
   const idPattern = `${digits !== id || candidate.provider === 'sec_companies' ? '(?:0[\\s.-]*)*' : ''}${digits.split('').join('[\\s.-]*')}`;
@@ -383,12 +401,14 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
   }) : id.length >= 5 && [...value.matchAll(new RegExp(`${opening}(?:${labels[candidate.provider]})${closing}${gap}(${idPattern})${end}`, 'giu'))]
     // A broker's or retailer's site prints its insurer's or lender's FRN as a
     // partner: «Policies are underwritten by …, FRN 955859»; a representative's
-    // site prints its adviser's CRD. Unless the domain carries the firm's own
-    // name, such a number names someone else.
+    // site prints its adviser's CRD, a fundraiser's its charity's number. Unless
+    // the domain carries the firm's own name, such a number names someone else.
     .some(match => !thirdParty || options.brandSite || !thirdParty.test(value.slice(Math.max(0, match.index - 200), match.index)));
   if (registryNumber && options.numberAlone) return true;
   if (!legalName || !named.includes(` ${legalName} `)) return false;
-  if (registryNumber || localRegistryNumber(value, candidate)) return true;
+  // A fundraiser's or trading company's footer prints the charity's company number too; a bank's or insurer's own footer prints
+  // its company number beside «lender» or «introducer» wording, so only a charity's is guarded.
+  if (registryNumber || localRegistryNumber(value, candidate, options.brandSite || candidate.provider !== 'charity_commission' ? null : thirdParty)) return true;
   // A long legal page contains most address words somewhere; only the number counts there.
   if (options.numberRequired) return false;
   const countryDefinition = ENG_COUNTRIES.find(item => item.value === country(candidate.country));
@@ -443,10 +463,11 @@ const LOCAL_REGISTRY_LABELS = '(?:handelsregister|registernummer|registergericht
  * numbers repeat between courts and countries, so the caller also requires the
  * legal name in the same block.
  */
-function localRegistryNumber(value: string, candidate: HeEngRegistryCandidate): boolean {
+function localRegistryNumber(value: string, candidate: HeEngRegistryCandidate, thirdParty: RegExp | null = null): boolean {
   // ESMA fund managers and PRA banks carry the same GLEIF number, looked up by their LEI;
   // EBA firms the one GLEIF holds for their exact legal name, and their supervisor's reference.
-  if (!['gleif', 'esma', 'pra', 'eba'].includes(candidate.provider)) return false;
+  // Charities, academy trusts and care providers carry their Companies House number.
+  if (!['gleif', 'esma', 'pra', 'eba', 'charity_commission', 'gias', 'cqc'].includes(candidate.provider)) return false;
   return [candidate.localRegistryId, candidate.supervisorReference].some(number => {
     const chars = (number ?? '').normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
     if (chars.length < 5 || chars.length > 30) return false;
@@ -455,9 +476,11 @@ function localRegistryNumber(value: string, candidate: HeEngRegistryCandidate): 
     const digits = companiesHouseDigits(chars);
     const pattern = `${digits !== chars ? '(?:0[\\s.:/-]*)*' : ''}${digits.split('').map(char => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s.:/-]*')}`;
     const end = '(?![\\p{L}\\p{N}]|[\\s.-]{1,3}\\d)';
-    return /\p{L}/u.test(chars)
-      ? new RegExp(`(?<![\\p{L}\\p{N}])${pattern}${end}`, 'iu').test(value)
-      : new RegExp(`\\b${LOCAL_REGISTRY_LABELS}\\b[\\s:./#-]{0,16}${pattern}${end}`, 'iu').test(value);
+    const found = /\p{L}/u.test(chars)
+      ? value.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])${pattern}${end}`, 'giu'))
+      : value.matchAll(new RegExp(`\\b${LOCAL_REGISTRY_LABELS}\\b[\\s:./#-]{0,16}${pattern}${end}`, 'giu'));
+    // After a partner's wording («All proceeds go to …, company no. 03456789») the number is someone else's.
+    return [...found].some(match => !thirdParty || !thirdParty.test(value.slice(Math.max(0, match.index - 200), match.index)));
   });
 }
 interface OwnFacts { identity: boolean; employees: HeEngEmployeeRange | null }

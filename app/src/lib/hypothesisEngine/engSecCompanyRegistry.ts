@@ -70,7 +70,7 @@ export function heEngSecSicInSector(sector: string, sic: number): boolean {
 /** One quarter's filers by CIK. */
 function quarter(text: string, filers: Map<string, Filer>): void {
   const lines = text.split('\n');
-  const head = lines[0].replace(/^﻿/, '').replace(/\r$/, '').split('\t');
+  const head = lines[0].replace(/^\ufeff/, '').replace(/\r$/, '').split('\t');
   const column = Object.fromEntries(head.map((name, i) => [name.trim(), i]));
   if (['cik', 'name', 'sic', 'countryba', 'stprba', 'cityba', 'zipba', 'bas1', 'bas2', 'afs', 'form', 'filed', 'accepted']
     .some(name => column[name] === undefined)) fail('registry_invalid_response');

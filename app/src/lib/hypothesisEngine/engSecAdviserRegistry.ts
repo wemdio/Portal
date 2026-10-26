@@ -31,7 +31,11 @@ const MAX_CSV_BYTES = 512 * 1024 * 1024;
 const FILE_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
 const PAGE_SIZE = 25;
 // An organisation's own website is the one to check; these are profiles, filings, link pages and donation platforms.
-const NOT_OWN_SITE = /(?:^|\.)(?:facebook|linkedin|twitter|x|instagram|youtube|vimeo|tiktok|pinterest|yelp|google|medium|bit|tinyurl)\.(?:com|ly)$|(?:^|\.)(?:sec\.gov|finra\.org|irs\.gov|linktr\.ee|guidestar\.org|candid\.org|propublica\.org|charitynavigator\.org|causeiq\.com|givebutter\.com|gofundme\.com|paypal\.com|eventbrite\.com|networkforgood\.org|classy\.org|donorbox\.org)$/;
+// Registers and directories the UK lists name instead of a site (charitycommission.gov.uk, carehome.co.uk) are no site
+// either: the organisation is then searched, not dropped.
+const NOT_OWN_SITE = /(?:^|\.)(?:facebook|linkedin|twitter|x|instagram|youtube|vimeo|tiktok|pinterest|yelp|google|medium|bit|tinyurl)\.(?:com|ly)$|(?:^|\.)(?:sec\.gov|finra\.org|irs\.gov|linktr\.ee|guidestar\.org|candid\.org|propublica\.org|charitynavigator\.org|causeiq\.com|givebutter\.com|gofundme\.com|paypal\.com|eventbrite\.com|networkforgood\.org|classy\.org|donorbox\.org|charitycommission\.gov\.uk|cqc\.org\.uk|get-information-schools\.service\.gov\.uk|company-information\.service\.gov\.uk|ncua\.gov|mycreditunion\.gov|carehome\.co\.uk|homecare\.co\.uk|ofsted\.gov\.uk|enthuse\.com|justgiving\.com|virginmoneygiving\.com|localgiving\.org|totalgiving\.co\.uk|crowdfunder\.co\.uk)$|^(?:www\.)?gov\.uk$/;
+// «no.website», «none.co.uk», «website.co.uk»: a placeholder typed into the field, someone else's domain.
+const PLACEHOLDER_LABELS = new Set(['none', 'no', 'nil', 'website', 'web', 'tbc', 'unknown', 'null', 'example', 'test', 'nowebsite', 'noweb']);
 // A home page; anything deeper is a page on someone's site («habitat.org/us-ca/…» for a chapter, a campus under its university).
 const HOME_PATH = /^\/(?:(?:index|default|home)(?:\.[a-z]{2,5})?|en(?:-us)?)?\/?$/i;
 
@@ -49,8 +53,9 @@ function amount(raw: string): number | null {
 }
 /**
  * A site a US list names for an organisation: its origin, or '' for a social
- * page, a filing, a non-address («N/A») or a host without a real top-level
- * domain (a typed «WWW.GWU. EDU» is read as gwu.edu first). With `home`, also
+ * page, a filing, a register, a placeholder («N/A», «no.website») or a host
+ * without a real top-level domain (a typed «WWW.GWU. EDU» is read as gwu.edu
+ * first). With `home`, also
  * '' for a page below a home page: the organisation then owns a page, not the site.
  */
 export function heEngListedWebsite(raw: string, options: { home?: boolean } = {}): string {
@@ -59,7 +64,8 @@ export function heEngListedWebsite(raw: string, options: { home?: boolean } = {}
     const url = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`);
     const host = url.hostname.toLowerCase().replace(/\.$/, '');
     if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.port || !host.includes('.') || isIP(host) ||
-      parseDomain(host).isIcann !== true || NOT_OWN_SITE.test(host) || (options.home && (!HOME_PATH.test(url.pathname) || url.search))) return '';
+      parseDomain(host).isIcann !== true || PLACEHOLDER_LABELS.has((parseDomain(host).domainWithoutSuffix ?? '').toLowerCase()) || NOT_OWN_SITE.test(host) ||
+      (options.home && (!HOME_PATH.test(url.pathname) || url.search))) return '';
     return `${url.protocol}//${host}`;
   } catch { return ''; }
 }
@@ -101,11 +107,11 @@ export function heEngWebsiteOfParentFederation(site: string, name: string): bool
   const federation = own(words.slice(0, split)); const place = own(words.slice(split + 1));
   return place.length > 0 && federation.some(word => label.includes(word)) && !place.some(word => label.includes(word));
 }
-/** «$1.2 billion», for descriptions. */
-export function heEngUsdAmount(value: number): string {
-  if (value >= 1e9) return `$${(value / 1e9).toFixed(value >= 1e10 ? 0 : 1)} billion`;
-  if (value >= 1e6) return `$${(value / 1e6).toFixed(value >= 1e7 ? 0 : 1)} million`;
-  return `$${Math.round(value).toLocaleString('en-US')}`;
+/** «$1.2 billion» («£1.2 billion» with the pound), for descriptions. */
+export function heEngUsdAmount(value: number, currency = '$'): string {
+  if (value >= 1e9) return `${currency}${(value / 1e9).toFixed(value >= 1e10 ? 0 : 1)} billion`;
+  if (value >= 1e6) return `${currency}${(value / 1e6).toFixed(value >= 1e7 ? 0 : 1)} million`;
+  return `${currency}${Math.round(value).toLocaleString('en-US')}`;
 }
 
 async function download(options: Options): Promise<string> {
