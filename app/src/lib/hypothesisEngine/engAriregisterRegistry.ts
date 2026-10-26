@@ -1,10 +1,9 @@
 import { sliceWholeChars, stripUnstorableJsonChars } from '../jsonbSafe';
 import { HE_ENG_NACE_CLASSES, heEngNaceRev2Classes } from './engNaceRegistryCatalog';
 import type { HeEngRegistryCandidate, HeEngRegistryPage, HeEngRegistryTask } from './engPublicRegistryTypes';
-import { discardHeEngRegistryBulkFile, heEngRegistryCacheFile, heEngRegistryCsvRows, openHeEngRegistryZipEntry,
-  ownHeEngRegistryText, readHeEngRegistryBulkFile } from './engRegistryBulkFile';
+import { discardHeEngRegistryBulkFile, heEngRegistryBackgroundList, heEngRegistryCacheFile, heEngRegistryCsvRows, openHeEngRegistryZipEntry,
+  ownHeEngRegistryText, readHeEngRegistryBulkFile, type HeEngRegistryBuildOptions } from './engRegistryBulkFile';
 import { readHeEngRegistryText } from './engRegistryHttp';
-import { HeEngRegistryRetryError } from './engRegistryRetry';
 
 /**
  * The Estonian e-Business Register's open data (keyless, CC BY 4.0). The
@@ -27,9 +26,6 @@ const MAX_ZIP_BYTES = 128 * 1024 * 1024;
 const MAX_CSV_BYTES = 1024 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const FILE_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
-const INDEX_MAX_AGE_MS = 24 * 60 * 60_000;
-// After a failed read every slice gets the same error for a while instead of starting another download.
-const FAILURE_PAUSE_MS = 15 * 60_000;
 const CACHED = ['ee-reports.zip', 'ee-activities.zip', 'ee-indicators.zip', 'ee-basic.zip'];
 const PAGE_SIZE = 25;
 const EMPLOYEES = 'AverageNumberOfEmployeesInFullTimeEquivalentUnits';
@@ -86,7 +82,7 @@ async function* rowsOf(url: string, name: string, columns: readonly string[], op
   }
 }
 
-async function build(options: Options): Promise<Map<string, Company[]>> {
+async function build(options: HeEngRegistryBuildOptions): Promise<Map<string, Company[]>> {
   try { return await parse(options); }
   catch (error) {
     // A bad copy must not be reused for a week; the next read downloads again.
@@ -94,7 +90,7 @@ async function build(options: Options): Promise<Map<string, Company[]>> {
     throw error;
   }
 }
-async function parse(options: Options): Promise<Map<string, Company[]>> {
+async function parse(options: HeEngRegistryBuildOptions): Promise<Map<string, Company[]>> {
   const html = await readHeEngRegistryText(LISTING, { fetch: options.fetch, accept: 'text/html', maxBytes: 2 * 1024 * 1024, timeoutMs: 30_000 });
   const reportsUrl = latest(html, REPORTS), activitiesUrl = latest(html, ACTIVITIES);
   // The latest report of each company: its year, id and size class.
@@ -166,20 +162,8 @@ async function parse(options: Options): Promise<Map<string, Company[]>> {
   return byClass;
 }
 
-let index: { at: number; byClass: Map<string, Company[]> } | null = null;
-let building: Promise<void> | null = null;
-let failure: { at: number; error: Error } | null = null;
-/** The list once read; a day-old list is served while the next one is read. */
-async function companies(options: Options): Promise<Map<string, Company[]>> {
-  const now = (options.now ?? Date.now)();
-  if (index && now - index.at < INDEX_MAX_AGE_MS) return index.byClass;
-  if (!index && failure && now - failure.at < FAILURE_PAUSE_MS) throw failure.error;
-  building ??= build(options).then(byClass => { index = { at: (options.now ?? Date.now)(), byClass }; failure = null; },
-    error => { failure = { at: (options.now ?? Date.now)(), error: error instanceof Error ? error : new Error('registry_unavailable') }; })
-    .finally(() => { building = null; });
-  if (index) return index.byClass;
-  throw new HeEngRegistryRetryError(30_000);
-}
+/** The list once read, rebuilt from the files on disk after a day (engRegistryBulkFile). */
+const companies = heEngRegistryBackgroundList(build);
 
 /**
  * Full-time equivalents above the slice's maximum are outside it; under its

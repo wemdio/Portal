@@ -5,6 +5,9 @@ import path from 'node:path';
 import type { Readable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import { setImmediate as yieldLoop } from 'node:timers/promises';
+import { crc32, inflateRawSync } from 'node:zlib';
+import { inflateHeEngDeflate64 } from './engRegistryInflate64';
+import { HeEngRegistryRetryError } from './engRegistryRetry';
 
 /**
  * Whole-file national registers (Czech statistical register, Estonian open
@@ -101,14 +104,201 @@ export async function readHeEngRegistryBulkFile(url: string, file: string, optio
 const unzipper = require('unzipper') as { Open: { file(file: string): Promise<{ files: Array<{
   path: string; type: string; uncompressedSize: number; stream(): Readable }> }> } };
 
-/** The one file inside a downloaded archive; an archive with more files or an oversized one is not the register's. */
-export async function openHeEngRegistryZipEntry(file: string, maxBytes: number): Promise<Readable> {
+/**
+ * The one file inside a downloaded archive; an archive with more files or an
+ * oversized one is not the register's. With `name`, the one file whose name
+ * matches it (NCES archives also hold a SAS copy of the table); of several,
+ * the one matching `prefer` (IPEDS ships a revised «_rv» table next to the first).
+ */
+export async function openHeEngRegistryZipEntry(file: string, maxBytes: number, name?: RegExp, prefer?: RegExp): Promise<Readable> {
   const zip = await unzipper.Open.file(file);
-  const entries = zip.files.filter(entry => entry.type === 'File');
+  let entries = zip.files.filter(entry => entry.type === 'File' && (!name || name.test(path.basename(entry.path))));
+  if (entries.length > 1 && prefer) entries = entries.filter(entry => prefer.test(path.basename(entry.path)));
   if (entries.length !== 1 || !(entries[0].uncompressedSize > 0) || entries[0].uncompressedSize > maxBytes) {
     throw new Error('registry_invalid_response');
   }
   return entries[0].stream();
+}
+
+interface RemoteOptions { signal?: AbortSignal; fetch?: typeof fetch; timeoutMs: number }
+/** A HEAD request for a public file whose name carries its year: true when it exists, false on 404. */
+export async function probeHeEngRegistryFile(url: string, options: RemoteOptions): Promise<boolean> {
+  const response = await remote(url, 'HEAD', undefined, options, async response => response);
+  if (response.status === 404) return false;
+  if (!response.ok) throw new Error(`registry_http_${response.status}`);
+  return true;
+}
+
+/** One request with the registry rules: no redirects, a time limit and the registry_* error codes. */
+async function remote<T>(url: string, method: 'GET' | 'HEAD', range: string | undefined, options: RemoteOptions,
+  read: (response: Response) => Promise<T>): Promise<T> {
+  const fail = (code: string): never => { throw new Error(code); };
+  if (options.signal?.aborted) fail('registry_aborted');
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  options.signal?.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+  try {
+    const response = await (options.fetch ?? fetch)(url, { method, redirect: 'error', signal: controller.signal,
+      headers: { 'User-Agent': USER_AGENT, ...(range ? { Range: range } : {}) } });
+    return await read(response);
+  } catch (error) {
+    if (options.signal?.aborted) return fail('registry_aborted');
+    if (controller.signal.aborted) return fail('registry_timeout');
+    if (error instanceof Error && /^registry_[a-z0-9_]+$/.test(error.message)) throw error;
+    return fail('registry_network_error');
+  } finally { clearTimeout(timer); options.signal?.removeEventListener('abort', onAbort); }
+}
+
+/**
+ * Bytes [start, end] of a remote file and its total size (`start` null: the
+ * last `end` bytes). The range the server states is checked before the body
+ * is read, and the body is read no further than it: a server that sends the
+ * whole file instead is refused.
+ */
+async function rangeBytes(url: string, start: number | null, end: number, options: RemoteOptions): Promise<{ bytes: Buffer; total: number }> {
+  return remote(url, 'GET', start === null ? `bytes=-${end}` : `bytes=${start}-${end}`, options, async response => {
+    const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get('content-range') ?? '');
+    const [first, last, total] = range ? [Number(range[1]), Number(range[2]), Number(range[3])] : [NaN, NaN, NaN];
+    const length = last - first + 1;
+    const fits = start === null ? last === total - 1 && length <= end : first === start && last === end;
+    if (response.status !== 206 || !range || !fits || !(length > 0) || last >= total) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(response.status === 206 ? 'registry_invalid_response' : response.ok ? 'registry_range_unsupported' : `registry_http_${response.status}`);
+    }
+    if (!response.body) throw new Error('registry_invalid_response');
+    const bytes = Buffer.alloc(length);
+    let size = 0;
+    const reader = response.body.getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (size + value.byteLength > length) { await reader.cancel(); throw new Error('registry_invalid_response'); }
+        bytes.set(value, size); size += value.byteLength;
+      }
+    } finally { reader.releaseLock(); }
+    if (size !== length) throw new Error('registry_invalid_response');
+    return { bytes, total };
+  });
+}
+
+export interface HeEngRegistryRemoteZipEntry { method: number; compressed: number; size: number; offset: number; crc: number }
+export interface HeEngRegistryRemoteZipDirectory { entries: Map<string, HeEngRegistryRemoteZipEntry>; end: number }
+/**
+ * The directory of a large remote zip archive, read with byte ranges: the
+ * end-of-directory record, then the central directory. Only entries whose name
+ * `keep` accepts are kept (an IRS archive lists 50 000–80 000 returns). Read
+ * entries with readHeEngRegistryRemoteZipFile.
+ */
+export async function readHeEngRegistryRemoteZipDirectory(url: string, options: RemoteOptions,
+  keep: (name: string) => boolean = () => true): Promise<HeEngRegistryRemoteZipDirectory> {
+  const fail = (): never => { throw new Error('registry_invalid_response'); };
+  // The end-of-directory record (22 bytes) and an archive comment of up to 64 KB.
+  const tail = await rangeBytes(url, null, 65_557, options);
+  const tailStart = tail.total - tail.bytes.length;
+  let eocd = -1;
+  for (let i = tail.bytes.length - 22; i >= 0; i -= 1) if (tail.bytes.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) fail();
+  const directorySize = tail.bytes.readUInt32LE(eocd + 12);
+  const directoryOffset = tail.bytes.readUInt32LE(eocd + 16);
+  // ZIP64 offsets (archives of 4 GB and more) are not read; a ZIP64 entry count alone is fine (the directory is walked by size).
+  if (directorySize === 0xffffffff || directoryOffset === 0xffffffff || directoryOffset + directorySize > tail.total) fail();
+  const directory = directoryOffset >= tailStart
+    ? tail.bytes.subarray(directoryOffset - tailStart, directoryOffset - tailStart + directorySize)
+    : (await rangeBytes(url, directoryOffset, directoryOffset + directorySize - 1, options)).bytes;
+  const entries = new Map<string, HeEngRegistryRemoteZipEntry>();
+  for (let pos = 0; pos + 46 <= directory.length;) {
+    if (directory.readUInt32LE(pos) !== 0x02014b50) fail();
+    const nameLength = directory.readUInt16LE(pos + 28);
+    const name = directory.subarray(pos + 46, pos + 46 + nameLength).toString('utf8');
+    if (keep(name)) {
+      if (entries.has(name)) fail();
+      entries.set(name, { method: directory.readUInt16LE(pos + 10), crc: directory.readUInt32LE(pos + 16), compressed: directory.readUInt32LE(pos + 20),
+        size: directory.readUInt32LE(pos + 24), offset: directory.readUInt32LE(pos + 42) });
+    }
+    pos += 46 + nameLength + directory.readUInt16LE(pos + 30) + directory.readUInt16LE(pos + 32);
+  }
+  return { entries, end: directoryOffset };
+}
+
+// A local header's name and extra field are rarely longer than this: one request then reads header and data together.
+const LOCAL_HEADER_ROOM = 30 + 512;
+/** One file of a remote archive by its directory entry: stored, deflated or Deflate64 (zip method 9), CRC-checked. */
+export async function readHeEngRegistryRemoteZipFile(url: string, entry: HeEngRegistryRemoteZipEntry, end: number,
+  options: RemoteOptions & { maxBytes: number }): Promise<Buffer> {
+  const fail = (): never => { throw new Error('registry_invalid_response'); };
+  const { method, compressed, size, offset, crc } = entry;
+  if (![0, 8, 9].includes(method) || size === 0xffffffff || compressed === 0xffffffff || !(size > 0) || size > options.maxBytes || offset + 30 > end) fail();
+  const first = (await rangeBytes(url, offset, Math.min(end, offset + LOCAL_HEADER_ROOM + compressed) - 1, options)).bytes;
+  if (first.readUInt32LE(0) !== 0x04034b50) fail();
+  const dataStart = 30 + first.readUInt16LE(26) + first.readUInt16LE(28);
+  if (offset + dataStart + compressed > end) fail();
+  const data = dataStart + compressed <= first.length ? first.subarray(dataStart, dataStart + compressed)
+    : (await rangeBytes(url, offset + dataStart, offset + dataStart + compressed - 1, options)).bytes;
+  let content: Buffer;
+  try {
+    content = method === 8 ? inflateRawSync(data, { maxOutputLength: options.maxBytes }) : method === 9 ? inflateHeEngDeflate64(data, size) : Buffer.from(data);
+  } catch { return fail(); }
+  if (content.length !== size || crc32(content) !== crc) fail();
+  return content;
+}
+
+/**
+ * One named file of a large remote zip archive, read with byte ranges: the
+ * SEC's quarterly financial statement archive is 65 MB; its list of filers is 2 MB.
+ */
+export async function readHeEngRegistryRemoteZipEntry(url: string, name: string, options: RemoteOptions & { maxBytes: number }): Promise<Buffer> {
+  const directory = await readHeEngRegistryRemoteZipDirectory(url, options, entry => entry === name);
+  const entry = directory.entries.get(name);
+  if (!entry) throw new Error('registry_invalid_response');
+  return readHeEngRegistryRemoteZipFile(url, entry, directory.end, options);
+}
+
+export interface HeEngRegistryBuildOptions { fetch?: typeof fetch; now?: () => number }
+/**
+ * A list built in the background from downloaded files and kept for a day:
+ * the stage comes back for it (a free read, no cursor moves) while it is
+ * built, and a day-old list is served while the next one is built. A failed
+ * build is not repeated for 15 minutes: meanwhile the old list is served, or
+ * the slices wait; only after three failed builds in a row does the error
+ * reach them, and a slice then gives the source up. (Throwing the first error
+ * at once let one timeout end every slice of the list within 90 seconds.)
+ * From the third failure the pause doubles, up to a day, so a broken source is
+ * not downloaded again every 15 minutes. The build never gets a stage's
+ * signal: one cancelled job must not fail the list for everyone.
+ */
+export function heEngRegistryBackgroundList<T>(build: (options: HeEngRegistryBuildOptions) => Promise<T>):
+  (options: HeEngRegistryBuildOptions) => Promise<T> {
+  let index: { at: number; value: T } | null = null;
+  let building: Promise<void> | null = null;
+  let failure: { at: number; error: Error; count: number } | null = null;
+  return async options => {
+    const now = (options.now ?? Date.now)();
+    if (index && now - index.at < BACKGROUND_LIST_MAX_AGE_MS) return index.value;
+    const pause = failure ? Math.min(BACKGROUND_MAX_PAUSE_MS, BACKGROUND_FAILURE_PAUSE_MS * 2 ** Math.max(0, failure.count - BACKGROUND_FAILED_BUILDS + 1)) : 0;
+    const paused = failure !== null && now - failure.at < pause;
+    if (!paused) {
+      building ??= build({ fetch: options.fetch, now: options.now }).then(value => { index = { at: (options.now ?? Date.now)(), value }; failure = null; },
+        error => {
+          failure = { at: (options.now ?? Date.now)(), error: error instanceof Error ? error : new Error('registry_unavailable'), count: (failure?.count ?? 0) + 1 };
+        })
+        .finally(() => { building = null; });
+    }
+    if (index) return index.value;
+    if (paused && failure!.count >= BACKGROUND_FAILED_BUILDS) throw failure!.error;
+    throw new HeEngRegistryRetryError(paused ? failure!.at + pause - now : 30_000);
+  };
+}
+const BACKGROUND_LIST_MAX_AGE_MS = 24 * 60 * 60_000;
+const BACKGROUND_FAILURE_PAUSE_MS = 15 * 60_000;
+const BACKGROUND_FAILED_BUILDS = 3;
+const BACKGROUND_MAX_PAUSE_MS = 24 * 60 * 60_000;
+
+/** A streaming Windows-1252 decoder with the StringDecoder interface. */
+function windows1252(): { write(chunk: Buffer): string; end(): string } {
+  const decoder = new TextDecoder('windows-1252');
+  return { write: chunk => decoder.decode(chunk, { stream: true }), end: () => decoder.decode() };
 }
 
 /** One record from `start`, or null when the text ends before the record does (more text may follow). */
@@ -155,12 +345,12 @@ function takeRecord(text: string, start: number, delimiter: string, final: boole
  * Rows of a delimited text stream (RFC 4180 quoting: quoted fields may hold
  * the delimiter, doubled quotes and line breaks), parsed chunk by chunk without
  * holding the file. Yields to the event loop between batches; stops past
- * maxBytes of text.
+ * maxBytes of text. UTF-8 unless the file is Windows-1252 (the SEC's adviser list).
  */
 export async function* heEngRegistryCsvRows(stream: AsyncIterable<Buffer | string>, delimiter: string, options: {
-  maxBytes: number; signal?: AbortSignal;
+  maxBytes: number; signal?: AbortSignal; encoding?: 'windows-1252';
 }): AsyncGenerator<string[]> {
-  const decoder = new StringDecoder('utf8');
+  const decoder = options.encoding ? windows1252() : new StringDecoder('utf8');
   let text = '';
   let bytes = 0;
   let count = 0;

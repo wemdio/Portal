@@ -7,8 +7,12 @@ import { readHeEngCroRegistryPage } from './engCroRegistry';
 import { readHeEngCzsoRegistryPage } from './engCzsoRegistry';
 import { readHeEngEbaRegistryPage } from './engEbaRegistry';
 import { readHeEngEsmaRegistryPage } from './engEsmaRegistry';
+import { readHeEngIrsRegistryPage } from './engIrsRegistry';
+import { readHeEngNcesRegistryPage } from './engNcesRegistry';
 import { readHeEngPraRegistryPage } from './engPraRegistry';
 import { readHeEngPrhRegistryPage } from './engPrhRegistry';
+import { readHeEngSecAdviserRegistryPage } from './engSecAdviserRegistry';
+import { readHeEngSecCompanyRegistryPage } from './engSecCompanyRegistry';
 import { readHeEngWikidataRegistryPage } from './engWikidataRegistry';
 import { heEngRegistryTaskCountries, validateHeEngRegistryTask } from './engPublicRegistryPlan';
 import type { HeEngRegistryCandidate, HeEngRegistryPage, HeEngRegistryProvider, HeEngRegistryTask } from './engPublicRegistryTypes';
@@ -24,10 +28,11 @@ const OSM_REQUEST_TIMEOUT_MS = 60_000;
 const BRREG_COMPANY_FORMS = ['AS', 'ASA', 'ANS', 'DA', 'BA', 'SA', 'SE', 'SF', 'SPA', 'GFS', 'IKS', 'KS', 'SÆR', 'NUF'] as const;
 const US_STATES = new Set('AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY'.split(' '));
 // Sources with their own readers: engPraRegistry.ts, engEsmaRegistry.ts, engEbaRegistry.ts,
-// engPrhRegistry.ts, engCzsoRegistry.ts, engCroRegistry.ts, engAriregisterRegistry.ts, engWikidataRegistry.ts.
-type WholeListProvider = 'pra' | 'esma' | 'eba' | 'prh' | 'czso' | 'cro' | 'ariregister' | 'wikidata';
+// engPrhRegistry.ts, engCzsoRegistry.ts, engCroRegistry.ts, engAriregisterRegistry.ts, engWikidataRegistry.ts,
+// engSecCompanyRegistry.ts, engSecAdviserRegistry.ts, engIrsRegistry.ts, engNcesRegistry.ts.
+type WholeListProvider = 'pra' | 'esma' | 'eba' | 'prh' | 'czso' | 'cro' | 'ariregister' | 'wikidata' | 'sec_companies' | 'sec_advisers' | 'irs' | 'nces';
 const WHOLE_LIST_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set<WholeListProvider>(['pra', 'esma', 'eba', 'prh', 'czso', 'cro',
-  'ariregister', 'wikidata']);
+  'ariregister', 'wikidata', 'sec_companies', 'sec_advisers', 'irs', 'nces']);
 function wholeList(provider: HeEngRegistryProvider): provider is WholeListProvider { return WHOLE_LIST_PROVIDERS.has(provider); }
 const ENDPOINTS: Readonly<Record<Exclude<HeEngRegistryProvider, WholeListProvider>, string>> = {
   brreg: 'https://data.brreg.no/enhetsregisteret/api/enheter',
@@ -426,6 +431,10 @@ export async function readHeEngRegistryPage(task: HeEngRegistryTask, position: n
   if (task.provider === 'cro') return readHeEngCroRegistryPage(task, position, options);
   if (task.provider === 'ariregister') return readHeEngAriregisterRegistryPage(task, position, options);
   if (task.provider === 'wikidata') return readHeEngWikidataRegistryPage(task, position, options);
+  if (task.provider === 'sec_companies') return readHeEngSecCompanyRegistryPage(task, position, options);
+  if (task.provider === 'sec_advisers') return readHeEngSecAdviserRegistryPage(task, position, options);
+  if (task.provider === 'irs') return readHeEngIrsRegistryPage(task, position, options);
+  if (task.provider === 'nces') return readHeEngNcesRegistryPage(task, position, options);
   const raw = await jsonResponse(task, position, options); const body = object(raw);
   let rows: unknown[]; let total: number | null = null;
   switch (task.provider) {

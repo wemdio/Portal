@@ -43,6 +43,10 @@ const DIRECTORY_HOSTS = new Set(['linkedin.com', 'facebook.com', 'instagram.com'
   'eba.europa.eu', 'ytj.fi', 'prh.fi', 'finder.fi', 'asiakastieto.fi', 'kauppalehti.fi', 'fonecta.fi', 'ares.gov.cz',
   'justice.cz', 'czso.cz', 'kurzy.cz', 'firmy.cz', 'detail.cz', 'cro.ie', 'vision-net.ie', 'rik.ee', 'inforegister.ee',
   'teatmik.ee', 'e-krediidiinfo.ee', 'wikidata.org',
+  // US lists and the directories that copy them: SEC, FINRA, IRS copies, NCES and school/college rankings.
+  'sec.gov', 'finra.org', 'irs.gov', 'propublica.org', 'guidestar.org', 'candid.org', 'charitynavigator.org', 'causeiq.com',
+  'nces.ed.gov', 'niche.com', 'greatschools.org', 'privateschoolreview.com', 'publicschoolreview.com', 'usnews.com',
+  'stockanalysis.com', 'macrotrends.net', 'marketscreener.com', 'seekingalpha.com', 'prnewswire.com', 'businesswire.com', 'globenewswire.com',
   'manageo.fr', 'proff.no', 'purehelp.no', '1881.no', 'gulesider.no', 'bizapedia.com', 'manta.com',
   'buzzfile.com', 'yelp.com', 'bbb.org', 'sophymarine.com', 'experian.com', 'ebay.com', 'amazon.com']);
 // Legal-form words: the register says «LTD», the company's own footer «Limited».
@@ -146,9 +150,10 @@ function hasRegistryCountry(candidate: HeEngRegistryCandidate): boolean {
   // discovery task. UK and French adapters supply validated domestic
   // registered offices; accepting their country does not claim a local team.
   // The PRA lists state incorporation in the UK instead of an address; the
-  // Finnish, Czech, Irish and Estonian registers hold only domestic companies.
+  // Finnish, Czech, Irish and Estonian registers hold only domestic companies,
+  // as do the IRS and NCES lists (a mailing address in a US state).
   return (candidate.addressKind === 'business' ||
-      (['companies_house', 'france', 'pra', 'prh', 'czso', 'cro', 'ariregister'].includes(candidate.provider) &&
+      (['companies_house', 'france', 'pra', 'prh', 'czso', 'cro', 'ariregister', 'irs', 'nces'].includes(candidate.provider) &&
         candidate.addressKind === 'registered')) &&
     text(candidate.address).length >= 5 &&
     heEngRegistryRecordValid(candidate.provider, candidate.recordId, country(candidate.country), candidate.sourceUrl);
@@ -214,18 +219,28 @@ function legalLinkRank(label: string): number {
   return /\b(?:terms|k[äa]ytt[öo]ehdot|kasutustingimused|podm[íi]nky)\b/i.test(label) ? 1
     : /\b(?:privacy|tietosuoja(?:seloste)?|andmekaitse|privaatsus|osobn[íi]ch|gdpr)\b/i.test(label) ? 2 : 0;
 }
-/** Same-origin legal pages linked from the home page, legal notice first. */
-function legalLinks(html: string, baseUrl: string): string[] {
+// A US nonprofit prints its EIN where a donor needs it — gifts of stock, donor-advised funds,
+// tax information («Tax ID# 53-0196605», «EIN: …» on the Red Cross's pages) — then on its
+// ways-to-give and financial pages; a donation form or account page rarely has it.
+const NONPROFIT_LINKS: ReadonlyArray<readonly [RegExp, number]> = [
+  [/\b(?:tax[\s-]*(?:id|information|exempt(?:ion)?)|form[\s-]*990|ein|donor[\s-]*advised|stocks?|securities|wire[\s-]*transfers?)\b/i, -3],
+  [/\b(?:ways[\s-]*to[\s-]*(?:give|donate)|planned[\s-]*giving|financials?|financial[\s-]*(?:information|statements)|annual[\s-]*reports?|transparency|accountability)\b/i, -2],
+  [/\b(?:donate|donations?|give[\s-]*now)\b/i, -1],
+];
+const NOT_GIVING_PAGE = /\b(?:account|log[\s-]*in|sign[\s-]*in|history|cart|checkout)\b/i;
+/** Same-origin legal pages linked from the home page, legal notice first; for a US nonprofit, its donation and financial pages first. */
+function legalLinks(html: string, baseUrl: string, nonprofit = false): string[] {
   const $ = cheerio.load(html);
   const found = new Map<string, number>();
   $('a[href]').slice(0, 600).each((_index, node) => {
     const href = ($(node).attr('href') ?? '').trim();
     const label = `${href} ${$(node).text()}`.slice(0, 300);
-    if (!href || /^(?:#|mailto:|tel:|javascript:)/i.test(href) || !LEGAL_LINK.test(label) || LEGAL_PRODUCT.test(label)) return;
+    const giving = nonprofit && !NOT_GIVING_PAGE.test(label) ? NONPROFIT_LINKS.find(([pattern]) => pattern.test(label))?.[1] : undefined;
+    if (!href || /^(?:#|mailto:|tel:|javascript:)/i.test(href) || (giving === undefined && (!LEGAL_LINK.test(label) || LEGAL_PRODUCT.test(label)))) return;
     try {
       const url = new URL(href, baseUrl);
       url.hash = '';
-      if (url.origin === new URL(baseUrl).origin && !found.has(url.href)) found.set(url.href, legalLinkRank(label));
+      if (url.origin === new URL(baseUrl).origin && !found.has(url.href)) found.set(url.href, giving ?? legalLinkRank(label));
     } catch { /* Not a link. */ }
   });
   return [...found].sort((a, b) => a[1] - b[1]).map(([url]) => url);
@@ -294,6 +309,9 @@ const UK_COMPANY_NUMBER_LABELS = '(?:company\\s+(?:registration\\s+|reg(?:istere
   + '|reg\\.?\\s*(?:number|no|nr)|under\\s+(?:registration\\s+)?(?:number|no)|crn)';
 // Wording that introduces a partner firm before its FRN on another firm's site.
 const PRA_THIRD_PARTY = /\b(?:underwritten|insured|provided|arranged|issued|administered|introduced|supplied|offered)\s+by\b|\bappointed\s+representatives?\b|\bintroducers?\b|\bcredit\s+brokers?\b|\blenders?\b|\bon\s+behalf\s+of\b|\bin\s+partnership\s+with\b|\bpanel\s+of\b/i;
+// An adviser representative's own site names the firm it works through: «Advisory services offered through
+// Example Advisors, LLC, a registered investment adviser (CRD# 123456)». That site is not the firm's.
+const ADVISER_THIRD_PARTY = /\b(?:offered|provided|conducted|transacted)\s+(?:through|by)\b|\b(?:registered|investment\s+advis[eo]r)\s+representatives?\s+(?:of|with)\b|\bin\s+association\s+with\b|\baffiliated\s+with\b/i;
 /**
  * A legal block names this entity. With `numberAlone` (the site's own footer) a
  * labelled registry number is enough by itself: the number is unique, and a
@@ -334,10 +352,19 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
     // A Wikidata item id never appears on a company site; its website comes with the record.
     wikidata: '(?!)',
     ariregister: 'registrikood|reg\\.?\\s*kood|reg\\.?\\s*nr|äriregistri\\s+kood|registry\\s+code|reg(?:istration|istry)?\\.?\\s*(?:code|no|number)',
+    // «CIK 0000320193» on investor pages; «CRD# 104689» in an adviser's disclosures;
+    // «EIN 13-1624100», «Tax ID: …», «Federal Tax ID Number …» on a nonprofit's donation page.
+    sec_companies: 'cik|central\\s+index\\s+key',
+    sec_advisers: 'crd(?:\\s+(?:no|number))?|central\\s+registration\\s+depository(?:\\s+(?:no|number))?',
+    irs: 'ein|employer\\s+identification\\s+(?:number|no)|(?:federal\\s+)?tax[\\s-]+(?:id|identification)(?:\\s+(?:number|no))?|tax[\\s-]+exempt\\s+(?:id|number)|federal\\s+id(?:\\s+(?:number|no))?',
+    // NCES ids never appear on a school's site; colleges and districts bring their website.
+    nces: '(?!)',
   };
   const id = identifierKey(candidate.recordId);
+  const thirdParty = candidate.provider === 'pra' ? PRA_THIRD_PARTY : candidate.provider === 'sec_advisers' ? ADVISER_THIRD_PARTY : null;
   const digits = candidate.provider === 'companies_house' ? companiesHouseDigits(id) : id;
-  const idPattern = `${digits !== id ? '(?:0[\\s.-]*)*' : ''}${digits.split('').join('[\\s.-]*')}`;
+  // EDGAR pads a CIK to ten digits («CIK 0000320193»); Companies House numbers lose their padding on sites.
+  const idPattern = `${digits !== id || candidate.provider === 'sec_companies' ? '(?:0[\\s.-]*)*' : ''}${digits.split('').join('[\\s.-]*')}`;
   // A labelled registry identifier in the company's own legal footer is a
   // second identity fact. Arbitrary numbers in articles/testimonials are not.
   const end = '(?![\\p{L}\\p{N}]|[\\s.-]{1,3}\\d)';
@@ -355,10 +382,10 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
     return [...matches].some(match => frenchIdentifierMatches(match[1], id, namespace));
   }) : id.length >= 5 && [...value.matchAll(new RegExp(`${opening}(?:${labels[candidate.provider]})${closing}${gap}(${idPattern})${end}`, 'giu'))]
     // A broker's or retailer's site prints its insurer's or lender's FRN as a
-    // partner: «Policies are underwritten by …, FRN 955859». Unless the domain
-    // carries the firm's own name, such a number names someone else.
-    .some(match => candidate.provider !== 'pra' || options.brandSite ||
-      !PRA_THIRD_PARTY.test(value.slice(Math.max(0, match.index - 200), match.index)));
+    // partner: «Policies are underwritten by …, FRN 955859»; a representative's
+    // site prints its adviser's CRD. Unless the domain carries the firm's own
+    // name, such a number names someone else.
+    .some(match => !thirdParty || options.brandSite || !thirdParty.test(value.slice(Math.max(0, match.index - 200), match.index)));
   if (registryNumber && options.numberAlone) return true;
   if (!legalName || !named.includes(` ${legalName} `)) return false;
   if (registryNumber || localRegistryNumber(value, candidate)) return true;
@@ -371,9 +398,17 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
     countryDefinition?.value === 'united kingdom' ? ' uk england wales scotland northern ireland' : ''}`).split(' '));
   // Single-character address parts still matter: dropping "1" or "A" would
   // match a different house or street belonging to an unrelated namesake.
-  const addressWords = [...new Set(key(candidate.address).split(' ').filter(word => word.length > 0 && !countryWords.has(word)))];
-  return addressWords.length >= 3 && addressWords.some(word => /\d/.test(word)) && addressWords.every(word => normalized.includes(` ${word} `));
+  const addressWords = [...new Set(key(candidate.address).split(' ').filter(word => word.length > 0 && !countryWords.has(word)).map(streetWord))];
+  const pageWords = ` ${normalized.trim().split(' ').map(streetWord).join(' ')} `;
+  return addressWords.length >= 3 && addressWords.some(word => /\d/.test(word)) && addressWords.every(word => pageWords.includes(` ${word} `));
 }
+// US registers abbreviate street words the USPS way («1000 INDUSTRIAL SCHOOL RD»); sites spell them out.
+const STREET_WORDS: Readonly<Record<string, string>> = {
+  street: 'st', avenue: 'ave', av: 'ave', road: 'rd', boulevard: 'blvd', drive: 'dr', lane: 'ln', court: 'ct', place: 'pl', parkway: 'pkwy',
+  highway: 'hwy', suite: 'ste', floor: 'fl', square: 'sq', terrace: 'ter', circle: 'cir', trail: 'trl', center: 'ctr', centre: 'ctr', plaza: 'plz',
+  building: 'bldg', north: 'n', south: 's', east: 'e', west: 'w', northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
+};
+function streetWord(word: string): string { return STREET_WORDS[word] ?? word; }
 /**
  * Short passages around each mention of the legal name: «issued by 1st Sure Ltd …
  * Our registered office is at: 6 Station Close, Potters Bar EN6 1TL». Address
@@ -467,7 +502,9 @@ export function readHeEngRegistryOwnSiteFacts(
   // notice) names the entity with its number: «Acme Ltd, company number …».
   const legalText = options.legalPage ? $('body').text().replace(/\s+/g, ' ').slice(0, 200_000) : '';
   const brandSite = brandScore(page.url, candidate.company) > 0;
-  const legalPageMatch = !!options.legalPage && (legalBlockIdentity(legalText, candidate, { numberRequired: true, brandSite }) ||
+  // A labelled EIN on a nonprofit's own giving or legal page names it, under whatever name
+  // it uses («American Red Cross» for the American National Red Cross), when the domain carries that name.
+  const legalPageMatch = !!options.legalPage && (legalBlockIdentity(legalText, candidate, { numberRequired: true, numberAlone: candidate.provider === 'irs' && brandSite, brandSite }) ||
     nameWindows(legalText, candidate.company).some(window => legalBlockIdentity(window, candidate, { brandSite })));
   // Many sites build the footer from a div named «footer»/«copyright», not the
   // <footer> element. A long block is a page wrapper, not a footer.
@@ -708,7 +745,7 @@ export async function resolveHeEngRegistryCandidate(
       contentReason = lastReason;
       if (seen.size === 1) {
         // Two legal pages (where the company number lives), then contact pages.
-        const legal = legalLinks(page.html, page.url).filter(link => link.startsWith('https:') && sameSite(link, site) && !seen.has(link)).slice(0, 2);
+        const legal = legalLinks(page.html, page.url, candidate.provider === 'irs').filter(link => link.startsWith('https:') && sameSite(link, site) && !seen.has(link)).slice(0, 2);
         for (const link of legal) { queue.push(link); legalPages.add(link); }
         for (const link of discoverContactLinks(page.html, page.url)) {
           if (queue.length >= MAX_PAGES_PER_SITE - 1) break;

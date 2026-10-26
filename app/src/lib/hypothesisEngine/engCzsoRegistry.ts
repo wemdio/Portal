@@ -2,9 +2,8 @@ import { createReadStream } from 'node:fs';
 import { sliceWholeChars, stripUnstorableJsonChars } from '../jsonbSafe';
 import { HE_ENG_NACE_CLASSES } from './engNaceRegistryCatalog';
 import type { HeEngRegistryCandidate, HeEngRegistryPage, HeEngRegistryTask } from './engPublicRegistryTypes';
-import { discardHeEngRegistryBulkFile, heEngRegistryCacheFile, heEngRegistryCsvRows, ownHeEngRegistryText,
-  readHeEngRegistryBulkFile } from './engRegistryBulkFile';
-import { HeEngRegistryRetryError } from './engRegistryRetry';
+import { discardHeEngRegistryBulkFile, heEngRegistryBackgroundList, heEngRegistryCacheFile, heEngRegistryCsvRows, ownHeEngRegistryText,
+  readHeEngRegistryBulkFile, type HeEngRegistryBuildOptions } from './engRegistryBulkFile';
 
 /**
  * The Czech Statistical Office's business register (RES) as open data
@@ -21,10 +20,6 @@ const FILE = 'czso-res.csv';
 const MAX_BYTES = 1536 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
 const FILE_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
-// The index is rebuilt from the file on disk after a day.
-const INDEX_MAX_AGE_MS = 24 * 60 * 60_000;
-// After a failed read every slice gets the same error for a while instead of starting another download.
-const FAILURE_PAUSE_MS = 15 * 60_000;
 const PAGE_SIZE = 25;
 // Legal forms that trade (CZSO code list PravniForma): general and limited
 // partnerships, limited liability and joint-stock companies, co-operatives,
@@ -63,10 +58,7 @@ function str(raw: unknown, max = 300): string {
 }
 function sizeRank(code: string): number { return SIZE[code] ? (SIZE[code][1] ?? 1e6) : -1; }
 
-let index: { at: number; byClass: Map<string, Entity[]> } | null = null;
-let building: Promise<void> | null = null;
-let failure: { at: number; error: Error } | null = null;
-async function build(options: Options): Promise<Map<string, Entity[]>> {
+async function build(options: HeEngRegistryBuildOptions): Promise<Map<string, Entity[]>> {
   const file = await readHeEngRegistryBulkFile(SOURCE, heEngRegistryCacheFile(FILE), { fetch: options.fetch, now: options.now,
     maxBytes: MAX_BYTES, maxAgeMs: FILE_MAX_AGE_MS, timeoutMs: DOWNLOAD_TIMEOUT_MS });
   try { return await parse(file); }
@@ -111,18 +103,8 @@ async function parse(file: string): Promise<Map<string, Entity[]>> {
   for (const list of byClass.values()) list.sort((a, b) => sizeRank(b[3]) - sizeRank(a[3]) || (a[0] < b[0] ? -1 : 1));
   return byClass;
 }
-/** The list once read; a day-old list is served while the next one is read. */
-async function entities(options: Options): Promise<Map<string, Entity[]>> {
-  const now = (options.now ?? Date.now)();
-  if (index && now - index.at < INDEX_MAX_AGE_MS) return index.byClass;
-  if (!index && failure && now - failure.at < FAILURE_PAUSE_MS) throw failure.error;
-  // Not tied to one stage run's signal: the next run picks up the finished list.
-  building ??= build(options).then(byClass => { index = { at: (options.now ?? Date.now)(), byClass }; failure = null; },
-    error => { failure = { at: (options.now ?? Date.now)(), error: error instanceof Error ? error : new Error('registry_unavailable') }; })
-    .finally(() => { building = null; });
-  if (index) return index.byClass;
-  throw new HeEngRegistryRetryError(30_000);
-}
+/** The list once read, rebuilt from the file on disk after a day (engRegistryBulkFile). */
+const entities = heEngRegistryBackgroundList(build);
 
 // An entity that states no size is almost always a micro or dormant one: a 10+ slice skips it.
 const UNKNOWN_SIZE_MAX_MIN = 10;

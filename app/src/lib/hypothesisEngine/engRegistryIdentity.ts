@@ -61,6 +61,16 @@ export function heEngRegistryRecordValid(provider: unknown, id: unknown, country
     case 'ariregister': return country === 'estonia' && /^\d{8}$/.test(id) && url.href === `https://ariregister.rik.ee/eng/company/${id}`;
     // A Wikidata organisation by its item id; the country comes from its headquarters (or own) statement.
     case 'wikidata': return engCountry(country) && /^Q[1-9]\d{0,11}$/.test(id) && url.href === `https://www.wikidata.org/wiki/${id}`;
+    // A company filing with the SEC by its CIK on EDGAR, an SEC-registered adviser by its CRD number;
+    // the country comes from the filing's business address or the adviser's main office.
+    case 'sec_companies': return engCountry(country) && /^[1-9]\d{0,9}$/.test(id) && url.href === `https://www.sec.gov/edgar/browse/?CIK=${id}`;
+    case 'sec_advisers': return engCountry(country) && /^[1-9]\d{0,7}$/.test(id) && url.href === `https://adviserinfo.sec.gov/firm/summary/${id}`;
+    // A US tax-exempt organisation by its EIN on ProPublica's copy of the IRS returns.
+    case 'irs': return country === 'united states' && /^\d{9}$/.test(id) && url.href === `https://projects.propublica.org/nonprofits/organizations/${id}`;
+    // NCES ids differ by list: IPEDS unit id (6 digits), CCD district id (7), Private School Survey id (8 characters).
+    case 'nces': return country === 'united states' && (/^\d{6}$/.test(id) ? url.href === `https://nces.ed.gov/collegenavigator/?id=${id}`
+      : /^\d{7}$/.test(id) ? url.href === `https://nces.ed.gov/ccd/districtsearch/district_detail.asp?ID2=${id}`
+        : /^[A-Z0-9]{8}$/.test(id) && url.href === `https://nces.ed.gov/surveys/pss/privateschoolsearch/school_detail.asp?ID=${id}`);
     // Global sources: the country comes from the record itself (GLEIF headquarters,
     // or the OpenStreetMap country boundary containing the premises).
     case 'gleif': return engCountry(country) && validLei(id) && url.href === `https://api.gleif.org/api/v1/lei-records/${id}`;
