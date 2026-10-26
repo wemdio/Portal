@@ -12,12 +12,20 @@ function section(metric: ChannelMetrics): string {
   return line(metric.channel.displayName, metric);
 }
 
+/**
+ * Две строки на канал (Дмитрий, 26.10.2026): лиды и встречи, каждая «по
+ * когорте» и «без когорты» — термины переключателя дашборда первички. По
+ * когорте — всё, что случилось за неделю, в том числе по старым сделкам; без
+ * когорты — только по пришедшим за неделю, как отчёт считал до 26.10.
+ */
 function line(title: string, metric: Counts): string {
   return `${title}\n`
     + `Пришло — ${metric.arrived} | `
-    + `Лидов — ${metric.qualifiedLeads} | `
-    + `Встреч (Было/Запланировано) — `
-    + `${metric.meetingsHeld}/${metric.meetingsScheduled}`;
+    + `Лидов по когорте — ${metric.qualifiedLeadsCohort} | `
+    + `Лидов без когорты — ${metric.qualifiedLeads}\n`
+    + `Встреч по когорте (Было/Запланировано) — `
+    + `${metric.meetingsHeldCohort}/${metric.meetingsScheduledCohort} | `
+    + `Встреч без когорты — ${metric.meetingsHeld}/${metric.meetingsScheduled}`;
 }
 
 function pick(
@@ -82,15 +90,21 @@ export function formatSummaryMessages(
   // поэтому простое сложение ничего не задваивает. Стоит в конце последнего
   // сообщения: в первом её не сверить с ручным отчётом — там нет
   // конференций и SDR.
-  const total = [...main, ...extra].reduce<Counts>(
-    (sum, metric) => ({
-      arrived: sum.arrived + metric.arrived,
-      qualifiedLeads: sum.qualifiedLeads + metric.qualifiedLeads,
-      meetingsScheduled: sum.meetingsScheduled + metric.meetingsScheduled,
-      meetingsHeld: sum.meetingsHeld + metric.meetingsHeld,
-    }),
-    { arrived: 0, qualifiedLeads: 0, meetingsScheduled: 0, meetingsHeld: 0 },
-  );
+  const empty: Counts = {
+    arrived: 0,
+    qualifiedLeads: 0,
+    qualifiedLeadsCohort: 0,
+    meetingsScheduled: 0,
+    meetingsScheduledCohort: 0,
+    meetingsHeld: 0,
+    meetingsHeldCohort: 0,
+  };
+  const fields = Object.keys(empty) as Array<keyof Counts>;
+  const total = [...main, ...extra].reduce<Counts>((sum, metric) => {
+    const next = { ...sum };
+    for (const field of fields) next[field] += metric[field];
+    return next;
+  }, empty);
   messages[messages.length - 1] += `\n\n${line('🧮 Итого по всем каналам', total)}`;
   return messages;
 }
