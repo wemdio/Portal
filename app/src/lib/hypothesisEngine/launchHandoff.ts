@@ -207,6 +207,29 @@ export interface HeTemplateLaunchInfo {
   leads_already_present?: number;
   /** Сегменты, которые не поехали; ключа нет — запуск закончен. */
   pending?: HeTemplateLaunchPending[];
+  /**
+   * Кампания только для команды (решение владельца 26.10.2026): адреса,
+   * которые компания опубликовала на своём сайте, но её почтовый сервер не дал
+   * проверить (`_email_unverified: 'site'`), — у компаний без единого
+   * проверенного адреса в этом запуске. Те же письма и ящики, не больше
+   * HE_ENG_UNVERIFIED_DAILY_NEW_LEADS новых контактов в день. Клиенту не
+   * видна: её нет ни в `campaigns`, ни в проекции кабинета, и
+   * heEngLaunchCampaigns её не отдаёт; старт и паузу ведёт
+   * engUnverifiedCampaign.ts по состоянию основных кампаний.
+   */
+  unverified_campaign?: HeTemplateLaunchCampaign;
+}
+
+/** Новых контактов в день у кампании непроверенных адресов (решение владельца 26.10.2026). */
+export const HE_ENG_UNVERIFIED_DAILY_NEW_LEADS = 10;
+
+/**
+ * Выключатель кампаний непроверенных адресов: HE_ENG_UNVERIFIED_SEND=0 —
+ * запуск их не создаёт, а engUnverifiedCampaign.ts не стартует и ставит на
+ * паузу уже созданные. Не задан — включено.
+ */
+export function heEngUnverifiedSendEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !['0', 'false', 'off', 'no'].includes((env.HE_ENG_UNVERIFIED_SEND ?? '').trim().toLowerCase());
 }
 
 /** Пункт селектора пресетов (GET launch): id + человекочитаемое имя клиента. */
@@ -228,23 +251,9 @@ export function parseLaunchInfo(raw: unknown): HeTemplateLaunchInfo | null {
   const campaigns = Array.isArray(r.campaigns)
     ? (r.campaigns as Array<Record<string, unknown>>)
         .filter((c) => c && typeof c.campaign_id === 'string' && c.campaign_id.length > 0)
-        .map((c) => {
-          const requested = optionalCount(c.leads_requested);
-          const attempted = optionalCount(c.leads_attempted);
-          const present = optionalCount(c.leads_already_present);
-          return {
-            campaign_id: c.campaign_id as string,
-            campaign_name: typeof c.campaign_name === 'string' ? c.campaign_name : '',
-            campaign_url: typeof c.campaign_url === 'string' ? c.campaign_url : '',
-            segment: typeof c.segment === 'string' ? c.segment : null,
-            leads_count:
-              typeof c.leads_count === 'number' && Number.isFinite(c.leads_count) ? c.leads_count : 0,
-            ...(requested !== undefined ? { leads_requested: requested } : {}),
-            ...(attempted !== undefined ? { leads_attempted: attempted } : {}),
-            ...(present !== undefined && present > 0 ? { leads_already_present: present } : {}),
-          };
-        })
+        .map(parseLaunchCampaign)
     : undefined;
+  const unverified = r.unverified_campaign as Record<string, unknown> | null | undefined;
   // Незнакомая стадия — «кампании нет»: считать её самым безопасным исходом
   // нельзя наоборот (повтор пропустил бы сегмент как уже созданный), а лишний
   // повтор создания сегменту без кампании ничего не портит. 'classify'
@@ -290,6 +299,26 @@ export function parseLaunchInfo(raw: unknown): HeTemplateLaunchInfo | null {
     ...(attemptedTotal !== undefined ? { leads_attempted: attemptedTotal } : {}),
     ...(presentTotal !== undefined && presentTotal > 0 ? { leads_already_present: presentTotal } : {}),
     ...(pending && pending.length > 0 ? { pending } : {}),
+    ...(unverified && typeof unverified === 'object' && typeof unverified.campaign_id === 'string' && unverified.campaign_id.length > 0
+      ? { unverified_campaign: { ...parseLaunchCampaign(unverified), segment: null } }
+      : {}),
+  };
+}
+
+function parseLaunchCampaign(c: Record<string, unknown>): HeTemplateLaunchCampaign {
+  const requested = optionalCount(c.leads_requested);
+  const attempted = optionalCount(c.leads_attempted);
+  const present = optionalCount(c.leads_already_present);
+  return {
+    campaign_id: c.campaign_id as string,
+    campaign_name: typeof c.campaign_name === 'string' ? c.campaign_name : '',
+    campaign_url: typeof c.campaign_url === 'string' ? c.campaign_url : '',
+    segment: typeof c.segment === 'string' ? c.segment : null,
+    leads_count:
+      typeof c.leads_count === 'number' && Number.isFinite(c.leads_count) ? c.leads_count : 0,
+    ...(requested !== undefined ? { leads_requested: requested } : {}),
+    ...(attempted !== undefined ? { leads_attempted: attempted } : {}),
+    ...(present !== undefined && present > 0 ? { leads_already_present: present } : {}),
   };
 }
 

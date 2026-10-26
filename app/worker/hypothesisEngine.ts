@@ -145,6 +145,7 @@ import { runHeEngClientMailScan, sendHeEngClientNotice } from '@/lib/hypothesisE
 // Заблокированный ENG-аккаунт (S3b): страж джобы в handleJob и фоновая
 // проверка между джобами (heEngBlockSweep ниже).
 import { createHeEngBlockSweepTicker, guardHeEngJobOwner } from '@/lib/hypothesisEngine/engBlockedSweep';
+import { createHeEngUnverifiedCampaignTicker } from '@/lib/hypothesisEngine/engUnverifiedCampaign';
 // «Do not contact» ENG (решение владельца 14.10.2026): снятие людей из списка
 // клиента с его идущих кампаний — проход между джобами (heEngDncRemoval ниже).
 import { createHeEngDncRemovalTicker } from '@/lib/hypothesisEngine/engDncRemoval';
@@ -3793,6 +3794,19 @@ const heEngDncRemoval = createHeEngDncRemovalTicker({
   shouldStop,
 });
 
+/**
+ * Кампании непроверенных адресов ENG (engUnverifiedCampaign.ts): отправляют
+ * вместе с основными кампаниями запуска и стоят вместе с ними. Не чаще раза в
+ * HE_ENG_UNVERIFIED_TICK_MS (5 мин); HE_ENG_UNVERIFIED_SEND=0 — ставит на паузу
+ * и не стартует.
+ */
+const heEngUnverifiedCampaigns = createHeEngUnverifiedCampaignTicker({
+  portalDb: db,
+  instantlyDb: supabaseInstantly,
+  log: (level, msg) => log(level, msg),
+  shouldStop,
+});
+
 async function runClaimedJob(job: HeJob): Promise<void> {
   if (strandedJobs.has(job.id)) forgetStrandedJob(job.id);
   try {
@@ -3826,6 +3840,8 @@ async function pollOnce(): Promise<boolean> {
     await heEngBlockSweep.maybeRun();
     // «Do not contact» — снятие с идущих кампаний клиента (см. heEngDncRemoval).
     await heEngDncRemoval.maybeRun();
+    // Кампании непроверенных адресов — в ногу с основными (heEngUnverifiedCampaigns).
+    await heEngUnverifiedCampaigns.maybeRun();
     // Автозапуск ENG — только без активных сборок, как раньше между стадиями.
     if (await maybeRunHeEngAutoLaunch()) return true;
   }

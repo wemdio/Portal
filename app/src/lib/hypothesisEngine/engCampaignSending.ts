@@ -373,9 +373,10 @@ async function loadLaunch(
 /**
  * Воркспейс кампаний запуска — пресета ЗАПИСИ о запуске, и только если это
  * пресет самого клиента (ядро создало кампании в его воркспейсе). null —
- * пресета нет / чужой / воркспейс не настроен в окружении.
+ * пресета нет / чужой / воркспейс не настроен в окружении. Его же читает
+ * проход кампаний непроверенных адресов (engUnverifiedCampaign.ts).
  */
-async function launchWorkspace(
+export async function launchWorkspace(
   instantlyDb: SupabaseClient,
   ownerUserId: string,
   presetId: string,
@@ -1685,9 +1686,17 @@ export async function readHeEngSendingSummaries(
  * heEngLaunchCampaigns берёт из разобранной записи. Пустые и не-строки
  * пропускаются. Чистая функция.
  */
-export function heEngCampaignIdsOfLaunchRow(row: { launch_campaign_id?: unknown; launch_campaigns?: unknown }): string[] {
+export function heEngCampaignIdsOfLaunchRow(row: {
+  launch_campaign_id?: unknown;
+  launch_campaigns?: unknown;
+  launch_unverified_campaign_id?: unknown;
+}): string[] {
   const ids = new Set<string>();
   if (typeof row.launch_campaign_id === 'string' && row.launch_campaign_id.trim()) ids.add(row.launch_campaign_id.trim());
+  // Кампания непроверенных адресов (launch_info.unverified_campaign) — тоже ENG.
+  if (typeof row.launch_unverified_campaign_id === 'string' && row.launch_unverified_campaign_id.trim()) {
+    ids.add(row.launch_unverified_campaign_id.trim());
+  }
   if (Array.isArray(row.launch_campaigns)) {
     for (const c of row.launch_campaigns) {
       const id = c && typeof c === 'object' ? (c as { campaign_id?: unknown }).campaign_id : null;
@@ -1702,7 +1711,8 @@ export function heEngCampaignIdsOfLaunchRow(row: { launch_campaign_id?: unknown;
  * адресов на шаблон): id кампаний, пресет запуска и вертикаль шаблона.
  */
 const HE_ENG_LAUNCH_CAMPAIGN_COLUMNS =
-  'id, vertical_id, launch_campaign_id:launch_info->>campaign_id, launch_campaigns:launch_info->campaigns, launch_preset_id:launch_info->>preset_id';
+  'id, vertical_id, launch_campaign_id:launch_info->>campaign_id, launch_campaigns:launch_info->campaigns, launch_preset_id:launch_info->>preset_id, '
+  + 'launch_unverified_campaign_id:launch_info->unverified_campaign->>campaign_id';
 
 const ENG_IDS_PAGE = 1000;
 const ENG_IDS_MAX_PAGES = 200;
