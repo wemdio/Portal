@@ -97,6 +97,18 @@ html:not([data-portal-theme='dark']) body > .row-actions-menu button:hover:not(:
   background-color: #dbeafe !important;
 }
 
+/* Меню панели выделения ящиков («Под тег», «На адрес»): подсветка пункта — как у меню строк. */
+html body .sender-popover-menu button:hover:not(:disabled) {
+  background-color: #dbeafe !important;
+}
+html[data-portal-theme='dark'] body .sender-popover-menu button {
+  color: #f4f4f5 !important;
+}
+html[data-portal-theme='dark'] body .sender-popover-menu button:hover:not(:disabled) {
+  background-color: rgba(96, 165, 250, 0.28) !important;
+  color: #ffffff !important;
+}
+
 /* Панель массовых действий над ящиками липнет к шапке при прокрутке: заливка
    сплошная, иначе строки таблицы просвечивали бы под ней. */
 html body :is(.sender-glass, .portal-glass) .sender-bulk-bar {
@@ -137,8 +149,10 @@ html body :is(.sender-glass, .portal-glass) section.rounded-xl.border > table > 
   border-bottom-right-radius: 0.75rem;
 }
 
-/* Вложенные белые подложки внутри стекла — прозрачные, чтобы блок был цельным. */
-html body :is(.sender-glass, .portal-glass) .rounded-xl.border .bg-white:not(input):not(textarea):not(select):not(button):not([role='tooltip']):not([role='menu']) {
+/* Вложенные белые подложки внутри стекла — прозрачные, чтобы блок был цельным.
+   Всплывающие меню (с тенью) — исключение: «Под тег» и «На адрес» в панели
+   выделения ящиков становились прозрачными, сквозь них читались строки. */
+html body :is(.sender-glass, .portal-glass) .rounded-xl.border .bg-white:not(input):not(textarea):not(select):not(button):not([role='tooltip']):not([role='menu']):not(.shadow-lg):not(.shadow-xl) {
   background-color: transparent !important;
 }
 

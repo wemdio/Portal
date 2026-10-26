@@ -356,7 +356,7 @@ export function TagAssignMenu({
       </button>
 
       {open ? (
-        <div className="absolute left-0 z-30 mt-1 w-56 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg">
+        <div className="sender-popover-menu absolute left-0 z-30 mt-1 w-56 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg">
           <button
             type="button"
             onClick={() => {

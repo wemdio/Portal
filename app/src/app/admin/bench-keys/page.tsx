@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, BookOpen, Copy, Download, KeyRound, Plus, RefreshCw, ScrollText, X } from 'lucide-react';
+import { AlertTriangle, BookOpen, Copy, Download, KeyRound, Pencil, Plus, RefreshCw, ScrollText, X } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 
 interface BenchKeyUsage {
@@ -56,6 +56,15 @@ const DEFAULTS = {
   max_active_jobs: 3,
 };
 
+type Limits = typeof DEFAULTS;
+
+const LIMIT_FIELDS = [
+  ['rpm_limit', 'Запросов в минуту'],
+  ['daily_jobs_limit', 'Задач в сутки'],
+  ['daily_rows_limit', 'Строк в сутки'],
+  ['max_active_jobs', 'Задач одновременно'],
+] as const;
+
 function formatDateTime(value: string | null): string {
   if (!value) return '—';
   return new Date(value).toLocaleString('ru-RU', {
@@ -105,6 +114,11 @@ export default function BenchKeysPage() {
   const [historyDays, setHistoryDays] = useState<DayUsage[]>([]);
   const [historyLimits, setHistoryLimits] = useState<{ daily_jobs_limit: number; daily_rows_limit: number } | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
+
+  const [limitsFor, setLimitsFor] = useState<BenchKey | null>(null);
+  const [limitsForm, setLimitsForm] = useState<Limits>(DEFAULTS);
+  const [limitsSaving, setLimitsSaving] = useState(false);
+  const [limitsError, setLimitsError] = useState<string | null>(null);
 
   const [logFor, setLogFor] = useState<BenchKey | null>(null);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
@@ -177,6 +191,40 @@ export default function BenchKeysPage() {
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось отозвать ключ');
+    }
+  }
+
+  function openLimits(key: BenchKey) {
+    setLimitsFor(key);
+    setLimitsError(null);
+    setLimitsForm({
+      rpm_limit: key.rpm_limit,
+      daily_jobs_limit: key.daily_jobs_limit,
+      daily_rows_limit: key.daily_rows_limit,
+      max_active_jobs: key.max_active_jobs,
+    });
+  }
+
+  async function saveLimits() {
+    if (!limitsFor) return;
+    setLimitsSaving(true);
+    setLimitsError(null);
+    try {
+      const res = await authFetch(`/api/admin/bench-keys/${limitsFor.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'set_limits', limits: limitsForm }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error ?? 'Не удалось сохранить лимиты');
+      }
+      setLimitsFor(null);
+      await load();
+    } catch (e) {
+      setLimitsError(e instanceof Error ? e.message : 'Не удалось сохранить лимиты');
+    } finally {
+      setLimitsSaving(false);
     }
   }
 
@@ -383,14 +431,7 @@ export default function BenchKeysPage() {
           Лимиты — они и не дают чужому скрипту выжечь прокси и бюджет
         </p>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
-          {(
-            [
-              ['rpm_limit', 'Запросов в минуту'],
-              ['daily_jobs_limit', 'Задач в сутки'],
-              ['daily_rows_limit', 'Строк в сутки'],
-              ['max_active_jobs', 'Задач одновременно'],
-            ] as const
-          ).map(([field, label]) => (
+          {LIMIT_FIELDS.map(([field, label]) => (
             <div key={field}>
               <label className="block text-xs text-gray-500 mb-1">{label}</label>
               <input
@@ -507,6 +548,15 @@ export default function BenchKeysPage() {
                       </button>
                       {!key.revoked_at && (
                         <button
+                          onClick={() => openLimits(key)}
+                          className="mr-2 inline-flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs hover:bg-gray-50"
+                        >
+                          <Pencil className="w-3 h-3" />
+                          Лимиты
+                        </button>
+                      )}
+                      {!key.revoked_at && (
+                        <button
                           onClick={() => void revoke(key)}
                           className="rounded border border-red-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50"
                         >
@@ -606,6 +656,62 @@ export default function BenchKeysPage() {
                 {historyLimits.daily_rows_limit.toLocaleString('ru-RU')} строк в сутки
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {limitsFor && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg overflow-hidden rounded-lg bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
+              <div>
+                <h3 className="font-medium">Лимиты — {limitsFor.name}</h3>
+                <p className="text-xs text-gray-500">Действуют со следующего запроса, ключ менять не нужно.</p>
+              </div>
+              <button
+                onClick={() => setLimitsFor(null)}
+                className="p-1 hover:bg-gray-100 rounded"
+                aria-label="Закрыть"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-3 p-4">
+              {LIMIT_FIELDS.map(([field, label]) => (
+                <div key={field}>
+                  <label className="block text-xs text-gray-500 mb-1">{label}</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={limitsForm[field]}
+                    onChange={(e) =>
+                      setLimitsForm((f) => ({ ...f, [field]: Number(e.target.value) || 0 }))
+                    }
+                    className="w-full rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
+                  />
+                </div>
+              ))}
+            </div>
+            {limitsError && (
+              <p className="mx-4 mb-3 rounded-lg border border-red-200 bg-red-50 p-2 text-sm text-red-700">
+                {limitsError}
+              </p>
+            )}
+            <div className="flex justify-end gap-2 border-t border-gray-200 px-4 py-3">
+              <button
+                onClick={() => setLimitsFor(null)}
+                className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50"
+              >
+                Отмена
+              </button>
+              <button
+                onClick={() => void saveLimits()}
+                disabled={limitsSaving}
+                className="rounded-lg bg-gray-900 px-3 py-1.5 text-sm text-white disabled:opacity-40"
+              >
+                {limitsSaving ? 'Сохраняем…' : 'Сохранить'}
+              </button>
+            </div>
           </div>
         </div>
       )}
