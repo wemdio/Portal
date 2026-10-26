@@ -857,7 +857,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
 
   const downloadValuesPdf = useCallback(() => {
     if (!run?.values_text) return;
-    const html = `<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>Ценности ${run.company_name ?? ''}</title>
+    const html = `<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>Ценности ${escapeHtml(run.company_name ?? '')}</title>
 <style>
   @page { size: A4; margin: 18mm 16mm; }
   body { font-family: Arial, Helvetica, sans-serif; color: #111; line-height: 1.45; font-size: 12pt; }
@@ -870,7 +870,9 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
 <pre>${escapeHtml(run.values_text)}</pre>
 <script>window.onload = () => { setTimeout(() => window.print(), 250); };</script>
 </body></html>`;
-    const w = window.open('', '_blank', 'noopener,noreferrer');
+    // Без noopener: с ним window.open всегда возвращает null, и выгрузка не
+    // открывалась вовсе. Окно — наш же about:blank с экранированным текстом.
+    const w = window.open('', '_blank');
     if (!w) {
       setError('Браузер заблокировал всплывающее окно. Разрешите всплывающие окна для этого сайта.');
       return;

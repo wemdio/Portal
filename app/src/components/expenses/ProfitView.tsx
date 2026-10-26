@@ -67,9 +67,12 @@ function mergeSeries(incomes: IncomesSummary, expenses: ExpensesSummary): Profit
 export default function ProfitView({
   period,
   onPeriodChange,
+  refreshKey,
 }: {
   period: PeriodValue;
   onPeriodChange: (next: PeriodValue) => void;
+  /** Растёт, когда запись внесли кнопкой «+ Доход» / «+ Расход» над вкладками. */
+  refreshKey: number;
 }) {
   const [incomes, setIncomes] = useState<IncomesSummary | null>(null);
   const [expenses, setExpenses] = useState<ExpensesSummary | null>(null);
@@ -111,7 +114,7 @@ export default function ProfitView({
       active = false;
       controller.abort();
     };
-  }, [query]);
+  }, [query, refreshKey]);
 
   const totals: Totals | null = useMemo(() => {
     if (!incomes || !expenses) return null;

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { isInternalUser } from '@/lib/auth/internalGuard';
 import { SEARCH_CONFIG } from '@/lib/config';
 
 export const dynamic = 'force-dynamic';
@@ -69,6 +70,9 @@ export async function GET(req: NextRequest) {
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return jsonError('Unauthorized', 401);
+  // Путь лежит в клиентском разделе middleware (/api/parsers/search/), а адреса
+  // прокси клиентам видеть незачем — только сотрудникам (аудит 26.10.2026).
+  if (!(await isInternalUser(supabase, user.id))) return jsonError('Доступ только для сотрудников', 403);
 
   const cfg = getProxyConfig();
   const redacted = cfg.proxies.map((p) => redactProxyUrl(p)).filter(Boolean);

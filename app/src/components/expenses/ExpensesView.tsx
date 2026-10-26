@@ -1,12 +1,12 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 
 import ClassifyQueue from '@/components/expenses/ClassifyQueue';
 import DailyLedger from '@/components/expenses/DailyLedger';
 import Filters, { getDefaultFilters, type FiltersValue } from '@/components/expenses/Filters';
 import KpiRow from '@/components/expenses/KpiRow';
-import ManualExpenseForm from '@/components/expenses/ManualExpenseForm';
+import ManualEntries from '@/components/expenses/ManualEntries';
 import type { PeriodValue } from '@/components/expenses/PeriodBar';
 import TimeChart from '@/components/expenses/TimeChart';
 import VendorBreakdown from '@/components/expenses/VendorBreakdown';
@@ -23,9 +23,12 @@ import type { ExpensesSummary, VendorBreakdownItem, VendorOption } from '@/lib/e
 export default function ExpensesView({
   period,
   onPeriodChange,
+  refreshKey,
 }: {
   period: PeriodValue;
   onPeriodChange: (next: PeriodValue) => void;
+  /** Растёт, когда запись внесли кнопкой «+ Расход» / «+ Доход» над вкладками. */
+  refreshKey: number;
 }) {
   const [filters, setFilters] = useState<FiltersValue>(() => getDefaultFilters());
   const [summary, setSummary] = useState<ExpensesSummary | null>(null);
@@ -35,9 +38,8 @@ export default function ExpensesView({
   const [showQueue, setShowQueue] = useState(false);
   const [exporting, setExporting] = useState(false);
   // Справочник для выбора вендора — все активные, независимо от периода.
-  // Тянется здесь один раз и раздаётся вниз пропсами: и очередь разметки, и
-  // форма ручной траты выбирают из одного и того же списка, и незачем ходить
-  // за ним дважды.
+  // Тянется здесь один раз и раздаётся вниз пропсами: очередь разметки
+  // выбирает из него, а список ручных трат подписывает им вендора.
   const [directory, setDirectory] = useState<VendorOption[]>([]);
   const [directoryError, setDirectoryError] = useState<string | null>(null);
   // Вендоры, заведённые в этой сессии. Справочник перечитывается только при
@@ -45,6 +47,10 @@ export default function ExpensesView({
   const [createdVendors, setCreatedVendors] = useState<VendorOption[]>([]);
   // Перечитать сводку после разметки или правки ручной траты, не трогая фильтры.
   const [reloadKey, setReloadKey] = useState(0);
+  // Правка ручной траты в списке: блоки, которые читают данные сами (разбивка,
+  // список по дням), пересоздаются вместе со сводкой — иначе показали бы
+  // старую сумму рядом с новой.
+  const [manualKey, setManualKey] = useState(0);
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ from: period.from, to: period.to, groupBy: period.groupBy });
@@ -93,7 +99,7 @@ export default function ExpensesView({
       active = false;
       controller.abort();
     };
-  }, [query, reloadKey]);
+  }, [query, reloadKey, refreshKey]);
 
   // Справочник от периода не зависит, поэтому и от `query` эффект не зависит:
   // перечитывать его на каждую смену дат значило бы гонять один и тот же
@@ -208,18 +214,26 @@ export default function ExpensesView({
 
           <TimeChart series={summary.series} groupBy={period.groupBy} />
 
-          <VendorBreakdown items={vendors} query={query} queueQuery={queueQuery} />
+          {/* Ключ пересоздаёт блоки, которые сами ходят за данными, когда
+              ручную запись добавили или поправили. */}
+          <Fragment key={`${refreshKey}:${manualKey}`}>
+            <VendorBreakdown items={vendors} query={query} queueQuery={queueQuery} />
 
-          {/* Разбивка по вендорам отвечает «кому за период», список по дням —
-              «что именно ушло в этот день». Он же заменяет собой выгрузку в
-              Excel в половине случаев, ради которых её открывали. */}
-          <DailyLedger kind="expenses" query={query} />
+            {/* Разбивка по вендорам отвечает «кому за период», список по дням —
+                «что именно ушло в этот день». Он же заменяет собой выгрузку в
+                Excel в половине случаев, ради которых её открывали. */}
+            <DailyLedger kind="expenses" query={query} />
+          </Fragment>
 
-          <ManualExpenseForm
+          <ManualEntries
+            kind="expense"
             range={range}
+            refreshKey={refreshKey}
             vendors={vendorOptions}
-            onVendorCreated={addVendor}
-            onChanged={reload}
+            onChanged={() => {
+              setManualKey((prev) => prev + 1);
+              reload();
+            }}
           />
         </>
       ) : null}

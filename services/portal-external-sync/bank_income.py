@@ -1,4 +1,4 @@
-"""New bank / USDT receipts → PolzaSiteFeedbackBot, without replaying history.
+"""New bank / USDT / manually entered receipts → PolzaSiteFeedbackBot, without replaying history.
 
 Only sendMessage/getMe: the bot's webhook belongs to the existing lead service.
 Telegram has no idempotency key. Ambiguous sends are quarantined for manual
@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from time import monotonic
+from typing import Callable
 
 import asyncpg
 import httpx
@@ -113,6 +114,34 @@ def format_crypto_income(row: dict) -> str:
     ])
 
 
+def format_manual_income(row: dict) -> str:
+    """Доход, внесённый руками в портале («+ Доход» в «Расходы и доходы»).
+
+    Решение владельца (26.10.2026): такой доход — та же оплата, и в ветку он
+    идёт тем же «Поступила оплата». Пометка «внесено вручную» и автор нужны,
+    чтобы продажи не искали этот платёж в выписке банка.
+    """
+    amount = f"{Decimal(str(row['amount'])):,.2f}".replace(",", " ").replace(".", ",")
+    currency = "₽" if row["currency"] == "RUB" else _clip(row["currency"], 12)
+    entered = row["created_at"].astimezone(MSK).strftime("%d.%m.%Y %H:%M МСК")
+    author = _clip(row.get("author_name") or row.get("author_email"), 120) or "неизвестно"
+    lines = [
+        "💰 <b>Поступила оплата</b> (внесено вручную)", "",
+        f"<b>Плательщик:</b> {_clip(row.get('payer'), 240) or 'не указан'}",
+        f"<b>Сумма:</b> {amount} {currency}",
+        f"<b>Откуда:</b> {_clip(row.get('channel'), 60) or 'не указано'}",
+        f"<b>Дата платежа:</b> {row['occurred_on'].strftime('%d.%m.%Y')}",
+        f"<b>Внёс:</b> {author}, {entered}",
+        f"<b>За что:</b> {_clip(row.get('comment'), 1200) or 'не указано'}",
+    ]
+    if row.get("project_name"):
+        lines.append(f"<b>Проект:</b> {_clip(row['project_name'], 240)}")
+    if row.get("amo_deal_id"):
+        deal = _clip(row.get("deal_name"), 240)
+        lines.append(f"<b>Сделка AMO:</b> {deal + ' · ' if deal else ''}№ {row['amo_deal_id']}")
+    return "\n".join(lines)
+
+
 async def prepare_income(conn: asyncpg.Connection, config: IncomeConfig) -> None:
     # Verify the exact named bot before baselining or transmitting financial data.
     try:
@@ -145,6 +174,59 @@ ELIGIBLE = """b.bank IN ('tochka', 'tbank') AND b.direction = 'credit'
     AND b.payer_inn ~ '^([0-9]{10}|[0-9]{12})$'"""
 CRYPTO_ELIGIBLE = f"""b.network='tron' AND b.token_contract='{USDT_TRC20_CONTRACT}'
     AND b.currency='USDT' AND b.amount > 0"""
+# Ручной доход всегда выручка (решение владельца), фильтровать нечего.
+MANUAL_ELIGIBLE = "b.amount > 0"
+
+# Synced sources: rows past the baseline, dated from the day alerts were enabled.
+_SINCE_BASELINE = """b.id > s.baseline_id
+    AND b.occurred_at >= date_trunc('day', s.started_at AT TIME ZONE 'Europe/Moscow')
+                         AT TIME ZONE 'Europe/Moscow'"""
+
+
+@dataclass(frozen=True)
+class _Queue:
+    """SQL identifiers of one journal. They come exclusively from QUEUES below."""
+    journal: str
+    key: str
+    source: str
+    state: str
+    eligible: str
+    # Which source rows are new enough to announce (aliases: b — source, s — state).
+    fresh: str
+    columns: str
+    # Extra joins for the message text only (alias b — source).
+    joins: str
+    formatter: Callable[[dict], str]
+
+
+QUEUES: dict[str, _Queue] = {
+    "bank": _Queue(
+        "bank_income_notifications", "bank_transaction_id", "bank_transactions",
+        "bank_income_notification_state", ELIGIBLE, _SINCE_BASELINE,
+        "b.bank, b.payer_name, b.payer_inn, b.currency, b.purpose, b.raw, b.amount, b.occurred_at",
+        "", format_income,
+    ),
+    "crypto": _Queue(
+        "crypto_income_notifications", "crypto_transfer_id", "crypto_income_transfers",
+        "crypto_income_notification_state", CRYPTO_ELIGIBLE, _SINCE_BASELINE,
+        "b.from_address, b.wallet_address, b.transaction_id, b.amount, b.occurred_at",
+        "", format_crypto_income,
+    ),
+    # Ручной доход появился 26.10.2026, истории у него нет: baseline не нужен,
+    # достаточно не слать записи, внесённые до включения уведомлений. Дата
+    # платежа не важна — задним числом внесённая оплата тоже новость для продаж.
+    "manual": _Queue(
+        "manual_income_notifications", "manual_income_id", "manual_incomes",
+        "bank_income_notification_state", MANUAL_ELIGIBLE, "b.created_at >= s.started_at",
+        """b.payer, b.channel, b.comment, b.currency, b.amount, b.occurred_on, b.amo_deal_id,
+           au.full_name AS author_name, au.email AS author_email,
+           pj.name AS project_name, al.name AS deal_name""",
+        """LEFT JOIN profiles au ON au.id = b.created_by
+           LEFT JOIN projects pj ON pj.id = b.project_id
+           LEFT JOIN amo_leads al ON al.amo_id = b.amo_deal_id""",
+        format_manual_income,
+    ),
+}
 
 
 async def _deliver(client: httpx.AsyncClient, config: IncomeConfig, text: str) -> tuple[str, int | None, int]:
@@ -184,7 +266,7 @@ async def dispatch_income(conn: asyncpg.Connection, config: IncomeConfig) -> Non
     issues: list[str] = []
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            for kind in ("bank", "crypto"):
+            for kind in QUEUES:
                 if not await _dispatch_queue(conn, client, config, kind, issues):
                     break
     finally:
@@ -200,16 +282,10 @@ async def _dispatch_queue(
     conn: asyncpg.Connection, client: httpx.AsyncClient, config: IncomeConfig,
     kind: str, issues: list[str],
 ) -> bool:
-    # SQL identifiers come exclusively from these two fixed internal definitions.
-    crypto = kind == "crypto"
-    journal = "crypto_income_notifications" if crypto else "bank_income_notifications"
-    source = "crypto_income_transfers" if crypto else "bank_transactions"
-    state = "crypto_income_notification_state" if crypto else "bank_income_notification_state"
-    key = "crypto_transfer_id" if crypto else "bank_transaction_id"
-    eligible = CRYPTO_ELIGIBLE if crypto else ELIGIBLE
-    columns = ("b.from_address, b.wallet_address, b.transaction_id" if crypto
-               else "b.bank, b.payer_name, b.payer_inn, b.currency, b.purpose, b.raw")
-    formatter = format_crypto_income if crypto else format_income
+    # SQL identifiers come exclusively from the fixed internal QUEUES definitions.
+    queue = QUEUES[kind]
+    journal, source, state, key = queue.journal, queue.source, queue.state, queue.key
+    eligible, columns, formatter = queue.eligible, queue.columns, queue.formatter
     # With the exclusive session lock no other dispatcher can own sending.
     stale = await conn.fetch(
             f"""UPDATE {journal} SET status='unknown', updated_at=now(),
@@ -221,9 +297,7 @@ async def _dispatch_queue(
             f"""INSERT INTO {journal} ({key}, chat_id, thread_id)
                 SELECT b.id, $1, $2 FROM {source} b
                 CROSS JOIN {state} s
-                WHERE b.id > s.baseline_id AND {eligible}
-                  AND b.occurred_at >= date_trunc('day', s.started_at AT TIME ZONE 'Europe/Moscow')
-                                         AT TIME ZONE 'Europe/Moscow'
+                WHERE {queue.fresh} AND {eligible}
                 ON CONFLICT ({key}) DO NOTHING""", config.chat_id, config.thread_id,
         )
     # A correction to classification before sending cancels the alert.
@@ -246,10 +320,10 @@ async def _dispatch_queue(
         tx_id = row["source_id"]
         claimed = await conn.fetchrow(
             f"""UPDATE {journal} n SET status='sending', attempts=attempts+1,
-                 updated_at=now() FROM {source} b
+                 updated_at=now() FROM {source} b {queue.joins}
                WHERE n.{key}=$1 AND n.status='pending'
                  AND b.id=n.{key} AND {eligible}
-               RETURNING n.attempts, n.created_at, {columns}, b.amount, b.occurred_at""", tx_id,
+               RETURNING n.attempts, n.created_at, {columns}""", tx_id,
         )
         if claimed is None:
             continue

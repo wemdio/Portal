@@ -97,6 +97,21 @@ html:not([data-portal-theme='dark']) body > .row-actions-menu button:hover:not(:
   background-color: #dbeafe !important;
 }
 
+/* Меню «⋯» кампаний «Рассылки»: подсветка пункта при наведении — как у меню строк. */
+html body .sender-actions-menu button:hover:not(:disabled) {
+  background-color: #dbeafe !important;
+}
+html[data-portal-theme='dark'] body .sender-actions-menu button:not(.text-red-600) {
+  color: #f4f4f5 !important;
+}
+html[data-portal-theme='dark'] body .sender-actions-menu button:hover:not(:disabled):not(.text-red-600) {
+  background-color: rgba(96, 165, 250, 0.28) !important;
+  color: #ffffff !important;
+}
+html[data-portal-theme='dark'] body .sender-actions-menu button.text-red-600:hover:not(:disabled) {
+  background-color: rgba(239, 68, 68, 0.22) !important;
+}
+
 /* Меню панели выделения ящиков («Под тег», «На адрес»): подсветка пункта — как у меню строк. */
 html body .sender-popover-menu button:hover:not(:disabled) {
   background-color: #dbeafe !important;

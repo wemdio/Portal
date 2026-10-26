@@ -8,6 +8,7 @@ import { useCallback, useState } from 'react';
 import ExpensesView from '@/components/expenses/ExpensesView';
 import ForecastView from '@/components/expenses/ForecastView';
 import IncomesView from '@/components/expenses/IncomesView';
+import ManualEntryModal, { type ManualKind } from '@/components/expenses/ManualEntryModal';
 import ProfitView from '@/components/expenses/ProfitView';
 import { getDefaultPeriod, type PeriodValue } from '@/components/expenses/PeriodBar';
 
@@ -61,6 +62,16 @@ export default function MoneyView() {
 
   const [period, setPeriod] = useState<PeriodValue>(() => getDefaultPeriod());
 
+  /**
+   * Ручной ввод — кнопками над вкладками, а не формой внизу одной из них:
+   * деньги из несинкаемых источников вносят с любой вкладки, и искать форму
+   * под графиками не приходится. После сохранения вкладки перечитывают
+   * данные по `refreshKey`.
+   */
+  const [adding, setAdding] = useState<ManualKind | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [notice, setNotice] = useState<string | null>(null);
+
   const hrefFor = useCallback(
     (next: Mode): Route => {
       const params = new URLSearchParams(searchParams.toString());
@@ -83,7 +94,7 @@ export default function MoneyView() {
 
           Ссылки, а не кнопки: режим — это адрес, значит вкладку можно открыть
           в новом окне и скопировать ссылкой, а не только кликнуть. */}
-      <div className="border-b border-zinc-200 pb-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 pb-3">
         <div
           role="tablist"
           aria-label="Расходы или доходы"
@@ -109,17 +120,70 @@ export default function MoneyView() {
             );
           })}
         </div>
+
+        <div className="flex items-center gap-2">
+          {(['income', 'expense'] as const).map((kind) => (
+            <button
+              key={kind}
+              type="button"
+              onClick={() => {
+                setNotice(null);
+                setAdding(kind);
+              }}
+              className="rounded-full bg-blue-600 px-4 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70"
+            >
+              {kind === 'income' ? '+ Доход' : '+ Расход'}
+            </button>
+          ))}
+        </div>
       </div>
+
+      {notice ? (
+        <div className="flex items-start justify-between gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+          <span>{notice}</span>
+          <button
+            type="button"
+            onClick={() => setNotice(null)}
+            aria-label="Скрыть"
+            className="leading-none text-blue-400 hover:text-blue-700"
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
+
+      {adding ? (
+        <ManualEntryModal
+          kind={adding}
+          onClose={() => setAdding(null)}
+          onSaved={({ occurredOn }) => {
+            const what = adding === 'income' ? 'Доход' : 'Расход';
+            // Запись вне периода на графиках не появится — молчать об этом
+            // нельзя, иначе выглядит как «не сохранилось».
+            const outside = occurredOn < period.from || occurredOn > period.to;
+            // Доход уходит в ветку «Оплаты» не сразу, а ближайшей проверкой
+            // синка (bank_income.py) — чтобы его не ждали мгновенно.
+            const chat = adding === 'income' ? ' В чат «Оплаты» придёт в течение 15 минут.' : '';
+            setNotice(
+              outside
+                ? `${what} сохранён, но его дата вне выбранного периода — расширь период, чтобы увидеть его.${chat}`
+                : `${what} сохранён.${chat}`,
+            );
+            setAdding(null);
+            setRefreshKey((prev) => prev + 1);
+          }}
+        />
+      ) : null}
 
       <div id="money-tabpanel" role="tabpanel" aria-labelledby={`money-tab-${mode}`}>
         {mode === 'incomes' ? (
-          <IncomesView period={period} onPeriodChange={setPeriod} />
+          <IncomesView period={period} onPeriodChange={setPeriod} refreshKey={refreshKey} />
         ) : mode === 'forecast' ? (
           <ForecastView />
         ) : mode === 'profit' ? (
-          <ProfitView period={period} onPeriodChange={setPeriod} />
+          <ProfitView period={period} onPeriodChange={setPeriod} refreshKey={refreshKey} />
         ) : (
-          <ExpensesView period={period} onPeriodChange={setPeriod} />
+          <ExpensesView period={period} onPeriodChange={setPeriod} refreshKey={refreshKey} />
         )}
       </div>
     </div>
