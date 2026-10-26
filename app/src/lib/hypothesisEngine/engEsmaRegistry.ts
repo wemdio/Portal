@@ -83,12 +83,22 @@ function query(task: HeEngRegistryTask): string {
   return url.href;
 }
 
+/** Letters and digits only, for comparing two spellings of one firm. */
+function nameKey(name: string): string { return name.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, ''); }
+/** ESMA cuts some names at 50 characters («…Management Limit»): a long prefix is the same name. */
+function sameName(a: string, b: string): boolean {
+  const [x, y] = [nameKey(a), nameKey(b)];
+  return x === y || (Math.min(x.length, y.length) >= 30 && (x.startsWith(y) || y.startsWith(x)));
+}
+
 const cache = new Map<string, { at: number; managers: Manager[] }>();
+const MAX_CACHED_SLICES = 16;
 async function managers(task: HeEngRegistryTask, options: Options): Promise<Manager[]> {
   const cacheKey = `${task.category}:${(task.countries ?? [task.country]).join(',')}`;
   const now = (options.now ?? Date.now)();
+  for (const [key, entry] of cache) if (now - entry.at >= CACHE_MS) cache.delete(key);
   const cached = cache.get(cacheKey);
-  if (cached && now - cached.at < CACHE_MS) return cached.managers;
+  if (cached) return cached.managers;
   let body: Row | null = null;
   try { body = JSON.parse(await readHeEngRegistryText(query(task), { ...options, accept: 'application/json', maxBytes: MAX_BYTES, timeoutMs: REQUEST_TIMEOUT_MS })) as Row; }
   catch (error) { if (error instanceof SyntaxError) fail('registry_invalid_response'); throw error; }
@@ -97,7 +107,10 @@ async function managers(task: HeEngRegistryTask, options: Options): Promise<Mana
   const found = typeof response?.numFound === 'number' ? response.numFound : null;
   if (!Array.isArray(docs) || found === null) fail('registry_invalid_response');
   if (found > MAX_RECORDS) fail('registry_page_limit');
-  const byKey = new Map<string, Manager>();
+  // A register that answers fewer rows than it counts would silently shorten the list.
+  if (docs.length < found) fail('registry_invalid_response');
+  type EsmaRecord = Omit<Manager, 'key' | 'types'> & { type: string };
+  const records: EsmaRecord[] = [];
   const allowed = task.countries ?? [task.country];
   for (const raw of docs as unknown[]) {
     const doc = raw && typeof raw === 'object' ? raw as Row : null;
@@ -105,20 +118,55 @@ async function managers(task: HeEngRegistryTask, options: Options): Promise<Mana
     const country = engCountry(doc?.ae_homeMemberState); const office = address(doc?.ae_headOfficeAddress);
     if (!/^ae\d{1,9}$/.test(id) || !name || !TYPE_LABELS[type] || !country || !allowed.includes(country) || office.length < 5) continue;
     const lei = str(doc?.ae_lei).toUpperCase();
-    // One firm registered as both AIFM and UCITS manager carries one LEI.
-    const key = validLei(lei) ? lei : id;
-    const existing = byKey.get(key);
-    if (existing) { existing.types.add(type); continue; }
     const funds = Number(str(doc?.no_of_funds));
-    byKey.set(key, { key, id, lei: validLei(lei) ? lei : '', name, country, address: office, authority: str(doc?.ae_competentAuthority, 200),
-      types: new Set([type]), funds: Number.isSafeInteger(funds) && funds > 0 ? funds : null, website: website(doc?.ae_website) });
+    records.push({ id, lei: validLei(lei) ? lei : '', name, country, address: office, authority: str(doc?.ae_competentAuthority, 200),
+      type, funds: Number.isSafeInteger(funds) && funds > 0 ? funds : null, website: website(doc?.ae_website) });
+  }
+  // One LEI under two different names (a rename, or a wrong LEI in the
+  // register): no record of it is trusted with that LEI.
+  const names = new Map<string, string[]>();
+  for (const record of records) if (record.lei) names.set(record.lei, [...(names.get(record.lei) ?? []), record.name]);
+  const conflicted = new Set([...names].filter(([, list]) => list.some(name => !sameName(name, list[0]))).map(([lei]) => lei));
+  // One firm registered as both AIFM and UCITS manager: one LEI, or one name in
+  // one country (ESMA leaves the LEI empty on some of a firm's records).
+  const byKey = new Map<string, Manager>();
+  const byName = new Map<string, Manager>();
+  for (const record of records) {
+    const lei = record.lei && !conflicted.has(record.lei) ? record.lei : '';
+    const named = `${record.country}:${nameKey(record.name)}`;
+    const sameNamed = byName.get(named);
+    // Two different LEIs under one name stay two firms.
+    const existing = (lei ? byKey.get(lei) : undefined) ?? (sameNamed && (!lei || !sameNamed.lei) ? sameNamed : undefined);
+    if (existing) {
+      existing.types.add(record.type);
+      // Keep the full spelling over one cut at 50 characters.
+      if (record.name.length > existing.name.length) existing.name = record.name;
+      if (lei && !existing.lei) { byKey.delete(existing.key); Object.assign(existing, { lei, key: lei }); byKey.set(lei, existing); }
+      byName.set(named, existing);
+      continue;
+    }
+    const { type, ...rest } = record;
+    const manager: Manager = { ...rest, key: lei || named, lei, types: new Set([type]) };
+    byKey.set(manager.key, manager);
+    byName.set(named, manager);
   }
   const list = [...byKey.values()];
-  // Their legal notice names the entity with its local register number (see readHeEngGleifRegisteredAs).
-  const registered = await readHeEngGleifRegisteredAs(list.map(manager => manager.lei).filter(Boolean),
-    { ...options, maxBytes: MAX_BYTES, timeoutMs: REQUEST_TIMEOUT_MS });
-  for (const manager of list) manager.localRegistryId = registered.get(manager.lei);
-  cache.set(cacheKey, { at: now, managers: list });
+  // Their legal notice names the entity with its local register number (see
+  // readHeEngGleifRegisteredAs). Without GLEIF the list still works; it is not
+  // cached then, so the next page asks again.
+  let complete = true;
+  try {
+    const registered = await readHeEngGleifRegisteredAs(list.map(manager => manager.lei).filter(Boolean),
+      { ...options, maxBytes: MAX_BYTES, timeoutMs: REQUEST_TIMEOUT_MS });
+    for (const manager of list) manager.localRegistryId = registered.get(manager.lei);
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    complete = false;
+  }
+  if (complete) {
+    if (cache.size >= MAX_CACHED_SLICES) cache.delete(cache.keys().next().value as string);
+    cache.set(cacheKey, { at: now, managers: list });
+  }
   return list;
 }
 

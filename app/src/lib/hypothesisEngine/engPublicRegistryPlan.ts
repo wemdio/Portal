@@ -33,6 +33,12 @@ function providerCovers(provider: HeEngRegistryProvider, country: string): boole
 }
 const MAX_TASKS = 120;
 const MAX_TASK_COUNTRIES = 40;
+// An ESMA slice is read whole and paged within the 80-page safety limit (2 000
+// firms); ten countries stay under it (all 30 member states hold about 3 200).
+const ESMA_MAX_TASK_COUNTRIES = 10;
+function maxTaskCountries(provider: HeEngRegistryProvider): number {
+  return provider === 'esma' ? ESMA_MAX_TASK_COUNTRIES : MAX_TASK_COUNTRIES;
+}
 // OpenStreetMap maps premises, mostly small businesses, and never a headcount:
 // a scope of 50+ employees would only spend company checks on them.
 const OSM_MAX_MIN_EMPLOYEES = 50;
@@ -190,9 +196,10 @@ export function createHeEngRegistryPlan(input: {
     const [provider, category] = selected.split(':') as [HeEngRegistryProvider, string];
     if (!HE_ENG_GLOBAL_REGISTRY_PROVIDERS.has(provider) || (provider === 'osm' && (range?.min ?? 0) >= OSM_MAX_MIN_EMPLOYEES)) continue;
     const covered = countries.filter(country => providerCovers(provider, country));
-    for (let start = 0; start < covered.length; start += MAX_TASK_COUNTRIES) {
+    const perTask = maxTaskCountries(provider);
+    for (let start = 0; start < covered.length; start += perTask) {
       const task: HeEngRegistryTask = { id: '', provider, country: 'global', category,
-        countries: covered.slice(start, start + MAX_TASK_COUNTRIES), ...size };
+        countries: covered.slice(start, start + perTask), ...size };
       task.id = taskId(input.scopeKey, task);
       tasks.push(task);
     }
@@ -211,7 +218,7 @@ export function validateHeEngRegistryTask(task: HeEngRegistryTask): void {
     !HE_ENG_REGISTRY_CATEGORIES[task.provider].includes(task.category) ||
     (task.transport !== undefined && (task.transport !== 'csv' || task.provider !== 'companies_house')) ||
     (HE_ENG_GLOBAL_REGISTRY_PROVIDERS.has(task.provider)
-      ? task.country !== 'global' || !Array.isArray(task.countries) || !task.countries.length || task.countries.length > MAX_TASK_COUNTRIES ||
+      ? task.country !== 'global' || !Array.isArray(task.countries) || !task.countries.length || task.countries.length > maxTaskCountries(task.provider) ||
         task.countries.some((country, index) => typeof country !== 'string' || normalizeEngCountry(country) !== country ||
           !engCountryIso2(country) || !providerCovers(task.provider, country) || (index > 0 && task.countries![index - 1] >= country))
       : task.countries !== undefined || normalizeEngCountry(task.country) !== task.country ||

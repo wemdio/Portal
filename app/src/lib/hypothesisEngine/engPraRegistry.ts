@@ -80,16 +80,19 @@ function parseCsv(text: string): string[][] {
   return rows;
 }
 
-/** Firms under the file's UK heading; a heading is a row with only its first cell filled. */
+// A heading row names a group of firms; a firm row with a missing FRN is not one.
+const HEADING = /\b(?:incorporated|authorised|entitled|vehicles|list of)\b/i;
+
+/** Firms under the file's UK heading: a row with only its first cell filled that reads like a heading. */
 function ukFirms(text: string, list: ListFile): Firm[] {
   const firms: Firm[] = [];
   let section = '';
-  for (const raw of parseCsv(text.replace(/^﻿/, ''))) {
+  for (const raw of parseCsv(text.replace(/^\uFEFF/, ''))) {
     const cells = raw.map(cell => clean(cell, 1500));
     if (!cells.some(Boolean)) continue;
     if (/^\d{6,7}$/.test(cells[1] ?? '')) {
       if (list.section.test(section) && cells[0]) firms.push({ frn: cells[1], name: clean(cells[0], 300), detail: cells[2] ?? '', kind: list.kind });
-    } else if (cells[0] && cells.slice(1).every(cell => !cell)) section = cells[0];
+    } else if (cells[0] && cells.slice(1).every(cell => !cell) && HEADING.test(cells[0])) section = cells[0];
   }
   return firms;
 }
@@ -111,12 +114,19 @@ async function categoryFirms(category: string, options: Options): Promise<Firm[]
   if (sorted.length < MIN_FIRMS) fail('registry_invalid_response');
   // Banks and building societies come with their LEI; its GLEIF entry gives the
   // Companies House number their legal pages print («Registered in England No. …»).
+  // Without GLEIF the list still works (FRN identity); it is not cached, so the next page asks again.
   const leis = sorted.filter(firm => firm.kind !== 'insurer' && validLei(firm.detail)).map(firm => firm.detail);
+  let complete = true;
   if (leis.length) {
-    const registered = await readHeEngGleifRegisteredAs(leis, { ...options, maxBytes: MAX_BYTES, timeoutMs: REQUEST_TIMEOUT_MS });
-    for (const firm of sorted) firm.localRegistryId = registered.get(firm.detail);
+    try {
+      const registered = await readHeEngGleifRegisteredAs(leis, { ...options, maxBytes: MAX_BYTES, timeoutMs: REQUEST_TIMEOUT_MS });
+      for (const firm of sorted) firm.localRegistryId = registered.get(firm.detail);
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      complete = false;
+    }
   }
-  cache.set(category, { at: now, firms: sorted });
+  if (complete) cache.set(category, { at: now, firms: sorted });
   return sorted;
 }
 

@@ -1,3 +1,4 @@
+import { sliceWholeChars, stripUnstorableJsonChars } from '../jsonbSafe';
 import { validLei } from './engRegistryIdentity';
 
 /**
@@ -48,15 +49,18 @@ const GLEIF_BATCH = 100;
 /**
  * The local register number of each LEI from GLEIF («HRB 13814», «B 28679»,
  * a Companies House number): a firm's own site rarely prints its LEI, but its
- * legal notice names the entity with this number. A failed read throws, so the
- * caller fails its page rather than returning candidates without the number,
- * and a candidate stays the same on a retry.
+ * legal notice names the entity with this number. A failed read throws; the
+ * callers then go on without numbers and do not cache that list, so the next
+ * page asks again. A loaded page's candidates are frozen in the wave
+ * checkpoint, so a later answer never changes a candidate being resolved.
  */
 export async function readHeEngGleifRegisteredAs(leis: readonly string[], options: {
   signal?: AbortSignal; fetch?: typeof fetch; maxBytes: number; timeoutMs: number;
 }): Promise<Map<string, string>> {
   const found = new Map<string, string>();
-  const text = (raw: unknown) => typeof raw === 'string' ? raw.replace(/[\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) : '';
+  // Stored in jsonb and fingerprinted with the candidate: same cleaning as every registry field.
+  const text = (raw: unknown) => typeof raw === 'string'
+    ? sliceWholeChars(stripUnstorableJsonChars(raw).replace(/[\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim(), 0, 60) : '';
   for (let start = 0; start < leis.length; start += GLEIF_BATCH) {
     const url = new URL(GLEIF);
     url.searchParams.set('filter[lei]', leis.slice(start, start + GLEIF_BATCH).join(','));
