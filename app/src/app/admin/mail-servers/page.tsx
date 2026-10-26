@@ -1,32 +1,23 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, ChevronLeft, RefreshCw, Server } from 'lucide-react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import {
-  activeAlerts,
+  addressRows,
+  attentionItems,
   freshness,
-  ipClients,
-  ipKind,
   providerOf,
-  summarize,
-  type Freshness,
-  type IpKind,
   type MailServerRow,
+  type RowState,
 } from '@/lib/mailServers/heartbeat';
 
-const FRESH_STYLE: Record<Freshness, string> = {
-  ok: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-  late: 'bg-amber-50 text-amber-700 border-amber-200',
-  silent: 'bg-red-50 text-red-700 border-red-200',
-};
-
-const KIND_STYLE: Record<IpKind, string> = {
-  ours: 'bg-teal-50 text-teal-700 border-teal-200',
-  client: 'bg-purple-50 text-purple-700 border-purple-200',
-  paused: 'bg-gray-50 text-gray-500 border-gray-300 border-dashed',
-  idle: 'bg-gray-50 text-gray-500 border-gray-300 border-dashed',
+const DOT: Record<RowState, string> = {
+  ok: 'bg-emerald-500',
+  warn: 'bg-amber-400',
+  bad: 'bg-red-500',
+  off: 'bg-gray-300',
 };
 
 function ago(iso: string, now: Date): string {
@@ -36,118 +27,12 @@ function ago(iso: string, now: Date): string {
   return h < 48 ? `${h} ч назад` : `${Math.floor(h / 24)} дн. назад`;
 }
 
-function uptime(s: number): string {
-  const d = Math.floor(s / 86_400);
-  return d > 0 ? `${d} дн.` : `${Math.floor(s / 3600)} ч`;
-}
-
-function kindLabel(kind: IpKind, clients: string[]): string {
-  if (kind === 'client') return clients.join(', ') || 'клиент';
-  if (kind === 'ours') return 'наши неименные';
-  if (kind === 'paused') return 'на паузе';
-  return 'пусто';
-}
-
-function ServerCard({ row, now }: { row: MailServerRow; now: Date }) {
-  const r = row.payload;
-  const s = r.server;
-  const fresh = freshness(row.received_at, now);
-  const down = Object.entries(s.services ?? {}).filter(([, v]) => v !== 'active');
-  const alerts = activeAlerts(r);
-  return (
-    <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4 sm:p-5">
-      <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <Server className="h-4 w-4 text-gray-400" />
-            <h3 className="text-base font-semibold text-gray-900">{s.label}</h3>
-          </div>
-          <p className="text-xs text-gray-500 mt-0.5">
-            {s.hostname} · работает {uptime(s.uptime_s)}
-          </p>
-        </div>
-        <span className={`text-xs border rounded-full px-2 py-0.5 ${FRESH_STYLE[fresh]}`}>
-          {fresh === 'silent' ? 'молчит ' : 'обновлён '}
-          {ago(row.received_at, now)}
-        </span>
-      </div>
-
-      <div className="space-y-2 mb-3">
-        {r.ips.map((ip) => {
-          const kind = ipKind(ip);
-          return (
-            <div key={ip.ip} className="rounded-lg border border-gray-100 bg-gray-50/60 p-2.5">
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-                <span className="font-mono text-gray-900">{ip.ip}</span>
-                <span className="text-gray-500">{ip.ptr || 'нет PTR'}</span>
-                <span className={`ml-auto text-xs border rounded-full px-2 py-0.5 ${KIND_STYLE[kind]}`}>
-                  {kindLabel(kind, ipClients(ip))}
-                  {kind !== 'idle' ? `, ${ip.domains.reduce((n, d) => n + d.boxes, 0)}` : ''}
-                </span>
-              </div>
-              {ip.domains.length > 0 && (
-                <div className="mt-1.5 grid grid-cols-1 gap-0.5 text-xs text-gray-600">
-                  {ip.domains.map((d) => (
-                    <div key={d.domain} className="flex flex-wrap gap-x-2">
-                      <span className="text-gray-800">{d.domain}</span>
-                      <span className="text-gray-400">→ {d.conn || '—'}</span>
-                      <span>
-                        {d.boxes} ящ.
-                        {d.paused ? `, на паузе ${d.paused}` : ''}
-                        {d.pending ? `, не подключено ${d.pending}` : ''}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1 text-xs mb-3">
-        <div><dt className="inline text-gray-500">Почта за сутки: </dt><dd className="inline text-gray-900">отправлено {r.mail_today.sent}, принято {r.mail_today.delivered_in}</dd></div>
-        <div><dt className="inline text-gray-500">Отказы: </dt><dd className="inline text-gray-900">мёртвые адреса {r.mail_today.bounced_dead}, спам/блок {r.mail_today.bounced_other}</dd></div>
-        <div><dt className="inline text-gray-500">Очередь: </dt><dd className="inline text-gray-900">{s.queue}</dd></div>
-        <div><dt className="inline text-gray-500">Диск: </dt><dd className="inline text-gray-900">{s.disk_used_pct}%</dd></div>
-        <div><dt className="inline text-gray-500">Память: </dt><dd className="inline text-gray-900">{s.mem_used_mb ?? '—'} из {s.mem_total_mb ?? '—'} МБ</dd></div>
-        <div><dt className="inline text-gray-500">Сертификат: </dt><dd className="inline text-gray-900">{s.cert_days_left ?? '—'} дн.</dd></div>
-        {s.pay_due && <div><dt className="inline text-gray-500">Оплачен до: </dt><dd className="inline text-gray-900">{s.pay_due}</dd></div>}
-      </dl>
-
-      {r.instantly.tags.length > 0 && (
-        <div className="text-xs text-gray-600 mb-2">
-          <span className="text-gray-500">Instantly: </span>
-          {r.instantly.tags.map((t) => `«${t.label}» ${t.active} из ${t.boxes} подключены, прогрев у ${t.warmup_on}`).join('; ')}
-          {r.instantly.error && <span className="text-red-600"> · не удалось проверить: {r.instantly.error}</span>}
-        </div>
-      )}
-
-      {(down.length > 0 || r.dnsbl.listed.length > 0 || alerts.length > 0) && (
-        <div className="rounded-lg border border-red-100 bg-red-50/60 p-2.5 text-xs text-red-800 space-y-1">
-          {down.map(([name, state]) => (
-            <div key={name}>Служба {name}: {state || 'не отвечает'}</div>
-          ))}
-          {r.dnsbl.listed.map((l) => (
-            <div key={l.name + l.result}>В чёрном списке: {l.name} — {l.result}</div>
-          ))}
-          {alerts.map((a) => (
-            <div key={a.key}>
-              {a.text || a.key}
-              {a.since ? ` (с ${a.since.slice(0, 16).replace('T', ' ')} UTC)` : ''}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function AdminMailServersPage() {
   const [rows, setRows] = useState<MailServerRow[]>([]);
   const [now, setNow] = useState(() => new Date());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [open, setOpen] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -174,23 +59,22 @@ export default function AdminMailServersPage() {
     return () => clearInterval(t);
   }, [load]);
 
-  const summary = useMemo(() => summarize(rows, now), [rows, now]);
-  const groups = useMemo(() => {
-    const map = new Map<string, MailServerRow[]>();
-    for (const row of rows) {
-      const key = providerOf(row);
-      map.set(key, [...(map.get(key) ?? []), row]);
-    }
-    return [...map.entries()];
-  }, [rows]);
+  const addresses = useMemo(() => addressRows(rows, now), [rows, now]);
+  const attention = useMemo(() => attentionItems(rows, now), [rows, now]);
+  const boxes = addresses.reduce((n, a) => n + (a.kind === 'paused' ? 0 : a.boxes), 0);
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-8">
+    <div className="max-w-5xl mx-auto px-4 py-8">
       <Link href="/admin" className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 mb-4">
         <ChevronLeft className="h-4 w-4" /> Админ панель
       </Link>
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
-        <h1 className="text-2xl font-bold text-gray-900">Почтовые серверы</h1>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Почтовые серверы</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            {rows.length} серв. · {addresses.length} адр. · {boxes} ящиков в работе · данные обновляются сами каждые 15 минут
+          </p>
+        </div>
         <button
           type="button"
           onClick={() => void load()}
@@ -199,71 +83,166 @@ export default function AdminMailServersPage() {
           <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /> Обновить
         </button>
       </div>
-      <p className="text-sm text-gray-500 mb-6">
-        Свои почтовые серверы для ящиков в Instantly. Каждый сервер сам присылает состояние раз в 15 минут; молчит
-        дольше часа — значит, сломался он сам или связь с ним.
-      </p>
 
       {error && (
-        <div className="mb-4 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-          <AlertTriangle className="h-4 w-4" /> {error}
+        <div className="mb-6 flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          <AlertTriangle className="h-4 w-4 shrink-0" /> {error}
         </div>
       )}
 
-      {rows.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-6 text-sm">
-          <span className="rounded-lg border border-gray-200 bg-white px-3 py-1">Серверов: <b>{summary.servers}</b>{summary.silent ? <span className="text-red-600">, молчат {summary.silent}</span> : null}</span>
-          <span className="rounded-lg border border-gray-200 bg-white px-3 py-1">Адресов: <b>{summary.ips}</b></span>
-          <span className="rounded-lg border border-gray-200 bg-white px-3 py-1">Ящиков: наших <b>{summary.boxesOurs}</b>, клиентов <b>{summary.boxesClients}</b>, на паузе <b>{summary.boxesPaused}</b></span>
-          <span className={`rounded-lg border px-3 py-1 ${summary.alerts || summary.listed ? 'border-red-200 bg-red-50 text-red-700' : 'border-gray-200 bg-white'}`}>
-            Тревог: <b>{summary.alerts}</b>, в чёрных списках: <b>{summary.listed}</b>
-          </span>
-        </div>
-      )}
+      {rows.length > 0 &&
+        (attention.length === 0 ? (
+          <div className="mb-8 flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-800">
+            <CheckCircle2 className="h-5 w-5 shrink-0" />
+            <span>Всё в порядке: все серверы на связи, тревог нет.</span>
+          </div>
+        ) : (
+          <div className="mb-8 rounded-xl border border-amber-200 bg-amber-50 p-4">
+            <div className="flex items-center gap-2 font-medium text-amber-900 mb-2">
+              <AlertTriangle className="h-5 w-5" /> Требует внимания
+            </div>
+            <ul className="space-y-1 text-sm">
+              {attention.map((a) => (
+                <li key={a.text} className="flex gap-2">
+                  <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${a.level === 'bad' ? 'bg-red-500' : 'bg-amber-400'}`} />
+                  <span className={a.level === 'bad' ? 'text-red-800' : 'text-amber-900'}>{a.text}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
 
       {!loading && rows.length === 0 && !error && (
-        <div className="rounded-xl border border-dashed border-gray-300 p-8 text-center text-sm text-gray-500 mb-6">
+        <div className="mb-8 rounded-xl border border-dashed border-gray-300 p-8 text-center text-sm text-gray-500">
           Пока ни один сервер не прислал отчёт.
         </div>
       )}
 
-      {groups.map(([provider, list]) => (
-        <section key={provider} className="mb-8">
-          <h2 className="text-lg font-semibold text-gray-900 mb-3">{provider}</h2>
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {list.map((row) => <ServerCard key={row.server_id} row={row} now={now} />)}
+      {addresses.length > 0 && (
+        <section className="mb-10">
+          <h2 className="text-lg font-semibold text-gray-900 mb-1">Кто где живёт</h2>
+          <p className="text-sm text-gray-500 mb-3">У каждого клиента свой адрес. Нажмите на строку — домены и ящики.</p>
+          <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+            <table className="w-full text-sm">
+              <thead className="text-left text-xs text-gray-500 border-b border-gray-100">
+                <tr>
+                  <th className="px-4 py-2 font-medium">Кто</th>
+                  <th className="px-4 py-2 font-medium text-right">Ящиков</th>
+                  <th className="px-4 py-2 font-medium">Адрес</th>
+                  <th className="px-4 py-2 font-medium">Сервер</th>
+                  <th className="px-4 py-2 font-medium">Состояние</th>
+                </tr>
+              </thead>
+              <tbody>
+                {addresses.map((a) => (
+                  <Fragment key={a.key}>
+                    <tr
+                      onClick={() => setOpen(open === a.key ? null : a.key)}
+                      className="cursor-pointer border-b border-gray-100 last:border-0 hover:bg-gray-50"
+                    >
+                      <td className="px-4 py-3">
+                        <span className="inline-flex items-center gap-1.5">
+                          {open === a.key ? <ChevronDown className="h-4 w-4 text-gray-400" /> : <ChevronRight className="h-4 w-4 text-gray-400" />}
+                          <span className={a.kind === 'client' ? 'font-semibold text-gray-900' : 'text-gray-700'}>{a.who}</span>
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-right tabular-nums text-gray-900">{a.boxes}</td>
+                      <td className="px-4 py-3 font-mono text-gray-700">{a.ip}</td>
+                      <td className="px-4 py-3 text-gray-700">
+                        {a.server} <span className="text-gray-400">· {a.where}</span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="inline-flex items-center gap-2 text-gray-700">
+                          <span className={`h-2.5 w-2.5 rounded-full ${DOT[a.state]}`} />
+                          {a.stateText}
+                        </span>
+                      </td>
+                    </tr>
+                    {open === a.key && (
+                      <tr className="border-b border-gray-100 bg-gray-50/70">
+                        <td colSpan={5} className="px-10 py-3 text-xs text-gray-600">
+                          <div className="mb-2">Обратное имя адреса: <span className="text-gray-900">{a.ptr || '—'}</span></div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1">
+                            {a.domains.map((d) => (
+                              <div key={d.domain}>
+                                <span className="text-gray-900">{d.domain}</span> — {d.boxes} ящ.
+                                {d.paused ? `, на паузе ${d.paused}` : ''}
+                                <span className="text-gray-400"> · подключение {d.conn || '—'}</span>
+                              </div>
+                            ))}
+                          </div>
+                          {a.tags.length > 0 && (
+                            <div className="mt-2">
+                              Instantly:{' '}
+                              {a.tags.map((t) => `«${t.label}» — подключено ${t.active} из ${t.boxes}, прогрев у ${t.warmup_on}`).join('; ')}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
           </div>
         </section>
-      ))}
+      )}
 
-      <section className="bg-white rounded-xl border border-gray-200 p-5 text-sm text-gray-700 leading-relaxed space-y-3">
-        <h2 className="text-lg font-semibold text-gray-900">Как это устроено</h2>
-        <p>
-          <b>Изоляция.</b> У каждого клиента свой адрес сервера (на одном сервере — до двух клиентов, каждый на своём IP),
-          у каждого сервера свой служебный домен для обратного имени (mx1.&lt;домен&gt;). Чёрный список одного адреса или
-          домена не задевает остальных.
-        </p>
-        <p>
-          <b>Имена подключения.</b> Instantly подключается к ящикам не по адресу сервера, а по имени пары доменов
-          (pN.&lt;служебный домен&gt;). Пару можно перевезти на другой сервер одной правкой A-записи — прогрев в Instantly
-          не сбрасывается. Срок жизни записей в DNS — 1 час.
-        </p>
-        <p>
-          <b>Тревоги.</b> На каждом сервере бот (pilot-alert.py) раз в 15 минут проверяет службы, отказы, очередь, диск,
-          сертификат, чёрные списки, оплату и ящики в Instantly; ошибки подключения в Instantly после простоя снимает сам.
-          Из московского дата-центра Telegram недоступен, поэтому тревоги в бот пересылает внешний сервер.
-        </p>
-        <p>
-          <b>Резервные копии.</b> Каждую ночь внешний сервер забирает с каждого сервера зашифрованный архив (настройки,
-          ключи DKIM, ящики, письма), хранит 14 дней. Ключ расшифровки — только у владельца. Восстановление проверено:
-          сервер поднимается из архива за несколько минут.
-        </p>
-        <p>
-          <b>Новый клиент.</b> Домены покупаются в Reg.ru; на сервере add_domain.sh &lt;домен&gt; &lt;IP&gt; &lt;ящики&gt;,
-          записи DNS через API Reg.ru, проверки wait_dns_and_test.sh (DKIM, приём, SPF/DKIM снаружи, чёрные списки),
-          подключение к Instantly instantly_add_pending.py с тегом клиента. Скрипты и инструкции — папка mail-pilot.
-        </p>
-      </section>
+      {rows.length > 0 && (
+        <section className="mb-10">
+          <h2 className="text-lg font-semibold text-gray-900 mb-3">Серверы</h2>
+          <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+            <table className="w-full text-sm">
+              <thead className="text-left text-xs text-gray-500 border-b border-gray-100">
+                <tr>
+                  <th className="px-4 py-2 font-medium">Сервер</th>
+                  <th className="px-4 py-2 font-medium">Где</th>
+                  <th className="px-4 py-2 font-medium">Отчёт</th>
+                  <th className="px-4 py-2 font-medium">Почта за сутки</th>
+                  <th className="px-4 py-2 font-medium">Диск</th>
+                  <th className="px-4 py-2 font-medium">Оплачен до</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => {
+                  const s = row.payload.server;
+                  const m = row.payload.mail_today;
+                  const fresh = freshness(row.received_at, now);
+                  return (
+                    <tr key={row.server_id} className="border-b border-gray-100 last:border-0">
+                      <td className="px-4 py-3 text-gray-900">
+                        {s.label}
+                        <div className="text-xs text-gray-400">{s.hostname}</div>
+                      </td>
+                      <td className="px-4 py-3 text-gray-700">{providerOf(row)}</td>
+                      <td className="px-4 py-3">
+                        <span className={fresh === 'ok' ? 'text-gray-700' : 'font-medium text-red-600'}>{ago(row.received_at, now)}</span>
+                      </td>
+                      <td className="px-4 py-3 text-gray-700">
+                        ушло {m.sent}, пришло {m.delivered_in}
+                        {m.bounced_other > 0 && <span className="text-amber-700"> · отказов «спам» {m.bounced_other}</span>}
+                      </td>
+                      <td className={`px-4 py-3 ${s.disk_used_pct >= 80 ? 'font-medium text-red-600' : 'text-gray-700'}`}>{s.disk_used_pct}%</td>
+                      <td className="px-4 py-3 text-gray-700">{s.pay_due || '—'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      <details className="rounded-xl border border-gray-200 bg-white p-5 text-sm text-gray-700">
+        <summary className="cursor-pointer font-semibold text-gray-900">Как это устроено</summary>
+        <ul className="mt-3 space-y-2 list-disc pl-5 leading-relaxed">
+          <li>У каждого клиента свой адрес сервера; на одном сервере не больше двух клиентов. Чёрный список одного адреса не задевает остальных.</li>
+          <li>Instantly подключается к ящикам по имени пары доменов (pN.&lt;домен сервера&gt;). Пару можно перевезти на другой сервер одной правкой DNS — прогрев не сбрасывается.</li>
+          <li>Бот на каждом сервере раз в 15 минут проверяет службы, отказы, диск, чёрные списки, оплату и ящики в Instantly и пишет в Telegram; ошибки подключения в Instantly после простоя снимает сам.</li>
+          <li>Каждую ночь с серверов забирается зашифрованная копия (настройки, ключи, ящики, письма), хранится 14 дней; сервер поднимается из неё за несколько минут.</li>
+          <li>Новый клиент: домены в Reg.ru → add_domain.sh на сервере → записи DNS → проверки wait_dns_and_test.sh → instantly_add_pending.py с тегом клиента. Скрипты и инструкции — в папке mail-pilot.</li>
+        </ul>
+      </details>
     </div>
   );
 }
