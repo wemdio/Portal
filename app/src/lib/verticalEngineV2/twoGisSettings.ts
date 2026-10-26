@@ -6,6 +6,10 @@ import type { SupabaseClient } from '@supabase/supabase-js';
  * читают и портал (новое превью, выдача), и воркер. Сбой чтения — null: это
  * «неизвестно», а не «выключено». Флаг не ставится и строки 2ГИС не выдаются, но
  * близнец не закрывается, а откладывается (необратимо закрывает только mode=off).
+ *
+ * Аварийный выключатель выдачи — client_use='off': обратимо, близнецы откладываются.
+ * Переход all → internal — смена политики, а не авария: для текущих баз клиентских
+ * проектов он необратим (проект «убран из списка»: близнецы закрываются, строки освобождаются).
  */
 export interface VeTwoGisSettings {
   mode: 'off' | 'on';
@@ -115,12 +119,51 @@ export function veTwoGisOutputOpen(settings: VeTwoGisSettings | null, projectId:
 }
 
 /** Снимок для чтения проверен сборкой (шаг Ш5): без него флаг заморозил бы пустой снимок. */
-export const veTwoGisSnapshotReady = (settings: VeTwoGisSettings | null) =>
+export const veTwoGisSnapshotReady = (settings: VeTwoGisSettings | null):
+  settings is VeTwoGisSettings & { snapshot_id: number; features_version: number; built_at: string } =>
   !!settings && settings.snapshot_id != null && settings.features_version != null && settings.built_at != null;
 
 /** Флаг 2ГИС новому RU-превью: 2ГИС включён, снимок собран и выдача проекту открыта. */
 export function veTwoGisFlagAllowed(settings: VeTwoGisSettings | null, projectId: string): boolean {
   return settings?.mode === 'on' && veTwoGisSnapshotReady(settings) && veTwoGisOutputOpen(settings, projectId);
+}
+
+/** collect_info.two_gis_source (план R3 «Флаг»): ставит только вставка нового RU-превью
+ * (baseCollectEnqueue); база поставки копирует его в baseCollect. Нет поля — нет близнецов. */
+export const VE_TWO_GIS_SOURCE_FLAG_VERSION = 1;
+export interface VeTwoGisSourceFlag {
+  version: typeof VE_TWO_GIS_SOURCE_FLAG_VERSION;
+  snapshot_id: number;
+  features_version: number;
+  /** Потолок кандидатов близнеца на базу; null — собственный лимит базы. */
+  max_candidates: number | null;
+  frozen_at: string;
+}
+
+/** Только после veTwoGisFlagAllowed: без проверенного снимка флага нет. */
+export function createVeTwoGisSourceFlag(settings: VeTwoGisSettings, now: Date): VeTwoGisSourceFlag | null {
+  if (!veTwoGisSnapshotReady(settings)) return null;
+  return { version: VE_TWO_GIS_SOURCE_FLAG_VERSION, snapshot_id: settings.snapshot_id,
+    features_version: settings.features_version, max_candidates: settings.max_candidates, frozen_at: now.toISOString() };
+}
+
+const positiveInt = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+
+/** jsonb → флаг. Чужая форма — null: база ведёт себя как без флага (без близнеца), а не падает. */
+export function readVeTwoGisSourceFlag(value: unknown): VeTwoGisSourceFlag | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const flag = value as Record<string, unknown>;
+  if (flag.version !== VE_TWO_GIS_SOURCE_FLAG_VERSION || !positiveInt(flag.snapshot_id) || !positiveInt(flag.features_version)
+    || (flag.max_candidates !== null && !positiveInt(flag.max_candidates))
+    || typeof flag.frozen_at !== 'string' || !Number.isFinite(Date.parse(flag.frozen_at))) return null;
+  return { version: VE_TWO_GIS_SOURCE_FLAG_VERSION, snapshot_id: flag.snapshot_id, features_version: flag.features_version,
+    max_candidates: flag.max_candidates as number | null, frozen_at: flag.frozen_at };
+}
+
+/** Флаг заморожен на снимке и таблице сайтов, проверенных сейчас. Проверка страницы (часть 3) — тем же предикатом. */
+export function veTwoGisFlagCurrent(flag: VeTwoGisSourceFlag | null, settings: VeTwoGisSettings | null): boolean {
+  return !!flag && veTwoGisSnapshotReady(settings) && flag.snapshot_id === settings.snapshot_id
+    && flag.features_version === settings.features_version;
 }
 
 /** Конец тихого окна, если now внутри него, иначе null. Окно [start, end) по UTC, start > end — через полночь. */

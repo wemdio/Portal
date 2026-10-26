@@ -1,4 +1,4 @@
-import { applyVeCollectionGeographyToPlan, readVeCollectionGeography, type VeCollectionGeography } from '../collectionGeography';
+import { applyVeCollectionGeographyToPlan, readVeCollectionGeography, veTwoGisQueryScope, type VeCollectionGeography } from '../collectionGeography';
 import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
 import { VeLlmRateLimitError, veRateLimitDelay } from '../llmRateLimit';
 /**
@@ -101,7 +101,7 @@ import { isVeProviderBillingError, isVeRequestyBillingError, isVeProviderConfigu
 import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
   readVeBatchSpend, veAdaptiveCandidateLimit, veAdaptiveLowYield, veAdaptiveYieldWindows, veAdaptiveSourceDry, veAdaptiveSourceDeferred, veDryLiveSources,
   veDrySourcesSummary, type VeAdaptiveCollection } from '../adaptiveCollection';
-import { normalizeVeGenerationSourcePlan, stripUnfoundedSizeFilters, veBroadHypothesisPlan, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTasks, veTaskWithoutSizeFilters,
+import { isVeGenerationLaboratoryScope, normalizeVeGenerationSourcePlan, stripUnfoundedSizeFilters, veBroadHypothesisPlan, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTasks, veTaskWithoutSizeFilters,
   VE_PLAN_MAX_TASKS, VE_PLAN_WIDENING_LIMIT, VE_SIZE_FILTER_KEYS } from '../planWidening';
 import { isVeRestaurantCatalogAudience, normalizeVeRestaurantSourcePlan, type VeRestaurantSourceRefresh } from '../restaurantSourcePolicy';
 import { prioritizeVeCandidates, readVeCandidateHints } from '../candidatePriority';
@@ -113,7 +113,7 @@ import { applyFundedFilters } from '@/lib/funded/queryFilters';
 import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
 import { readVeYandexCatalogPage, resolveVeYandexCatalogFilters, VeYandexCatalogUnavailableError, veRuMapsUseCatalog, VE_YANDEX_CATALOG_MAPPING_REVISION, type VeYandexCatalogCheckpoint } from '../yandexCatalog';
-import { isVeLegacyMapsTask, isVeRenewableSourceTask, reopenVeSourceTask } from '../sourceRenewal';
+import { isVeLegacyMapsTask, isVeRenewableSourceTask, reopenVeSourceTask, veHasSourceCursor } from '../sourceRenewal';
 import { extractEmail, extractEmails } from '@/lib/tools/dfybUtils';
 import { applyVeSourceContacts, normalizeVeSourceContacts, hasPendingVeSourceContacts, pendingVeSourceContacts, recoverVeSourceContacts, countVeSourceDiscoveryContacts, evaluateVeSourceDiscoveryBudget, veSourceDiscoveryLimit, VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT, type VeSourceContactCheckpoint, type VeSourceDiscoveryBudget } from '../sourceContacts';
 import {
@@ -140,8 +140,11 @@ import { veSavedRelevanceScope } from '../collectionRecovery';
 import { addVeKnownWebsiteSource, VE_KNOWN_ADULT_WEBSITES, VE_KNOWN_WEBSITE_CATALOG, veKnownWebsiteAudienceEligible, type VeKnownWebsiteSourceReceipt } from '../knownWebsiteDirectory';
 import { cleanVeCompanyNames, type VeCompanyNameCheckpoint } from '../companyNameCleanup';
 import { recoverVeSavedEmails, needsVeSavedEmailReview, hasPendingVeSavedEmailRecovery, type VeSavedEmailRecoveryState } from '../savedEmailRecovery';
-import { isVeTwoGisRow, isVeTwoGisTask, veCountedPlanTasks, veTwoGisImportMarker, veTwoGisInputMarkers, veTwoGisTwinKeys,
-  VE_TWO_GIS_ROW_FIELD, withoutVeTwoGisRows } from '../twoGisQuarantine';
+import { finalizeVeTwoGisTwins, isVeTwoGisRow, isVeTwoGisTask, pairVeTwoGisStates, retireVeOrphanTwoGisTwins, retireVeTwoGisTwin,
+  veCountedPlanTasks, veTwoGisImportMarker, veTwoGisInputMarkers, veTwoGisTwinKeys, VE_TWO_GIS_ROW_FIELD, withoutVeTwoGisRows,
+  withVeTwoGisTwins } from '../twoGisQuarantine';
+import { readVeTwoGisSettings, readVeTwoGisSourceFlag, veTwoGisFlagAllowed, veTwoGisFlagCurrent,
+  type VeTwoGisSourceFlag } from '../twoGisSettings';
 import { singleVeSavedEmail } from '../savedEmailReviewEligibility';
 import { companyNameSource, isCompanyNameReady, VE_COMPANY_NAME_FIELD, type VeCompanyNameCleanupSummary } from '../companyNames';
 import { prepareSegmentationAudience } from '../segmentationAudit';
@@ -173,7 +176,7 @@ import { searchVeNicheDirectoryRows } from '../nicheDirectory';
 import { isVeAudienceScopeEnabled, veAudienceScopeText } from '../audienceScope';
 import { createVeCollectionAudienceSnapshot, readVeCollectionAudienceSnapshot, readVeSourceCostPolicy,
   veSourceDiscoveryIsExistingOnly, veNewAudienceSourceCostPolicy, veAudienceNicheProfile, normalizeVeAudienceSourcePlan, loadVeApprovedSupplyAudience,
-  canRefreshVeAudienceSources, needsLegacyFintechAudienceRefresh, needsLegacyRetailAudienceRefresh, veAudienceRetailProfile,
+  canRefreshVeAudienceSources, isVeBroadFintechAudience, needsLegacyFintechAudienceRefresh, needsLegacyRetailAudienceRefresh, veAudienceRetailProfile,
   type VeCollectionAudienceSnapshot, type VeSourceCostPolicy, type VeSourceAudienceHypothesis } from '../sourceAudience';
 import { vePaymentCompanyHint } from '../paymentCompanyDirectory';
 import { deriveVeRetailAudienceScope, type VeRetailSourceProfile } from '../legacyRetailAudience';
@@ -762,6 +765,9 @@ export interface VeSliceProbe {
 export interface VeCollectInfo {
   /** Frozen on preview creation; supply inherits the approved source base. */
   collection_geography?: VeCollectionGeography;
+  /** 2ГИС (план 26.10, R3 «Флаг»): ставит только вставка нового RU-превью; база поставки копирует его
+   * с одобренного превью, пока настройки разрешают. Нет поля — нет близнецов, база как до R3. */
+  two_gis_source?: VeTwoGisSourceFlag;
   /** Explicit operator repair: freezes the existing collection envelope and source list. */
   geography_repair?: VeGeographyRepairReceipt;
   known_website_source?: VeKnownWebsiteSourceReceipt;
@@ -780,6 +786,8 @@ export interface VeCollectInfo {
   source_selection?: { version: 1 | 2; profile: VeNicheSourceProfile; previous_tasks: Array<{
     task: VeCollectTask; catalog?: VeYandexCatalogCheckpoint; directory_cursors?: Record<string, number>;
     status: VeCollectTaskStatus; child_job_id: string | null; exhausted?: boolean; unavailable?: boolean;
+    /** Только у задач пары 2ГИС: курсор близнеца и связь пары, для аудита. */
+    two_gis?: VeCollectTaskState['two_gis']; two_gis_pair_id?: string;
   }> };
   adaptive_collection?: VeAdaptiveCollection;
   /** Display/audit snapshot of the last applied "addresses per company" limit; the source of truth is ve_bases.max_emails_per_company. */
@@ -1161,6 +1169,8 @@ async function buildPlan(
   strategyFeedback?: string,
   audienceSnapshot?: VeCollectionAudienceSnapshot,
   collectionGeography?: VeCollectionGeography,
+  /** Флаг 2ГИС базы. Передаёт только первичный план; реплан не передаёт — близнецов он не даёт. */
+  twoGisSource?: VeTwoGisSourceFlag | null,
 ): Promise<{
   plan: VeSourcePlan;
   planRepair?: VePlanRepair;
@@ -1310,7 +1320,30 @@ async function buildPlan(
   // Последним перед географией: прежние нормализаторы переставляют и режут задачи, а
   // ключи стратегий для проверки дублей сравниваются в одной форме — до географии.
   const licence = normalizeVeLicenceSourcePlan(restaurant.plan);
-  const plan = applyVeCollectionGeographyToPlan(licence.plan, collectionGeography);
+  // 2ГИС (план R3 «Близнец»): после последнего нормализатора и до географии — по близнецу сразу после
+  // каждой yandex_maps, только с флагом и без профиля аудитории. Профиль считается лишь при флаге:
+  // без флага план, лог и порядок прежние.
+  const twoGisProfile = () => {
+    // broadFlag null — ve_hypotheses.broad не прочитался: clinic/generation/media/restaurant не проверены,
+    // а pinMediaAudience/pinNicheSourceProfile потом могут найти профиль рядом с живым близнецом.
+    if (broadFlag === null) return true;
+    const single = !structuredAudience && hypothesisId && broadFlag === false ? hypotheses.map((h) => ({ ...h, broad: false })) : [];
+    // Решение Сергея 26.10: структурная аудитория блокирует близнеца, только если у какой-нибудь гипотезы
+    // снимка есть обязательные условия — тот же критерий, что у safeAlternativeTask.
+    return !!audienceSnapshot?.hypotheses.some((h) => h.audience_scope?.required.length)
+      || (!!controlled && controlled.decision !== 'unchanged') || !!niche || !!clinic || !!media
+      || generation.changed || restaurant.changed || isVeGenerationLaboratoryScope({ market, hypotheses: single })
+      || (market === 'ru' && single.length === 1 && isVeRestaurantCatalogAudience(single[0]))
+      // Старый широкий финтех без снимка: buildPlan его не переписывает, а needsLegacyFintechAudienceRefresh — может.
+      || (!audienceSnapshot && broadFlag === true && hypotheses.length === 1 && isVeBroadFintechAudience({ ...hypotheses[0], broad: true }));
+  };
+  const twinned = twoGisSource && market === 'ru' && !twoGisProfile() ? withVeTwoGisTwins(licence.plan) : licence.plan;
+  const placed = applyVeCollectionGeographyToPlan(twinned, collectionGeography);
+  // Дедуп близнецов — по итоговому ключу, после географии: она сводит разные geo к одному.
+  const twins = twinned !== licence.plan ? finalizeVeTwoGisTwins(placed) : null;
+  const plan = twins?.plan ?? placed;
+  if (twins) stageLog(ctx, `[base_collect] план: близнецов 2ГИС ${twins.added}`
+    + `${twins.dropped ? `, не поставлено ${twins.dropped} (повтор ключа или география вне 2ГИС)` : ''}`);
   if (licence.changed) stageLog(ctx, `[base_collect] план: лицензия medical только с ОКВЭД, рядом добор по тому же ОКВЭД без лицензии (${licence.changed} правок)`);
   if (licence.skipped) stageLog(ctx, `[base_collect] план: добор без лицензии не добавлен — в плане уже ${VE_PLAN_MAX_TASKS} задач (${licence.skipped})`);
   if (generation.changed) stageLog(ctx, '[base_collect] план генерации: профильные каталоги впереди, водоканалы исключены, вакансии ограничены отраслью');
@@ -3017,6 +3050,9 @@ function taggedHarvest(task: VeCollectTaskState): VeUnifiedRow[] {
     _ve_source_strategy: candidateSourceKey(row) ?? veSourceStrategyKey(task.task) }));
 }
 const candidateSourceKey = (row: VeUnifiedRow) => (row as VeUnifiedRow & { _ve_source_strategy?: string })._ve_source_strategy;
+/** Аудит пары 2ГИС в previous_tasks: у задач без пары ключей нет — форма прежняя. */
+const veTwoGisPreviousFields = (state: VeCollectTaskState) => ({ ...(state.two_gis ? { two_gis: state.two_gis } : {}),
+  ...(state.two_gis_pair_id ? { two_gis_pair_id: state.two_gis_pair_id } : {}) });
 
 /** Explicit preview continuation only: rewrite future free-source reads while
  * preserving paid observations, target caps, old cursors and source attribution. */
@@ -3034,10 +3070,19 @@ export function applyVeAudienceSourceRefresh(info: VeCollectInfo, snapshot: VeCo
   if (decision.decision !== (retail ? 'retail' : 'sector_fintech')) return false;
   const previous = info.tasks.map((state) => ({ task: state.task, catalog: state.catalog,
     directory_cursors: state.directory_cursors, status: state.status, child_job_id: state.child_job_id,
-    exhausted: state.exhausted, unavailable: state.unavailable }));
+    exhausted: state.exhausted, unavailable: state.unavailable, ...veTwoGisPreviousFields(state) }));
   info.cost_policy = { version: 1, website_discovery: 'existing_only' };
   for (let index = 0; index < info.tasks.length; index++) {
     const state = info.tasks[index], task = decision.plan.tasks[index];
+    if (isVeTwoGisTask(state)) {
+      // Аудитория уточнена (retail / финтех): справочник организаций под неё не сужается — близнец закрыт,
+      // собранное и атрибуция остаются, прежнее состояние с курсором — в previous выше.
+      if (!(state.status === 'done' && state.unavailable)) {
+        state.harvest = taggedHarvest(state);
+        retireVeTwoGisTwin(state, 'Источник уточнён под выбранную аудиторию: справочник организаций по ней не читается; результаты сохранены.');
+      }
+      continue;
+    }
     // Historical paid children and unchanged cursors never run a second time.
     const staleMapping = retail && state.source === 'yandex_maps'
       && state.catalog?.mapping_revision !== VE_YANDEX_CATALOG_MAPPING_REVISION;
@@ -3076,7 +3121,14 @@ function applyCollectionGeography(info: VeCollectInfo): boolean {
   let changed = false;
   info.tasks.forEach((state, index) => {
     if (JSON.stringify(state.task) === JSON.stringify(tasks[index])) return;
-    if (state.status !== 'pending' || state.child_job_id || state.rows > 0 || state.harvest?.length) {
+    const progressed = state.status !== 'pending' || !!state.child_job_id || state.rows > 0 || !!state.harvest?.length;
+    if (progressed && isVeTwoGisTask(state)) {
+      // Близнеца с прогрессом по прежней географии не пересчитывают (заметка R1 № 8) и базу им не валят:
+      // закрыт, harvest/курсор/пара остаются; задача прежняя — атрибуция строк не меняется. Повтор — no-op.
+      if (retireVeTwoGisTwin(state, 'География сбора изменилась: справочник организаций по прежней географии не продолжается')) changed = true;
+      return;
+    }
+    if (progressed) {
       throw new Error('Collection geography differs from a saved source task; explicit preview correction is required');
     }
     if (info.adaptive_collection?.active_source === veSourceStrategyKey(state.task)) {
@@ -3084,10 +3136,35 @@ function applyCollectionGeography(info: VeCollectInfo): boolean {
     }
     state.task = tasks[index];
     delete state.catalog;
+    // Курсор близнеца относится к прежним фильтрам — сбрасывается, как закладка каталога; two_gis_pair_id прежний.
+    delete state.two_gis;
+    // План R3 «Переписывания»: не разрешилось — unavailable. Прогресса нет (проверено выше).
+    if (isVeTwoGisTask(state) && (!state.task.two_gis_query || !veTwoGisQueryScope(state.task.two_gis_query))) {
+      retireVeTwoGisTwin(state, 'География сбора не сводится к регионам и городам России: справочник организаций не читается');
+    }
     changed = true;
   });
   if (changed) info.plan = { ...info.plan, tasks: info.tasks.map((state) => state.task) };
   return changed;
+}
+
+/** 2ГИС (R3 «Флаг»): база поставки берёт флаг одобренного превью, только если сейчас mode=on, снимок
+ * проверен, выдача проекту открыта и снимок с таблицей сайтов — те же, что во флаге. Зовётся только до
+ * плана (isNew) и только при флаге в линии: прочие базы поставки нового чтения не получают. Часть 4
+ * заменит чтение настройками тика из ctx. */
+async function inheritVeSupplyTwoGisSource(ctx: VeStageContext, projectId: string, info: VeCollectInfo,
+  flag: VeTwoGisSourceFlag, market: VeMarket): Promise<boolean> {
+  const settings = market === 'ru' ? await readVeTwoGisSettings(ctx.supabase) : null;
+  const allowed = veTwoGisFlagAllowed(settings, projectId);
+  const current = allowed && veTwoGisFlagCurrent(flag, settings);
+  const before = JSON.stringify(info.two_gis_source ?? null);
+  if (current) info.two_gis_source = { ...flag };
+  else {
+    delete info.two_gis_source;
+    stageLog(ctx, `[base_collect] 2gis: добор без 2ГИС — ${market !== 'ru' ? 'рынок не RU' : !settings ? 'настройки не прочитаны'
+      : !allowed ? 'выключен, снимок не проверен или выдача закрыта' : 'снимок сменился'}`);
+  }
+  return JSON.stringify(info.two_gis_source ?? null) !== before;
 }
 
 async function pinCollectionAudience(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo, market: VeMarket, generationVersion: unknown): Promise<void> {
@@ -3112,7 +3189,10 @@ async function pinCollectionAudience(ctx: VeStageContext, job: VeJob, base: VeAu
         info.hypotheses = approved.snapshot.hypotheses;
       }
       if (approved.geography) info.collection_geography = approved.geography;
-      await persistCollectInfo(ctx, base.id, info);
+      const twoGisChanged = approved.twoGisSource
+        ? await inheritVeSupplyTwoGisSource(ctx, job.project_id, info, approved.twoGisSource, market) : false;
+      // Без флага — прежняя запись: approved не null только со снимком или географией.
+      if (approved.snapshot || approved.geography || twoGisChanged) await persistCollectInfo(ctx, base.id, info);
     }
     return;
   }
@@ -3181,6 +3261,16 @@ export function applyVeNicheSourceSelection(info: VeCollectInfo, profile: VeNich
     || info.preview_pipeline?.batches.length || info.tasks.some((task) => task.status === 'dispatched')) return false;
   const previous: NonNullable<VeCollectInfo['source_selection']>['previous_tasks'] = [...(info.source_selection?.previous_tasks ?? [])];
   for (const state of info.tasks) {
+    if (isVeTwoGisTask(state)) {
+      // Профиль аудитории (план R3 «Переписывания»): справочник организаций рубриками профиля не сужается —
+      // близнец закрыт, собранное остаётся; прежнее состояние с курсором — в previous_tasks.
+      if (state.status === 'done' && state.unavailable) continue;
+      previous.push({ task: state.task, status: state.status, child_job_id: state.child_job_id,
+        exhausted: state.exhausted, unavailable: state.unavailable, ...veTwoGisPreviousFields(state) });
+      state.harvest = taggedHarvest(state);
+      retireVeTwoGisTwin(state, 'Уточнён отбор источника под аудиторию: справочник организаций по профилю не читается; результаты сохранены.');
+      continue;
+    }
     // Already paid HH jobs are immutable. A newly built plan receives the
     // narrower query, but a code update must not launch another HH job.
     if (state.source === 'hh_live' && state.status !== 'pending') continue;
@@ -3188,7 +3278,8 @@ export function applyVeNicheSourceSelection(info: VeCollectInfo, profile: VeNich
     const wrongCatalog = state.catalog?.filters.categories?.some((label) => !veNicheRubricAllowed(profile, label));
     if (veSourceStrategyKey(task) === veSourceStrategyKey(state.task) && !wrongCatalog) continue;
     previous.push({ task: state.task, catalog: state.catalog, directory_cursors: state.directory_cursors,
-      status: state.status, child_job_id: state.child_job_id, exhausted: state.exhausted, unavailable: state.unavailable });
+      status: state.status, child_job_id: state.child_job_id, exhausted: state.exhausted, unavailable: state.unavailable,
+      ...veTwoGisPreviousFields(state) });
     state.harvest = taggedHarvest(state);
     if (info.adaptive_collection?.active_source === veSourceStrategyKey(state.task)) {
       info.adaptive_collection.active_source = veSourceStrategyKey(task);
@@ -3466,6 +3557,7 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
       const feedback = planExhausted
         ? `Источники плана исчерпаны, а цель базы не набрана. Предложи ДРУГОЙ срез того же рынка: соседние или более общие коды ОКВЭД, готовый каталог Яндекс Карт или другой запрос. ${rules} Предыдущий план (без порогов размера): ${previous}`
         : `Предыдущие партии дали низкий выход. Предложи ДРУГОЙ источник из готовых каталогов или другой запрос/срез. ${rules} Предыдущий план (без порогов размера): ${previous}. Результаты последних партий (расходы оценочные): ${JSON.stringify(policy.completed.filter((batch) => batch.source !== 'two_gis' && !twoGisTwinKeys.has(batch.source_key)).slice(-6))}`;
+      // Без флага 2ГИС: реплан близнецов не даёт, Яндекс-задача реплана (tasks.push ниже) идёт без пары.
       const replacement = await buildPlan(job, ctx, vertical, usage, market, base.hypothesis_id ?? null, feedback, info.audience_snapshot, info.collection_geography);
       if (replacement.sliceProbe?.outcome === 'rejected') throw new Error('alternative_slice_rejected');
       const known = new Set(tasks.map((task) => veSourceStrategyKey(task.task)));
@@ -4780,10 +4872,11 @@ async function completeTargetRound(args: {
   }
   // Старая задача карт тоже продолжаема: следующий раунд читает её запросы
   // из готового каталога (sourceRenewal).
-  const renewableDirectory = tasks.some((task) => !veTaskAcquisitionDeferred(info, task) && isVeRenewableSourceTask(task));
+  // R1: близнец 2ГИС не держит раунд открытым своим курсором — до части 4 (там предикат отсрочки).
+  const renewableDirectory = tasks.some((task) => !isVeTwoGisTask(task) && !veTaskAcquisitionDeferred(info, task) && isVeRenewableSourceTask(task));
   // Близнец 2ГИС (эта версия его не читает) не держит план открытым — ни закрытый, ни отложенный pending.
   const exhausted = !args.hasBufferedCandidates && veCountedPlanTasks(tasks).length > 0 && tasks.every((task) => isVeTwoGisTask(task)
-    || ((task.source === 'companies_directory' || !!task.catalog) && task.status === 'done' && task.exhausted && !task.hit_ceiling),
+    || ((task.source === 'companies_directory' || veHasSourceCursor(task)) && task.status === 'done' && task.exhausted && !task.hit_ceiling),
   );
   // A saved-only review does not retry sources: their old failure remains in
   // task history but must not invalidate a now-confirmed saved audience.
@@ -5302,7 +5395,7 @@ async function completeTargetRound(args: {
     if (info.search_policy) delete info.search_policy.construct_rows;
     delete stats.finished_at;
     info.tasks = boundedSourceContinuation(info) ? info.tasks : pipeline || info.adaptive_collection ? tasks : tasks.map((state) =>
-      ((state.source === 'companies_directory' || !!state.catalog) && !state.exhausted && !state.hit_ceiling)
+      ((state.source === 'companies_directory' || veHasSourceCursor(state)) && !state.exhausted && !state.hit_ceiling)
         || isVeLegacyMapsTask(state)
         // Закладку выдачи переносим вместе с задачей. Без неё следующий раунд
         // читает реестр с первой страницы и заново просматривает уже
@@ -5660,6 +5753,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       undefined,
       info.audience_snapshot,
       info.collection_geography,
+      // 2ГИС: близнецов даёт только первичный план базы с флагом (поставка получает флаг копией в
+      // pinCollectionAudience, до этого блока). Чтение флага — разбор collect_info, без запросов.
+      target && !isRefill && market === 'ru' ? readVeTwoGisSourceFlag(info.two_gis_source) : null,
     );
     info.plan = plan;
     if (planRepair) info.plan_repair = planRepair;
@@ -5692,6 +5788,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       rows: 0,
       task,
     }));
+    // 2ГИС: близнец стоит сразу после своей Яндекс-задачи (buildPlan); обе получают один случайный
+    // two_gis_pair_id. Близнец без такой пары — done+unavailable «пара потеряна». Без близнецов — no-op.
+    pairVeTwoGisStates(info.tasks);
     addVeKnownWebsiteSource(info);
     await persistCollectInfo(ctx, baseId, info);
     stageLog(ctx, `[base_collect] план: ${info.tasks.length} задач (${info.tasks.map((t) => t.source).join(', ')})`);
@@ -5700,6 +5799,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     const profile = await pinNicheSourceProfile(ctx, job, base, info);
     if (profile && applyVeNicheSourceSelection(info, profile)) await persistCollectInfo(ctx, baseId, info);
   }
+  // 2ГИС: близнец без Яндекс-задачи с тем же two_gis_pair_id (ремонт, замена, reopen) — done+unavailable
+  // «пара потеряна». Только при флаге: без флага ни новой проверки, ни записи.
+  if (info.two_gis_source && retireVeOrphanTwoGisTwins(info.tasks)) await persistCollectInfo(ctx, baseId, info);
   if (target) await adaptCollectionSources(ctx, job, base, info, vertical, market, usage);
   if (applyCollectionGeography(info)) await persistCollectInfo(ctx, baseId, info);
 
@@ -5758,7 +5860,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       const pendingDiscovery = new Set(!existingFirst && !state.task.widened && !info.source_contact_budget?.paused
         ? pendingVeSourceContacts(harvest, info.source_contact_recovery) : []);
       if (canAcquire && (info.preview_pipeline?.batches.length ?? 0) < PREVIEW_IN_FLIGHT
-        && !veTaskAcquisitionDeferred(info, state) && isVeRenewableSourceTask(state)
+        // R1: курсор близнеца эта версия не продолжает — до части 4 (там предикат отсрочки).
+        && !isVeTwoGisTask(state) && !veTaskAcquisitionDeferred(info, state) && isVeRenewableSourceTask(state)
         && !recovered.some((row, index) => normalizeCompanyForDedup(row.company) !== ''
           && !isRetiredNicheHarvestRow(info, state, row) && allowedByProject(ctx, row)
           && (hasExistingSourceContact(row) || pendingDiscovery.has(harvest[index]))
@@ -5776,7 +5879,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
           state.harvest = []; state.rows = 0;
         }
         state.status = 'pending';
-        if (state.catalog) { state.harvest = []; state.rows = 0; delete state.catalog_pages_read; }
+        if (veHasSourceCursor(state)) { state.harvest = []; state.rows = 0; delete state.catalog_pages_read; }
       }
     }
   }
