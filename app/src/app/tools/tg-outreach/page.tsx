@@ -7257,6 +7257,8 @@ interface ReportResponse {
     weeks: Array<{
       period: string; chats: number | null; contacts: number; delivered: number;
       anyReplies: number; targetReplies: number; conversion: number | null;
+      /** В отчётах, собранных до 26.10.2026, блокировок нет. */
+      blocks?: number;
       /** Разбивка по гипотезам; в отчётах, собранных до 22.10.2026, её нет. */
       bases?: Array<{ base: string; chats: number | null; contacts: number }>;
     }>;
@@ -7291,7 +7293,7 @@ function toDateInput(ms: number): string {
  */
 const REPORT_SECTION_1_HEADERS = [
   'Период', 'Обработано чатов', 'Подобрано контактов', 'Доставлено',
-  'Любых ответов', 'Целевых ответов (передано лидов)', 'Конверсия, %',
+  'Любых ответов', 'Целевых ответов (передано лидов)', 'Блокировок', 'Конверсия, %',
 ];
 const REPORT_SECTION_2_HEADERS = [
   'Чат/группа', 'Критерий отбора', 'Никнейм', 'Дата оффера', '№ оффера', 'Качество лида', 'Передан клиенту',
@@ -7440,7 +7442,7 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
       w.period,
       chatLines.length ? [chats, ...chatLines] : chats,
       contactLines.length ? [String(w.contacts), ...contactLines] : String(w.contacts),
-      w.delivered, w.anyReplies, w.targetReplies,
+      w.delivered, w.anyReplies, w.targetReplies, w.blocks ?? '—',
       w.conversion === null ? '—' : w.conversion,
     ];
   }) : [];
@@ -7522,6 +7524,7 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
                       <td className={`${cell} align-top`}>{w.delivered}</td>
                       <td className={`${cell} align-top`}>{w.anyReplies}</td>
                       <td className={`${cell} align-top`}>{w.targetReplies}</td>
+                      <td className={`${cell} align-top`}>{w.blocks ?? '—'}</td>
                       <td className={`${cell} align-top`}>{w.conversion === null ? '—' : w.conversion}</td>
                     </tr>
                   ))}
@@ -7583,9 +7586,9 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
                 <tbody>
                   {data.offers.map((o, i) => (
                     <tr key={o.offer + i}>
-                      <td className={cell} />
+                      <td className={cell}>{o.offerNumber}</td>
                       <td className={cell}>{o.offer}</td>
-                      <td className={cell} />
+                      <td className={`${cell} whitespace-pre-line break-all`}>{o.channel}</td>
                       <td className={cell} />
                       <td className={cell} />
                       <td className={cell} />
