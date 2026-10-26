@@ -20,7 +20,7 @@ import {
   type ValidationResult,
   type DomainInfo,
 } from './shared';
-import { cachedCatchAll, cachedValidation, isConclusiveValidation, rememberCatchAll, rememberValidation } from './sharedCache';
+import { bouncedBefore, cachedCatchAll, cachedValidation, isConclusiveValidation, rememberCatchAll, rememberValidation } from './sharedCache';
 
 // Re-export everything from shared so the worker can import from one place
 export { checkSyntax, normalizeEmail, isDisposable, isRole, isFreeProvider, suggestTypo } from './shared';
@@ -623,11 +623,60 @@ export async function validateEmail(
   const email = validationAddress(rawEmail);
   if (checkSyntax(email).valid && !isFreeMailPlaceholder(email)) {
     const cached = await cachedValidation(email);
-    if (cached) return cached;
+    if (cached) return withBounceHistory(email, cached, domainCache);
   }
   const result = await validateEmailBySmtp(email, domainCache);
   if (isConclusiveValidation(result)) rememberValidation(email, result);
-  return result;
+  return withBounceHistory(email, result, domainCache);
+}
+
+/**
+ * Our sends answer what SMTP cannot. In 01.08–09.10.2026 a re-send to an
+ * address that had already bounced bounced again in 69% of cases on the
+ * Mail.ru group and 64% on catch-all company domains, but in 33% when SMTP had
+ * confirmed the mailbox. So a recent bounce with no sign of life after it
+ * (email_bounce_history) turns catch_all into invalid. ok stays ok, and so does
+ * unknown: it says something about our side (greylisting, a throttled or banned
+ * probe IP, a proxy or DNS outage, no probe IPs), not about the mailbox, and its
+ * retries must keep running. The cache keeps the SMTP verdict; the history is
+ * read on every check.
+ */
+async function withBounceHistory(
+  email: string,
+  result: ValidationResult,
+  domainCache: Map<string, DomainInfo>,
+): Promise<ValidationResult> {
+  if (result.result !== 'catch_all') return result;
+  const bounce = await bouncedBefore(email);
+  if (!bounce || await yandexHosted(email, domainCache)) return result;
+  return {
+    ...result,
+    result: 'invalid', quality: 'bad', error: undefined,
+    details: {
+      ...result.details,
+      step: 'bounced_before', verdict_before: result.result,
+      last_bounced_at: bounce.lastBouncedAt, bounces: bounce.bounces,
+      error: 'Адрес уже отбивался в наших рассылках',
+    },
+  };
+}
+
+/**
+ * Yandex has refused our Google sending mailboxes by policy since 10.10.2026
+ * (554 5.7.1 for ~92% of cold mail), so a bounce from a Yandex-hosted domain
+ * says nothing about the mailbox — 14.5% of catch-all domains sit on Yandex 360.
+ * An undetermined MX counts as Yandex: the verdict is kept, never guessed.
+ */
+async function yandexHosted(email: string, domainCache: Map<string, DomainInfo>): Promise<boolean> {
+  const domain = email.substring(email.lastIndexOf('@') + 1);
+  let info = domainCache.get(domain);
+  if (!info) {
+    const mx = await lookupMX(domain);
+    if (mx.lookupFailed) return true;
+    info = { domain, mxHosts: mx.mxHosts, mxFound: mx.found, isCatchAll: null, isDisposable: isDisposable(domain), checkedAt: new Date() };
+    domainCache.set(domain, info);
+  }
+  return info.mxHosts.some((host) => smtpEgressKey(host) === 'provider:yandex');
 }
 
 async function validateEmailBySmtp(
