@@ -443,11 +443,58 @@ async function translateForCounterpart(
 }
 
 /**
+ * Фраза передачи на языке того сообщения, к которому её дописываем (Дмитрий,
+ * 26.10.2026): сообщение на английском — фраза по-английски, на русском — как
+ * в настройках кампании. Короткую фразу модель переводит надёжно, и результат
+ * проверяется: другой алфавит или русская фраза в латинице — ошибка.
+ */
+async function phraseInLanguageOf(
+  settings: OpenAISettings,
+  text: string,
+  phrase: string,
+): Promise<string> {
+  const target = alphabetOf(withoutAddresses(text));
+  if (target === null || target === alphabetOf(phrase)) return phrase;
+  const translated = await openaiGenerate({
+    ...settings,
+    system_prompt: 'Ты переводчик. Переводишь одну короткую фразу, ничего не добавляя.',
+  }, [{
+    role: 'user',
+    content: `Переведи фразу ${JSON.stringify(phrase)} на язык этого сообщения: ${JSON.stringify(text)}. Верни только переведённую фразу, без кавычек и пояснений.`,
+  }]);
+  const result = (translated ?? '').trim().replace(/^["«']+|["»']+$/g, '');
+  const wrongAlphabet = alphabetOf(result) !== target
+    || (target === 'latin' && /\p{Script=Cyrillic}/u.test(result));
+  if (!result || wrongAlphabet) {
+    throw new Error('Не удалось перевести фразу передачи на язык сообщения');
+  }
+  return result;
+}
+
+/**
+ * Дописать фразу передачи на языке самого сообщения. Если в сообщении уже
+ * стоит исходная фраза, а само сообщение на другом языке, — она заменяется
+ * переводом: 25.10.2026 английский ответ ушёл с русским «Передаю ваш контакт
+ * менеджеру» в конце.
+ */
+export async function appendHandoffPhrase(
+  settings: OpenAISettings,
+  reply: string,
+  phrase: string,
+): Promise<string> {
+  const body = stripHandoffPhrase(reply, phrase) || reply;
+  const localPhrase = await phraseInLanguageOf(settings, body, phrase);
+  if (localPhrase === phrase) return ensureHandoffPhrase(reply, phrase);
+  return ensureHandoffPhrase(body, localPhrase);
+}
+
+/**
  * Одна попытка исправить язык. Непроверенный перевод отправлять нельзя.
  *
- * Фраза передачи переводится отдельно от ответа и дописывается в конец сама.
- * Вместе с ответом переводчик её пропускал или оставлял по-русски (25.10.2026),
- * а одну короткую фразу он переводит надёжно — и результат проверяется.
+ * Фраза передачи переводится не вместе с ответом, а после: сначала ответ
+ * приводится к языку собеседника, потом к нему дописывается фраза на языке
+ * получившегося сообщения (`appendHandoffPhrase`). Вместе с ответом
+ * переводчик её пропускал или оставлял по-русски (25.10.2026).
  */
 export async function ensureReplyLanguage(
   settings: OpenAISettings,
@@ -456,22 +503,11 @@ export async function ensureReplyLanguage(
   positiveHandoffPhrase?: string | null,
 ): Promise<string | null> {
   const phrase = positiveHandoffPhrase?.trim() || null;
-  const draft = phrase ? ensureHandoffPhrase(reply, phrase) : reply;
-  if (!needsReplyTranslation(draft, history)) return draft;
-
-  const body = phrase ? stripHandoffPhrase(draft, phrase) : draft;
-  let result = body && needsReplyTranslation(body, history)
+  const body = phrase ? stripHandoffPhrase(reply, phrase) || reply : reply;
+  const translated = needsReplyTranslation(body, history)
     ? await translateForCounterpart(settings, history, body)
     : body;
-  if (phrase) {
-    const localPhrase = needsReplyTranslation(phrase, history)
-      ? await translateForCounterpart(settings, history, phrase)
-      : phrase;
-    if (needsReplyTranslation(localPhrase, history)) {
-      throw new Error('Фраза передачи после перевода осталась на другом языке');
-    }
-    result = result ? ensureHandoffPhrase(result, localPhrase) : localPhrase;
-  }
+  const result = phrase ? await appendHandoffPhrase(settings, translated, phrase) : translated;
   if (needsReplyTranslation(result, history)) {
     throw new Error('После перевода ответ остался на языке, отличном от языка собеседника');
   }
