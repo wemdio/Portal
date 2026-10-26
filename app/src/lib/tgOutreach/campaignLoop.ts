@@ -24,7 +24,7 @@ import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionStri
 import type { LoopControl } from './watchdog';
 import { dialogEditKey, dialogRevision, dialogUnchanged, withoutDeletedMessages, withDialogWrite, withDialogDeletion, clearDialogEdits, type DeleteMessageTarget } from './dialogEdits';
 import { orderByStaleness } from './accountRotation';
-import { asksMoreThanQuestionList, openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, needsTranslatedHandoff, parseQualificationQuestions, checkQualification, qualificationInstruction, ensureHandoffPhrase, asksOpenQuestions, stripHandoffPhrase,
+import { asksMoreThanQuestionList, openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, needsTranslatedHandoff, parseQualificationQuestions, checkQualification, qualificationInstruction, ensureHandoffPhrase, appendHandoffPhrase, asksOpenQuestions, stripHandoffPhrase,
   stripRepeatGreeting, needsReplyTranslation, ensureReplyLanguage,
 } from './openaiChat';
 import { isRoleOnlyReply } from './roleFirstGate';
@@ -1255,9 +1255,17 @@ export async function handleChat(
         throw new Error('Модель снова задала лишние вопросы вместо контрольных');
       }
     }
-    let forcePositive = Boolean(interested && phrase && !qualifying && translateHandoff);
-    if (interested && phrase && !qualifying && !translateHandoff) {
-      replyText = ensureHandoffPhrase(replyText, phrase);
+    // Передачу дописываем сами и на языке самого сообщения (appendHandoffPhrase),
+    // поэтому лид засчитываем по интересу, а не по тексту фразы: переведённую
+    // фразу настроенный триггер не узнал бы.
+    // Ответ, который ниже всё равно пойдёт в перевод, получит фразу уже после
+    // перевода (ensureReplyLanguage) — иначе она оказалась бы в нём дважды.
+    let forcePositive = Boolean(interested && phrase && !qualifying);
+    if (
+      interested && phrase && !qualifying && !translateHandoff
+      && !needsReplyTranslation(replyText, chatMessages)
+    ) {
+      replyText = await appendHandoffPhrase(oai, replyText, phrase);
     }
     // Обязательная квалификация: передача лида — только после ответов на
     // контрольные вопросы кампании. Не ответил — один раз спрашиваем сами; не
