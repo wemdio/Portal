@@ -8,12 +8,13 @@ import {
   isContractInWindow,
   isSaleInWindow,
   isLeadInWindow,
-  isQualifiedForMode,
+  qualifiedAtForMode,
   meetingsByDeal,
 } from '@/lib/firstSales/metrics';
 import { fetchTaskMeetings } from '@/lib/firstSales/meetings';
 import { fetchFirstSalesPayments, moneyByDeal } from '@/lib/firstSales/money';
 import { fetchStatusesAt } from '@/lib/firstSales/dealTransitions';
+import { fetchRequalified } from '@/lib/firstSales/requalified';
 
 // Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
 // либо пустой ответ, либо чужой. Тот же паттерн, что у summary/route.ts.
@@ -55,14 +56,18 @@ export async function GET(req: NextRequest) {
     // цифрами строки — март, оплаченный в сентябре, сидел в «Деньгах»
     // сентября, но в сентябрьском списке его не было (решение 25.09.2026).
     // Выборка одна на оба режима: без когорты старые сделки отсеиваются ниже.
-    const [payments, taskMeetings] = await Promise.all([
+    const [payments, taskMeetings, requalified] = await Promise.all([
       fetchFirstSalesPayments(gate.supabaseAdmin, PIPELINE_ID, from, to),
       fetchTaskMeetings(gate.supabaseAdmin, PIPELINE_ID, from, to),
+      cohort
+        ? fetchRequalified(gate.supabaseAdmin, PIPELINE_ID, from, to)
+        : Promise.resolve(new Map<number, string>()),
     ]);
     const extraDealIds = [
       ...new Set([
         ...payments.map((p) => p.amo_deal_id).filter((id): id is number => id != null),
         ...taskMeetings.keys(),
+        ...requalified.keys(),
       ]),
     ];
 
@@ -84,7 +89,9 @@ export async function GET(req: NextRequest) {
         createdInCohort: isLeadInWindow(lead, cohortFrom, cohortTo),
         hits: {
           lead: isLeadInWindow(lead, from, to),
-          qualified: isQualifiedForMode(lead, from, to, cohort),
+          qualified: qualifiedAtForMode(
+            lead, from, to, cohort, requalified.get(lead.amo_id) ?? null,
+          ) !== null,
           meetings: meetings.get(lead.amo_id) ?? 0,
           sale: isSaleInWindow(lead, from, to),
           contract: isContractInWindow(lead, from, to),
@@ -94,7 +101,7 @@ export async function GET(req: NextRequest) {
       // В списке — сделки, созданные в периоде, и сделки, заведённые раньше,
       // если в периоде по ним что-то случилось (квал, встреча, договор,
       // продажа, деньги). Квал старой сделке засчитывается только «по
-      // когорте» (isQualifiedForMode), без когорты её отсекает createdInCohort.
+      // когорте» (qualifiedAtForMode), без когорты её отсекает createdInCohort.
       //
       // История решения: 08.09.2026 список резали строго по дате создания —
       // старая сделка в нём читалась как сломанный фильтр периода. Это

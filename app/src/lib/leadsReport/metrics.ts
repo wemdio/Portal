@@ -7,6 +7,7 @@ import {
 } from '@/lib/leadsReport/channels';
 import { extractCustomField } from '@/lib/leadsReport/extractCustomField';
 import { fetchTaskMeetings } from '@/lib/firstSales/meetings';
+import { fetchRequalified } from '@/lib/firstSales/requalified';
 import {
   dedupeLeadMagnets,
   isExcludedLeadName,
@@ -105,13 +106,15 @@ export type AmoDealInfoRow = {
  * «Встреча назначена» или закрыта задача-встреча. `deals` — их название и
  * поля. `scheduledDealIds` — переведённые в «Встреча назначена» внутри окна.
  * `taskMeetings` — встречи по закрытой задаче, ровно как на дашборде
- * (`fetchTaskMeetings`).
+ * (`fetchTaskMeetings`). `requalified` — повторные квалы недели, тоже как на
+ * дашборде (`fetchRequalified`).
  */
 export type CohortInputs = {
   stageDates: AmoStageDatesRow[];
   deals: AmoDealInfoRow[];
   scheduledDealIds: number[];
   taskMeetings: Map<number, string>;
+  requalified?: Map<number, string>;
 };
 
 /**
@@ -124,6 +127,8 @@ export type ChannelMetrics = {
   arrived: number;
   qualifiedLeads: number;
   qualifiedLeadsCohort: number;
+  /** Из `qualifiedLeadsCohort` — повторные квалы (сделка уже была квалом). */
+  requalifiedCohort: number;
   meetingsScheduled: number;
   meetingsScheduledCohort: number;
   meetingsHeld: number;
@@ -340,6 +345,7 @@ export function computeMetricsFromRows(
         arrived: 0,
         qualifiedLeads: 0,
         qualifiedLeadsCohort: 0,
+        requalifiedCohort: 0,
         meetingsScheduled: 0,
         meetingsScheduledCohort: 0,
         meetingsHeld: 0,
@@ -465,10 +471,11 @@ function creationStatusId(
  * 26.10.2026). Правила те же, что у дашборда первички, чтобы неделя давала
  * одну цифру в обоих местах:
  *
- *   * квал — первая квалификация (`first_qualified_at`) внутри окна. Повторный
- *     перевод в «Лид квалифицирован» сделки, которая уже была квалом, квалом
- *     не делает. В AMO такой перевод — отдельное событие, отсюда расхождение
- *     с фильтром событий: за 19–23.10 31 событие — это 25 квалов;
+ *   * квал — первая квалификация (`first_qualified_at`) внутри окна или,
+ *     только по когорте, повторная: сделку, уже бывшую квалом, вернули ниже и
+ *     снова перевели в квал (requalified.ts). Повторные показываются в
+ *     скобках. Несколько переводов одной сделки за неделю — один квал: за
+ *     19–23.10 в AMO 31 событие — это 28 сделок;
  *   * встреча была — первая встреча по этапу (`first_meeting_at`) в окне или
  *     закрытая задача-встреча при карточке, оставшейся на «Встреча назначена»
  *     (`fetchTaskMeetings`). Этап «Встреча проведена» сам по себе засорён;
@@ -506,17 +513,22 @@ function countCohortMetrics(
     if (!bucket) continue;
 
     const createdInWindow = isInWindow(row.created_at, start, end);
-    const qualified = row.history_complete
+    const firstQualified = row.history_complete
       && isInWindow(row.first_qualified_at, start, end);
+    const requalified = !firstQualified
+      && isInWindow(inputs.requalified?.get(row.amo_deal_id) ?? null, start, end);
     const held = isInWindow(row.first_meeting_at, start, end)
       || inputs.taskMeetings.has(row.amo_deal_id);
     const metBefore = row.first_meeting_at !== null
       && Date.parse(row.first_meeting_at) < start.getTime();
     const waiting = !held && !metBefore && scheduled.has(row.amo_deal_id);
 
-    if (qualified) {
+    if (firstQualified) {
       bucket.qualifiedLeadsCohort += 1;
       if (createdInWindow) bucket.qualifiedLeads += 1;
+    } else if (requalified) {
+      bucket.qualifiedLeadsCohort += 1;
+      bucket.requalifiedCohort += 1;
     }
     if (held) {
       bucket.meetingsHeldCohort += 1;
@@ -640,7 +652,7 @@ async function fetchCohortInputs(
   const startIso = start.toISOString();
   const endIso = end.toISOString();
 
-  const [stageRes, scheduledRes, taskMeetings] = await Promise.all([
+  const [stageRes, scheduledRes, taskMeetings, requalified] = await Promise.all([
     db
       .from('amo_lead_stage_dates_v')
       .select(STAGE_DATE_COLUMNS)
@@ -660,6 +672,8 @@ async function fetchCohortInputs(
     // Окно у задач закрытое справа (`lte`), у отчёта — открытое; совпадение
     // секунда в секунду с пятничными 18:00 на практике не встречается.
     fetchTaskMeetings(db, pipelineId, start, end),
+    // Правая граница там включительно — отступаем на миллисекунду.
+    fetchRequalified(db, pipelineId, start, new Date(end.getTime() - 1)),
   ]);
   if (stageRes.error) throw stageRes.error;
   if (scheduledRes.error) throw scheduledRes.error;
@@ -675,7 +689,9 @@ async function fetchCohortInputs(
   // Назначенные и задачи-встречи окно по датам этапов не ловит — дотягиваем
   // их даты по id. Фильтр воронки здесь же отсекает чужие воронки.
   const seen = new Set(stageDates.map((row) => Number(row.amo_deal_id)));
-  const missing = [...new Set([...scheduledDealIds, ...taskMeetings.keys()])]
+  const missing = [
+    ...new Set([...scheduledDealIds, ...taskMeetings.keys(), ...requalified.keys()]),
+  ]
     .filter((id) => !seen.has(id));
   const extraChunks = await Promise.all(
     chunkArray(missing, IN_CHUNK_SIZE).map(async (chunk) => {
@@ -707,6 +723,7 @@ async function fetchCohortInputs(
     deals: dealChunks.flat(),
     scheduledDealIds,
     taskMeetings,
+    requalified,
   };
 }
 

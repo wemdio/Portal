@@ -21,7 +21,8 @@ function section(metric: ChannelMetrics): string {
 function line(title: string, metric: Counts): string {
   return `${title}\n`
     + `Пришло — ${metric.arrived} | `
-    + `Лидов по когорте — ${metric.qualifiedLeadsCohort} | `
+    + `Лидов по когорте — ${metric.qualifiedLeadsCohort}`
+    + `${metric.requalifiedCohort > 0 ? ` (повторно ${metric.requalifiedCohort})` : ''} | `
     + `Лидов без когорты — ${metric.qualifiedLeads}\n`
     + `Встреч по когорте (Было/Запланировано) — `
     + `${metric.meetingsHeldCohort}/${metric.meetingsScheduledCohort} | `
@@ -94,6 +95,7 @@ export function formatSummaryMessages(
     arrived: 0,
     qualifiedLeads: 0,
     qualifiedLeadsCohort: 0,
+    requalifiedCohort: 0,
     meetingsScheduled: 0,
     meetingsScheduledCohort: 0,
     meetingsHeld: 0,

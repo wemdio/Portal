@@ -109,6 +109,13 @@ export type FirstSalesTotals = {
   /** Сделки, закрытые в плюс в окне, — то, что продажи называют продажами. */
   sales: number;
   leadMagnets: number;
+  /**
+   * Из `qualified` — повторные квалы: сделка уже была квалом раньше периода,
+   * её вернули ниже и квалифицировали снова. Только «по когорте»; без
+   * когорты всегда 0. Показывается в скобках у плитки (просьба Дмитрия,
+   * 26.10.2026), чтобы было видно, сколько квалов — не новые.
+   */
+  requalified: number;
   noSourceLeads: number;
   wonCount: number;
   cycleAvgDays: number | null;
@@ -244,25 +251,30 @@ export function isQualifiedInWindow(lead: FirstSalesLeadRow, from: Date, to: Dat
 }
 
 /**
- * Квал с учётом режима счёта (см. `cohort` в params.ts).
+ * Дата квала сделки в периоде с учётом режима счёта (см. `cohort` в
+ * params.ts); null — квала в периоде нет.
  *
- * «По когорте» (с 26.10.2026, просьба Дмитрия) — по дате ПЕРВОЙ
- * квалификации, когда бы сделку ни завели: апрельская сделка, впервые
- * ставшая квалом в октябре, — квал октября. Раньше режим этого не делал, и
- * за 17–23.10 дашборд показывал 17 при 25 впервые квалифицированных — разница
- * читалась как ошибка. Повторный перевод в «Лид квалифицирован» (сделка уже
- * была квалом весной) квалом не делает: first_qualified_at — первый раз.
+ * «По когорте» (с 26.10.2026, решения Дмитрия) — квал, когда бы сделку ни
+ * завели: первая квалификация в периоде ИЛИ повторная — сделку, уже бывшую
+ * квалом, вернули ниже и снова перевели в квал (`requalifiedAt`, см.
+ * requalified.ts). До этого режим считал только заведённые в периоде, и за
+ * 17–23.10 дашборд показывал 17 при 28 сделках, переведённых в квал по AMO.
  *
- * «Без когорты» — как раньше: заведена в периоде И квалифицирована в нём же.
+ * «Без когорты» — как раньше: заведена в периоде И квалифицирована в нём же
+ * (дата — создания: так квал ложится в корзину графика).
  */
-export function isQualifiedForMode(
+export function qualifiedAtForMode(
   lead: FirstSalesLeadRow,
   from: Date,
   to: Date,
   cohort: boolean,
-): boolean {
-  if (!cohort) return isQualifiedInWindow(lead, from, to);
-  return inWindow(lead.first_qualified_at, from, to) && lead.history_complete;
+  requalifiedAt: string | null = null,
+): string | null {
+  if (!cohort) return isQualifiedInWindow(lead, from, to) ? lead.created_at : null;
+  if (lead.history_complete && inWindow(lead.first_qualified_at, from, to)) {
+    return lead.first_qualified_at;
+  }
+  return inWindow(requalifiedAt, from, to) ? requalifiedAt : null;
 }
 
 /**
@@ -389,12 +401,19 @@ export function computeFirstSalesSeries(
   // cohortFrom/cohortTo — период, по которому «без когорты» судит о дате
   // создания; по умолчанию from/to. Шире окна он при клике по столбцу
   // графика — см. `cohortFrom` в params.ts.
-  options: { cohort?: boolean; cohortFrom?: Date; cohortTo?: Date } = {},
+  // requalified — повторные квалы периода (fetchRequalified): сделка → дата.
+  options: {
+    cohort?: boolean;
+    cohortFrom?: Date;
+    cohortTo?: Date;
+    requalified?: Map<number, string>;
+  } = {},
 ): FirstSalesSeries {
   const allowed = sourceFilter && sourceFilter.length > 0 ? new Set(sourceFilter) : null;
   const cohort = options.cohort ?? true;
   const cohortFrom = options.cohortFrom ?? from;
   const cohortTo = options.cohortTo ?? to;
+  const requalified = options.requalified ?? new Map<number, string>();
   /** Заведена ли сделка в выбранном периоде — в смысле режима «без когорты». */
   const createdInCohort = (lead: FirstSalesLeadRow): boolean => isLeadInWindow(lead, cohortFrom, cohortTo);
 
@@ -407,7 +426,7 @@ export function computeFirstSalesSeries(
    * или поздно разошлись бы не только тем, чем должны.
    *
    * Лиды сюда не смотрят: они и так считаются по дате создания. Квал
-   * различает режимы сам — см. isQualifiedForMode.
+   * различает режимы сам — см. qualifiedAtForMode.
    */
   const eventsCount = (lead: FirstSalesLeadRow): boolean => cohort || createdInCohort(lead);
 
@@ -445,7 +464,7 @@ export function computeFirstSalesSeries(
 
   const totals: FirstSalesTotals = {
     leads: 0, qualified: 0, meetings: 0, sales: 0,
-    leadMagnets: 0, noSourceLeads: 0, wonCount: 0,
+    leadMagnets: 0, requalified: 0, noSourceLeads: 0, wonCount: 0,
     cycleAvgDays: null, cycleMedianDays: null,
     ...stageAvailability(to),
     meetingsSince: MEETINGS_RELIABLE_SINCE.toISOString(),
@@ -519,17 +538,22 @@ export function computeFirstSalesSeries(
       if (resolved.key === NO_SOURCE_KEY) totals.noSourceLeads += 1;
     }
 
-    // Квал — по режиму (isQualifiedForMode). «По когорте» он, как встречи и
+    // Квал — по режиму (qualifiedAtForMode). «По когорте» он, как встречи и
     // продажи, кладётся в корзину по дате самой квалификации: «сколько стало
     // квалами в этот день». «Без когорты» — по дате СОЗДАНИЯ: «из пришедших в
     // этот день/неделю/месяц скольких сумели квалифицировать в том же
     // периоде» (с 11.09.2026, см. isQualifiedInWindow).
-    if (isQualifiedForMode(lead, from, to, cohort)) {
+    const qualifiedAt = qualifiedAtForMode(
+      lead, from, to, cohort, requalified.get(lead.amo_id) ?? null,
+    );
+    if (qualifiedAt) {
       totals.qualified += 1;
       breakdown.qualified += 1;
       manager.qualified += 1;
-      const bucketAt = cohort ? lead.first_qualified_at : lead.created_at;
-      bump(bucketKey(new Date(bucketAt as string), groupBy), 'qualified');
+      bump(bucketKey(new Date(qualifiedAt), groupBy), 'qualified');
+      const firstInWindow = lead.history_complete
+        && inWindow(lead.first_qualified_at, from, to);
+      if (cohort && !firstInWindow) totals.requalified += 1;
     }
 
     // Договор — по дате достижения этапа. Сделка с неполной историей

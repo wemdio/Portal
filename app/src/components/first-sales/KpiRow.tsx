@@ -187,6 +187,7 @@ export default function KpiRow({
       <Tile
         label="Квал"
         value={fmt(totals.qualified)}
+        sub={totals.requalified > 0 ? `повторно: ${fmt(totals.requalified)}` : undefined}
         delta={<Delta current={totals.qualified} previous={previousTotals.qualified} label="Квалов" {...prevWindow} />}
       />
       {/* Прочерк, а не ноль, пока окно целиком раньше даты, с которой подписи
