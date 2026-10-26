@@ -56,12 +56,29 @@ async function campaignIdsOfMailbox(mailboxId: string): Promise<string[]> {
   return (data ?? []).map((row) => String(row.campaign_id));
 }
 
+/**
+ * Message-ID из заголовка In-Reply-To. Обычно он один, но тикет-системы
+ * пишут туда несколько: «<наше письмо> <их тикет>». Сравнение строки целиком
+ * такой ответ не узнавало — 14–19.10.2026 «Сравни» ответили на каждое из
+ * четырёх писем с другого адреса (m_service@ вместо service@), ответ не
+ * привязался к получателю, и цепочка дошла до конца.
+ */
+export function threadMessageIds(inReplyTo: string | null): string[] {
+  if (!inReplyTo) return [];
+  const ids = inReplyTo.match(/<[^<>\s]+>/g);
+  if (ids?.length) return [...new Set(ids)];
+  const trimmed = inReplyTo.trim();
+  return trimmed ? [trimmed] : [];
+}
+
 async function findRecipientByThread(inReplyTo: string | null): Promise<string | null> {
-  if (!supabaseAdmin || !inReplyTo) return null;
+  const ids = threadMessageIds(inReplyTo);
+  if (!supabaseAdmin || !ids.length) return null;
   const { data } = await supabaseAdmin
     .from('sender_messages')
     .select('recipient_id')
-    .eq('message_id', inReplyTo)
+    .in('message_id', ids)
+    .limit(1)
     .maybeSingle();
   if (data) return String(data.recipient_id);
   // Ответ на наше ручное письмо: новый контакт из ответа лида или тот, кто был
@@ -69,7 +86,7 @@ async function findRecipientByThread(inReplyTo: string | null): Promise<string |
   const { data: manual } = await supabaseAdmin
     .from('sender_manual_messages')
     .select('recipient_id')
-    .eq('message_id', inReplyTo)
+    .in('message_id', ids)
     .not('recipient_id', 'is', null)
     .limit(1)
     .maybeSingle();
