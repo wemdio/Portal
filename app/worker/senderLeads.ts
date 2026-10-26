@@ -1,6 +1,7 @@
 import { runOutreachOsLeadsPass } from '@/lib/outreachOsLeads/process';
 import { runOwnReplyLeadsPass } from '@/lib/ownReplyLeads/process';
 import { runSenderLeadsPass, senderLeadsAi, SENDER_LEADS_RECOVERY_INTERVAL_MS } from '@/lib/senderLeads/process';
+import { runSenderProjectLeadCardsPass } from '@/lib/senderLeads/projectLeadCards';
 import { leadTelegramConfig } from '@/lib/senderLeads/telegram';
 import { runAgencyLeadHandoffs } from '@/lib/agencyLeadHandoff/process';
 import { recordSenderHandoffs } from '@/lib/sender/clientHandoff';
@@ -103,6 +104,16 @@ async function main(): Promise<void> {
       if (recorded) log('info', `Передачи «Рассылки»: в кабинет клиента записано лидов ${recorded}`);
     } catch (err) {
       log('error', 'Запись передач «Рассылки» в кабинет клиента упала', err);
+    }
+    // Лиды кампаний Движка вертикалей: карточка специалисту проекта, доска
+    // лидов, передача клиенту. После записи передач — чтобы видеть ушедшие.
+    try {
+      const cards = await runSenderProjectLeadCardsPass({ db, instantlyDb: supabaseInstantly, log });
+      if (cards.created || cards.delivered || cards.events) {
+        log('info', `Лиды проектов «Рассылки»: заведено карточек ${cards.created}, доставлено ${cards.delivered}, шагов ${cards.events}`);
+      }
+    } catch (err) {
+      log('error', 'Круг карточек лидов проектов «Рассылки» упал', err);
     }
     // Заявки OutreachOS (лиды кабинета, регистрации) → AMO → General со ссылкой на сделку.
     try {

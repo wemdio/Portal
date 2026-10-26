@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { qualifyReply } from '@/lib/instantly/leadQualifier';
 import { loadSenderThread } from './context';
 import { loadCampaignSettings, type LeadSettings } from './settings';
+import { isClientPartyReply, withProjectLeadSettings } from './projectScope';
 import { buildLeadMessage, leadTelegramConfig, sendLeadMessage, threadUrl, type LeadTelegramConfig } from './telegram';
 import { processSenderAutoLeadCrm } from './crm';
 
@@ -212,10 +213,21 @@ async function qualifyOne(
   }
   const attempts = row.attempts + 1;
   try {
+    // Проект кампании Движка не прочитан — ждём, а не оцениваем без брифа.
+    if (settings.projectError) throw new Error(settings.projectError);
     if (!ai) throw new Error('Ключ ИИ для квалификации не настроен (SENDER_LEADS_AI_API_KEY)');
     const thread = await loadSenderThread(db, row.reply_id, row.recipient_id);
     if (!thread) {
       await markRow(db, row.reply_id, { status: 'skipped', attempts, last_error: 'ответ или переписка не найдены' });
+      return false;
+    }
+    // После передачи клиент в копии и может ответить в ту же переписку: его
+    // письмо — не ответ лида. Итог переписки (лида) не трогаем, ИИ не зовём.
+    if (settings.route === 'project' && isClientPartyReply(thread.replyFrom, settings.clientParty)) {
+      await markRow(db, row.reply_id, {
+        status: 'skipped', attempts, next_attempt_at: null,
+        last_error: 'ответ клиента проекта (адрес «Передачи лида»), а не лида',
+      });
       return false;
     }
     const verdict = await qualifyReply(
@@ -226,8 +238,9 @@ async function qualifyOne(
         apiKey: ai.apiKey,
         ...(ai.model ? { model: ai.model } : {}),
         // Пустая строка, а не null: при null квалификатор пошёл бы искать бриф
-        // кампании в базе Instantly. Контекст оффера — наши собственные письма.
-        briefText: '',
+        // кампании в базе Instantly. Контекст оффера — наши собственные письма,
+        // у кампаний Движка вертикалей — ещё и бриф проекта.
+        briefText: settings.briefText ?? '',
         leadCriteria: settings.criteria,
         prefetchedContext: thread.context,
         maxRetries: 1,
@@ -293,6 +306,8 @@ async function deliverLeads(db: SupabaseClient, tg: LeadTelegramConfig, log: Log
     const campaign = settings.get(row.campaign_id);
     const skip = async (reason: string) => markRow(db, row.reply_id, { tg_attempts: MAX_ATTEMPTS, tg_error: reason });
     if (!campaign) { await skip('рассылка не найдена'); continue; }
+    // Лид кампании Движка вертикалей уходит карточкой специалисту проекта (projectLeadCards), не в чат продаж.
+    if (campaign.veProjectId) { await skip('лид проекта — карточка специалисту'); continue; }
     if (!campaign.settings.telegram) { await skip('отправка в чат выключена у папки'); continue; }
 
     const [{ data: recipient }, { data: alreadySent }] = await Promise.all([
@@ -357,7 +372,7 @@ export async function runSenderLeadsPass(
   const rows = [...new Map([...fresh, ...retries, ...recovery].map((row) => [row.reply_id, row])).values()];
   if (recovery.length) log('info', `Ежечасный обход: найдено ${recovery.length} ответов с ошибкой квалификации`);
   if (rows.length) {
-    const settings = await loadCampaignSettings(db, rows.map((r) => r.campaign_id));
+    const settings = await withProjectLeadSettings(db, await loadCampaignSettings(db, rows.map((r) => r.campaign_id)));
     for (const row of rows) {
       if (!await claimAttempt(db, row)) continue;
       const campaign = settings.get(row.campaign_id);

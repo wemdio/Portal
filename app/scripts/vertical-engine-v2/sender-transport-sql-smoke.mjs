@@ -1,5 +1,5 @@
 /** Executable PostgreSQL smoke for VE2 launches through «Рассылка» (migrations
- * 20261024_0020, 20261024_0030, 20261024_0070); never connects to Portal/prod.
+ * 20261024_0020, 20261024_0030, 20261024_0070, 20261026_0010); never connects to Portal/prod.
  *
  * Run from app/: node scripts/vertical-engine-v2/sender-transport-sql-smoke.mjs
  * Supply PGLITE_MODULE when @electric-sql/pglite is installed outside this repo.
@@ -247,6 +247,142 @@ try {
   await rows(`insert into public.sender_mailboxes(email,status,enabled) values('Box@Example.org','verified',true),('off@example.org','failed',true)`);
   const pool = await rows('select email, status from public.ve_sender_pool_for_emails($1::text[]) order by email', [[' box@example.org', 'OFF@example.org', 'none@example.org']]);
   check(pool.length === 2 && pool[0].email === 'Box@Example.org', 'preset pool lookup is case-insensitive and returns status', JSON.stringify(pool));
+
+  // ── Карточки лидов проектов (этап 5) ──
+  await db.exec(`
+    alter table public.sender_recipients add column lead_verdict text, add column lead_verdict_source text;
+    create table public.sender_replies(id uuid primary key default gen_random_uuid(),
+      recipient_id uuid references public.sender_recipients on delete set null, created_at timestamptz not null default now());
+    create table public.sender_reply_qualifications(reply_id uuid primary key references public.sender_replies on delete cascade,
+      recipient_id uuid not null references public.sender_recipients on delete cascade,
+      campaign_id uuid not null references public.sender_campaigns on delete cascade,
+      status text not null, qualified_at timestamptz);
+    create table public.sender_manual_messages(id uuid primary key default gen_random_uuid(),
+      recipient_id uuid references public.sender_recipients on delete cascade, status text not null, error text,
+      cc_emails text[], handoff jsonb, created_at timestamptz not null default now());
+  `);
+  await db.exec(migration('20261026_0010_sender_project_lead_cards.sql'));
+  const leadSettings = await rows('select enabled, enabled_at from public.sender_project_lead_settings');
+  check(leadSettings.length === 1 && leadSettings[0].enabled === true, 'lead cards switch is seeded once, on', JSON.stringify(leadSettings));
+  const privileges = await one(`select
+      has_table_privilege('authenticated', 'public.sender_project_lead_cards', 'select') as auth_cards,
+      has_table_privilege('anon', 'public.sender_project_lead_settings', 'select') as anon_settings,
+      has_table_privilege('service_role', 'public.sender_project_lead_cards', 'update') as service_cards,
+      has_function_privilege('authenticated', 'public.sender_project_lead_candidates(integer)', 'execute') as auth_candidates,
+      has_function_privilege('service_role', 'public.sender_project_lead_card_events(integer)', 'execute') as service_events`);
+  check(!privileges.auth_cards && !privileges.anon_settings && privileges.service_cards && !privileges.auth_candidates && privileges.service_events,
+    'cards, switch and functions are service_role only', JSON.stringify(privileges));
+
+  const VE2_CAMPAIGN = (await one(`insert into public.sender_campaigns(name, project_id, source_kind) values ('ve2', $1, 've2') returning id`, [STAFF])).id;
+  const MANUAL_CAMPAIGN = (await one(`insert into public.sender_campaigns(name, project_id, source_kind) values ('manual', $1, 'manual') returning id`, [STAFF])).id;
+  const lead = async (campaign, verdict, qualifiedAt, source = null) => {
+    const recipient = (await one(`insert into public.sender_recipients(campaign_id, email, lead_verdict, lead_verdict_source)
+      values ($1, 'x@y.ru', $2, $3) returning id`, [campaign, verdict, source])).id;
+    const reply = (await one('insert into public.sender_replies(recipient_id) values ($1) returning id', [recipient])).id;
+    await rows(`insert into public.sender_reply_qualifications values ($1, $2, $3, 'lead', $4)`, [reply, recipient, campaign, qualifiedAt]);
+    return { recipient, reply };
+  };
+  const leadReply = async (recipient) => {
+    const reply = (await one('insert into public.sender_replies(recipient_id) values ($1) returning id', [recipient])).id;
+    await rows(`insert into public.sender_reply_qualifications values ($1, $2, $3, 'lead', now())`, [reply, recipient, VE2_CAMPAIGN]);
+    return reply;
+  };
+  const candidates = async () => rows('select reply_id, recipient_id, has_card, card_status from public.sender_project_lead_candidates(10)');
+  const fresh = await lead(VE2_CAMPAIGN, 'lead', 'now()');
+  await lead(VE2_CAMPAIGN, 'lead', '2000-01-01T00:00:00Z');
+  const aiNotLead = await lead(VE2_CAMPAIGN, 'not_lead', 'now()', 'ai');
+  await lead(VE2_CAMPAIGN, 'not_lead', 'now()', 'manual');
+  await lead(MANUAL_CAMPAIGN, 'lead', 'now()');
+  let found = await candidates();
+  check(found.length === 2 && found.some((row) => row.reply_id === fresh.reply) && found.some((row) => row.reply_id === aiNotLead.reply)
+    && found.every((row) => row.has_card === false && row.card_status === null),
+    'candidates: ve2 leads after the cutoff; only a manual «Не лид» drops the thread, not a later AI one', JSON.stringify(found));
+  await rows('delete from public.sender_reply_qualifications where reply_id = $1', [aiNotLead.reply]);
+
+  await rows(`insert into public.sender_project_lead_cards(recipient_id, reply_id, campaign_id, project_id, merged_reply_ids)
+    values ($1, $2, $3, $4, array[$2]::uuid[])`, [fresh.recipient, fresh.reply, VE2_CAMPAIGN, STAFF]);
+  const second = await leadReply(fresh.recipient);
+  check((await candidates()).length === 0, 'a later lead reply waits until the card has its board row');
+  await rows(`update public.sender_project_lead_cards set status = 'card_sent', board_written_at = now() where recipient_id = $1`, [fresh.recipient]);
+  found = await candidates();
+  check(found.length === 1 && found[0].reply_id === second && found[0].has_card === true && found[0].card_status === 'card_sent',
+    'then it is merged into the same card', JSON.stringify(found));
+  await rows(`update public.sender_project_lead_cards set merged_reply_ids = merged_reply_ids || $2::uuid where recipient_id = $1`, [fresh.recipient, second]);
+  check((await candidates()).length === 0, 'a merged reply is not returned again');
+  await rows(`update public.sender_project_lead_cards set status = 'undelivered' where recipient_id = $1`, [fresh.recipient]);
+  const third = await leadReply(fresh.recipient);
+  found = await candidates();
+  check(found.length === 1 && found[0].reply_id === third && found[0].card_status === 'undelivered',
+    'a card never delivered is reopened by a later lead reply', JSON.stringify(found));
+  await rows(`update public.sender_project_lead_cards set status = 'card_sent', merged_reply_ids = merged_reply_ids || $2::uuid
+    where recipient_id = $1`, [fresh.recipient, third]);
+  await expectError('card status is checked', `update public.sender_project_lead_cards set status = 'unknown' where recipient_id = $1`, [fresh.recipient], /check/);
+
+  const before = (await one('select enabled_at from public.sender_project_lead_settings')).enabled_at;
+  const late = await lead(VE2_CAMPAIGN, 'lead', 'now()');
+  await rows('update public.sender_project_lead_settings set enabled = false');
+  check((await candidates()).length === 0, 'switched off: no candidates');
+  await rows(`update public.sender_project_lead_settings set enabled = true`);
+  const after = (await one('select enabled_at from public.sender_project_lead_settings')).enabled_at;
+  found = await candidates();
+  check(new Date(after) >= new Date(before) && !found.some((row) => row.reply_id === late.reply),
+    'switching back on moves the cutoff: leads qualified while off get no card', JSON.stringify({ before, after, found }));
+
+  const events = async () => rows('select recipient_id, kind, status, handoff_status from public.sender_project_lead_card_events(50)');
+  const kinds = async () => (await events()).map((row) => `${row.kind}:${row.status}`).join(',');
+  const card = (set) => rows(`update public.sender_project_lead_cards set ${set} where recipient_id = $1`, [fresh.recipient]);
+  const handoff = async (status, createdAt = 'now()') => (await one(`insert into public.sender_manual_messages(recipient_id, status, handoff, created_at)
+    values ($1, $2, '{}', $3) returning id`, [fresh.recipient, status, createdAt])).id;
+  await card(`tg_message_id = 7, tg_rendered_status = 'card_sent'`);
+  check((await events()).length === 0, 'no events for a delivered card without news');
+  await handoff('sent');
+  check(await kinds() === 'sent:card_sent', 'a sent handoff closes the card', await kinds());
+  await card(`status = 'pending'`);
+  check(await kinds() === 'publish:pending', 'sent while the card is undelivered: only publish the board row', await kinds());
+  await card(`board_published_at = now()`);
+  check(await kinds() === '', 'once published, an undelivered card is left to delivery', await kinds());
+
+  await rows('delete from public.sender_manual_messages where recipient_id = $1', [fresh.recipient]);
+  await card(`status = 'queued', tg_rendered_status = 'queued', decided_at = now(), board_published_at = null`);
+  await handoff('failed', new Date(Date.now() - 3600_000).toISOString());
+  check(await kinds() === '', 'a handoff that failed before the decision is not this card’s', await kinds());
+  const own = await handoff('failed');
+  await card(`manual_message_id = '${own}'`);
+  check(await kinds() === 'failed:queued', 'the card’s own handoff failed', await kinds());
+  await rows('delete from public.sender_manual_messages where recipient_id = $1', [fresh.recipient]);
+  check(await kinds() === '', 'queued without a letter is not stuck yet', await kinds());
+  await card(`updated_at = now() - interval '11 minutes'`);
+  check(await kinds() === 'stuck:queued', 'queued without a letter for 10 minutes is stuck', await kinds());
+
+  await card(`status = 'card_sent', tg_rendered_status = 'card_sent', decided_at = null, updated_at = now(),
+    handoff_mode = 'auto', blocked_reason = 'Ящик переписки недоступен', next_attempt_at = now() + interval '15 minutes'`);
+  check(await kinds() === '', 'a deferred auto handoff waits for its time', await kinds());
+  await card(`next_attempt_at = now() - interval '1 minute'`);
+  check(await kinds() === 'auto_retry:card_sent', 'then it is retried', await kinds());
+  await card(`created_at = now() - interval '8 days'`);
+  check(await kinds() === 'auto_retry:card_sent', 'past 7 days the worker gets one more event to give up on the card', await kinds());
+  await card(`created_at = now() - interval '1 hour'`);
+  await handoff('failed', new Date(Date.now() - 2 * 3600_000).toISOString());
+  check(await kinds() === 'auto_retry:card_sent', 'a handoff that failed before the card does not stop the retry', await kinds());
+  await handoff('failed');
+  check(await kinds() === 'failed:card_sent', 'a handoff from «Письма» that failed while auto waited is shown, not re-sent', await kinds());
+  await card(`status = 'queued', tg_rendered_status = 'queued', manual_message_id = null`);
+  check(await kinds() === 'failed:queued', 'an auto card queued by itself sees a later handoff from «Письма» fail', await kinds());
+  await rows('delete from public.sender_manual_messages where recipient_id = $1', [fresh.recipient]);
+  await card(`status = 'card_sent', tg_rendered_status = 'card_sent', handoff_mode = 'manual', blocked_reason = null, next_attempt_at = null, created_at = now()`);
+
+  await rows(`update public.sender_recipients set lead_verdict = 'not_lead', lead_verdict_source = 'ai' where id = $1`, [fresh.recipient]);
+  check(await kinds() === '', 'an AI «не лид» does not close the card', await kinds());
+  await rows(`update public.sender_recipients set lead_verdict_source = 'manual' where id = $1`, [fresh.recipient]);
+  check(await kinds() === 'not_lead:card_sent', 'a manual «Не лид» in the sender closes the card', await kinds());
+  await card(`status = 'undelivered', tg_rendered_status = null`);
+  check(await kinds() === 'not_lead:undelivered', '…and hides the row of a card never delivered', await kinds());
+  await card(`status = 'handoff_failed'`);
+  check(await kinds() === 'not_lead:handoff_failed', '…or of a card whose handoff failed', await kinds());
+  await card(`status = 'rejected', tg_rendered_status = 'card_sent', updated_at = now()`);
+  check(await kinds() === '', 'a fresh status change is left to the press that made it', await kinds());
+  await card(`updated_at = now() - interval '3 minutes'`);
+  check(await kinds() === 'render:rejected', 'a card whose text lags its status is redrawn', await kinds());
 } finally {
   await db.close();
 }
