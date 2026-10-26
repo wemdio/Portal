@@ -71,6 +71,18 @@ export function heEngRegistryRecordValid(provider: unknown, id: unknown, country
     case 'nces': return country === 'united states' && (/^\d{6}$/.test(id) ? url.href === `https://nces.ed.gov/collegenavigator/?id=${id}`
       : /^\d{7}$/.test(id) ? url.href === `https://nces.ed.gov/ccd/districtsearch/district_detail.asp?ID2=${id}`
         : /^[A-Z0-9]{8}$/.test(id) && url.href === `https://nces.ed.gov/surveys/pss/privateschoolsearch/school_detail.asp?ID=${id}`);
+    // A charity in England and Wales by its registered number; its register page is keyed by the
+    // Commission's own organisation number, which the extract gives with it.
+    case 'charity_commission': return country === 'united kingdom' && /^\d{6,8}$/.test(id) &&
+      /^https:\/\/register-of-charities\.charitycommission\.gov\.uk\/en\/charity-search\/-\/charity-details\/\d{1,9}$/.test(url.href);
+    // A school or college by its URN, an academy trust by «T» and its group id.
+    case 'gias': return country === 'united kingdom' && (/^\d{5,7}$/.test(id)
+      ? url.href === `https://get-information-schools.service.gov.uk/Establishments/Establishment/Details/${id}`
+      : /^T\d{1,7}$/.test(id) && url.href === `https://get-information-schools.service.gov.uk/Groups/Group/Details/${id.slice(1)}`);
+    // A CQC-registered provider by its provider id.
+    case 'cqc': return country === 'united kingdom' && /^1-\d{6,12}$/.test(id) && url.href === `https://www.cqc.org.uk/provider/${id}`;
+    // A US credit union by its NCUA charter number on the NCUA locator.
+    case 'ncua': return country === 'united states' && /^\d{1,8}$/.test(id) && url.href === `https://mapping.ncua.gov/CreditUnionDetails/${id}`;
     // Global sources: the country comes from the record itself (GLEIF headquarters,
     // or the OpenStreetMap country boundary containing the premises).
     case 'gleif': return engCountry(country) && validLei(id) && url.href === `https://api.gleif.org/api/v1/lei-records/${id}`;
