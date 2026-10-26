@@ -16,11 +16,15 @@ declare module 'pg' {
     query_timeout?: number;
     application_name?: string;
     ssl?: boolean | Record<string, unknown>;
+    keepAlive?: boolean;
+    keepAliveInitialDelayMillis?: number;
   }
 
   export interface PoolClient {
     query<R = Record<string, unknown>>(text: string, params?: unknown[]): Promise<QueryResult<R>>;
     release(err?: Error | boolean): void;
+    on(event: 'error', listener: (err: Error) => void): this;
+    removeListener(event: 'error', listener: (err: Error) => void): this;
   }
 
   export class Pool {
