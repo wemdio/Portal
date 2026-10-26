@@ -1,6 +1,6 @@
 import { load } from 'cheerio';
 import { extractAuthoredReplyText, getBodyText } from './leadQualifier';
-import { LEAD_DATED_ATTRIBUTION, LEAD_DATE_FIRST_ATTRIBUTION, LEAD_MONTH_FIRST_ATTRIBUTION, LEAD_QUOTE_BLOCKS, removeLeadReplyQuotes } from './leadReplyHtml';
+import { LEAD_DATED_ATTRIBUTION, LEAD_DATE_FIRST_ATTRIBUTION, LEAD_MONTH_FIRST_ATTRIBUTION, LEAD_MANUAL_QUOTE_ATTRIBUTION, LEAD_QUOTE_BLOCKS, removeLeadReplyQuotes } from './leadReplyHtml';
 import { stripLeadReplyContactSignature } from './leadReplyContacts';
 import type { Email } from './types';
 
@@ -77,7 +77,7 @@ function cleanRequestText(text: string): string | null {
   // Another common dated attribution: "Name писал 2026-09-18 12:49:".
   // This display-only boundary must not change classifier behaviour.
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
-  const attribution = lines.findIndex((line) => LEAD_DATED_ATTRIBUTION.test(line.trim()) || LEAD_DATE_FIRST_ATTRIBUTION.test(line.trim()) || LEAD_MONTH_FIRST_ATTRIBUTION.test(line.trim()) || YOU_WROTE.test(line.trim()) || SPACED_SIGNOFF.test(line.trim()) || /^От кого:\s*.+@/iu.test(line.trim()));
+  const attribution = lines.findIndex((line) => LEAD_DATED_ATTRIBUTION.test(line.trim()) || LEAD_DATE_FIRST_ATTRIBUTION.test(line.trim()) || LEAD_MONTH_FIRST_ATTRIBUTION.test(line.trim()) || LEAD_MANUAL_QUOTE_ATTRIBUTION.test(line.trim()) || YOU_WROTE.test(line.trim()) || SPACED_SIGNOFF.test(line.trim()) || /^От кого:\s*.+@/iu.test(line.trim()));
   const current = attribution < 0 ? text : lines.slice(0, attribution).join('\n');
   // Empty means there is no separable current answer; do not resurrect history.
   const authored = stripLeadReplyContactSignature(extractAuthoredReplyText(current)).split('\n')
