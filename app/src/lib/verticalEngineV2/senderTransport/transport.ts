@@ -49,7 +49,8 @@ export function decideVeLaunchTransport(input: {
   return { transport: 'instantly', source: 'default' };
 }
 
-function killedByEnv(env: Record<string, string | undefined>): boolean {
+/** Включён ли запасной выключатель в окружении этого процесса (только да/нет, без значения). */
+export function killedByEnv(env: Record<string, string | undefined>): boolean {
   const value = String(env[VE2_SENDER_LAUNCHES_DISABLED_ENV] ?? '').trim().toLowerCase();
   return value === '1' || value === 'true' || value === 'yes';
 }

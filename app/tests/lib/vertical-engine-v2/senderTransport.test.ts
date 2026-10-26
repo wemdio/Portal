@@ -51,6 +51,17 @@ import { isClientPartyReply, withProjectLeadSettings } from '@/lib/senderLeads/p
 import { runSenderProjectLeadCardsPass } from '@/lib/senderLeads/projectLeadCards';
 import { handleSenderProjectLeadCallback } from '@/lib/senderLeads/projectLeadCallbacks';
 import { signSenderLeadAction, verifySenderLeadAction } from '@/lib/senderLeads/projectLeadTelegram';
+import { readVe2SendingSwitch, ve2SendingRefusal } from '@/lib/sender/ve2SendingSwitch';
+import {
+  keepVeCampaignPaused,
+  readVeSenderSwitchState,
+  restoreVeLaunches,
+  resumeVeSenderSending,
+  setProjectLeadCards,
+  setVeSenderUploads,
+  stopVeLaunches,
+  stopVeSenderSending,
+} from '@/lib/verticalEngineV2/senderTransport/switches';
 import {
   decideVeLaunchTransport,
   resolveVeLaunchTransport,
@@ -83,7 +94,7 @@ jest.mock('@/lib/instantly/leadQualifier', () => ({
 }));
 jest.mock('@/lib/sender/campaignOps', () => {
   class SenderOpError extends Error {
-    constructor(message: string, readonly status: number) { super(message); }
+    constructor(message: string, readonly status: number, readonly code?: string) { super(message); }
   }
   return { importRecipients: jest.fn(), createCampaign: jest.fn(), startCampaign: jest.fn(), SenderOpError };
 });
@@ -650,6 +661,11 @@ describe('экраны VE2 для «Рассылки»', () => {
     expect(senderCampaignStartable({ ...c12!, leads_count: 3 })).toBe(false);
     expect(status.campaigns?.find((campaign) => campaign.campaign_id === 'c1')).not.toHaveProperty('scheduled_start_at');
     expect(await loadContactUploadStatus(db as never, 've1', 't1')).not.toHaveProperty('launch_closed');
+    // Отправку кампаний Движка остановил администратор — карточка говорит об этом (этап 6).
+    expect(await loadContactUploadStatus(db as never, 've1', 't1')).not.toHaveProperty('sending_stopped');
+    await db.from('ve_sender_global_settings').insert({ id: true, sending_enabled: false, sending_changed_at: '2026-10-26T12:00:00Z' });
+    expect(await loadContactUploadStatus(db as never, 've1', 't1')).toMatchObject({ sending_stopped: { at: '2026-10-26T12:00:00Z' } });
+    await db.from('ve_sender_global_settings').update({ sending_enabled: true }).eq('id', true);
     await db.from('ve_launch_queue_items').update({ status: 'released' }).eq('id', 'i1');
     expect(await loadContactUploadStatus(db as never, 've1', 't1')).toMatchObject({ transport: 'sender', launch_closed: true });
     expect(await loadContactUploadStatus(db as never, 've1', 't2')).not.toHaveProperty('transport');
@@ -927,7 +943,14 @@ describe('лиды кампаний Движка в «Рассылке» — к�
     expect(boxDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'card_sent', next_attempt_at: '9999-01-01T00:00:00.000Z', tg_rendered_status: 'card_sent' });
     expect(String((box.edit.mock.calls.at(-1) as unknown as [{ html: string }])[0].html)).toContain('Автопередача не состоится');
     await boxDb.from('sender_mailboxes').update({ enabled: true }).eq('id', 'm1');
+    // Карточки лидов выключены (этап 6) — автопередача ждёт включения, письмо само не встаёт.
+    await boxDb.from('sender_project_lead_settings').update({ enabled: false }).eq('id', true);
     await boxDb.from('sender_project_lead_cards').update({ next_attempt_at: '2000-01-01T00:00:00Z', created_at: new Date().toISOString() }).eq('recipient_id', RID);
+    await runSenderProjectLeadCardsPass(box.deps);
+    expect(boxDb.getRows('sender_manual_messages')).toEqual([]);
+    expect(boxDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'card_sent', blocked_reason: 'Карточки лидов выключены администратором' });
+    await boxDb.from('sender_project_lead_settings').update({ enabled: true }).eq('id', true);
+    await boxDb.from('sender_project_lead_cards').update({ next_attempt_at: '2000-01-01T00:00:00Z' }).eq('recipient_id', RID);
     await runSenderProjectLeadCardsPass(box.deps);
     expect(boxDb.getRows('sender_manual_messages')).toEqual([expect.objectContaining({ recipient_id: RID, status: 'queued', created_by: 'u-spec' })]);
     expect(boxDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'queued', blocked_reason: null });
@@ -1035,5 +1058,190 @@ describe('лиды кампаний Движка в «Рассылке» — к�
     await runSenderProjectLeadCardsPass(dup.deps);
     expect([dup.post.mock.calls.length, dup.edit.mock.calls.length]).toEqual([1, 1]);
     expect(dupDb.getRows('sender_project_lead_cards')[0]).toMatchObject({ status: 'card_sent', tg_message_id: 777, tg_rendered_status: 'card_sent' });
+  });
+});
+
+describe('выключатели запусков Движка через «Рассылку» (этап 6)', () => {
+  const NOW = new Date('2026-10-26T12:00:00Z');
+  const missing = createMockSupabase({ errorTables: { ve_sender_global_settings: 'relation "public.ve_sender_global_settings" does not exist' } });
+
+  it('выключатели пишут кто и когда, повтор их не переписывает; «вернуть» восстанавливает режим; пропущенные лиды можно прислать', async () => {
+    // Нет таблицы (почтовый хост раньше миграции) — отправка включена; иная ошибка — не запускаем; выключено — отказ с кодом.
+    expect(ve2SendingRefusal(await readVe2SendingSwitch(missing as never))).toBeNull();
+    const broken = createMockSupabase({ errorTables: { ve_sender_global_settings: 'timeout' } });
+    expect(ve2SendingRefusal(await readVe2SendingSwitch(broken as never))).toMatchObject({ status: 503 });
+    const off = createMockSupabase({ tables: { ve_sender_global_settings: [{ id: true, sending_enabled: false, sending_changed_at: '2026-10-26T11:00:00Z' }] } });
+    expect(ve2SendingRefusal(await readVe2SendingSwitch(off as never))).toMatchObject({ status: 409, code: 'VE2_SENDING_STOPPED' });
+
+    const db = createMockSupabase({
+      tables: {
+        ve_launch_transport_settings: [
+          { market: 'ru', mode: 'sender', mode_before_stop: null, sender_uploads_enabled: true, updated_at: null, updated_by: null, note: null },
+          { market: 'us', mode: 'instantly', mode_before_stop: null, sender_uploads_enabled: true, updated_at: null, updated_by: null, note: null },
+        ],
+        profiles: [{ id: 'u-admin', full_name: 'Сергей', email: 's@polza.ru' }],
+        ve_outreach_runs: [{ project_id: 'vp1', status: 'running' }, { project_id: 'vp2', status: 'active' }],
+        ve_projects: [{ id: 'vp1', market: 'ru' }, { id: 'vp2', market: 'ru' }],
+        ve_sender_global_settings: [{ id: true, sending_enabled: true, sending_changed_at: null, sending_changed_by: null, sending_note: null }],
+        ve_sender_sending_pauses: [],
+        sender_project_lead_settings: [{ id: true, enabled: true, enabled_at: '2026-10-20T00:00:00Z', disabled_at: null, updated_by: null, note: null }],
+        sender_campaigns: [{ id: 'c1', name: 'Клиники', source_kind: 've2', project_id: 'pp1', status: 'running' }],
+        sender_reply_qualifications: [],
+        sender_project_lead_cards: [],
+      },
+    });
+    const who = { userId: 'u-admin', note: 'инцидент', now: NOW };
+    expect(await stopVeLaunches(db as never, { market: 'ru', ...who })).toMatchObject({ changed: true });
+    expect(db.getRows('ve_launch_transport_settings')[0]).toMatchObject({ mode: 'instantly', mode_before_stop: 'sender', updated_by: 'u-admin', updated_at: NOW.toISOString() });
+    expect(await stopVeLaunches(db as never, { market: 'ru', userId: 'u-other', note: null, now: new Date('2026-10-26T13:00:00Z') })).toMatchObject({ changed: false });
+    expect(db.getRows('ve_launch_transport_settings')[0]).toMatchObject({ updated_by: 'u-admin', updated_at: NOW.toISOString() });
+    // США никогда не выключали этой панелью — вернуть нечего (включить «Рассылку» отсюда нельзя).
+    expect(await restoreVeLaunches(db as never, { market: 'us', ...who })).toMatchObject({ changed: false });
+    expect(await setVeSenderUploads(db as never, { market: 'ru', enabled: false, ...who })).toMatchObject({ changed: true });
+    expect(await setVeSenderUploads(db as never, { market: 'ru', enabled: false, ...who })).toMatchObject({ changed: false });
+
+    const state = await readVeSenderSwitchState(db as never, { VE2_SENDER_LAUNCHES_DISABLED: 'yes' }, NOW);
+    expect(state.env_kill).toBe(true);
+    expect(state.markets?.[0]).toMatchObject({
+      market: 'ru', label: 'РФ', mode: 'instantly', mode_before_stop: 'sender', sender_uploads_enabled: false,
+      updated_by_name: 'Сергей', note: 'инцидент', inflight_outreach_runs: 1,
+    });
+    expect(state.sending).toMatchObject({ enabled: true, running_campaigns: 1, open_pauses: [] });
+    expect((await readVeSenderSwitchState(db as never, { VE2_SENDER_LAUNCHES_DISABLED: '0' }, NOW)).env_kill).toBe(false);
+
+    expect(await restoreVeLaunches(db as never, { market: 'ru', ...who })).toMatchObject({ changed: true });
+    expect(db.getRows('ve_launch_transport_settings')[0]).toMatchObject({ mode: 'sender', mode_before_stop: null });
+
+    // Карточки: выключили в 12:00, лид пришёл в 12:30 — при включении «с пропущенными» возвращается отсечка,
+    // что была до выключения (не дальше 7 суток): лид, не успевший получить карточку до выключения, тоже придёт.
+    expect(await setProjectLeadCards(db as never, { enabled: false, ...who })).toMatchObject({ changed: true });
+    await db.from('sender_reply_qualifications').insert({ reply_id: 'r1', recipient_id: 'rc1', campaign_id: 'c1', status: 'lead', qualified_at: '2026-10-26T12:30:00Z' });
+    expect((await readVeSenderSwitchState(db as never, {}, NOW)).lead_cards).toMatchObject({ enabled: false, missed_leads: 1, changed_by_name: 'Сергей' });
+    const on = await setProjectLeadCards(db as never, { enabled: true, includeMissed: true, userId: 'u-admin', note: null, now: new Date('2026-10-26T14:00:00Z') });
+    expect(on.lines[0]).toContain(': 1');
+    expect(db.getRows('sender_project_lead_settings')[0]).toMatchObject({ enabled: true, enabled_at: '2026-10-20T00:00:00.000Z' });
+  });
+
+  it('«Остановить отправку»: флаг, потом пауза идущих кампаний Движка; «Продолжить» запускает только нетронутые и не закрывает то, что ещё можно запустить', async () => {
+    const nowIso = () => new Date().toISOString();
+    let batch = 0;
+    const db = createMockSupabase({
+      tables: {
+        ve_sender_global_settings: [{ id: true, sending_enabled: true, sending_changed_at: null, sending_changed_by: null, sending_note: null }],
+        ve_sender_sending_pauses: [],
+        sender_campaigns: [
+          { id: 'A', name: 'A', source_kind: 've2', status: 'running', updated_at: '2026-10-25T00:00:00Z' },
+          { id: 'B', name: 'B', source_kind: 've2', status: 'running', updated_at: '2026-10-25T00:00:00Z' },
+          { id: 'C', name: 'C', source_kind: 've2', status: 'running', updated_at: '2026-10-25T00:00:00Z' },
+          { id: 'E', name: 'E', source_kind: 've2', status: 'running', updated_at: '2026-10-25T00:00:00Z' },
+          { id: 'K', name: 'K', source_kind: 've2', status: 'running', updated_at: '2026-10-25T00:00:00Z' },
+          { id: 'D', name: 'D', source_kind: 've2', status: 'draft', updated_at: '2026-10-25T00:00:00Z', scheduled_start_at: '2099-01-01T06:00:00Z', scheduled_start_error: null },
+          { id: 'M', name: 'Папка', source_kind: 'manual', status: 'running', updated_at: '2026-10-25T00:00:00Z' },
+        ],
+        sender_recipients: [
+          { id: 'ra', campaign_id: 'A', status: 'active' }, { id: 'rb', campaign_id: 'B', status: 'active' },
+          { id: 're', campaign_id: 'E', status: 'active' }, { id: 'rk', campaign_id: 'K', status: 'active' },
+        ],
+      },
+      // Функции миграции 20261026_0020 поверх таблиц мока.
+      rpcHandlers: {
+        ve_sender_pause_running: async (_params, mock) => {
+          batch += 1;
+          const at = nowIso();
+          let paused = 0;
+          let unscheduled = 0;
+          for (const campaign of mock.getRows('sender_campaigns')) {
+            if (campaign.source_kind !== 've2') continue;
+            if (campaign.status === 'running') {
+              await mock.from('ve_sender_sending_pauses').insert({ id: `p${batch}-${campaign.id}`, batch_id: `b${batch}`, campaign_id: campaign.id, action: 'paused', paused_at: at, prior_status: 'running', resumed_at: null, resume_claimed_until: null, created_at: at });
+              await mock.from('sender_campaigns').update({ status: 'paused', updated_at: at }).eq('id', campaign.id);
+              paused += 1;
+            } else if (['draft', 'paused'].includes(String(campaign.status)) && campaign.scheduled_start_at) {
+              await mock.from('ve_sender_sending_pauses').insert({ id: `u${batch}-${campaign.id}`, batch_id: `b${batch}`, campaign_id: campaign.id, action: 'unscheduled', paused_at: at, prior_status: campaign.status, prior_scheduled_start_at: campaign.scheduled_start_at, resumed_at: null, resume_claimed_until: null, created_at: at });
+              await mock.from('sender_campaigns').update({ scheduled_start_at: null, updated_at: at }).eq('id', campaign.id);
+              unscheduled += 1;
+            }
+          }
+          return { data: { paused, unscheduled, canceled_messages: 0, still_running: 0 } };
+        },
+        ve_sender_resume_claim: async (params, mock) => {
+          const row = mock.getRows('ve_sender_sending_pauses').find((pause) => pause.id === params.p_pause_id);
+          if (!row || row.resumed_at || row.resume_claimed_until) return { data: { claimed: false } };
+          await mock.from('ve_sender_sending_pauses').update({ resume_claimed_until: '9999-01-01T00:00:00Z' }).eq('id', row.id);
+          const campaign = mock.getRows('sender_campaigns').find((c) => c.id === row.campaign_id)!;
+          return { data: {
+            claimed: true, action: row.action, campaign_id: campaign.id, campaign_status: campaign.status,
+            untouched: campaign.updated_at === row.paused_at,
+            active_recipients: mock.getRows('sender_recipients').filter((r) => r.campaign_id === campaign.id && r.status === 'active').length,
+          } };
+        },
+        ve_sender_resume_finish: async (params, mock) => {
+          const row = mock.getRows('ve_sender_sending_pauses').find((pause) => pause.id === params.p_pause_id);
+          if (!row || row.resumed_at) return { data: 'skip' };
+          const campaign = mock.getRows('sender_campaigns').find((c) => c.id === row.campaign_id)!;
+          const untouched = campaign.updated_at === row.paused_at;
+          if (params.p_mode === 'raw_running') {
+            const active = mock.getRows('sender_recipients').some((r) => r.campaign_id === campaign.id && r.status === 'active');
+            if (!untouched || campaign.status !== 'paused' || active) return { data: 'skip' };
+            await mock.from('sender_campaigns').update({ status: 'running', updated_at: nowIso() }).eq('id', campaign.id);
+          }
+          if (params.p_mode === 'restore_schedule') {
+            if (!untouched || campaign.scheduled_start_at) return { data: 'skip' };
+            await mock.from('sender_campaigns').update({ scheduled_start_at: row.prior_scheduled_start_at, updated_at: nowIso() }).eq('id', campaign.id);
+          }
+          await mock.from('ve_sender_sending_pauses').update({ resumed_at: nowIso(), resumed_by: params.p_user, resume_result: params.p_result, resume_claimed_until: null }).eq('id', row.id);
+          return { data: 'done' };
+        },
+      },
+    });
+
+    const stop = await stopVeSenderSending(db as never, { userId: 'u-admin', note: 'плохое письмо', now: NOW });
+    expect(stop.lines[0]).toBe('Отправка кампаний Движка остановлена.');
+    expect(stop.lines[1]).toContain('На паузу: 5, снято назначенных запусков: 1');
+    expect(db.getRows('ve_sender_global_settings')[0]).toMatchObject({ sending_enabled: false, sending_changed_by: 'u-admin', sending_changed_at: NOW.toISOString() });
+    expect(db.getRows('sender_campaigns').find((c) => c.id === 'M')).toMatchObject({ status: 'running' });
+    // Повтор — «остановили ещё раз», кто и когда — первые.
+    const again = await stopVeSenderSending(db as never, { userId: 'u-other', note: null, now: new Date('2026-10-26T13:00:00Z') });
+    expect(again.lines[0]).toContain('уже была остановлена');
+    expect(db.getRows('ve_sender_global_settings')[0]).toMatchObject({ sending_changed_by: 'u-admin' });
+
+    // Специалист после остановки поменял B, администратор оставил K на паузе.
+    await db.from('sender_campaigns').update({ updated_at: '2026-10-26T12:30:00Z' }).eq('id', 'B');
+    expect(await keepVeCampaignPaused(db as never, { pauseId: 'p1-K', userId: 'u-admin' })).toMatchObject({ changed: true });
+    // Строку, которую сейчас запускает «Продолжить отправку», «Оставить на паузе» не закрывает.
+    await db.from('ve_sender_sending_pauses').update({ resume_claimed_until: '9999-01-01T00:00:00Z' }).eq('id', 'p1-E');
+    expect((await keepVeCampaignPaused(db as never, { pauseId: 'p1-E', userId: 'u-admin' })).lines[0]).toContain('сейчас продолжает');
+    await db.from('ve_sender_sending_pauses').update({ resume_claimed_until: null }).eq('id', 'p1-E');
+    await db.from('sender_recipients').update({ status: 'replied' }).eq('campaign_id', 'C');
+    jest.mocked(startCampaign).mockReset().mockImplementation(async (id: string) => {
+      if (id === 'C') throw new SenderOpError('В кампании нет получателей', 422);
+      if (id === 'E') throw new SenderOpError('Стоп-листы клиента и проекта не сверены — запуск отложен: timeout', 503);
+      await db.from('sender_campaigns').update({ status: 'running' }).eq('id', id);
+    });
+    const resume = await resumeVeSenderSending(db as never, null, { userId: 'u-admin', note: null });
+    expect(jest.mocked(startCampaign).mock.calls.map((call) => call[0])).toEqual(['A', 'C', 'E']);
+    const status = Object.fromEntries(db.getRows('sender_campaigns').map((c) => [c.id, c.status]));
+    expect(status).toEqual({ A: 'running', B: 'paused', C: 'running', E: 'paused', K: 'paused', D: 'draft', M: 'running' });
+    expect(db.getRows('sender_campaigns').find((c) => c.id === 'D')).toMatchObject({ scheduled_start_at: '2099-01-01T06:00:00Z' });
+    expect(resume).toMatchObject({ resumed: 2, rescheduled: 1, left_open: 1, stopped_again: false });
+    expect(resume.lines.join(' ')).toContain('«B»: изменена после остановки — не трогаем');
+    expect(resume.lines.join(' ')).toContain('«E»: стоп-листы клиента и проекта не сверены — повторите позже');
+    expect(resume.lines.join(' ')).not.toContain('timeout');
+    // Открытой осталась только E — её запустит повторное «Продолжить».
+    expect(db.getRows('ve_sender_sending_pauses').filter((pause) => !pause.resumed_at).map((pause) => pause.campaign_id)).toEqual(['E']);
+
+    // Пока шло продолжение, отправку снова остановили — оставшиеся не закрываются «пропущенными».
+    await db.from('ve_sender_global_settings').update({ sending_enabled: false }).eq('id', true);
+    await db.from('sender_campaigns').update({ status: 'running' }).eq('id', 'A');
+    await stopVeSenderSending(db as never, { userId: 'u-admin', note: null });
+    jest.mocked(startCampaign).mockReset().mockImplementation(async () => {
+      await db.from('ve_sender_global_settings').update({ sending_enabled: false }).eq('id', true);
+      throw new SenderOpError('Отправка кампаний Движка остановлена администратором — запуск недоступен', 409, 'VE2_SENDING_STOPPED');
+    });
+    const interrupted = await resumeVeSenderSending(db as never, null, { userId: 'u-admin', note: null });
+    expect(interrupted.stopped_again).toBe(true);
+    // Вторая остановка снова взяла A и C (идут) и снятый запуск D; ни одна строка не закрыта «пропущенной».
+    expect(db.getRows('ve_sender_sending_pauses').filter((pause) => !pause.resumed_at).map((pause) => pause.campaign_id).sort()).toEqual(['A', 'C', 'D', 'E']);
+    expect(db.getRows('sender_campaigns').filter((c) => c.source_kind === 've2' && c.status === 'running')).toEqual([]);
   });
 });

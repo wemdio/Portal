@@ -8,6 +8,7 @@
 import { authFetch } from '@/lib/authFetch';
 import type { ClientBriefFields } from '@/lib/clientBrief';
 import type { VeSenderMarketView, VeSenderPoolSummary } from '@/lib/verticalEngineV2/senderTransport/labels';
+import type { VeSenderSwitchState } from '@/lib/verticalEngineV2/senderTransport/switches';
 import type {
   VeBase,
   VeChain,
@@ -348,6 +349,23 @@ export interface VeProjectsResponse {
   projects?: VeProject[];
   /** Рынки, где новые запуски идут в «Рассылку»; нет поля — везде Instantly. */
   launch_transport?: VeSenderMarketView[];
+  error?: string;
+}
+
+export type { VeSenderSwitchState };
+
+/** GET /sender-switches — состояние выключателей Движка → «Рассылка» (этап 6). */
+export interface VeSenderSwitchesResponse {
+  state?: VeSenderSwitchState;
+  /** admin: панель показывает кнопки (пишет POST /api/admin/ve2-sender). */
+  can_manage?: boolean;
+  error?: string;
+}
+
+/** POST /api/admin/ve2-sender — отчёт строками и свежее состояние. */
+export interface VeSenderSwitchActionResponse {
+  lines?: string[];
+  state?: VeSenderSwitchState;
   error?: string;
 }
 
