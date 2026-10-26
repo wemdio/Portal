@@ -1,5 +1,5 @@
 /** Server-generated ENG discovery inputs. Registry records are never validated contacts. */
-export type HeEngRegistryProvider = 'brreg' | 'france' | 'fdic' | 'nppes' | 'fmcsa' | 'companies_house' | 'gleif' | 'osm' | 'pra' | 'esma' | 'eba' | 'prh' | 'czso' | 'cro' | 'ariregister';
+export type HeEngRegistryProvider = 'brreg' | 'france' | 'fdic' | 'nppes' | 'fmcsa' | 'companies_house' | 'gleif' | 'osm' | 'pra' | 'esma' | 'eba' | 'prh' | 'czso' | 'cro' | 'ariregister' | 'wikidata';
 
 export interface HeEngRegistryTask {
   id: string;

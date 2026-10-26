@@ -59,6 +59,8 @@ export function heEngRegistryRecordValid(provider: unknown, id: unknown, country
     case 'czso': return country === 'czechia' && /^\d{8}$/.test(id) && url.href === `https://ares.gov.cz/ekonomicke-subjekty?ico=${id}`;
     case 'cro': return country === 'ireland' && /^\d{1,7}$/.test(id) && HE_ENG_CRO_RECORD.exec(url.href)?.[1] === id;
     case 'ariregister': return country === 'estonia' && /^\d{8}$/.test(id) && url.href === `https://ariregister.rik.ee/eng/company/${id}`;
+    // A Wikidata organisation by its item id; the country comes from its headquarters (or own) statement.
+    case 'wikidata': return engCountry(country) && /^Q[1-9]\d{0,11}$/.test(id) && url.href === `https://www.wikidata.org/wiki/${id}`;
     // Global sources: the country comes from the record itself (GLEIF headquarters,
     // or the OpenStreetMap country boundary containing the premises).
     case 'gleif': return engCountry(country) && validLei(id) && url.href === `https://api.gleif.org/api/v1/lei-records/${id}`;

@@ -42,7 +42,7 @@ const DIRECTORY_HOSTS = new Set(['linkedin.com', 'facebook.com', 'instagram.com'
   'chambers.com', 'vat-search.ie', 'solocheck.ie', 'societe.com', 'pappers.fr', 'infogreffe.fr', 'verif.com', 'bankofengland.co.uk', 'esma.europa.eu',
   'eba.europa.eu', 'ytj.fi', 'prh.fi', 'finder.fi', 'asiakastieto.fi', 'kauppalehti.fi', 'fonecta.fi', 'ares.gov.cz',
   'justice.cz', 'czso.cz', 'kurzy.cz', 'firmy.cz', 'detail.cz', 'cro.ie', 'vision-net.ie', 'rik.ee', 'inforegister.ee',
-  'teatmik.ee', 'e-krediidiinfo.ee',
+  'teatmik.ee', 'e-krediidiinfo.ee', 'wikidata.org',
   'manageo.fr', 'proff.no', 'purehelp.no', '1881.no', 'gulesider.no', 'bizapedia.com', 'manta.com',
   'buzzfile.com', 'yelp.com', 'bbb.org', 'sophymarine.com', 'experian.com', 'ebay.com', 'amazon.com']);
 // Legal-form words: the register says «LTD», the company's own footer «Limited».
@@ -331,6 +331,8 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
     prh: 'y-tunnus|business\\s+id|fo-nummer|org\\.?\\s*nr',
     czso: 'ič\\s*\\([^)]{1,24}\\)|ičo|ič|ico|id\\.?\\s*no|company\\s+id|identifikační\\s+číslo|reg(?:istration)?\\.?\\s*(?:no|number)',
     cro: `cro(?:\\s+(?:no|number))?|registered\\s+in\\s+(?:the\\s+republic\\s+of\\s+)?ireland(?:\\s*(?:no|number|nr))?|${UK_COMPANY_NUMBER_LABELS}`,
+    // A Wikidata item id never appears on a company site; its website comes with the record.
+    wikidata: '(?!)',
     ariregister: 'registrikood|reg\\.?\\s*kood|reg\\.?\\s*nr|äriregistri\\s+kood|registry\\s+code|reg(?:istration|istry)?\\.?\\s*(?:code|no|number)',
   };
   const id = identifierKey(candidate.recordId);

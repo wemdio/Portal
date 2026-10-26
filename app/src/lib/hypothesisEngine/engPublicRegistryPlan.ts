@@ -4,6 +4,7 @@ import { engCountryIso2, normalizeEngCountry } from './engCountries';
 import { HE_ENG_ESMA_MEMBER_STATES } from './engEsmaRegistry';
 import { HE_ENG_GLEIF_TERMS, HE_ENG_OSM_TAGS } from './engGlobalRegistryCatalog';
 import { HE_ENG_NACE_CLASSES, heEngNaceSources } from './engNaceRegistryCatalog';
+import { HE_ENG_WIKIDATA_SECTORS } from './engWikidataRegistry';
 import type { HeEngRegistryPlan, HeEngRegistryProvider, HeEngRegistryTask } from './engPublicRegistryTypes';
 
 /** Closed catalogue: a source can only run a reviewed, sector-specific query. */
@@ -30,15 +31,17 @@ export const HE_ENG_REGISTRY_CATEGORIES: Readonly<Record<HeEngRegistryProvider, 
   // National registers filing NACE classes (engNaceRegistryCatalog.ts): Finland,
   // Czechia, Ireland and Estonia; a category is a NACE Rev. 2.1 class.
   prh: HE_ENG_NACE_CLASSES, czso: HE_ENG_NACE_CLASSES, cro: HE_ENG_NACE_CLASSES, ariregister: HE_ENG_NACE_CLASSES,
+  // Wikidata organisations of a sector in any country (engWikidataRegistry.ts).
+  wikidata: Object.keys(HE_ENG_WIKIDATA_SECTORS),
 };
 
-type NationalProvider = Exclude<HeEngRegistryProvider, 'gleif' | 'osm' | 'esma' | 'eba'>;
+type NationalProvider = Exclude<HeEngRegistryProvider, 'gleif' | 'osm' | 'esma' | 'eba' | 'wikidata'>;
 const PROVIDER_ISO: Readonly<Record<NationalProvider, string>> = {
   brreg: 'no', france: 'fr', companies_house: 'gb', fdic: 'us', nppes: 'us', fmcsa: 'us', pra: 'gb',
   prh: 'fi', czso: 'cz', cro: 'ie', ariregister: 'ee',
 };
 /** Sources covering many countries: one slice per sector reads all allowed countries. */
-export const HE_ENG_GLOBAL_REGISTRY_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set(['gleif', 'osm', 'esma', 'eba']);
+export const HE_ENG_GLOBAL_REGISTRY_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set(['gleif', 'osm', 'esma', 'eba', 'wikidata']);
 // The EU authorities' registers hold firms of the EU and the EEA only.
 const EEA_REGISTRY_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set(['esma', 'eba']);
 /** A global source's countries. */
@@ -67,11 +70,11 @@ const SECTORS: readonly Sector[] = [
   { match: /\b(?:software (?:vendors?|companies|developers?|providers?|products?|publishers?|publishing)|saas|it (?:services?|companies|consultanc(?:y|ies))|cloud (?:platform|software) vendors?)\b/i,
     // Standard software publishers are explicitly outside NAF 62.01Z.
     sources: { brreg: ['58.29', '62'], france: ['58.29A', '58.29B', '58.29C', '62.01Z', '62.02A'], companies_house: ['58290', '62012', '62020'],
-      gleif: ['software'], osm: ['software'], ...heEngNaceSources('software') } },
+      gleif: ['software'], osm: ['software'], wikidata: ['software'], ...heEngNaceSources('software') } },
   { match: /\b(?:banks?|banking institutions|credit institutions|building societies)\b/i,
     // Custody specialists do not authorize scanning every retail/commercial bank.
     omit: /\b(?:custodian|custodial|custody|depositary|depository)[ -]+banks?\b/gi,
-    sources: { brreg: ['64'], france: ['64.19Z'], companies_house: ['64191', '64192'], fdic: ['banks'], gleif: ['banks'], osm: ['banks'], pra: ['banks'],
+    sources: { brreg: ['64'], france: ['64.19Z'], companies_house: ['64191', '64192'], fdic: ['banks'], gleif: ['banks'], osm: ['banks'], pra: ['banks'], wikidata: ['banks'],
       ...heEngNaceSources('banks') } },
   { match: /\b(?:fund (?:services?|administrators?|administration)|custodians?|depositar(?:y|ies)|transfer agents?|investor services?|mancos?)\b/i,
     // Third-party management companies are fund service providers; ESMA lists them.
@@ -79,70 +82,70 @@ const SECTORS: readonly Sector[] = [
       ...heEngNaceSources('fund_services') } },
   { match: /\b(?:(?:asset|wealth|investment|fund) manag(?:ers?|ement)|investment advisers?|investment advisors?)\b/i,
     sources: { brreg: ['66'], france: ['66.30Z'], companies_house: ['66300'], gleif: ['asset_management'], esma: ['fund_managers'],
-      ...heEngNaceSources('asset_management') } },
+      wikidata: ['asset_management'], ...heEngNaceSources('asset_management') } },
   { match: /\b(?:insurers?|reinsurers?|insurance (?:carriers?|companies))\b/i,
-    sources: { brreg: ['65'], france: ['65.12Z'], companies_house: ['65120'], gleif: ['insurance'], osm: ['insurance'], pra: ['insurers'],
+    sources: { brreg: ['65'], france: ['65.12Z'], companies_house: ['65120'], gleif: ['insurance'], osm: ['insurance'], pra: ['insurers'], wikidata: ['insurance'],
       ...heEngNaceSources('insurance') } },
   // Licensed under PSD2: payment and e-money institutions and account information providers.
   { match: /\b(?:payments? (?:institutions?|companies|firms|providers?|processors?|platforms?|gateways?|service providers?|fintechs?)|psps?|e-?money (?:institutions?|issuers?|providers?)|electronic money (?:institutions?|issuers?)|(?:merchant|card|payment) acquir(?:ers?|ing (?:banks?|companies|providers?))|money (?:transfer|remittance) (?:operators?|companies|providers?|services?)|remittance (?:companies|providers?|operators?)|paytech (?:companies|firms|providers?)|account information (?:service )?providers?|open banking (?:providers?|platforms?|companies))\b/i,
     sources: { eba: ['payment_institutions'] } },
   { match: /\b(?:dentists?|dental (?:clinics?|practices?|groups?|offices?))\b/i,
-    sources: { brreg: ['86.23'], france: ['86.23Z'], companies_house: ['86230'], nppes: ['Dentist'], osm: ['dental'], ...heEngNaceSources('dental') } },
+    sources: { brreg: ['86.23'], france: ['86.23Z'], companies_house: ['86230'], nppes: ['Dentist'], osm: ['dental'], wikidata: ['dental'], ...heEngNaceSources('dental') } },
   { match: /\bhospitals?\b/i,
     sources: { brreg: ['86.10'], france: ['86.10Z'], companies_house: ['86101'], nppes: ['General Acute Care Hospital'],
-      gleif: ['hospitals'], osm: ['hospitals'], ...heEngNaceSources('hospitals') } },
+      gleif: ['hospitals'], osm: ['hospitals'], wikidata: ['hospitals'], ...heEngNaceSources('hospitals') } },
   { match: /\b(?:(?:medical|outpatient|healthcare|primary care) (?:clinics?|cent(?:er|re)s?|practices?)|physician groups)\b/i,
-    sources: { brreg: ['86.2'], france: ['86.21Z'], companies_house: ['86210'], nppes: ['Clinic/Center'], osm: ['clinics'], ...heEngNaceSources('clinics') } },
+    sources: { brreg: ['86.2'], france: ['86.21Z'], companies_house: ['86210'], nppes: ['Clinic/Center'], osm: ['clinics'], wikidata: ['clinics'], ...heEngNaceSources('clinics') } },
   { match: /\b(?:clinical|medical|diagnostic) laborator(?:y|ies)\b/i,
-    sources: { nppes: ['Clinical Medical Laboratory'], gleif: ['laboratories'], osm: ['laboratories'] } },
+    sources: { nppes: ['Clinical Medical Laboratory'], gleif: ['laboratories'], osm: ['laboratories'], wikidata: ['laboratories'] } },
   { match: /\b(?:trucking|road (?:freight|haulage)|freight carriers?|haulage (?:companies|operators)|truck (?:fleets?|operators?))\b/i,
     sources: { brreg: ['49.41'], france: ['49.41A', '49.41B'], companies_house: ['49410'], fmcsa: ['freight_carriers'],
-      gleif: ['trucking'], osm: ['trucking'], ...heEngNaceSources('trucking') } },
+      gleif: ['trucking'], osm: ['trucking'], wikidata: ['trucking'], ...heEngNaceSources('trucking') } },
   { match: /\b(?:construction (?:companies|contractors|firms)|building contractors|general contractors)\b/i,
-    sources: { brreg: ['41'], france: ['41.20B'], companies_house: ['41201', '41202'], gleif: ['construction'], osm: ['construction'],
+    sources: { brreg: ['41'], france: ['41.20B'], companies_house: ['41201', '41202'], gleif: ['construction'], osm: ['construction'], wikidata: ['construction'],
       ...heEngNaceSources('construction') } },
   { match: /\b(?:hotels?|hotel (?:groups?|chains?|operators?))\b/i,
-    sources: { brreg: ['55.10'], france: ['55.10Z'], companies_house: ['55100'], gleif: ['hotels'], osm: ['hotels'],
+    sources: { brreg: ['55.10'], france: ['55.10Z'], companies_house: ['55100'], gleif: ['hotels'], osm: ['hotels'], wikidata: ['hotels'],
       ...heEngNaceSources('hotels') } },
   { match: /\b(?:machinery (?:manufacturers?|companies)|industrial equipment manufacturers?)\b/i,
-    sources: { brreg: ['28'], france: ['28.99B'], companies_house: ['28990'], gleif: ['machinery'], ...heEngNaceSources('machinery') } },
+    sources: { brreg: ['28'], france: ['28.99B'], companies_house: ['28990'], gleif: ['machinery'], wikidata: ['machinery'], ...heEngNaceSources('machinery') } },
   // Professional and service sectors: OpenStreetMap premises, GLEIF legal names
   // where such firms hold LEIs, and the national registers by activity code
   // (UK SIC, French NAF, Norwegian SN, and NACE in Finland, Czechia, Ireland, Estonia).
   { match: /\binsurance (?:brokers?|broking|brokerages?|agenc(?:y|ies)|agents?)\b/i,
     sources: { brreg: ['66.22'], france: ['66.22Z'], companies_house: ['66220'], gleif: ['insurance_brokers'], osm: ['insurance'],
-      ...heEngNaceSources('insurance_brokers') } },
+      wikidata: ['insurance_brokers'], ...heEngNaceSources('insurance_brokers') } },
   { match: /\b(?:law (?:firms?|offices?|practices?)|lawyers?|attorneys?|solicitors?|barristers?|legal (?:practices?|firms?))\b/i,
     sources: { brreg: ['69.1'], france: ['69.10Z'], companies_house: ['69101', '69102', '69109'], gleif: ['law_firms'], osm: ['law_firms'],
-      ...heEngNaceSources('law_firms') } },
+      wikidata: ['law_firms'], ...heEngNaceSources('law_firms') } },
   { match: /\b(?:accounting (?:firms?|practices?|offices?)|accountants?|accountancy (?:firms?|practices?)|bookkeep(?:ers?|ing (?:firms?|services?))|tax (?:advis(?:ers?|ors?|ory firms?)|consultants?)|audit(?:ing)? firms?|auditors?|cpa firms?)\b/i,
     sources: { brreg: ['69.2'], france: ['69.20Z'], companies_house: ['69201', '69202', '69203'], gleif: ['accounting'], osm: ['accounting'],
-      ...heEngNaceSources('accounting') } },
+      wikidata: ['accounting'], ...heEngNaceSources('accounting') } },
   { match: /\b(?:real estate (?:agenc(?:y|ies)|agents?|brokers?|brokerages?|offices?)|estate agen(?:ts?|cies|cy)|realtors?|letting agen(?:ts?|cies|cy)|property (?:managers?|management (?:companies|firms)))\b/i,
-    sources: { brreg: ['68.31'], france: ['68.31Z'], companies_house: ['68310'], osm: ['real_estate_agencies'], ...heEngNaceSources('real_estate_agencies') } },
+    sources: { brreg: ['68.31'], france: ['68.31Z'], companies_house: ['68310'], osm: ['real_estate_agencies'], wikidata: ['real_estate_agencies'], ...heEngNaceSources('real_estate_agencies') } },
   { match: /\b(?:architects?|architecture (?:firms?|practices?|studios?|offices?)|architectural (?:firms?|practices?))\b/i,
-    sources: { brreg: ['71.11'], france: ['71.11Z'], companies_house: ['71111', '71112'], osm: ['architects'], ...heEngNaceSources('architects') } },
+    sources: { brreg: ['71.11'], france: ['71.11Z'], companies_house: ['71111', '71112'], osm: ['architects'], wikidata: ['architects'], ...heEngNaceSources('architects') } },
   { match: /\b(?:engineering (?:firms?|consultanc(?:y|ies)|consultants?|offices?)|consulting engineers?)\b/i,
-    sources: { brreg: ['71.12'], france: ['71.12B'], companies_house: ['71121', '71122', '71129'], osm: ['engineering'], ...heEngNaceSources('engineering') } },
+    sources: { brreg: ['71.12'], france: ['71.12B'], companies_house: ['71121', '71122', '71129'], osm: ['engineering'], wikidata: ['engineering'], ...heEngNaceSources('engineering') } },
   { match: /\b(?:veterinar(?:y|ians?) (?:clinics?|practices?|hospitals?)|veterinarians?|vet (?:clinics?|practices?)|animal (?:clinics?|hospitals?))\b/i,
-    sources: { brreg: ['75'], france: ['75.00Z'], companies_house: ['75000'], osm: ['veterinary'], ...heEngNaceSources('veterinary') } },
+    sources: { brreg: ['75'], france: ['75.00Z'], companies_house: ['75000'], osm: ['veterinary'], wikidata: ['veterinary'], ...heEngNaceSources('veterinary') } },
   { match: /\b(?:pharmac(?:y|ies)|drugstores?|chemists?)\b/i,
-    sources: { osm: ['pharmacies'] } },
+    sources: { osm: ['pharmacies'], wikidata: ['pharmacies'] } },
   { match: /\b(?:(?:car|auto(?:mobile)?|vehicle|motor) dealer(?:s|ships?)?|dealerships?)\b/i,
-    sources: { osm: ['car_dealers'] } },
+    sources: { osm: ['car_dealers'], wikidata: ['car_dealers'] } },
   { match: /\b(?:gyms?|fitness (?:clubs?|cent(?:er|re)s?|studios?|chains?)|health clubs?)\b/i,
-    sources: { osm: ['fitness'] } },
+    sources: { osm: ['fitness'], wikidata: ['fitness'] } },
   { match: /\b(?:beauty (?:salons?|studios?|parlou?rs?|clinics?)|spas?|nail (?:salons?|studios?)|hair (?:salons?|studios?)|hairdressers?|barber(?:s|shops?)?)\b/i,
     sources: { osm: ['beauty'] } },
   { match: /\b(?:restaurants?|caf(?:e|é)s?|bistros?|eateries|coffee shops?)\b/i,
-    sources: { osm: ['restaurants'] } },
+    sources: { osm: ['restaurants'], wikidata: ['restaurants'] } },
   { match: /\b(?:travel agen(?:ts?|cies|cy)|tour operators?)\b/i,
-    sources: { brreg: ['79.1'], france: ['79.11Z', '79.12Z'], companies_house: ['79110', '79120'], osm: ['travel_agencies'], ...heEngNaceSources('travel_agencies') } },
+    sources: { brreg: ['79.1'], france: ['79.11Z', '79.12Z'], companies_house: ['79110', '79120'], osm: ['travel_agencies'], wikidata: ['travel_agencies'], ...heEngNaceSources('travel_agencies') } },
   { match: /\b(?:recruit(?:ment|ing) (?:agenc(?:y|ies)|firms?|companies)|staffing (?:agenc(?:y|ies)|firms?|companies)|employment agenc(?:y|ies)|headhunt(?:ers?|ing firms?)|executive search firms?)\b/i,
-    sources: { brreg: ['78'], france: ['78.10Z', '78.20Z', '78.30Z'], companies_house: ['78109', '78200', '78300'], osm: ['recruitment'],
+    sources: { brreg: ['78'], france: ['78.10Z', '78.20Z', '78.30Z'], companies_house: ['78109', '78200', '78300'], osm: ['recruitment'], wikidata: ['recruitment'],
       ...heEngNaceSources('recruitment') } },
   { match: /\b(?:marketing|advertising|digital|creative|branding|pr|media) agenc(?:y|ies)\b/i,
-    sources: { brreg: ['73.11'], france: ['73.11Z'], companies_house: ['73110'], osm: ['marketing_agencies'], ...heEngNaceSources('marketing_agencies') } },
+    sources: { brreg: ['73.11'], france: ['73.11Z'], companies_house: ['73110'], osm: ['marketing_agencies'], wikidata: ['marketing_agencies'], ...heEngNaceSources('marketing_agencies') } },
   { match: /\b(?:physiotherap(?:y|ists?)|physical therap(?:y|ists?)|physio (?:clinics?|practices?))\b/i,
     sources: { osm: ['physiotherapy'] } },
   { match: /\b(?:opticians?|optometrists?|optical (?:stores?|shops?)|eyewear (?:stores?|shops?))\b/i,
