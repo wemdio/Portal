@@ -39,7 +39,6 @@ import { ALL_TOOL_IDS, TOOLS_CONFIG, TOOL_GROUPS, type ToolId } from '@/lib/tool
 import { sortToolIdsByTitle } from '@/lib/toolsSort';
 import { type ToolStatus } from '@/lib/toolStatus';
 import { isAdmin } from '@/lib/roles';
-import { RdpToolCard } from './RdpToolCard';
 import { ToolVisibilityModal } from './ToolVisibilityModal';
 import { usePortalBlockingLoad } from '@/components/PortalLoadingProvider';
 import { useUser } from '@/lib/UserProvider';
@@ -95,7 +94,6 @@ const TOOL_ICONS: Record<ToolId, ComponentType<{ className?: string }>> = {
   'tg-transcribe': Video,
   'cis-lead-finder': Building2,
   'li-outreach': Users,
-  rdp: FileText,
   instantly: Send,
   'tg-outreach': MessageSquareMore,
   'habr-career': Briefcase,
@@ -300,21 +298,16 @@ export default function ToolsPage() {
 
   const adminViewer = isAdmin(userRole);
 
-  /** Карточка одного тула (RDP — особый, у него своя card-компонента). */
-  const renderToolCard = (toolId: string) =>
-    toolId === 'rdp' ? (
-      <div key="rdp" className="min-w-0 flex flex-col h-full">
-        <RdpToolCard />
-      </div>
-    ) : (
-      <ToolLinkCard
-        key={toolId}
-        toolId={toolId as ToolId}
-        locale={locale}
-        effectiveStatus={statuses[toolId]}
-        userRole={userRole}
-      />
-    );
+  /** Карточка одного тула. */
+  const renderToolCard = (toolId: string) => (
+    <ToolLinkCard
+      key={toolId}
+      toolId={toolId as ToolId}
+      locale={locale}
+      effectiveStatus={statuses[toolId]}
+      userRole={userRole}
+    />
+  );
 
   return (
     <div className="space-y-6 text-left max-w-full">

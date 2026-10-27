@@ -68,7 +68,6 @@ export function LayoutShell({
 }) {
   const pathname = usePathname();
   const isSpreadsheetPage = pathname === '/tools/databases';
-  const isRdpPage = pathname === '/tools/rdp';
   const isTwoGisParserPage = pathname === '/tools/2gis-parser';
   const isGuestReviewPage = pathname.startsWith('/review/');
   const isMaintenancePage = pathname === '/maintenance';
@@ -111,7 +110,6 @@ export function LayoutShell({
       (
         pathname.startsWith('/tools')
         && !isSpreadsheetPage
-        && !isRdpPage
         && !isTwoGisParserPage
       ) ||
       pathname.startsWith('/admin')
@@ -125,9 +123,9 @@ export function LayoutShell({
     ? 'p-0'
     : isTma
     ? (isSpreadsheetPage ? 'p-1.5' : 'px-4 py-4')
-    : (isSpreadsheetPage ? 'p-1.5' : isRdpPage ? 'p-2' : isToolsPage ? desktopToolsPadding : desktopDefaultPadding);
+    : (isSpreadsheetPage ? 'p-1.5' : isToolsPage ? desktopToolsPadding : desktopDefaultPadding);
   const shouldUseFullHeightContent =
-    isRdpPage || isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || pathname === '/';
+    isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || pathname === '/';
   const contentWidth = shouldUseFullHeightContent ? 'w-full flex flex-1 min-h-0 flex-col' : 'w-full';
 
   // Long payment lists use the document as their only vertical scroller.

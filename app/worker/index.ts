@@ -406,60 +406,6 @@ async function claimYandexDirectJob(): Promise<string | null> {
 }
 
 // --------------------------------------------------------------------------
-// RDP booking expiry — marks bookings as 'expired' when starts_at + 5 min
-// has passed without an active session being started.
-// --------------------------------------------------------------------------
-
-async function checkRdpBookingExpiry(): Promise<void> {
-  if (!supabaseAdmin) return;
-  const db = supabaseAdmin;
-
-  const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-
-  const { data: expired, error } = await db
-    .from('rdp_bookings')
-    .update({ status: 'expired' })
-    .eq('status', 'pending')
-    .lt('starts_at', fiveMinAgo)
-    .select('id');
-
-  if (error) {
-    log('warn', 'RDP booking expiry check failed', error);
-  } else if (expired?.length) {
-    log('info', `Expired ${expired.length} RDP booking(s) (no-show after 5 min)`);
-  }
-}
-
-// --------------------------------------------------------------------------
-// RDP session inactivity — auto-ends sessions idle for 30+ minutes.
-// Safety net for closed tabs / browser crashes where the frontend can't
-// call DELETE /sessions itself.
-// --------------------------------------------------------------------------
-
-const RDP_INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
-
-async function checkRdpSessionInactivity(): Promise<void> {
-  if (!supabaseAdmin) return;
-  const db = supabaseAdmin;
-
-  const cutoff = new Date(Date.now() - RDP_INACTIVITY_TIMEOUT_MS).toISOString();
-  const now = new Date().toISOString();
-
-  const { data: ended, error } = await db
-    .from('rdp_sessions')
-    .update({ status: 'ended', ended_at: now })
-    .eq('status', 'active')
-    .lt('last_activity_at', cutoff)
-    .select('id, user_id');
-
-  if (error) {
-    log('warn', 'RDP session inactivity check failed', error);
-  } else if (ended?.length) {
-    log('info', `Auto-ended ${ended.length} RDP session(s) due to 30 min inactivity`);
-  }
-}
-
-// --------------------------------------------------------------------------
 // Single poll tick — tries to pick up one job of any type
 // --------------------------------------------------------------------------
 
@@ -646,9 +592,6 @@ async function pollLoop(): Promise<void> {
 
   while (!shuttingDown) {
     try {
-      await checkRdpBookingExpiry();
-      await checkRdpSessionInactivity();
-
       const found = await pollOnce();
       if (!found) {
         if (channel) {

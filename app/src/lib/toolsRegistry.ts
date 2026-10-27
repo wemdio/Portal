@@ -62,7 +62,6 @@ export const ALL_TOOL_IDS = [
   'polza-reports',
   'audio-transcribe',
   'tg-transcribe',
-  'rdp',
   'instantly',
   'tg-outreach',
   'habr-career',
@@ -279,15 +278,6 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description_en: 'LinkedIn outreach: campaigns, AI personalization, and lead scraping via Unipile.',
     href: '/tools/li-outreach',
     accentColor: 'blue',
-  },
-  rdp: {
-    id: 'rdp',
-    title: 'Удалённый рабочий стол',
-    title_en: 'Remote desktop',
-    description: 'Подключение к удалённому ПК через браузер.',
-    description_en: 'Connect to a remote PC directly from your browser.',
-    href: '/tools/rdp',
-    accentColor: 'emerald',
   },
   instantly: {
     id: 'instantly',
@@ -519,7 +509,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Утилиты',
     label_en: 'Utilities',
-    toolIds: ['auto-report', 'replies-report', 'polza-reports', 'audio-transcribe', 'tg-transcribe', 'rdp'],
+    toolIds: ['auto-report', 'replies-report', 'polza-reports', 'audio-transcribe', 'tg-transcribe'],
   },
   {
     label: 'AI и знания',
