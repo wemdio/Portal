@@ -8,6 +8,7 @@ import { readSqliteSession } from '@/lib/telegram/sessionUtils';
 import { HttpConnectSocket } from './httpProxySocket';
 import type { OutreachAccount, OutreachProxy } from './types';
 import { handleProxyError } from './proxyHealth';
+import { accountLogName } from './accountLabel';
 
 /**
  * Threshold for auto-disabling an account that keeps getting
@@ -270,7 +271,7 @@ export async function buildClients(
     if (!acc.is_active) continue;
     const hasSession = (acc.session_data?.trim()) || (acc.session_file_path && downloadSessionFile);
     if (!hasSession) {
-      log('warning', `Аккаунт ${acc.session_name}: нет session_data или .session файла, пропуск`);
+      log('warning', `Аккаунт ${accountLogName(acc)}: нет session_data или .session файла, пропуск`);
       continue;
     }
 
@@ -307,7 +308,7 @@ export async function buildClients(
         probeAlive = probe.alive;
         if (probe.alive) {
           probeNote = ` (TCP-проверка прокси прошла за ${probe.latencyMs}мс — похоже временная проблема Telegram, делаю повторную попытку)`;
-          log('warning', `Аккаунт ${acc.session_name}: первая попытка подключения упала — ${humanizeConnectError(errMsg)}.${probeNote} Прокси: ${proxyLabel}.`);
+          log('warning', `Аккаунт ${accountLogName(acc)}: первая попытка подключения упала — ${humanizeConnectError(errMsg)}.${probeNote} Прокси: ${proxyLabel}.`);
           retried = true;
           try {
             client = await createGramClient(acc, proxy, downloadSessionFile);
@@ -323,7 +324,7 @@ export async function buildClients(
 
     if (client) {
       clients.push({ client, account: acc });
-      log('info', `Аккаунт ${acc.session_name}: подключён${retried ? ' со второй попытки' : ''}`);
+      log('info', `Аккаунт ${accountLogName(acc)}: подключён${retried ? ' со второй попытки' : ''}`);
 
       // Reset the duplicated-session counter on any successful connect.
       // We only do the DB round-trip when there's something to clear, since
@@ -334,14 +335,14 @@ export async function buildClients(
           .update({ auth_key_dup_count: 0 })
           .eq('id', acc.id);
         if (resetErr) {
-          log('warning', `Аккаунт ${acc.session_name}: не смог сбросить счётчик ошибок подключения в базе данных — ${resetErr.message}`);
+          log('warning', `Аккаунт ${accountLogName(acc)}: не смог сбросить счётчик ошибок подключения в базе данных — ${resetErr.message}`);
         } else {
           acc.auth_key_dup_count = 0;
         }
       }
     } else {
       const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
-      log('error', `Аккаунт ${acc.session_name}: не удалось подключиться к Telegram${retried ? ' (даже после повторной попытки)' : ''} — ${humanizeConnectError(errMsg)}.${probeNote} Прокси: ${proxyLabel}. [${accountLabel}]`);
+      log('error', `Аккаунт ${accountLogName(acc)}: не удалось подключиться к Telegram${retried ? ' (даже после повторной попытки)' : ''} — ${humanizeConnectError(errMsg)}.${probeNote} Прокси: ${proxyLabel}. [${accountLabel}]`);
 
       // Автосвап на падении подключения. До 05.08.2026 здоровье прокси
       // считалось только по ошибкам внутри круга боевого цикла, а самый частый
@@ -359,7 +360,7 @@ export async function buildClients(
           reason: probeAlive === false ? 'tcp_dead' : 'connect_timeout',
           log,
         }).catch((e: unknown) => {
-          log('warning', `Аккаунт ${acc.session_name}: не смог обновить здоровье прокси — ${e instanceof Error ? e.message : String(e)}`);
+          log('warning', `Аккаунт ${accountLogName(acc)}: не смог обновить здоровье прокси — ${e instanceof Error ? e.message : String(e)}`);
           return { swappedTo: null };
         });
 
@@ -372,10 +373,10 @@ export async function buildClients(
           try {
             const swapped = await createGramClient(acc, fresh, downloadSessionFile);
             clients.push({ client: swapped, account: acc });
-            log('info', `Аккаунт ${acc.session_name}: подключён после автосвапа прокси на ${fresh.url}`);
+            log('info', `Аккаунт ${accountLogName(acc)}: подключён после автосвапа прокси на ${fresh.url}`);
             continue;
           } catch (e) {
-            log('error', `Аккаунт ${acc.session_name}: не зашёл и на новом прокси ${fresh.url} — ${humanizeConnectError(e instanceof Error ? e.message : String(e))}`);
+            log('error', `Аккаунт ${accountLogName(acc)}: не зашёл и на новом прокси ${fresh.url} — ${humanizeConnectError(e instanceof Error ? e.message : String(e))}`);
           }
         }
       }
@@ -392,11 +393,11 @@ export async function buildClients(
             .update({ is_active: false, auth_key_dup_count: next })
             .eq('id', acc.id);
           if (updErr) {
-            log('error', `Аккаунт ${acc.session_name}: не смог выключить аккаунт в базе данных — ${updErr.message}`);
+            log('error', `Аккаунт ${accountLogName(acc)}: не смог выключить аккаунт в базе данных — ${updErr.message}`);
           } else {
             log(
               'warning',
-              `Аккаунт ${acc.session_name}: 3 неудачные попытки подряд (AUTH_KEY_DUPLICATED) — выключаю автоматически. ` +
+              `Аккаунт ${accountLogName(acc)}: 3 неудачные попытки подряд (AUTH_KEY_DUPLICATED) — выключаю автоматически. ` +
                 `Чтобы вернуть в работу: на телефоне с этим номером откройте Telegram → Настройки → Конфиденциальность → ` +
                 `Активные сеансы → завершите чужие сессии. Затем перевыпустите session_data в UI.`,
             );
@@ -407,11 +408,11 @@ export async function buildClients(
             .update({ auth_key_dup_count: next })
             .eq('id', acc.id);
           if (updErr) {
-            log('warning', `Аккаунт ${acc.session_name}: не смог записать счётчик ошибок подключения в базу данных — ${updErr.message}`);
+            log('warning', `Аккаунт ${accountLogName(acc)}: не смог записать счётчик ошибок подключения в базу данных — ${updErr.message}`);
           } else {
             log(
               'warning',
-              `Аккаунт ${acc.session_name}: сессия параллельно открыта с другого устройства ` +
+              `Аккаунт ${accountLogName(acc)}: сессия параллельно открыта с другого устройства ` +
                 `(AUTH_KEY_DUPLICATED, попытка ${next}/${AUTH_KEY_DUP_DISABLE_THRESHOLD} подряд). ` +
                 `После 3 подряд аккаунт будет выключен автоматически.`,
             );
