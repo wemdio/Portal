@@ -90,6 +90,12 @@ export interface ThreadVerdictDto {
     qualifiedAt: string | null;
     tgSentAt: string | null;
   } | null;
+  /** Разговор квалифицирующего ИИ по этой переписке, если он был. */
+  aiConversation: {
+    state: 'active' | 'handed_off' | 'no_reply' | 'closed' | 'stopped' | 'failed';
+    aiMessages: number;
+    handoffContact: string | null;
+  } | null;
 }
 
 /** Ключ папки из адреса: auto_en / auto_ru. Что угодно другое — не ключ. */
