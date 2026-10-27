@@ -7,6 +7,7 @@ import {
   parseAmount,
   parseChannel,
   parseCurrency,
+  parseIncomeComment,
   parseIncomePayer,
   parseLinks,
   parseOccurredOn,
@@ -46,7 +47,7 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
     if (body.currency !== undefined) patch.currency = parseCurrency(body.currency);
     if (body.payer !== undefined) patch.payer = parseIncomePayer(body.payer);
     if (body.channel !== undefined) patch.channel = parseChannel(body.channel);
-    if (body.comment !== undefined) patch.comment = body.comment.trim() || null;
+    if (body.comment !== undefined) patch.comment = parseIncomeComment(body.comment);
     const links = parseLinks(body);
     if (links.projectId !== undefined) patch.project_id = links.projectId;
     if (links.amoDealId !== undefined) patch.amo_deal_id = links.amoDealId;
