@@ -28,7 +28,7 @@ const stamp = (e: { timestamp_email?: string; timestamp_created?: string }) =>
   Date.parse(e.timestamp_email ?? e.timestamp_created ?? '') || 0;
 
 /** Include actual correspondence so the new CC recipient can take over. */
-function withHistory(text: string, history: string): string {
+export function withHistory(text: string, history: string): string {
   return `${text}\n\n${history.slice(-20_000).split(/\r?\n/).map(line => `> ${line}`).join('\n')}`;
 }
 function ccFor(settings: AgencyHandoffSettings, sender: string, lead: string): string[] {
