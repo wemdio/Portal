@@ -178,6 +178,20 @@ export async function releaseVeTwoGisClaims(db: SupabaseClient, baseId: string, 
   await deleteClaimed(db, 'release', baseId, signal);
 }
 
+const DOMAIN_PAGE = 1000;
+
+/** Домены, которые база держит claimed в журнале линии: страницами по 1000, по id. Домены наружу не логируются. */
+export async function readVeTwoGisClaimedDomains(db: SupabaseClient, baseId: string, signal?: AbortSignal): Promise<Set<string>> {
+  const domains = new Set<string>();
+  for (let from = 0; ; from += DOMAIN_PAGE) {
+    const data = await step<Array<{ registrable_domain?: unknown }>>('read', signal, (abort) => db.from(TABLE).select('registrable_domain')
+      .eq('base_id', baseId).eq('outcome', 'claimed').order('id').abortSignal(abort).range(from, from + DOMAIN_PAGE - 1));
+    const rows = data ?? [];
+    for (const row of rows) if (typeof row.registrable_domain === 'string') domains.add(row.registrable_domain);
+    if (rows.length < DOMAIN_PAGE) return domains;
+  }
+}
+
 export type VeTwoGisRejectReason = 'site_unconfirmed' | 'ip_site' | 'owner_inn_excluded' | 'no_published_mailbox';
 
 /**
