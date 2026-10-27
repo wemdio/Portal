@@ -1681,6 +1681,57 @@ body:has(.client-portal) {
   }
 }
 
+/* Пункты выпадающего меню TopNav. Наведение и текущая страница должны
+   читаться с первого взгляда в обеих темах: наведение — заливкой, текущая
+   страница — синим цветом, заливкой и полоской слева. Свои классы, а не
+   hover:-утилиты: тёмная тема hover-утилиты не переопределяет. */
+.portal-nav-item {
+  position: relative;
+  color: #52525b;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.portal-nav-item:hover,
+.portal-nav-item:focus-visible {
+  background-color: #f4f4f5;
+  color: #18181b;
+}
+.portal-nav-item[data-active='true'] {
+  background-color: #eff6ff;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+.portal-nav-item[data-active='true']:hover {
+  background-color: #dbeafe;
+}
+.portal-nav-item[data-active='true']::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: #2563eb;
+}
+html[data-portal-theme='dark'] .portal-shell .portal-nav-item {
+  color: #a1a1aa;
+}
+html[data-portal-theme='dark'] .portal-shell .portal-nav-item:hover,
+html[data-portal-theme='dark'] .portal-shell .portal-nav-item:focus-visible {
+  background-color: rgba(255, 255, 255, 0.08);
+  color: #fafafa;
+}
+html[data-portal-theme='dark'] .portal-shell .portal-nav-item[data-active='true'] {
+  background-color: rgba(96, 165, 250, 0.16);
+  color: #93c5fd;
+}
+html[data-portal-theme='dark'] .portal-shell .portal-nav-item[data-active='true']:hover {
+  background-color: rgba(96, 165, 250, 0.24);
+}
+html[data-portal-theme='dark'] .portal-shell .portal-nav-item[data-active='true']::before {
+  background: #60a5fa;
+}
+
 /* Раскрывающийся блок внутри карточки (легенда графика в разделе «Деньги»).
    Своя пара keyframes, а не переиспользование меню TopNav: у меню это часть
    его собственного поведения, и привязывать к нему карточку не за что. */

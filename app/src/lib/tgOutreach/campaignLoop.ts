@@ -3,6 +3,7 @@ import path from 'path';
 import os from 'os';
 import { Api, helpers, utils } from 'telegram';
 import type { Dialog } from 'telegram/tl/custom/dialog';
+import { NewMessage, type NewMessageEvent } from 'telegram/events';
 import { Dialog as GramDialog } from 'telegram/tl/custom/dialog';
 import type { TelegramClient } from 'telegram';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -49,6 +50,7 @@ import { aiLeadMark } from './leadMark';
 import { withTimeout } from './withTimeout';
 import { truncateMessage } from '@/lib/logger';
 import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
+import { accountLogName } from './accountLabel';
 
 /**
  * Сроки на вызовы Telegram в боевом круге.
@@ -131,6 +133,39 @@ async function interruptibleSleep(ms: number, shouldStop: () => boolean, chunkMs
 function randomRange([min, max]: [number, number]): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
+
+/**
+ * Через сколько после сообщения собеседника уходит наш ответ, секунды.
+ *
+ * 27.10.2026 по просьбе продаж: «рандомно 30–260 с после того, как нам
+ * написали». Отсчёт от времени ЕГО сообщения, а не от момента, когда аккаунт до
+ * него добрался: круг, нашедший сообщение получасовой давности, отвечает сразу.
+ * Это значение по умолчанию: свои пределы кампания задаёт на экране
+ * (reply_delay_range). read_reply_delay_range на ответы больше не действует —
+ * осталась у напоминаний и догоняющих ответов.
+ */
+const REPLY_AFTER_INCOMING_SEC: [number, number] = [30, 260];
+/**
+ * Рамка для настройки кампании (27.10.2026, решение продаж): быстрее 30 с ответ
+ * выглядит как бот, дольше 5 минут — снова «долго ждать».
+ */
+const REPLY_AFTER_INCOMING_MIN_SEC = 30;
+const REPLY_AFTER_INCOMING_MAX_SEC = 300;
+
+/** Пределы ответа из настроек кампании в рамке 30–300 с; кривые или пустые — 30–260. */
+function replyDelayRange(tg: TelegramSettings): [number, number] {
+  const range = tg.reply_delay_range;
+  if (!Array.isArray(range) || range.length !== 2) return REPLY_AFTER_INCOMING_SEC;
+  const min = Math.round(Number(range[0]));
+  const max = Math.round(Number(range[1]));
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return REPLY_AFTER_INCOMING_SEC;
+  const from = Math.min(Math.max(min, REPLY_AFTER_INCOMING_MIN_SEC), REPLY_AFTER_INCOMING_MAX_SEC);
+  return [from, Math.min(Math.max(max, from), REPLY_AFTER_INCOMING_MAX_SEC)];
+}
+/** За сколько до срока ответа браться за чат: прочитать историю и сгенерировать. */
+const INCOMING_PREPARE_LEAD_MS = 30_000;
+/** Раньше этого после сообщения не читаем: часто дописывают вторым и третьим. */
+const INCOMING_MIN_READ_AFTER_MS = 15_000;
 
 
 /**
@@ -878,7 +913,7 @@ function pickSpareClient(
     if (Number.isFinite(warmup) && warmup > Date.now()) return false;
     return true;
   });
-  return spare ? { client: spare.client, accountName: spare.account.session_name } : null;
+  return spare ? { client: spare.client, accountName: accountLogName(spare.account) } : null;
 }
 
 /**
@@ -952,6 +987,15 @@ export interface HandleChatOptions {
    * подменный — переписка в ней текстом, оригиналы подменному недоступны.
    */
   getSpareClient?: (excludeAccountId: string) => { client: TelegramClient; accountName: string } | null;
+  /** Когда отправить ответ, мс. Нет — через 30–260 с от последнего сообщения собеседника. */
+  replyAt?: number;
+  /** Ответ по входящему: если последними уже ответили мы (успел круг), молчим. */
+  skipIfAnswered?: boolean;
+  /**
+   * Собеседник дописал после прочитанной истории (`seenMessageId` — последнее
+   * сообщение в ней)? Тогда этот ответ не шлём: ответим на всё сразу.
+   */
+  isStale?: (seenMessageId: number) => boolean;
 }
 
 export async function handleChat(
@@ -1036,6 +1080,10 @@ export async function handleChat(
   if (chatMessages.length === 0) {
     return { replied: false, triggerType: null };
   }
+  if (options?.skipIfAnswered && chatMessages.at(-1)?.role === 'assistant') {
+    return { replied: false, triggerType: null };
+  }
+  const seenMessageId = Math.max(0, ...[...history].map((m) => Number(m.id) || 0));
 
   await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, {
     tgIsBot,
@@ -1358,11 +1406,18 @@ export async function handleChat(
   }
   if (!replyText) return { replied: false, triggerType: null };
 
-  const readReplyDelay = randomRange(tg.read_reply_delay_range) * 1000;
-  if (shouldStop) await interruptibleSleep(readReplyDelay, shouldStop); else await sleep(readReplyDelay);
+  const lastIncomingMs = Date.parse([...chatMessages].reverse().find((m) => m.role === 'user')?.timestamp ?? '');
+  const replyAt = options?.replyAt
+    ?? (Number.isFinite(lastIncomingMs) ? lastIncomingMs + randomRange(replyDelayRange(tg)) * 1000 : Date.now());
+  const replyDelay = Math.max(0, replyAt - Date.now());
+  if (shouldStop) await interruptibleSleep(replyDelay, shouldStop); else await sleep(replyDelay);
 
   if (shouldStop?.() || !dialogUnchanged(editKey, revision)) {
     log('info', `${displayName}: остановка или изменение переписки — отменяю ответ по старой истории`);
+    return { replied: false, triggerType: null };
+  }
+  if (options?.isStale?.(seenMessageId)) {
+    log('info', `${displayName}: собеседник дописал, пока готовился ответ, — отвечу на всё сразу`);
     return { replied: false, triggerType: null };
   }
   let sent;
@@ -1454,7 +1509,7 @@ export async function handleChat(
               );
             }
             outcome = { ok: true };
-            log('warning', `Пересылка по триггеру упёрлась в ограничение аккаунта ${account.session_name} — карточку в ${targetChat} отправил ${spare.accountName}.`);
+            log('warning', `Пересылка по триггеру упёрлась в ограничение аккаунта ${accountLogName(account)} — карточку в ${targetChat} отправил ${spare.accountName}.`);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             log('error', `Подменный аккаунт ${spare.accountName} тоже не смог отправить карточку в ${targetChat} — ${msg}`);
@@ -1502,6 +1557,8 @@ async function handleFollowUp(
   db: SupabaseClient,
   log: LogFn,
   shouldStop?: () => boolean,
+  /** Чат, где уже запланирован ответ по входящему: собеседник написал, напоминать нечего. */
+  isAnswering?: (tgUserId: number) => boolean,
 ) {
   const tg = campaign.telegram_settings as TelegramSettings;
   const oai = campaign.openai_settings as OpenAISettings;
@@ -1515,7 +1572,7 @@ async function handleFollowUp(
     return;
   }
   if (totalDelayMs <= 0 || !followUpPrompt) {
-    log('info', `Аккаунт ${account.session_name}: напоминания (follow-up) пропущены — не задана задержка или промпт в настройках кампании`);
+    log('info', `Аккаунт ${accountLogName(account)}: напоминания (follow-up) пропущены — не задана задержка или промпт в настройках кампании`);
     return;
   }
 
@@ -1535,11 +1592,11 @@ async function handleFollowUp(
     .limit(10);
 
   if (fErr) {
-    log('warning', `Аккаунт ${account.session_name}: напоминания (follow-up) — не смог получить список диалогов из базы данных: ${fErr.message}`);
+    log('warning', `Аккаунт ${accountLogName(account)}: напоминания (follow-up) — не смог получить список диалогов из базы данных: ${fErr.message}`);
     return;
   }
   if (!dialogs?.length) {
-    log('info', `Аккаунт ${account.session_name}: напоминания (follow-up) — нет диалогов, где наше последнее сообщение старше ${delayHours}ч ${delayMinutes}мин`);
+    log('info', `Аккаунт ${accountLogName(account)}: напоминания (follow-up) — нет диалогов, где наше последнее сообщение старше ${delayHours}ч ${delayMinutes}мин`);
     return;
   }
 
@@ -1563,7 +1620,7 @@ async function handleFollowUp(
   try {
     contacts = await campaignContactIds(db, campaign.id, dialogs.map((d) => Number(d.tg_user_id)));
   } catch (err) {
-    log('warning', `Аккаунт ${account.session_name}: напоминания (follow-up) — ${err instanceof Error ? err.message : String(err)}`);
+    log('warning', `Аккаунт ${accountLogName(account)}: напоминания (follow-up) — ${err instanceof Error ? err.message : String(err)}`);
     return;
   }
 
@@ -1571,6 +1628,7 @@ async function handleFollowUp(
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
+    if (isAnswering?.(Number(tgUserId))) { stats.skip_last_not_assistant++; continue; }
     if (isBot) { stats.skip_bot++; continue; }
     if (!contacts.has(Number(tgUserId))) { stats.skip_not_campaign++; continue; }
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { stats.skip_blocked++; continue; }
@@ -1640,7 +1698,7 @@ async function handleFollowUp(
   // log instead of a silent block of time.
   log(
     'info',
-    `Аккаунт ${account.session_name}: напоминания (follow-up) — проверил ${stats.scanned} диалогов, отправил ${stats.sent} напоминаний.` +
+    `Аккаунт ${accountLogName(account)}: напоминания (follow-up) — проверил ${stats.scanned} диалогов, отправил ${stats.sent} напоминаний.` +
       (stats.skip_already_sent ||
         stats.skip_last_not_assistant ||
         stats.skip_empty ||
@@ -1670,6 +1728,8 @@ async function handleMissedRepliesLastDays(
   db: SupabaseClient,
   log: LogFn,
   shouldStop?: () => boolean,
+  /** Чат, где уже запланирован ответ по входящему: второй ответ туда не шлём. */
+  isAnswering?: (tgUserId: number) => boolean,
 ) {
   const tg = campaign.telegram_settings as TelegramSettings;
   const oai = campaign.openai_settings as OpenAISettings;
@@ -1691,11 +1751,11 @@ async function handleMissedRepliesLastDays(
     .limit(200);
 
   if (cErr) {
-    log('warning', `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up) — не смог получить список диалогов: ${cErr.message}`);
+    log('warning', `Аккаунт ${accountLogName(account)}: проверка пропущенных ответов (catch-up) — не смог получить список диалогов: ${cErr.message}`);
     return;
   }
   if (!dialogs?.length) {
-    log('info', `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up) — нет диалогов за последние ${CATCHUP_LOOKBACK_DAYS} дн., где пользователь написал последним`);
+    log('info', `Аккаунт ${accountLogName(account)}: проверка пропущенных ответов (catch-up) — нет диалогов за последние ${CATCHUP_LOOKBACK_DAYS} дн., где пользователь написал последним`);
     return;
   }
 
@@ -1710,13 +1770,14 @@ async function handleMissedRepliesLastDays(
   let skipRepeat = 0;
   let skipCloser = 0;
   let skipNotCampaign = 0;
+  let skipAnswering = 0;
   let errorsCount = 0;
 
   let contacts: Set<number>;
   try {
     contacts = await campaignContactIds(db, campaign.id, dialogs.map((d) => Number(d.tg_user_id)));
   } catch (err) {
-    log('warning', `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up) — ${err instanceof Error ? err.message : String(err)}`);
+    log('warning', `Аккаунт ${accountLogName(account)}: проверка пропущенных ответов (catch-up) — ${err instanceof Error ? err.message : String(err)}`);
     return;
   }
 
@@ -1727,6 +1788,7 @@ async function handleMissedRepliesLastDays(
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
+    if (isAnswering?.(Number(tgUserId))) { skipAnswering++; continue; }
     if (isBot) { skipBot++; continue; }
     if (!contacts.has(Number(tgUserId))) { skipNotCampaign++; continue; }
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { skipBlocked++; continue; }
@@ -1810,10 +1872,11 @@ async function handleMissedRepliesLastDays(
   // Always emit a summary so the operator can confirm catch-up actually ran.
   log(
     'info',
-    `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up за ${CATCHUP_LOOKBACK_DAYS} дн.) — проверил ${processed} диалогов, отправил ${replied} ответов.` +
-      (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue || skipRepeat || skipCloser || skipNotCampaign
+    `Аккаунт ${accountLogName(account)}: проверка пропущенных ответов (catch-up за ${CATCHUP_LOOKBACK_DAYS} дн.) — проверил ${processed} диалогов, отправил ${replied} ответов.` +
+      (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue || skipRepeat || skipCloser || skipNotCampaign || skipAnswering
         ? ' Не отправил по причинам:'
         : '') +
+      (skipAnswering ? ` ответ уже готовится по входящему — ${skipAnswering};` : '') +
       (skipNotCampaign ? ` не из баз кампании — ${skipNotCampaign};` : '') +
       (skipBot ? ` это боты — ${skipBot};` : '') +
       (skipBlocked ? ` в чёрном списке — ${skipBlocked};` : '') +
@@ -1844,7 +1907,7 @@ async function backfillEmptyDialogs(
     .limit(50);
 
   if (bErr) {
-    log('warning', `Аккаунт ${account.session_name}: дозаполнение истории (backfill) — не смог получить список диалогов: ${bErr.message}`);
+    log('warning', `Аккаунт ${accountLogName(account)}: дозаполнение истории (backfill) — не смог получить список диалогов: ${bErr.message}`);
     return;
   }
 
@@ -1857,7 +1920,7 @@ async function backfillEmptyDialogs(
     return;
   }
 
-  log('info', `Аккаунт ${account.session_name}: дозаполнение истории (backfill) — нашёл ${empty.length} диалогов без сохранённой переписки, иду в Telegram за историей`);
+  log('info', `Аккаунт ${accountLogName(account)}: дозаполнение истории (backfill) — нашёл ${empty.length} диалогов без сохранённой переписки, иду в Telegram за историей`);
   let filled = 0;
   let stillEmpty = 0;
   let errors = 0;
@@ -1907,13 +1970,45 @@ async function backfillEmptyDialogs(
 
   log(
     'info',
-    `Аккаунт ${account.session_name}: дозаполнение истории завершено — заполнил ${filled} диалогов, ещё пустых осталось ${stillEmpty}` +
+    `Аккаунт ${accountLogName(account)}: дозаполнение истории завершено — заполнил ${filled} диалогов, ещё пустых осталось ${stillEmpty}` +
       (errors ? `, ошибок при загрузке ${errors}` : '') +
       '.',
   );
 }
 
 export type TraceContext = { requestId: string };
+
+/** Как часто дочитывать список своих аккаунтов, пока кампания идёт. */
+const FLEET_REFRESH_MS = 10 * 60_000;
+const FLEET_PAGE = 1000;
+
+/**
+ * tg_user_id всех наших аккаунтов: во всех кампаниях и все напарники по
+ * прогреву (в том числе удалённые из портала). Чат с любым из них — прогрев,
+ * а не лид.
+ *
+ * 27.10.2026 аккаунт прогрели в «Polza Agency» и перенесли в «Lachestry».
+ * Своими тогда считались только аккаунты этой же кампании — напарники по
+ * прогреву оказались чужими: их чаты попали в «Диалоги» и в статистику
+ * («ответы», «требуют внимания»), а разбор 22 непрочитанных прогревочных чатов
+ * на минуты задержал первую рассылку по новой базе.
+ */
+async function loadFleetTgUserIds(db: SupabaseClient): Promise<Set<number>> {
+  const ids = new Set<number>();
+  for (const table of ['tg_outreach_accounts', 'tg_outreach_warmup_peers'] as const) {
+    for (let from = 0; ; from += FLEET_PAGE) {
+      const { data, error } = await db.from(table).select('tg_user_id')
+        .not('tg_user_id', 'is', null).order('tg_user_id').range(from, from + FLEET_PAGE - 1);
+      if (error) throw new Error(`${table}: ${error.message}`);
+      for (const row of (data ?? []) as Array<{ tg_user_id: number | string | null }>) {
+        const id = Number(row.tg_user_id);
+        if (Number.isFinite(id) && id > 0) ids.add(id);
+      }
+      if ((data ?? []).length < FLEET_PAGE) break;
+    }
+  }
+  return ids;
+}
 
 export async function runCampaignLoop(
   campaignId: string,
@@ -2087,7 +2182,8 @@ export async function runCampaignLoop(
     .eq('is_active', true);
 
   /**
-   * Собственные аккаунты кампании — ВСЕ, а не только те, кто сейчас в круге.
+   * Собственные аккаунты — ВСЕ, а не только те, кто сейчас в круге, и не
+   * только этой кампании (см. loadFleetTgUserIds).
    *
    * После прогрева (см. warmup/) у аккаунтов остаются диалоги друг с другом, и
    * без этого фильтра боевой цикл принимает свой же аккаунт за лида:
@@ -2104,15 +2200,14 @@ export async function runCampaignLoop(
    * Поэтому спрашиваем базу отдельно и без единого условия: своим аккаунт
    * остаётся независимо от того, включён он, греется или стоит на паузе.
    */
-  const { data: ownRows } = await db
-    .from('tg_outreach_accounts')
-    .select('tg_user_id')
-    .eq('campaign_id', campaignId);
-  const ownTgUserIds = new Set(
-    ((ownRows ?? []) as Array<{ tg_user_id: number | null }>)
-      .map((a) => a.tg_user_id)
-      .filter((v): v is number => typeof v === 'number'),
-  );
+  let ownTgUserIds = new Set<number>();
+  try {
+    ownTgUserIds = await loadFleetTgUserIds(db);
+  } catch (err) {
+    log('warning', `Не загрузил список своих аккаунтов: ${err instanceof Error ? err.message : String(err)} — повторю через ${FLEET_REFRESH_MS / 60_000} мин`);
+  }
+  // Не загрузился — повторим в первом же витке, а не через десять минут.
+  let fleetRefreshedAt = ownTgUserIds.size ? Date.now() : 0;
 
   /**
    * Порядок обхода — «кого дольше всех не брали, тот первый».
@@ -2218,7 +2313,7 @@ export async function runCampaignLoop(
       clients = clients.filter((c) => freeIds.has(c.account.id));
       log(
         'info',
-        `Из круга выходят ${leaving.length}: ${leaving.map((c) => c.account.session_name).join(', ')} — `
+        `Из круга выходят ${leaving.length}: ${leaving.map((c) => accountLogName(c.account)).join(', ')} — `
           + 'выключены оператором, ушли на прогрев или в отлёжку. Разрываю их соединения.',
       );
       await disconnectAll(leaving);
@@ -2250,7 +2345,7 @@ export async function runCampaignLoop(
     log(
       'info',
       `В круг добавлены ${added.length} из ${joining.length} освободившихся аккаунтов`
-        + (added.length ? `: ${added.map((c) => c.account.session_name).join(', ')}` : ' (остальные не подключились, смотри строки выше)'),
+        + (added.length ? `: ${added.map((c) => accountLogName(c.account)).join(', ')}` : ' (остальные не подключились, смотри строки выше)'),
     );
   };
 
@@ -2272,7 +2367,7 @@ export async function runCampaignLoop(
     campaignId,
     getClient: (accountId) => {
       const entry = clients.find((c) => c.account.id === accountId);
-      return entry ? { client: entry.client, accountName: entry.account.session_name } : null;
+      return entry ? { client: entry.client, accountName: accountLogName(entry.account) } : null;
     },
     /**
      * Кем подменить, когда свой аккаунт не отвечает или под ограничением
@@ -2298,6 +2393,204 @@ export async function runCampaignLoop(
   }).catch((err) => {
     log('warning', `Опрос очереди передач остановился с ошибкой — ${err instanceof Error ? err.message : String(err)}. Передачи уйдут после перезапуска кампании.`);
   });
+
+  /**
+   * Ошибка ответа в чате — общая для круга и ответов по входящему.
+   *
+   * Заморозку и ограничение Telegram записываем в аккаунт (в базу и в объект
+   * круга), и дальше его не трогает ни круг, ни ответ по входящему. Недоступного
+   * собеседника выключаем, остальное — в лог.
+   */
+  const onChatError = async (
+    client: TelegramClient,
+    account: OutreachAccount,
+    entity: Api.User | null,
+    err: unknown,
+  ): Promise<'frozen' | 'flood' | 'unreachable' | 'error'> => {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    // Reconstruct a stable display label for the error log so the
+    // operator can search by ID/@username without scrolling.
+    const dialogId = entity ? Number(entity.id) : null;
+    const dialogLabel = entity?.username ? `@${entity.username}` : dialogId != null ? `ID:${dialogId}` : 'unknown';
+
+    if (classifyCheckError(errMsg).status === 'frozen') {
+      const frozen = await recordAccountFreeze({ db, client, account });
+      log(frozen.error ? 'error' : 'warning',
+        `Аккаунт ${accountLogName(account)}: ${frozen.detail}` +
+        (frozen.error ? ` Не удалось сохранить статус: ${frozen.error}` : ''));
+      return 'frozen';
+    }
+
+    if (
+      errMsg.includes('PeerFloodError') ||
+      errMsg.includes('FloodWaitError') ||
+      errMsg.includes('PEER_FLOOD')
+    ) {
+      // Срок паузы спрашиваем у @SpamBot этим же соединением: пауза
+      // из настроек ставилась вслепую и каждые сутки выпускала
+      // аккаунт ровно в то же ограничение.
+      const parked = await parkAccountAfterLimit({
+        db,
+        client,
+        account,
+        hours: tg.account_cooldown_hours,
+        reason: 'FloodError/Frozen',
+        rawError: errMsg,
+        log,
+      });
+      if (parked.parked) {
+        const cooldownDisplay = new Date(parked.untilIso).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
+        log('warning', `Аккаунт ${accountLogName(account)}: Telegram ограничил отправку (FloodError/Frozen на диалоге ${dialogLabel}). ${parked.diagnosis} Аккаунт на паузе до ${cooldownDisplay}.`);
+      }
+      return 'flood';
+    }
+
+    // Permanently unreachable peer: user deleted account, blocked
+    // us, or the peer reference is stale. Each cycle we'd otherwise
+    // burn another GPT call and another SendMessage. The helper
+    // flips can_send=false so canSendToDialog() short-circuits
+    // future rounds.
+    const unreachable = await disableDialogIfUnreachable(errMsg, {
+      db,
+      campaignId: campaign.id,
+      accountId: account.id,
+      tgUserId: dialogId,
+      dialogLabel,
+      log,
+    });
+    if (unreachable) return 'unreachable';
+
+    log('error', `Аккаунт ${accountLogName(account)}, диалог ${dialogLabel}: не смог обработать — ${errMsg}`);
+    return 'error';
+  };
+
+  /**
+   * Ответ по входящему — сразу, а не когда круг дойдёт до аккаунта.
+   *
+   * 27.10.2026: круг обходит аккаунты пачками по 5–6 с паузами и после всех
+   * отдыхает 5–10 минут; при 20–30 аккаунтах до каждого он доходит раз в 20–35
+   * минут, и в Polza Agency каждый четвёртый ответ ждал дольше 15 минут.
+   * Соединения при этом открыты весь запуск, и Telegram сам сообщает им о новом
+   * сообщении. По этому сигналу ставим ответ на 30–260 с от сообщения
+   * собеседника. Круг остаётся для первых касаний, напоминаний и всего, что
+   * сигнал пропустил: ночь, отлёжка, обрыв сокета, переподключение.
+   *
+   * Чат ведёт кто-то один. Запланированный здесь чат круг, напоминания и
+   * догоняющие ответы пропускают, а чат, который сейчас ведёт круг, здесь ждёт.
+   */
+  interface IncomingJob {
+    key: string;
+    accountId: string;
+    entity: Api.User;
+    dueAt: number;
+    lastIncomingAt: number;
+    lastIncomingId: number;
+    running: boolean;
+  }
+  const incoming = new Map<string, IncomingJob>();
+  const roundBusy = new Set<string>();
+  const activeIncoming = new Set<Promise<void>>();
+  const listened = new WeakSet<TelegramClient>();
+  let incomingStopped = false;
+  // Глобальный чёрный список перечитывает круг; ответы по входящему берут его отсюда.
+  let blockedUserIds = new Set<number>();
+  const incomingKey = (accountId: string, tgUserId: number) => `${accountId}:${tgUserId}`;
+  const canReply = (account: OutreachAccount) => account.check_status !== 'frozen'
+    && !(account.cooldown_until && Date.parse(account.cooldown_until) > Date.now());
+
+  const onIncoming = async (accountId: string, message: Api.Message): Promise<void> => {
+    if (incomingStopped || shouldStop() || message.out || !(message.peerId instanceof Api.PeerUser)) return;
+    const tgUserId = Number(message.peerId.userId);
+    if (ownTgUserIds.has(tgUserId) || tgUserId === TG_SERVICE_NOTIFICATIONS_USER_ID || blockedUserIds.has(tgUserId)) return;
+    const key = incomingKey(accountId, tgUserId);
+    const sentAt = (message.date || Math.floor(Date.now() / 1000)) * 1000;
+    const note = (job: IncomingJob) => {
+      job.lastIncomingAt = Math.max(job.lastIncomingAt, sentAt);
+      job.lastIncomingId = Math.max(job.lastIncomingId, message.id);
+    };
+    const known = incoming.get(key);
+    if (known) { note(known); return; }
+
+    const entry = clients.find((c) => c.account.id === accountId);
+    if (!entry || !canReply(entry.account) || isInSleepPeriod(tg.sleep_periods, tg.timezone_offset)) return;
+    const sender = await message.getSender();
+    if (!(sender instanceof Api.User) || sender.bot) return;
+    // Чужих оставляем кругу, как и раньше: он же решает, что с ними делать.
+    if (!(await isCampaignContact(db, campaignId, tgUserId))) return;
+    const raced = incoming.get(key);
+    if (raced) { note(raced); return; }
+
+    const job: IncomingJob = {
+      key,
+      accountId,
+      entity: sender,
+      dueAt: sentAt + randomRange(replyDelayRange(tg)) * 1000,
+      lastIncomingAt: sentAt,
+      lastIncomingId: message.id,
+      running: false,
+    };
+    incoming.set(key, job);
+    log('info', `Аккаунт ${accountLogName(entry.account)}: ${sender.username ? `@${sender.username}` : `ID:${tgUserId}`} написал — отвечу через ${Math.max(0, Math.round((job.dueAt - Date.now()) / 1000))} с`);
+  };
+
+  const runIncoming = async (job: IncomingJob): Promise<void> => {
+    const startId = job.lastIncomingId;
+    let seenId = 0;
+    const entry = clients.find((c) => c.account.id === job.accountId);
+    try {
+      // Аккаунт ушёл из круга, на паузе или наступила ночь — чат остался
+      // непрочитанным, его подхватит круг.
+      if (!entry || !canReply(entry.account) || isInSleepPeriod(tg.sleep_periods, tg.timezone_offset)) return;
+      await handleChat(entry.client, entry.account, { entity: job.entity } as Dialog, campaign as OutreachCampaign, db, log,
+        () => incomingStopped || shouldStop(), {
+          blockedUserIds,
+          getSpareClient: (excludeId) => pickSpareClient(clients, excludeId),
+          replyAt: Math.max(job.dueAt, Date.now()),
+          skipIfAnswered: true,
+          isStale: (seen) => {
+            seenId = seen;
+            return job.lastIncomingId > seen;
+          },
+        });
+    } catch (err) {
+      if (entry) await onChatError(entry.client, entry.account, job.entity, err);
+    } finally {
+      // Дописал, пока мы готовили ответ, — новый срок от его последнего сообщения.
+      if (!incomingStopped && job.lastIncomingId > Math.max(startId, seenId)) {
+        job.dueAt = job.lastIncomingAt + randomRange(replyDelayRange(tg)) * 1000;
+        job.running = false;
+      } else {
+        incoming.delete(job.key);
+      }
+    }
+  };
+
+  const incomingLoop = (async () => {
+    while (!incomingStopped && !shouldStop()) {
+      // Подписываем каждое соединение, в том числе пересозданное кругом и
+      // добавленное в состав: подписка живёт на объекте клиента.
+      for (const entry of clients) {
+        if (listened.has(entry.client)) continue;
+        listened.add(entry.client);
+        const accountId = entry.account.id;
+        entry.client.addEventHandler((event: NewMessageEvent) => {
+          onIncoming(accountId, event.message).catch((err) => {
+            log('warning', `Входящее не разобрал — отвечу в обычном круге: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        }, new NewMessage({ incoming: true }));
+      }
+      const now = Date.now();
+      for (const job of incoming.values()) {
+        if (job.running || roundBusy.has(job.key)) continue;
+        if (now < Math.max(job.dueAt - INCOMING_PREPARE_LEAD_MS, job.lastIncomingAt + INCOMING_MIN_READ_AFTER_MS)) continue;
+        job.running = true;
+        const pending = runIncoming(job);
+        activeIncoming.add(pending);
+        void pending.finally(() => activeIncoming.delete(pending));
+      }
+      await sleep(2000);
+    }
+  })();
 
   const offsetErrorCounts = new Map<string, number>();
   // Separate counter for the gramJS internal pagination bug — `getDialogs`
@@ -2388,6 +2681,15 @@ export async function runCampaignLoop(
       tick();
       try { fs.writeFileSync('/tmp/tg-outreach-heartbeat', Date.now().toString()); } catch { /* */ }
       await refreshSettings();
+      // Новые аккаунты и напарники по прогреву появляются, пока кампания идёт.
+      if (Date.now() - fleetRefreshedAt > FLEET_REFRESH_MS) {
+        fleetRefreshedAt = Date.now();
+        try {
+          for (const id of await loadFleetTgUserIds(db)) ownTgUserIds.add(id);
+        } catch (err) {
+          log('warning', `Не обновил список своих аккаунтов: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
 
       if (isInSleepPeriod(tg.sleep_periods, tg.timezone_offset)) {
         if (!inSleepPeriod) {
@@ -2418,7 +2720,6 @@ export async function runCampaignLoop(
       }
       idleAnnounced = false;
 
-      let blockedUserIds: Set<number>;
       try {
         blockedUserIds = await loadBlockedUserIds(db, campaign.user_id);
         log('info', `Загрузил глобальный чёрный список: ${blockedUserIds.size} пользователей будут пропущены`);
@@ -2477,12 +2778,12 @@ export async function runCampaignLoop(
 
         const now = new Date();
         if (account.check_status === 'frozen' && !account.check_requested_at) {
-          log('info', `${account.session_name}: Telegram заморозил аккаунт — пропускаю до повторной проверки после обжалования`);
+          log('info', `${accountLogName(account)}: Telegram заморозил аккаунт — пропускаю до повторной проверки после обжалования`);
           continue;
         }
         if (account.cooldown_until && new Date(account.cooldown_until) > now
           && !(account.check_status === 'frozen' && account.check_requested_at)) {
-          log('info', `${account.session_name}: cooldown до ${account.cooldown_until}`);
+          log('info', `${accountLogName(account)}: cooldown до ${account.cooldown_until}`);
           continue;
         }
 
@@ -2498,6 +2799,7 @@ export async function runCampaignLoop(
           replied: 0,
           flood: 0,
           errors: 0,
+          incoming: 0,
         };
         const accountStartMs = Date.now();
         // Snapshot the gramJS unknown-constructor buffer so that, if this
@@ -2592,7 +2894,7 @@ export async function runCampaignLoop(
             const reconnectSec = ((Date.now() - reconnectStartMs) / 1000).toFixed(1);
             log(
               'warning',
-              `Аккаунт ${account.session_name}: загрузка диалогов зависла (${firstHangSec}с, мёртвый сокет) — ` +
+              `Аккаунт ${accountLogName(account)}: загрузка диалогов зависла (${firstHangSec}с, мёртвый сокет) — ` +
                 `переподключил на свежее соединение за ${reconnectSec}с, повторяю загрузку сразу в этом же круге. ${proxyProbeLog}.`,
             );
 
@@ -2621,7 +2923,7 @@ export async function runCampaignLoop(
             const retryMs = Date.now() - retryStartMs;
             log(
               'info',
-              `Аккаунт ${account.session_name}: повторная загрузка после переподключения удалась за ${(retryMs / 1000).toFixed(1)}с.`,
+              `Аккаунт ${accountLogName(account)}: повторная загрузка после переподключения удалась за ${(retryMs / 1000).toFixed(1)}с.`,
             );
             // Свежий сокет отдал то же самое мгновенно — значит висел именно
             // сокет, а не объём почты. Только теперь это ошибка прокси: один и
@@ -2698,12 +3000,12 @@ export async function runCampaignLoop(
               account.check_status = checkResult.status;
               account.check_detail = checkResult.detail.slice(0, 500);
               if (saveErr) {
-                log('warning', `Аккаунт ${account.session_name}: проверка прошла, но результат не записался — ${saveErr.message}`);
+                log('warning', `Аккаунт ${accountLogName(account)}: проверка прошла, но результат не записался — ${saveErr.message}`);
               } else {
                 const others = checkResult.other_sessions?.length ?? 0;
                 log(
                   'info',
-                  `Аккаунт ${account.session_name}: проверка по заказу (${who}) выполнена на ходу — ${checkResult.detail}`
+                  `Аккаунт ${accountLogName(account)}: проверка по заказу (${who}) выполнена на ходу — ${checkResult.detail}`
                   + (others ? `, чужих сеансов: ${others}` : ''),
                 );
               }
@@ -2711,7 +3013,7 @@ export async function runCampaignLoop(
               const msg = checkErr instanceof Error ? checkErr.message : String(checkErr);
               // Заказ не гасим: проверка не состоялась, и снимать её значило бы
               // сделать вид, что оператору ответили.
-              log('warning', `Аккаунт ${account.session_name}: проверка по заказу (${who}) не удалась — ${msg}. Заказ остался в очереди, повторим в следующем круге.`);
+              log('warning', `Аккаунт ${accountLogName(account)}: проверка по заказу (${who}) не удалась — ${msg}. Заказ остался в очереди, повторим в следующем круге.`);
             }
           }
 
@@ -2774,7 +3076,7 @@ export async function runCampaignLoop(
               })
               .eq('id', account.id);
             if (prErr) {
-              log('warning', `Аккаунт ${account.session_name}: профиль применён, но итог не записался — ${prErr.message}`);
+              log('warning', `Аккаунт ${accountLogName(account)}: профиль применён, но итог не записался — ${prErr.message}`);
             }
             // И в память круга: состав перечитывается только на следующем
             // круге, а первое касание идёт в этом же. 07.10.2026 все 40 новых
@@ -2783,7 +3085,7 @@ export async function runCampaignLoop(
             if (restUntil) account.profile_rest_until = restUntil;
             log(
               outcome.status === 'applied' ? 'info' : 'warning',
-              `Аккаунт ${account.session_name}: правка профиля по заказу (${who}) — ${outcome.detail}`,
+              `Аккаунт ${accountLogName(account)}: правка профиля по заказу (${who}) — ${outcome.detail}`,
             );
           }
 
@@ -2805,24 +3107,24 @@ export async function runCampaignLoop(
               })
               .eq('id', account.id);
             if (apErr) {
-              log('warning', `Аккаунт ${account.session_name}: обжалование отработало, но итог не записался — ${apErr.message}`);
+              log('warning', `Аккаунт ${accountLogName(account)}: обжалование отработало, но итог не записался — ${apErr.message}`);
             }
             log(
               outcome.status === 'sent' ? 'info' : 'warning',
-              `Аккаунт ${account.session_name}: обжалование по заказу (${who}) — ${outcome.detail}`,
+              `Аккаунт ${accountLogName(account)}: обжалование по заказу (${who}) — ${outcome.detail}`,
             );
           }
           if (usedRawPageFallback) {
             log(
               'warning',
-              `Аккаунт ${account.session_name}: штатная пагинация GramJS упала с offset out of range — загрузил первый page диалогов через прямой GetDialogs без внутренней пагинации`,
+              `Аккаунт ${accountLogName(account)}: штатная пагинация GramJS упала с offset out of range — загрузил первый page диалогов через прямой GetDialogs без внутренней пагинации`,
             );
           }
           cycleStats.dialogs_total = dialogs.length;
           cycleStats.unread = dialogs.filter(d => d.unreadCount > 0).length;
           log(
             'info',
-            `Аккаунт ${account.session_name}: загрузил ${dialogs.length} диалогов, из них ${cycleStats.unread} с непрочитанными`,
+            `Аккаунт ${accountLogName(account)}: загрузил ${dialogs.length} диалогов, из них ${cycleStats.unread} с непрочитанными`,
           );
           // Галочки «прочитано» у наших сообщений: список диалогов уже в руках,
           // отдельного запроса не нужно. Диалоги без непрочитанных ниже
@@ -2841,9 +3143,9 @@ export async function runCampaignLoop(
                 return [{ tgUserId: Number(d.entity.id), flag }];
               }),
             );
-            if (changedReads > 0) log('info', `Аккаунт ${account.session_name}: отметки «прочитано» обновлены у ${changedReads} диалогов`);
+            if (changedReads > 0) log('info', `Аккаунт ${accountLogName(account)}: отметки «прочитано» обновлены у ${changedReads} диалогов`);
           } catch (readErr) {
-            log('warning', `Аккаунт ${account.session_name}: не удалось обновить отметки «прочитано» — ${readErr instanceof Error ? readErr.message : String(readErr)}`);
+            log('warning', `Аккаунт ${accountLogName(account)}: не удалось обновить отметки «прочитано» — ${readErr instanceof Error ? readErr.message : String(readErr)}`);
           }
 
           for (const dialog of dialogs) {
@@ -2866,6 +3168,13 @@ export async function runCampaignLoop(
               continue;
             }
 
+            // Ответ уже запланирован по входящему — второй круг не шлёт.
+            const chatKey = incomingKey(account.id, Number(dialog.entity.id));
+            if (incoming.has(chatKey)) {
+              cycleStats.incoming++;
+              continue;
+            }
+            roundBusy.add(chatKey);
             try {
               const r = await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log, shouldStop, {
                 blockedUserIds,
@@ -2874,86 +3183,35 @@ export async function runCampaignLoop(
               cycleStats.processed++;
               if (r.replied) cycleStats.replied++;
             } catch (err: unknown) {
-              const errMsg = err instanceof Error ? err.message : String(err);
-              // Reconstruct a stable display label for the error log so the
-              // operator can search by ID/@username without scrolling.
-              const dialogId = dialog.entity instanceof Api.User ? Number(dialog.entity.id) : null;
-              const dialogLabel = dialog.entity instanceof Api.User && dialog.entity.username
-                ? `@${dialog.entity.username}`
-                : dialogId != null ? `ID:${dialogId}` : 'unknown';
-
-              if (classifyCheckError(errMsg).status === 'frozen') {
-                const frozen = await recordAccountFreeze({ db, client, account });
-                log(frozen.error ? 'error' : 'warning',
-                  `Аккаунт ${account.session_name}: ${frozen.detail}` +
-                  (frozen.error ? ` Не удалось сохранить статус: ${frozen.error}` : ''));
-                break;
-              }
-
-              if (
-                errMsg.includes('PeerFloodError') ||
-                errMsg.includes('FloodWaitError') ||
-                errMsg.includes('PEER_FLOOD')
-              ) {
-                // Срок паузы спрашиваем у @SpamBot этим же соединением: пауза
-                // из настроек ставилась вслепую и каждые сутки выпускала
-                // аккаунт ровно в то же ограничение.
-                const parked = await parkAccountAfterLimit({
-                  db,
-                  client,
-                  account,
-                  hours: tg.account_cooldown_hours,
-                  reason: 'FloodError/Frozen',
-                  rawError: errMsg,
-                  log,
-                });
-                if (parked.parked) {
-                  const cooldownDisplay = new Date(parked.untilIso).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
-                  log('warning', `Аккаунт ${account.session_name}: Telegram ограничил отправку (FloodError/Frozen на диалоге ${dialogLabel}). ${parked.diagnosis} Аккаунт на паузе до ${cooldownDisplay}.`);
-                }
+              const outcome = await onChatError(client, account, dialog.entity, err);
+              if (outcome === 'frozen') break;
+              if (outcome === 'flood') {
                 cycleStats.flood++;
                 break;
               }
-
-              // Permanently unreachable peer: user deleted account, blocked
-              // us, or the peer reference is stale. Each cycle we'd otherwise
-              // burn another GPT call and another SendMessage. The helper
-              // flips can_send=false so canSendToDialog() short-circuits
-              // future rounds.
-              const unreachable = await disableDialogIfUnreachable(errMsg, {
-                db,
-                campaignId: campaign.id,
-                accountId: account.id,
-                tgUserId: dialogId,
-                dialogLabel,
-                log,
-              });
-              if (unreachable) {
-                cycleStats.errors++;
-                continue;
-              }
-
               cycleStats.errors++;
-              log('error', `Аккаунт ${account.session_name}, диалог ${dialogLabel}: не смог обработать — ${errMsg}`);
+            } finally {
+              roundBusy.delete(chatKey);
             }
           }
 
           if (account.check_status === 'frozen') continue;
 
-          await handleFollowUp(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop);
-          await handleMissedRepliesLastDays(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop);
+          const isAnswering = (tgUserId: number) => incoming.has(incomingKey(account.id, tgUserId));
+          await handleFollowUp(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop, isAnswering);
+          await handleMissedRepliesLastDays(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop, isAnswering);
 
           try {
             await backfillEmptyDialogs(client, account, campaign as unknown as OutreachCampaign, db, log);
           } catch (err) {
-            log('warning', `Аккаунт ${account.session_name}: ошибка при загрузке истории пустых диалогов (backfill) — ${err instanceof Error ? err.message : String(err)}`);
+            log('warning', `Аккаунт ${accountLogName(account)}: ошибка при загрузке истории пустых диалогов (backfill) — ${err instanceof Error ? err.message : String(err)}`);
           }
 
           const updatedSession = await getUpdatedSessionString(client);
           if (updatedSession && updatedSession !== account.session_data) {
             const { error: sErr } = await db.from('tg_outreach_accounts').update({ session_data: updatedSession }).eq('id', account.id);
             if (sErr) {
-              log('warning', `Аккаунт ${account.session_name}: не смог сохранить обновлённую сессию в базе данных — ${sErr.message}. На следующем запуске придётся залогиниваться заново.`);
+              log('warning', `Аккаунт ${accountLogName(account)}: не смог сохранить обновлённую сессию в базе данных — ${sErr.message}. На следующем запуске придётся залогиниваться заново.`);
             }
           }
 
@@ -2961,12 +3219,13 @@ export async function runCampaignLoop(
           const elapsedMs = Date.now() - accountStartMs;
           log(
             'info',
-            `Аккаунт ${account.session_name}: круг завершён за ${(elapsedMs / 1000).toFixed(1)}с. ` +
+            `Аккаунт ${accountLogName(account)}: круг завершён за ${(elapsedMs / 1000).toFixed(1)}с. ` +
               `Обработано ${cycleStats.processed} непрочитанных из ${cycleStats.unread}, отправлено ${cycleStats.replied} ответов. ` +
               `Пропуски: групп/каналов ${cycleStats.not_user}, ошибок ${cycleStats.errors}` +
               (cycleStats.own_account ? `, своих аккаунтов кампании ${cycleStats.own_account}` : '') +
               (cycleStats.service ? `, служебных чатов Telegram ${cycleStats.service}` : '') +
               (cycleStats.flood ? `, паузы из-за Flood ${cycleStats.flood}` : '') +
+              (cycleStats.incoming ? `, ответ уже готовится по входящему ${cycleStats.incoming}` : '') +
               '.',
           );
 
@@ -2995,7 +3254,7 @@ export async function runCampaignLoop(
           if (diagnosis.status === 'frozen') {
             const frozen = await recordAccountFreeze({ db, client, account });
             log(frozen.error ? 'error' : 'warning',
-              `Аккаунт ${account.session_name}: ${frozen.detail}` +
+              `Аккаунт ${accountLogName(account)}: ${frozen.detail}` +
               (frozen.error ? ` Не удалось сохранить статус: ${frozen.error}` : ''));
           } else if (diagnosis.status === 'session_revoked'
             || diagnosis.status === 'session_duplicate'
@@ -3010,7 +3269,7 @@ export async function runCampaignLoop(
               })
               .eq('id', account.id);
             if (diagErr) {
-              log('warning', `Аккаунт ${account.session_name}: не смог записать диагноз «${diagnosis.detail}» в карточку — ${diagErr.message}`);
+              log('warning', `Аккаунт ${accountLogName(account)}: не смог записать диагноз «${diagnosis.detail}» в карточку — ${diagErr.message}`);
             }
           }
 
@@ -3019,7 +3278,7 @@ export async function runCampaignLoop(
             // Log every occurrence (not only the first) so the operator sees
             // how widespread the TL-schema mismatch is. The aggregate backoff
             // below still kicks in only when every account is affected.
-            log('warning', `Аккаунт ${account.session_name}: устаревшая библиотека Telegram (несовпадение протокола, попытка #${tlSchemaErrorCount}). Нужно обновить пакет 'telegram' командой 'npm update telegram' и пересобрать воркер. Детали: ${errMsg.slice(0, 150)}`);
+            log('warning', `Аккаунт ${accountLogName(account)}: устаревшая библиотека Telegram (несовпадение протокола, попытка #${tlSchemaErrorCount}). Нужно обновить пакет 'telegram' командой 'npm update telegram' и пересобрать воркер. Детали: ${errMsg.slice(0, 150)}`);
           } else if (errMsg.includes('AUTH_KEY_UNREGISTERED') || errMsg.includes('USER_DEACTIVATED')) {
             const isUnreg = errMsg.includes('AUTH_KEY_UNREGISTERED');
             const reasonCode = isUnreg ? 'AUTH_KEY_UNREGISTERED' : 'USER_DEACTIVATED';
@@ -3035,9 +3294,9 @@ export async function runCampaignLoop(
               .update({ is_active: false, cooldown_until: null })
               .eq('id', account.id);
             if (deactErr) {
-              log('error', `Аккаунт ${account.session_name}: ${friendly} (${reasonCode}), но НЕ смог выключить аккаунт в базе данных — ${deactErr.message}. Аккаунт продолжит пытаться подключиться и сыпать ошибки.`);
+              log('error', `Аккаунт ${accountLogName(account)}: ${friendly} (${reasonCode}), но НЕ смог выключить аккаунт в базе данных — ${deactErr.message}. Аккаунт продолжит пытаться подключиться и сыпать ошибки.`);
             } else {
-              log('warning', `Аккаунт ${account.session_name}: ${friendly} (${reasonCode}) — аккаунт выключен автоматически. ${isUnreg ? 'Перевыпустите session_data и загрузите заново.' : 'Для возобновления потребуется новый номер.'}`);
+              log('warning', `Аккаунт ${accountLogName(account)}: ${friendly} (${reasonCode}) — аккаунт выключен автоматически. ${isUnreg ? 'Перевыпустите session_data и загрузите заново.' : 'Для возобновления потребуется новый номер.'}`);
             }
           } else if (
             // Only treat "offset out of range" as session damage when it
@@ -3059,18 +3318,18 @@ export async function runCampaignLoop(
                 .update({ is_active: false, cooldown_until: null })
                 .eq('id', account.id);
               if (dErr) {
-                log('error', `Аккаунт ${account.session_name}: повреждён .session-файл (попытка ${count}), но НЕ смог выключить аккаунт в базе данных — ${dErr.message}`);
+                log('error', `Аккаунт ${accountLogName(account)}: повреждён .session-файл (попытка ${count}), но НЕ смог выключить аккаунт в базе данных — ${dErr.message}`);
               } else {
-                log('warning', `Аккаунт ${account.session_name}: повреждён .session-файл (ошибка чтения, попытка ${count} подряд). Аккаунт выключен — пересоздайте .session-файл и загрузите заново.`);
+                log('warning', `Аккаунт ${accountLogName(account)}: повреждён .session-файл (ошибка чтения, попытка ${count} подряд). Аккаунт выключен — пересоздайте .session-файл и загрузите заново.`);
               }
             } else {
               const cooldownUntil = new Date(Date.now() + 3600_000).toISOString();
               const { error: cdErr } = await db.from('tg_outreach_accounts').update({ cooldown_until: cooldownUntil }).eq('id', account.id);
               if (cdErr) {
-                log('error', `Аккаунт ${account.session_name}: не смог сохранить часовую паузу в базе данных — ${cdErr.message}`);
+                log('error', `Аккаунт ${accountLogName(account)}: не смог сохранить часовую паузу в базе данных — ${cdErr.message}`);
               }
               (account as OutreachAccount).cooldown_until = cooldownUntil;
-              log('warning', `Аккаунт ${account.session_name}: ошибка чтения .session-файла (попытка ${count}). Пауза 1 час. Если повторится — аккаунт будет выключен.`);
+              log('warning', `Аккаунт ${accountLogName(account)}: ошибка чтения .session-файла (попытка ${count}). Пауза 1 час. Если повторится — аккаунт будет выключен.`);
             }
           } else if (errMsg.includes(PER_ACCOUNT_RECONNECT_FAILED_MARKER)) {
             // Terminal path: getDialogs wedged, we rebuilt the client on a fresh
@@ -3082,7 +3341,7 @@ export async function runCampaignLoop(
             cycleStats.errors++;
             log(
               'error',
-              `Аккаунт ${account.session_name}: ${errMsg} Пропускаю аккаунт в этом круге, попробую снова на следующем.`,
+              `Аккаунт ${accountLogName(account)}: ${errMsg} Пропускаю аккаунт в этом круге, попробую снова на следующем.`,
             );
           } else if (
             // "offset out of range" while loading dialogs. The session-
@@ -3120,26 +3379,26 @@ export async function runCampaignLoop(
               const cooldownDisplay = new Date(cooldownUntil).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
               const { error: cdErr } = await db.from('tg_outreach_accounts').update({ cooldown_until: cooldownUntil }).eq('id', account.id);
               if (cdErr) {
-                log('error', `Аккаунт ${account.session_name}: не смог сохранить 6-часовую паузу в базе данных — ${cdErr.message}`);
+                log('error', `Аккаунт ${accountLogName(account)}: не смог сохранить 6-часовую паузу в базе данных — ${cdErr.message}`);
               } else {
                 (account as OutreachAccount).cooldown_until = cooldownUntil;
               }
               log(
                 'error',
-                `Аккаунт ${account.session_name}: ${count} подряд сбоев загрузки диалогов (gramJS не смог декодировать ответ GetDialogs — НЕ пагинация). Пауза 6ч до ${cooldownDisplay}. ${diag}`,
+                `Аккаунт ${accountLogName(account)}: ${count} подряд сбоев загрузки диалогов (gramJS не смог декодировать ответ GetDialogs — НЕ пагинация). Пауза 6ч до ${cooldownDisplay}. ${diag}`,
               );
               pagingFailureCounts.delete(account.id);
             } else {
               log(
                 'warning',
-                `Аккаунт ${account.session_name}: сбой загрузки диалогов — gramJS не смог декодировать ответ GetDialogs (попытка ${count}/${PAGING_FAILURE_COOLDOWN_THRESHOLD}), пропускаю круг. ${diag}`,
+                `Аккаунт ${accountLogName(account)}: сбой загрузки диалогов — gramJS не смог декодировать ответ GetDialogs (попытка ${count}/${PAGING_FAILURE_COOLDOWN_THRESHOLD}), пропускаю круг. ${diag}`,
               );
             }
           } else if (errMsg.includes('TIMEOUT') || errMsg.includes('Constructor ID')) {
             // Transient MTProto/network issue — log but do not punish account
-            log('warning', `Аккаунт ${account.session_name}: разовый сбой сети или Telegram — пропускаю этот круг. Детали: ${errMsg.slice(0, 150)}`);
+            log('warning', `Аккаунт ${accountLogName(account)}: разовый сбой сети или Telegram — пропускаю этот круг. Детали: ${errMsg.slice(0, 150)}`);
           } else {
-            log('error', `Аккаунт ${account.session_name}: непредвиденная ошибка — ${errMsg}`);
+            log('error', `Аккаунт ${accountLogName(account)}: непредвиденная ошибка — ${errMsg}`);
           }
         }
 
@@ -3159,8 +3418,6 @@ export async function runCampaignLoop(
               campaignId,
               account,
               perDay: tg.first_touch_per_account_per_day,
-              gapMinutes: tg.first_touch_gap_minutes,
-              perGap: tg.first_touch_per_gap,
               // maxChars не передаём: порог один на все кампании, см. resolveMaxChars.
               cooldownHours: tg.account_cooldown_hours,
               log,
@@ -3174,7 +3431,7 @@ export async function runCampaignLoop(
             if (ft.sent || ft.skipped || ft.postponed) {
               log(
                 'info',
-                `Аккаунт ${account.session_name}: первое касание — отправлено ${ft.sent}, пропущено ${ft.skipped}, отложено ${ft.postponed}`,
+                `Аккаунт ${accountLogName(account)}: первое касание — отправлено ${ft.sent}, пропущено ${ft.skipped}, отложено ${ft.postponed}`,
               );
             }
 
@@ -3218,7 +3475,7 @@ export async function runCampaignLoop(
                 if (parked.parked) {
                   log(
                     'warning',
-                    `Аккаунт ${account.session_name}: ${detail} Аккаунт на паузе до ` +
+                    `Аккаунт ${accountLogName(account)}: ${detail} Аккаунт на паузе до ` +
                       `${new Date(parked.untilIso).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}, ` +
                       'контакты остаются в очереди нетронутыми.',
                   );
@@ -3230,7 +3487,7 @@ export async function runCampaignLoop(
             // диалогам важнее и уже отработал выше.
             log(
               'warning',
-              `Аккаунт ${account.session_name}: первое касание не отработало — ${err instanceof Error ? err.message : String(err)}`,
+              `Аккаунт ${accountLogName(account)}: первое касание не отработало — ${err instanceof Error ? err.message : String(err)}`,
             );
           }
         }
@@ -3250,7 +3507,7 @@ export async function runCampaignLoop(
           .update({ last_cycle_at: new Date().toISOString() })
           .eq('id', account.id);
         if (cycleErr) {
-          log('warning', `Аккаунт ${account.session_name}: не смог отметить прохождение круга — ${cycleErr.message}. Порядок обхода может сбиться.`);
+          log('warning', `Аккаунт ${accountLogName(account)}: не смог отметить прохождение круга — ${cycleErr.message}. Порядок обхода может сбиться.`);
         }
 
         const accountDelay = randomRange(tg.account_loop_delay_range) * 1000;
@@ -3294,6 +3551,11 @@ export async function runCampaignLoop(
     }
   } finally {
     forwardsStopped = true;
+    // Ответы по входящему: новых не берём, начатые отменяются на ожидании
+    // (shouldStop у handleChat смотрит на этот флаг) — ждём их до разрыва сокетов.
+    incomingStopped = true;
+    await incomingLoop;
+    await Promise.allSettled([...activeIncoming]);
     if (control) control.deleteMessage = undefined;
     await Promise.allSettled([...activeDeletions]);
     await disconnectAll(clients);

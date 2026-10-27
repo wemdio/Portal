@@ -28,3 +28,33 @@ export function accountLabel(account: LabeledAccount | null | undefined): string
   if (firstName) return firstName;
   return account.session_name || null;
 }
+
+/**
+ * Как подписывать наш аккаунт в журнале работы кампании.
+ *
+ * Техническое имя сессии остаётся первым: журнал отдельного аккаунта и счётчики
+ * ошибок отбирают строки по нему (accounts/[id]/logs, error-counts,
+ * dashboard), без него строка пропадёт из карточки. Но у залитых tdata это
+ * просто число, и оператор по нему аккаунт не узнаёт — 27.10.2026 попросили
+ * «номер и ФИО». Поэтому в скобках телефон и имя с фамилией из Telegram;
+ * телефон не повторяем, если имя сессии им и является, а пока первая проверка
+ * его не принесла — пишем что есть.
+ */
+export interface LoggedAccount {
+  session_name: string;
+  phone?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+}
+
+export function accountLogName(account: LoggedAccount): string {
+  const phoneDigits = (account.phone ?? '').replace(/\D/g, '');
+  const sessionDigits = account.session_name.replace(/\D/g, '');
+  const phone = phoneDigits && phoneDigits !== sessionDigits ? `+${phoneDigits}` : '';
+  const fullName = [account.first_name, account.last_name]
+    .map((part) => (part ?? '').trim())
+    .filter(Boolean)
+    .join(' ');
+  const details = [phone, fullName].filter(Boolean).join(', ');
+  return details ? `${account.session_name} (${details})` : account.session_name;
+}
