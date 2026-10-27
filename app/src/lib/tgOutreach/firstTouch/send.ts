@@ -23,6 +23,7 @@ import { formatFirstTouch } from './formatText';
 import { ATTACHMENTS_BUCKET, resolveContactAttachment, type BaseAttachment } from './attachments';
 import { CustomFile } from 'telegram/client/uploads';
 import { NICK_MISSING_REASON, normalizeNick, shouldReportTmeDown, type TmeCheck } from '../usernameExists';
+import { accountLogName } from '../accountLabel';
 
 /**
  * Сроки на вызовы Telegram в первом касании — та же причина, что в боевом
@@ -42,6 +43,10 @@ export interface SendBatchArgs {
   account: {
     id: string;
     session_name: string;
+    /** Телефон и имя — только для подписи строк журнала (accountLogName). */
+    phone?: string | null;
+    first_name?: string | null;
+    last_name?: string | null;
     campaign_id: string;
     cooldown_until?: string | null;
     /** Итог последней проверки. Нужен, чтобы снять «ограничен», когда письмо ушло. */
@@ -384,7 +389,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
    * записанная миллисекундой позже, оставалась только в общем логе кампании.
    * Оператор видел, что аккаунт молчит, и не видел почему.
    */
-  const log: LogFn = (level, message) => args.log(level, `Аккаунт ${account.session_name}: ${message}`);
+  const log: LogFn = (level, message) => args.log(level, `Аккаунт ${accountLogName(account)}: ${message}`);
 
   const result: SendBatchResult = { sent: 0, skipped: 0, postponed: 0, resolveBlocked: false, blindOnExisting: 0 };
   const maxChars = resolveMaxChars(args.maxChars);
