@@ -14,6 +14,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
  */
 
 export const LEAD_CRITERIA_MAX = 2000;
+/** «Короткое КП» квалифицирующего ИИ (lib/senderAiQualifier). */
+export const AI_OFFER_TEXT_MAX = 2000;
 
 /**
  * Текст «Что считать лидом» по умолчанию — пересказ общих правил

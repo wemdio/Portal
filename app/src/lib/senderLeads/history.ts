@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { DEFAULT_LEAD_CRITERIA, LEAD_CRITERIA_MAX, isDefaultLeadCriteria } from './settings';
+import { AI_OFFER_TEXT_MAX, DEFAULT_LEAD_CRITERIA, LEAD_CRITERIA_MAX, isDefaultLeadCriteria } from './settings';
 
 /**
  * Вкладка «Квалификация» автоаутрича: история оценок ответов папки и её
@@ -65,12 +65,18 @@ export interface LeadSettingsDto {
   enabled: boolean;
   telegram: boolean;
   criteria: string;
+  /** Квалифицирующий ИИ ведёт переписку до передачи (только автоаутрич). */
+  aiEnabled: boolean;
+  /** «Короткое КП» — единственный источник цен и кейсов для писем ИИ. */
+  aiOfferText: string;
 }
 
 export interface LeadSettingsInput {
   enabled: boolean;
   telegram: boolean;
   criteria: string;
+  aiEnabled?: boolean;
+  aiOfferText?: string;
 }
 
 /** Метка переписки и последняя оценка ИИ — для окна переписки в «Рассылке». */
@@ -102,12 +108,16 @@ interface FolderLeadRow {
   lead_criteria: string | null;
   leads_enabled: boolean;
   leads_telegram: boolean;
+  ai_enabled: boolean;
+  ai_offer_text: string | null;
 }
+
+export const FOLDER_LEAD_SELECT = 'id, name, lead_criteria, leads_enabled, leads_telegram, ai_enabled, ai_offer_text';
 
 export async function findFolderByKey(db: SupabaseClient, key: string): Promise<FolderLeadRow | null> {
   const { data, error } = await db
     .from('sender_folders')
-    .select('id, name, lead_criteria, leads_enabled, leads_telegram')
+    .select(FOLDER_LEAD_SELECT)
     .eq('key', key)
     .maybeSingle();
   if (error) throw new Error(`sender_folders: ${error.message}`);
@@ -116,23 +126,36 @@ export async function findFolderByKey(db: SupabaseClient, key: string): Promise<
 
 export function settingsDto(folder: FolderLeadRow | null): LeadSettingsDto {
   // Своего правила нет — показываем пересказ общих правил, а не пустое поле.
-  if (!folder) return { folderExists: false, folderName: null, enabled: true, telegram: true, criteria: DEFAULT_LEAD_CRITERIA };
+  if (!folder) {
+    return { folderExists: false, folderName: null, enabled: true, telegram: true, criteria: DEFAULT_LEAD_CRITERIA, aiEnabled: false, aiOfferText: '' };
+  }
   return {
     folderExists: true,
     folderName: folder.name,
     enabled: folder.leads_enabled,
     telegram: folder.leads_telegram,
     criteria: folder.lead_criteria ?? DEFAULT_LEAD_CRITERIA,
+    aiEnabled: folder.ai_enabled,
+    aiOfferText: folder.ai_offer_text ?? '',
   };
+}
+
+export interface LeadSettingsUpdate {
+  leads_enabled: boolean;
+  leads_telegram: boolean;
+  lead_criteria: string | null;
+  /** Нет в запросе — настройки ИИ не трогаем (старые клиенты экрана). */
+  ai_enabled?: boolean;
+  ai_offer_text?: string | null;
 }
 
 /**
  * Проверка тела PUT настроек. criteria обрезается по краям; пусто — общие
  * правила квалификатора (в базе null).
  */
-export function parseSettingsInput(body: unknown): { ok: true; value: { leads_enabled: boolean; leads_telegram: boolean; lead_criteria: string | null } } | { ok: false; error: string } {
+export function parseSettingsInput(body: unknown): { ok: true; value: LeadSettingsUpdate } | { ok: false; error: string } {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: 'Невалидный JSON' };
-  const { enabled, telegram, criteria } = body as Record<string, unknown>;
+  const { enabled, telegram, criteria, aiEnabled, aiOfferText } = body as Record<string, unknown>;
   if (typeof enabled !== 'boolean' || typeof telegram !== 'boolean') {
     return { ok: false, error: 'enabled и telegram — да/нет' };
   }
@@ -142,10 +165,19 @@ export function parseSettingsInput(body: unknown): { ok: true; value: { leads_en
     return { ok: false, error: `«Что считать лидом» — не длиннее ${LEAD_CRITERIA_MAX} символов` };
   }
   // Текст по умолчанию — не своё правило: в базе null, ИИ идёт по общим правилам.
-  return {
-    ok: true,
-    value: { leads_enabled: enabled, leads_telegram: telegram, lead_criteria: text && !isDefaultLeadCriteria(text) ? text : null },
+  const value: LeadSettingsUpdate = {
+    leads_enabled: enabled, leads_telegram: telegram, lead_criteria: text && !isDefaultLeadCriteria(text) ? text : null,
   };
+  if (aiEnabled !== undefined || aiOfferText !== undefined) {
+    if (typeof aiEnabled !== 'boolean') return { ok: false, error: 'aiEnabled — да/нет' };
+    if (aiOfferText != null && typeof aiOfferText !== 'string') return { ok: false, error: 'aiOfferText — текст' };
+    const offer = (aiOfferText ?? '').trim();
+    if (offer.length > AI_OFFER_TEXT_MAX) return { ok: false, error: `«Короткое КП» — не длиннее ${AI_OFFER_TEXT_MAX} символов` };
+    if (aiEnabled && !offer) return { ok: false, error: 'Заполните «Короткое КП» — без него ИИ не включается' };
+    value.ai_enabled = aiEnabled;
+    value.ai_offer_text = offer || null;
+  }
+  return { ok: true, value };
 }
 
 /**

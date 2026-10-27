@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { ExternalLink, Loader2, RefreshCw } from 'lucide-react';
-import { LEAD_CRITERIA_MAX } from '@/lib/senderLeads/settings';
+import { AI_OFFER_TEXT_MAX, LEAD_CRITERIA_MAX } from '@/lib/senderLeads/settings';
 import type { OwnReplySettingsDto } from '@/lib/ownReplyLeads/settings';
 import type {
   LeadHistoryCounts,
@@ -116,6 +116,8 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
   const [enabled, setEnabled] = useState(true);
   const [telegram, setTelegram] = useState(true);
   const [criteria, setCriteria] = useState('');
+  const [aiEnabled, setAiEnabled] = useState(false);
+  const [aiOfferText, setAiOfferText] = useState('');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -129,6 +131,8 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
     setEnabled(settings.enabled);
     setTelegram(settings.telegram);
     setCriteria(settings.criteria);
+    setAiEnabled(settings.aiEnabled);
+    setAiOfferText(settings.aiOfferText);
   };
 
   const applyOwn = (settings: OwnReplySettingsDto) => {
@@ -159,11 +163,13 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
   }, [folderKey]);
 
   const folderDirty = loaded !== null
-    && (enabled !== loaded.enabled || telegram !== loaded.telegram || criteria.trim() !== loaded.criteria.trim());
+    && (enabled !== loaded.enabled || telegram !== loaded.telegram || criteria.trim() !== loaded.criteria.trim()
+      || aiEnabled !== loaded.aiEnabled || aiOfferText.trim() !== loaded.aiOfferText.trim());
   const ownDirty = ownLoaded !== null
     && (ownEnabled !== ownLoaded.enabled || ownCriteria.trim() !== ownLoaded.criteria.trim());
   const dirty = folderDirty || ownDirty;
-  const tooLong = criteria.trim().length > LEAD_CRITERIA_MAX || ownCriteria.trim().length > LEAD_CRITERIA_MAX;
+  const tooLong = criteria.trim().length > LEAD_CRITERIA_MAX || ownCriteria.trim().length > LEAD_CRITERIA_MAX
+    || aiOfferText.trim().length > AI_OFFER_TEXT_MAX;
 
   const save = async () => {
     setSaving(true);
@@ -172,7 +178,9 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
     try {
       // Одна кнопка на вкладку: сохраняет и папку, и блок «наши кампании» — что изменено.
       const [folderRes, ownRes] = await Promise.all([
-        folderDirty ? saveLeadSettings(folderKey, { enabled, telegram, criteria: criteria.trim() }) : null,
+        folderDirty
+          ? saveLeadSettings(folderKey, { enabled, telegram, criteria: criteria.trim(), aiEnabled, aiOfferText: aiOfferText.trim() })
+          : null,
         ownDirty ? saveOwnSettings({ enabled: ownEnabled, criteria: ownCriteria.trim() }) : null,
       ]);
       if (folderRes) apply(folderRes);
@@ -264,6 +272,46 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
             <p className="mt-1 text-xs text-zinc-500">
               По умолчанию — общие правила квалификатора; изменённый текст приоритетнее них.
             </p>
+          </div>
+
+          <div className="space-y-3 border-t border-zinc-200 pt-4">
+            <label className="flex cursor-pointer items-start gap-3">
+              <input
+                type="checkbox"
+                checked={aiEnabled}
+                onChange={(e) => {
+                  setAiEnabled(e.target.checked);
+                  touch();
+                }}
+                className="mt-0.5 h-4 w-4 cursor-pointer rounded border-zinc-300"
+              />
+              <span>
+                <span className="block text-sm font-medium text-zinc-900">ИИ ведёт переписку до передачи</span>
+                <span className="block text-xs text-zinc-500">В чат и AMO — только подтвердившие и приславшие слоты или телефон.</span>
+              </span>
+            </label>
+            <div>
+              <div className="flex items-baseline justify-between gap-3">
+                <label htmlFor={`ai-offer-${folderKey}`} className="text-sm font-medium text-zinc-900">
+                  Короткое КП
+                </label>
+                <span className={`text-xs ${aiOfferText.trim().length > AI_OFFER_TEXT_MAX ? 'text-red-600' : 'text-zinc-400'}`}>
+                  {aiOfferText.trim().length} / {AI_OFFER_TEXT_MAX}
+                </span>
+              </div>
+              <textarea
+                id={`ai-offer-${folderKey}`}
+                value={aiOfferText}
+                onChange={(e) => {
+                  setAiOfferText(e.target.value);
+                  touch();
+                }}
+                rows={4}
+                placeholder="Что делаем, ориентир цены, кейс"
+                className="mt-1.5 w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
+              />
+              <p className="mt-1 text-xs text-zinc-500">Цены и кейсы ИИ берёт только отсюда.</p>
+            </div>
           </div>
 
           <div className="space-y-3 border-t border-zinc-200 pt-4">
