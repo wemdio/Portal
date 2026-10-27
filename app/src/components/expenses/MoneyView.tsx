@@ -71,6 +71,10 @@ export default function MoneyView() {
   const [adding, setAdding] = useState<ManualKind | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
+  // На вкладке расходов — только «+ Расход», на доходах — только «+ Доход»;
+  // на «Итоге» и «Прогнозе» речь об обеих сторонах, кнопки обе.
+  const addKinds: ManualKind[] =
+    mode === 'expenses' ? ['expense'] : mode === 'incomes' ? ['income'] : ['income', 'expense'];
 
   const hrefFor = useCallback(
     (next: Mode): Route => {
@@ -122,7 +126,7 @@ export default function MoneyView() {
         </div>
 
         <div className="flex items-center gap-2">
-          {(['income', 'expense'] as const).map((kind) => (
+          {addKinds.map((kind) => (
             <button
               key={kind}
               type="button"
