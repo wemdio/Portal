@@ -32,8 +32,11 @@ import {
   OWN_REPLY_RESPONSIBLE_USER_ID,
   OWN_REPLY_STATUS_ID,
   OWN_REPLY_TAG,
+  criteriaForCampaign,
+  loadOwnLeadCriteria,
   loadOwnReplySettings,
   saveInboxCursor,
+  type OwnLeadCriteria,
   type OwnReplySettings,
 } from './settings';
 
@@ -270,7 +273,9 @@ async function enqueuePush(db: SupabaseClient, row: QualRow, ctx: ThreadContext,
 
 type QualOutcome = 'lead' | 'not_lead' | 'wait';
 
-async function qualifyOne(db: SupabaseClient, row: QualRow, settings: OwnReplySettings, ai: SenderLeadsAi, log: Log): Promise<QualOutcome> {
+async function qualifyOne(
+  db: SupabaseClient, row: QualRow, settings: OwnReplySettings, criteria: OwnLeadCriteria, ai: SenderLeadsAi, log: Log,
+): Promise<QualOutcome> {
   const attempts = row.attempts + 1;
   try {
     // Задача в AMO уже стоит (вставка прошла, отметка «лид» — нет): ИИ заново не
@@ -312,12 +317,13 @@ async function qualifyOne(db: SupabaseClient, row: QualRow, settings: OwnReplySe
       await failAttempt(db, row, attempts, `переписка не прочиталась${ctx.historyFetchFailureReason ? `: ${ctx.historyFetchFailureReason}` : ''}`, log);
       return 'wait';
     }
+    const leadCriteria = criteriaForCampaign(criteria, row.campaign_name);
     const verdict = await qualifyReply(row.campaign_id, row.lead_email, row.thread_id, {
       apiKey: ai.apiKey,
       ...(ai.model ? { model: ai.model } : {}),
       // Пустая строка, а не null: при null квалификатор искал бы бриф кампании.
       briefText: '',
-      leadCriteria: settings.criteria,
+      leadCriteria,
       prefetchedContext: ctx,
       maxRetries: 1,
     }, 'main');
@@ -328,7 +334,7 @@ async function qualifyOne(db: SupabaseClient, row: QualRow, settings: OwnReplySe
       status: verdict.isLead ? 'lead' : 'not_lead',
       ai_reason: verdict.reason?.slice(0, 2000) ?? null,
       interest_signals: verdict.interestSignals ?? [],
-      criteria_used: Boolean(settings.criteria),
+      criteria_used: Boolean(leadCriteria),
       model: ai.model ?? 'default',
       attempts,
       last_error: null,
@@ -494,10 +500,11 @@ export async function runOwnReplyLeadsPass(db: SupabaseClient, instantlyDb: Supa
     // Сбой оценки не должен останавливать AMO и чат ниже.
     try {
       result.claimed = await claimFromInbox(db, instantlyDb, settings);
+      const criteria = await loadOwnLeadCriteria(db);
       for (const row of await dueQualifications(db)) {
         let outcome: QualOutcome;
         try {
-          outcome = await qualifyOne(db, row, settings, ai, log);
+          outcome = await qualifyOne(db, row, settings, criteria, ai, log);
         } catch (err) {
           // Не записался статус строки — она повторится в следующем круге.
           log('error', `Наши кампании: ответ ${row.email_id} — сбой записи статуса: ${errorText(err)}`);
@@ -531,7 +538,7 @@ export interface DryRunRow {
  * Последние ответы наших кампаний через квалификатор — без записи в базу,
  * без AMO и без чата. Для сверки с пользователем до включения.
  */
-export async function dryRunOwnReplies(instantlyDb: SupabaseClient, criteria: string | null, limit: number, log: Log): Promise<DryRunRow[]> {
+export async function dryRunOwnReplies(instantlyDb: SupabaseClient, criteria: OwnLeadCriteria, limit: number, log: Log): Promise<DryRunRow[]> {
   const ai = senderLeadsAi();
   if (!ai) throw new Error('SENDER_LEADS_AI_API_KEY не задан');
   const campaigns = await ownCampaigns(instantlyDb);
@@ -550,7 +557,7 @@ export async function dryRunOwnReplies(instantlyDb: SupabaseClient, criteria: st
       const ctx = await fetchThreadContext(r.campaign_id, r.lead_email, r.thread_id, 'main', { consumer: CONSUMER, requestPriority: 'bulk' });
       if (!ctx || ctx.historyFetchFailed) { out.push({ ...base, verdict: 'error', reason: 'переписка не прочиталась' }); continue; }
       const v = await qualifyReply(r.campaign_id, r.lead_email, r.thread_id, {
-        apiKey: ai.apiKey, ...(ai.model ? { model: ai.model } : {}), briefText: '', leadCriteria: criteria, prefetchedContext: ctx, maxRetries: 1,
+        apiKey: ai.apiKey, ...(ai.model ? { model: ai.model } : {}), briefText: '', leadCriteria: criteriaForCampaign(criteria, campaigns.get(r.campaign_id)), prefetchedContext: ctx, maxRetries: 1,
       }, 'main');
       out.push({ ...base, verdict: v.isLead ? 'lead' : 'not_lead', reason: (v.reason ?? '').slice(0, 300) });
     } catch (err) {

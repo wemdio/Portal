@@ -53,7 +53,7 @@ export function fetchOwnSettings() {
   return authFetchJson<OwnReplySettingsDto>(`${OWN_BASE}/settings`);
 }
 
-export function saveOwnSettings(body: { enabled: boolean; criteria: string }) {
+export function saveOwnSettings(body: { enabled: boolean }) {
   return authFetchJson<OwnReplySettingsDto>(`${OWN_BASE}/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },

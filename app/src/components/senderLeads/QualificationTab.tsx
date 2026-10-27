@@ -124,7 +124,6 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
 
   const [ownLoaded, setOwnLoaded] = useState<OwnReplySettingsDto | null>(null);
   const [ownEnabled, setOwnEnabled] = useState(false);
-  const [ownCriteria, setOwnCriteria] = useState('');
 
   const apply = (settings: LeadSettingsDto) => {
     setLoaded(settings);
@@ -138,7 +137,6 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
   const applyOwn = (settings: OwnReplySettingsDto) => {
     setOwnLoaded(settings);
     setOwnEnabled(settings.enabled);
-    setOwnCriteria(settings.criteria);
   };
 
   useEffect(() => {
@@ -166,9 +164,9 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
     && (enabled !== loaded.enabled || telegram !== loaded.telegram || criteria.trim() !== loaded.criteria.trim()
       || aiEnabled !== loaded.aiEnabled || aiOfferText.trim() !== loaded.aiOfferText.trim());
   const ownDirty = ownLoaded !== null
-    && (ownEnabled !== ownLoaded.enabled || ownCriteria.trim() !== ownLoaded.criteria.trim());
+    && ownEnabled !== ownLoaded.enabled;
   const dirty = folderDirty || ownDirty;
-  const tooLong = criteria.trim().length > LEAD_CRITERIA_MAX || ownCriteria.trim().length > LEAD_CRITERIA_MAX
+  const tooLong = criteria.trim().length > LEAD_CRITERIA_MAX
     || aiOfferText.trim().length > AI_OFFER_TEXT_MAX;
 
   const save = async () => {
@@ -181,7 +179,7 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
         folderDirty
           ? saveLeadSettings(folderKey, { enabled, telegram, criteria: criteria.trim(), aiEnabled, aiOfferText: aiOfferText.trim() })
           : null,
-        ownDirty ? saveOwnSettings({ enabled: ownEnabled, criteria: ownCriteria.trim() }) : null,
+        ownDirty ? saveOwnSettings({ enabled: ownEnabled }) : null,
       ]);
       if (folderRes) apply(folderRes);
       if (ownRes) applyOwn(ownRes);
@@ -270,7 +268,7 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
               className="mt-1.5 w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
             />
             <p className="mt-1 text-xs text-zinc-500">
-              По умолчанию — общие правила квалификатора; изменённый текст приоритетнее них.
+              Действует и на наши кампании Instantly этого языка. Пусто — общие правила квалификатора.
             </p>
           </div>
 
@@ -338,25 +336,7 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
                 </span>
               </span>
             </label>
-            <div>
-              <div className="flex items-baseline justify-between gap-3">
-                <label htmlFor="own-lead-criteria" className="text-sm font-medium text-zinc-900">Что считать лидом</label>
-                <span className={`text-xs ${ownCriteria.trim().length > LEAD_CRITERIA_MAX ? 'text-red-600' : 'text-zinc-400'}`}>
-                  {ownCriteria.trim().length} / {LEAD_CRITERIA_MAX}
-                </span>
-              </div>
-              <textarea
-                id="own-lead-criteria"
-                value={ownCriteria}
-                onChange={(e) => {
-                  setOwnCriteria(e.target.value);
-                  touch();
-                }}
-                rows={4}
-                placeholder="Пусто — общие правила квалификатора"
-                className="mt-1.5 w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
-              />
-            </div>
+            <p className="text-xs text-zinc-500">Что считать лидом — как у автоаутрича: N. Polza — правило RU, ENagency — EN.</p>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">

@@ -42,7 +42,7 @@ export async function PUT(req: NextRequest) {
     await logAudit(
       'own.reply.leads.settings.updated',
       `Наши кампании: квалификация и сделки в AMO ${parsed.value.enabled ? 'включены' : 'выключены'}`,
-      { enabled: parsed.value.enabled, criteriaLength: parsed.value.criteria?.length ?? 0 },
+      { enabled: parsed.value.enabled },
       { userId: auth.user.id },
     );
     return NextResponse.json(ownReplySettingsDto(await loadOwnReplySettings(supabaseAdmin)));
