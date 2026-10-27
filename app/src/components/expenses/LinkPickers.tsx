@@ -1,15 +1,14 @@
 'use client';
 
-import { useEffect, useId, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 
-import { expensesFetch } from '@/lib/expenses/client';
-import type { DealOption, ProjectOption } from '@/lib/expenses/types';
+import type { ProjectOption } from '@/lib/expenses/types';
 
 /**
- * Привязка ручной записи к проекту портала и к сделке AMO.
+ * Привязка ручной записи к проекту портала.
  *
- * Обе привязки необязательны, поэтому выбранное значение показывается плашкой
- * с крестиком: снять привязку должно быть так же просто, как поставить.
+ * Привязка необязательна, поэтому выбранный проект показывается плашкой с
+ * крестиком: снять её должно быть так же просто, как поставить.
  */
 
 export interface PickedProject {
@@ -17,147 +16,36 @@ export interface PickedProject {
   name: string;
 }
 
-export interface PickedDeal {
-  amoId: number;
-  name: string | null;
-}
-
-interface PickItem {
-  key: string;
-  title: string;
-  sub: string;
-}
-
-const MAX_ITEMS = 8;
+const MAX_ITEMS = 50;
+/** Высота списка, если места хватает; меньше — список ужимается под экран. */
+const LIST_MAX_HEIGHT = 288;
 
 const FIELD_CLASS =
   'w-full rounded-lg border border-zinc-200 px-2.5 py-1.5 text-xs text-zinc-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70';
 
-/**
- * Поле «набери и выбери». Enter при открытом списке выбирает пункт, а не
- * отправляет форму, внутри которой поле стоит; Esc закрывает только список.
- */
-function SearchPick({
-  label,
-  selected,
-  onClear,
-  query,
-  onQuery,
-  items,
-  onPick,
-  placeholder,
-  emptyText,
-}: {
-  label: string;
-  selected: { title: string; sub: string } | null;
-  onClear: () => void;
-  query: string;
-  onQuery: (value: string) => void;
-  items: PickItem[];
-  onPick: (key: string) => void;
-  placeholder: string;
-  /** Что сказать, когда набрано, но ничего не нашлось; null — молчать (ещё ищем или набрано мало). */
-  emptyText: string | null;
-}) {
-  const [open, setOpen] = useState(false);
-  const [active, setActive] = useState(0);
-  const listId = useId();
-
-  if (selected) {
-    return (
-      <div className="flex min-h-[30px] items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs">
-        <span className="min-w-0 flex-1">
-          <span className="block truncate font-medium text-zinc-800">{selected.title}</span>
-          {selected.sub ? <span className="block truncate text-[10px] text-zinc-500">{selected.sub}</span> : null}
-        </span>
-        <button
-          type="button"
-          onClick={onClear}
-          aria-label={`Убрать: ${label}`}
-          className="text-sm leading-none text-zinc-400 hover:text-zinc-700"
-        >
-          ×
-        </button>
-      </div>
-    );
-  }
-
-  const activeIndex = Math.min(active, Math.max(items.length - 1, 0));
-  const showList = open && (items.length > 0 || emptyText !== null);
-
-  function handleKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault();
-      setOpen(true);
-      if (items.length) {
-        const step = event.key === 'ArrowDown' ? 1 : -1;
-        setActive((activeIndex + step + items.length) % items.length);
-      }
-    } else if (event.key === 'Enter' && showList) {
-      event.preventDefault();
-      const item = items[activeIndex];
-      if (item) onPick(item.key);
-    } else if (event.key === 'Escape' && showList) {
-      // Иначе Esc дошёл бы до окна и закрыл его вместе с набранным.
-      event.preventDefault();
-      event.stopPropagation();
-      setOpen(false);
-    }
-  }
-
-  return (
-    <div className="relative">
-      <input
-        type="text"
-        role="combobox"
-        aria-label={label}
-        aria-expanded={showList}
-        aria-controls={listId}
-        aria-autocomplete="list"
-        value={query}
-        placeholder={placeholder}
-        onChange={(e) => {
-          onQuery(e.target.value);
-          setOpen(true);
-          setActive(0);
-        }}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
-        onKeyDown={handleKeyDown}
-        className={FIELD_CLASS}
-      />
-      {showList ? (
-        <ul
-          id={listId}
-          role="listbox"
-          className="absolute left-0 right-0 z-20 mt-1 max-h-64 overflow-y-auto rounded-lg border border-zinc-200 bg-white py-1 shadow-lg"
-        >
-          {items.length === 0 ? <li className="px-2.5 py-1.5 text-xs text-zinc-400">{emptyText}</li> : null}
-          {items.map((item, index) => (
-            <li
-              key={item.key}
-              role="option"
-              aria-selected={index === activeIndex}
-              // mousedown, а не click: click приходит после blur, а blur уже
-              // закрыл список.
-              onMouseDown={(e) => {
-                e.preventDefault();
-                onPick(item.key);
-              }}
-              onMouseEnter={() => setActive(index)}
-              className={`cursor-pointer px-2.5 py-1.5 text-xs ${index === activeIndex ? 'bg-blue-50' : ''}`}
-            >
-              <span className="block truncate text-zinc-800">{item.title}</span>
-              {item.sub ? <span className="block truncate text-[10px] text-zinc-500">{item.sub}</span> : null}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </div>
-  );
+/** «TypeType · Аутрич»: у десятков проектов одно имя «Аутрич», различает их клиент. */
+function projectTitle(project: { name: string; client?: string | null }): string {
+  return project.client ? `${project.client} · ${project.name}` : project.name;
 }
 
-/** Проект портала: список целиком приходит сверху, ищем на месте. */
+type ListPosition = { left: number; width: number; maxHeight: number } & ({ top: number } | { bottom: number });
+
+/**
+ * Список ставится `fixed` по координатам поля, а не `absolute` внутри него:
+ * окно ввода прокручивается и обрезало список по своему краю — видно было
+ * два пункта. Места внизу мало — открываем вверх.
+ */
+function listPosition(field: DOMRect): ListPosition {
+  const below = window.innerHeight - field.bottom - 12;
+  const above = field.top - 12;
+  const base = { left: field.left, width: Math.max(field.width, 280) };
+  if (below >= 180 || below >= above) {
+    return { ...base, top: field.bottom + 4, maxHeight: Math.min(LIST_MAX_HEIGHT, below) };
+  }
+  return { ...base, bottom: window.innerHeight - field.top + 4, maxHeight: Math.min(LIST_MAX_HEIGHT, above) };
+}
+
+/** Проект портала: список целиком приходит сверху, ищем на месте по клиенту и названию. */
 export function ProjectPicker({
   value,
   onChange,
@@ -168,103 +56,139 @@ export function ProjectPicker({
   options: ProjectOption[];
 }) {
   const [query, setQuery] = useState('');
+  const [position, setPosition] = useState<ListPosition | null>(null);
+  const [active, setActive] = useState(0);
+  const listRef = useRef<HTMLUListElement | null>(null);
+  const listId = useId();
 
-  const items = useMemo<PickItem[]>(() => {
+  const items = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return options
-      .filter((p) => !needle || `${p.name} ${p.client ?? ''}`.toLowerCase().includes(needle))
-      .slice(0, MAX_ITEMS)
-      .map((p) => ({ key: p.id, title: p.name, sub: [p.client, p.status].filter(Boolean).join(' · ') }));
+      .filter((p) => !needle || `${p.client ?? ''} ${p.name}`.toLowerCase().includes(needle))
+      .slice(0, MAX_ITEMS);
   }, [options, query]);
+
+  const open = position !== null;
+
+  // Окно прокрутили или растянули — координаты списка устарели; закрываем.
+  // Прокрутка самого списка не в счёт.
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: Event) => {
+      if (event.type === 'scroll' && listRef.current?.contains(event.target as Node)) return;
+      setPosition(null);
+    };
+    window.addEventListener('resize', close);
+    window.addEventListener('scroll', close, true);
+    return () => {
+      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', close, true);
+    };
+  }, [open]);
 
   const current = value ? options.find((p) => p.id === value.id) : undefined;
 
-  return (
-    <SearchPick
-      label="Проект"
-      selected={value ? { title: value.name, sub: current?.client ?? '' } : null}
-      onClear={() => onChange(null)}
-      query={query}
-      onQuery={setQuery}
-      items={items}
-      onPick={(id) => {
-        const project = options.find((p) => p.id === id);
-        if (project) onChange({ id: project.id, name: project.name });
-        setQuery('');
-      }}
-      placeholder="Название проекта или клиента"
-      emptyText={query.trim() ? 'Проект не найден' : null}
-    />
-  );
-}
+  if (value) {
+    return (
+      <div className="flex min-h-[30px] items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs">
+        <span className="min-w-0 flex-1 truncate font-medium text-zinc-800">
+          {projectTitle({ name: value.name, client: current?.client })}
+        </span>
+        <button
+          type="button"
+          onClick={() => onChange(null)}
+          aria-label="Убрать проект"
+          className="text-sm leading-none text-zinc-400 hover:text-zinc-700"
+        >
+          ×
+        </button>
+      </div>
+    );
+  }
 
-/** Сделка AMO: ищем на сервере по названию, компании или номеру сделки. */
-export function DealPicker({
-  value,
-  onChange,
-}: {
-  value: PickedDeal | null;
-  onChange: (next: PickedDeal | null) => void;
-}) {
-  const [query, setQuery] = useState('');
-  const [found, setFound] = useState<{ q: string; items: DealOption[] }>({ q: '', items: [] });
-  const [error, setError] = useState<string | null>(null);
+  const activeIndex = Math.min(active, Math.max(items.length - 1, 0));
+  const pick = (project: ProjectOption) => {
+    onChange({ id: project.id, name: project.name });
+    setQuery('');
+    setPosition(null);
+  };
 
-  const q = query.trim();
-
-  // Ищем с паузой после набора: запрос на каждую букву гонял бы базу впустую.
-  useEffect(() => {
-    if (q.length < 2) return;
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      void (async () => {
-        try {
-          const res = await expensesFetch<{ items: DealOption[] }>(
-            `/links/deals?q=${encodeURIComponent(q)}`,
-            { signal: controller.signal },
-          );
-          setFound({ q, items: res.items });
-          setError(null);
-        } catch (e) {
-          if (e instanceof DOMException && e.name === 'AbortError') return;
-          setError(e instanceof Error ? e.message : 'Не удалось найти сделки');
-        }
-      })();
-    }, 250);
-    return () => {
-      clearTimeout(timer);
-      controller.abort();
-    };
-  }, [q]);
-
-  // Результат прошлого запроса под новый текст не показываем — это были бы не те сделки.
-  const fresh = q.length >= 2 && found.q === q;
-  const items: PickItem[] = fresh
-    ? found.items.map((d) => ({
-        key: String(d.amoId),
-        title: d.name ?? `Сделка ${d.amoId}`,
-        sub: [d.company, d.status, `№ ${d.amoId}`].filter(Boolean).join(' · '),
-      }))
-    : [];
+  function handleKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (!open) setPosition(listPosition(event.currentTarget.getBoundingClientRect()));
+      if (items.length) {
+        const step = event.key === 'ArrowDown' ? 1 : -1;
+        setActive((activeIndex + step + items.length) % items.length);
+      }
+    } else if (event.key === 'Enter' && open) {
+      // Список открыт — Enter выбирает проект, а не отправляет форму.
+      event.preventDefault();
+      const project = items[activeIndex];
+      if (project) pick(project);
+    } else if (event.key === 'Escape' && open) {
+      // Иначе Esc закрыл бы всё окно вместе с набранным.
+      event.preventDefault();
+      event.stopPropagation();
+      setPosition(null);
+    }
+  }
 
   return (
     <>
-      <SearchPick
-        label="Сделка в AmoCRM"
-        selected={value ? { title: value.name ?? `Сделка ${value.amoId}`, sub: `№ ${value.amoId}` } : null}
-        onClear={() => onChange(null)}
-        query={query}
-        onQuery={setQuery}
-        items={items}
-        onPick={(key) => {
-          const deal = found.items.find((d) => String(d.amoId) === key);
-          if (deal) onChange({ amoId: deal.amoId, name: deal.name });
-          setQuery('');
+      <input
+        type="text"
+        role="combobox"
+        aria-label="Проект"
+        aria-expanded={open}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        value={query}
+        placeholder="Клиент или название проекта"
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setActive(0);
+          setPosition(listPosition(e.currentTarget.getBoundingClientRect()));
         }}
-        placeholder="Название, компания или номер сделки"
-        emptyText={fresh ? 'Сделка не найдена' : null}
+        onFocus={(e) => setPosition(listPosition(e.currentTarget.getBoundingClientRect()))}
+        onBlur={() => setPosition(null)}
+        onKeyDown={handleKeyDown}
+        className={FIELD_CLASS}
       />
-      {error ? <p className="mt-1 text-[11px] text-red-600">{error}</p> : null}
+      {position ? (
+        <ul
+          ref={listRef}
+          id={listId}
+          role="listbox"
+          style={position}
+          className="fixed z-[70] overflow-y-auto rounded-lg border border-zinc-200 bg-white py-1 shadow-xl"
+        >
+          {items.length === 0 ? (
+            <li className="px-3 py-2 text-xs text-zinc-400">
+              {options.length === 0 ? 'Загружаю проекты…' : 'Проект не найден'}
+            </li>
+          ) : null}
+          {items.map((project, index) => (
+            <li
+              key={project.id}
+              role="option"
+              aria-selected={index === activeIndex}
+              // mousedown, а не click: click приходит после blur, а blur уже закрыл список.
+              onMouseDown={(e) => {
+                e.preventDefault();
+                pick(project);
+              }}
+              onMouseEnter={() => setActive(index)}
+              className={`flex cursor-pointer items-center gap-3 px-3 py-1.5 text-xs ${
+                index === activeIndex ? 'bg-blue-50' : ''
+              }`}
+            >
+              <span className="min-w-0 flex-1 truncate text-zinc-800">{projectTitle(project)}</span>
+              <span className="shrink-0 text-[10px] text-zinc-400">{project.status}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </>
   );
 }

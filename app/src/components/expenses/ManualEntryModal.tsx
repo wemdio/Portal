@@ -3,8 +3,9 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
 
-import { DealPicker, ProjectPicker, type PickedDeal, type PickedProject } from '@/components/expenses/LinkPickers';
+import { ProjectPicker, type PickedProject } from '@/components/expenses/LinkPickers';
 import VendorSelect from '@/components/expenses/VendorSelect';
+import { parseAmoDealLink } from '@/lib/expenses/amoLink';
 import { expensesFetch, mskToday } from '@/lib/expenses/client';
 import { DEFAULT_PAYER } from '@/lib/expenses/labels';
 import {
@@ -22,6 +23,16 @@ const FIELD_CLASS =
   'w-full rounded-lg border border-zinc-200 px-2.5 py-1.5 text-xs text-zinc-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70';
 
 const LABEL_CLASS = 'flex min-w-0 flex-col gap-1 text-[11px] text-zinc-500';
+
+/** Подпись поля; обязательное помечено красной звёздочкой справа. */
+function FieldName({ children, required = false }: { children: string; required?: boolean }) {
+  return (
+    <span>
+      {children}
+      {required ? <span className="ml-0.5 text-red-500" aria-hidden="true">*</span> : null}
+    </span>
+  );
+}
 
 /**
  * Окно ручного дохода или расхода — и новой записи, и правки старой.
@@ -55,9 +66,10 @@ export default function ManualEntryModal({
   const [comment, setComment] = useState(entry?.comment ?? '');
   const [vendorId, setVendorId] = useState(entry?.vendor_id ?? '');
   const [project, setProject] = useState<PickedProject | null>(entry?.project ?? null);
-  const [deal, setDeal] = useState<PickedDeal | null>(
-    entry?.deal ? { amoId: entry.deal.amoId, name: entry.deal.name } : null,
-  );
+  // Сделка — ссылкой из адресной строки AMO, номер берём из неё (amoLink.ts).
+  const [dealLink, setDealLink] = useState(entry?.deal?.url ?? '');
+  const dealId = parseAmoDealLink(dealLink);
+  const dealLinkInvalid = dealLink.trim() !== '' && dealId === null;
 
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   const [directory, setDirectory] = useState<VendorOption[]>([]);
@@ -105,6 +117,10 @@ export default function ManualEntryModal({
 
   async function submit(e: FormEvent) {
     e.preventDefault();
+    if (dealLinkInvalid) {
+      setError('Сделка в AmoCRM — это ссылка вида https://….amocrm.ru/leads/detail/123');
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -114,7 +130,7 @@ export default function ManualEntryModal({
         currency,
         comment: comment.trim(),
         projectId: project?.id ?? null,
-        amoDealId: deal?.amoId ?? null,
+        amoDealId: dealId,
       };
       const body = isIncome
         ? { ...common, payer: payer.trim(), channel }
@@ -179,7 +195,7 @@ export default function ManualEntryModal({
         <form onSubmit={submit} className="space-y-3 px-5 py-4">
           <div className="grid grid-cols-[1fr_1fr_88px] gap-2">
             <label className={LABEL_CLASS}>
-              Дата
+              <FieldName required>Дата</FieldName>
               <input
                 type="date"
                 value={occurredOn}
@@ -190,7 +206,7 @@ export default function ManualEntryModal({
               />
             </label>
             <label className={LABEL_CLASS}>
-              Сумма
+              <FieldName required>Сумма</FieldName>
               <input
                 type="number"
                 step="0.01"
@@ -203,7 +219,7 @@ export default function ManualEntryModal({
               />
             </label>
             <label className={LABEL_CLASS}>
-              Валюта
+              <FieldName required>Валюта</FieldName>
               <select value={currency} onChange={(e) => setCurrency(e.target.value)} className={FIELD_CLASS}>
                 {CURRENCIES.map((code) => (
                   <option key={code} value={code}>
@@ -217,7 +233,7 @@ export default function ManualEntryModal({
           {isIncome ? (
             <div className="grid grid-cols-[1fr_160px] gap-2">
               <label className={LABEL_CLASS}>
-                От кого
+                <FieldName required>От кого</FieldName>
                 <input
                   type="text"
                   value={payer}
@@ -228,7 +244,7 @@ export default function ManualEntryModal({
                 />
               </label>
               <label className={LABEL_CLASS}>
-                Откуда
+                <FieldName required>Откуда</FieldName>
                 <select value={channel} onChange={(e) => setChannel(e.target.value)} className={FIELD_CLASS}>
                   {MANUAL_INCOME_CHANNELS.map((item) => (
                     <option key={item} value={item}>
@@ -242,7 +258,7 @@ export default function ManualEntryModal({
             <div className="grid grid-cols-2 gap-2">
               {/* Обёртка, а не label: внутри VendorSelect свой input. */}
               <div className={LABEL_CLASS}>
-                <span aria-hidden="true">Вендор</span>
+                <span aria-hidden="true"><FieldName>Вендор</FieldName></span>
                 <VendorSelect
                   value={vendorId}
                   onChange={setVendorId}
@@ -255,7 +271,7 @@ export default function ManualEntryModal({
                 />
               </div>
               <label className={LABEL_CLASS}>
-                Кто платил
+                <FieldName>Кто платил</FieldName>
                 <input
                   type="text"
                   value={payer}
@@ -268,11 +284,12 @@ export default function ManualEntryModal({
           )}
 
           <label className={LABEL_CLASS}>
-            {isIncome ? 'За что' : 'Комментарий'}
+            <FieldName required={isIncome}>{isIncome ? 'За что' : 'Комментарий'}</FieldName>
             <input
               type="text"
               value={comment}
               onChange={(e) => setComment(e.target.value)}
+              required={isIncome}
               placeholder={isIncome ? 'Например, оплата за октябрь' : ''}
               className={FIELD_CLASS}
             />
@@ -280,13 +297,23 @@ export default function ManualEntryModal({
 
           <div className="grid grid-cols-2 gap-2">
             <div className={LABEL_CLASS}>
-              <span aria-hidden="true">Проект</span>
+              <span aria-hidden="true"><FieldName>Проект</FieldName></span>
               <ProjectPicker value={project} onChange={setProject} options={projects} />
             </div>
-            <div className={LABEL_CLASS}>
-              <span aria-hidden="true">Сделка в AmoCRM</span>
-              <DealPicker value={deal} onChange={setDeal} />
-            </div>
+            <label className={LABEL_CLASS}>
+              <FieldName>Сделка в AmoCRM</FieldName>
+              <input
+                type="url"
+                value={dealLink}
+                onChange={(e) => setDealLink(e.target.value)}
+                placeholder="Ссылка на сделку"
+                aria-invalid={dealLinkInvalid}
+                className={`${FIELD_CLASS} ${dealLinkInvalid ? 'border-red-400' : ''}`}
+              />
+              {dealLinkInvalid ? (
+                <span className="text-[10px] text-red-600">Нужна ссылка на сделку из AmoCRM</span>
+              ) : null}
+            </label>
           </div>
 
           {currency !== 'RUB' ? (

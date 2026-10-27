@@ -163,15 +163,6 @@ export interface ProjectOption {
   status: string;
 }
 
-/** Вариант в поиске сделки AMO. */
-export interface DealOption {
-  amoId: number;
-  name: string | null;
-  company: string | null;
-  pipeline: string | null;
-  status: string | null;
-}
-
 /** Строка витрины incomes_v. Контрагент — плательщик. */
 export interface IncomeRow {
   source: IncomeSource;

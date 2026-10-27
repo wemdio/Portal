@@ -50,11 +50,25 @@ export const NAV_PATH_ALIASES: Record<string, string[]> = {
  * — это дашборды, а в шапке они занимали два места из полутора десятков.
  * Правила доступа при этом остались на самих пунктах: все три дашборда
  * выдаются точечно через user_tool_visibility, админу видны всегда.
+ *
+ * 27.10.2026 по тому же принципу шапку разгрузили ещё на шесть мест: группы
+ * «Проекты», «Календари» и «Админка». Доступ по-прежнему решает каждый пункт
+ * сам, поэтому сотрудник без админских прав видит в «Админке» только
+ * «Регламент», а «Календари» без выданных календарей не видит вовсе.
  */
 export const navTree: NavEntry[] = [
-  { id: 'projects', name: 'Проекты', nameEn: 'Projects', href: '/' },
-  { id: 'projects-analytics', name: 'Аналитика проектов', nameEn: 'Project analytics', href: '/analytics/projects' },
-  { id: 'mailbox-load', name: 'Нагрузка почт', nameEn: 'Mailbox load', href: '/analytics/mailbox-load', leadOnly: true },
+  {
+    id: 'projects-menu',
+    name: 'Проекты',
+    nameEn: 'Projects',
+    children: [
+      { id: 'projects', name: 'Проекты', nameEn: 'Projects', href: '/' },
+      { id: 'projects-analytics', name: 'Аналитика проектов', nameEn: 'Project analytics', href: '/analytics/projects' },
+      { id: 'mailbox-load', name: 'Нагрузка почт', nameEn: 'Mailbox load', href: '/analytics/mailbox-load', leadOnly: true },
+      { id: 'tasks', name: 'Задачи', nameEn: 'Tasks', href: '/tasks' },
+      { id: 'team', name: 'Команда', nameEn: 'Team', href: '/team' },
+    ],
+  },
   {
     id: 'dashboards',
     name: 'Дашборды',
@@ -65,22 +79,28 @@ export const navTree: NavEntry[] = [
       { id: 'expenses', name: 'Расходы и доходы', nameEn: 'Income & expenses', href: '/expenses', navTabId: 'nav-expenses' },
     ],
   },
-  { id: 'tasks', name: 'Задачи', nameEn: 'Tasks', href: '/tasks' },
   { id: 'board', name: 'Доска', nameEn: 'Board', href: '/board', navTabId: 'nav-tasks-board' },
-  { id: 'team', name: 'Команда', nameEn: 'Team', href: '/team' },
   { id: 'instantly', name: 'Instantly', nameEn: 'Instantly', href: '/instantly', requiresTool: 'instantly' },
   { id: 'tools', name: 'Инструменты', nameEn: 'Tools', href: '/tools' },
   { id: 'payments', name: 'Оплаты', nameEn: 'Payments', href: '/payments' },
-  { id: 'billing-calendar', name: 'Календарь почт', nameEn: 'Mailbox calendar', href: '/billing-calendar', billingCalendarOnly: true },
-  { id: 'tech-calendar', name: 'Календарь технички', nameEn: 'Tech calendar', href: '/tech-calendar', adminOnly: true },
-  { id: 'regulation', name: 'Регламент', nameEn: 'Regulation', href: '/reglament' },
-  { id: 'admin', name: 'Админ', nameEn: 'Admin', href: '/admin', adminOnly: true },
   {
-    id: 'invoices',
-    name: 'Счета',
-    nameEn: 'Invoices',
-    href: '/invoices',
-    adminOnly: true,
+    id: 'calendars',
+    name: 'Календари',
+    nameEn: 'Calendars',
+    children: [
+      { id: 'billing-calendar', name: 'Календарь почт', nameEn: 'Mailbox calendar', href: '/billing-calendar', billingCalendarOnly: true },
+      { id: 'tech-calendar', name: 'Календарь технички', nameEn: 'Tech calendar', href: '/tech-calendar', adminOnly: true },
+    ],
+  },
+  {
+    id: 'admin-menu',
+    name: 'Админка',
+    nameEn: 'Admin',
+    children: [
+      { id: 'admin', name: 'Админ', nameEn: 'Admin', href: '/admin', adminOnly: true },
+      { id: 'invoices', name: 'Счета', nameEn: 'Invoices', href: '/invoices', adminOnly: true },
+      { id: 'regulation', name: 'Регламент', nameEn: 'Regulation', href: '/reglament' },
+    ],
   },
   {
     id: 'support',
