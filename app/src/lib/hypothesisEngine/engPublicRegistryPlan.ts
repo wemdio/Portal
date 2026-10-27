@@ -10,7 +10,7 @@ import { HE_ENG_GLEIF_TERMS, HE_ENG_OSM_TAGS } from './engGlobalRegistryCatalog'
 import { HE_ENG_IRS_CATEGORIES } from './engIrsRegistry';
 import { HE_ENG_NACE_CLASSES, heEngNaceSources } from './engNaceRegistryCatalog';
 import { HE_ENG_NCES_CATEGORIES } from './engNcesRegistry';
-import { HE_ENG_SEC_SIC_SECTORS } from './engSecCompanyRegistry';
+import { HE_ENG_SEC_SIC_SECTORS, heEngSecSectorsOverlap } from './engSecCompanyRegistry';
 import { HE_ENG_WIKIDATA_SECTORS } from './engWikidataRegistry';
 import type { HeEngRegistryPlan, HeEngRegistryProvider, HeEngRegistryTask } from './engPublicRegistryTypes';
 
@@ -243,10 +243,15 @@ const SECTORS: readonly Sector[] = [
 function hash(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 function fields(task: HeEngRegistryTask): unknown[] {
   const legacy = [task.provider, task.country, task.category, task.minEmployees ?? null, task.maxEmployees ?? null];
-  if (task.countries) return [...legacy, task.transport ?? null, task.countries];
-  // Preserve every saved API task ID and plan fingerprint byte-for-byte.
-  return task.transport === undefined ? legacy : [...legacy, task.transport];
+  // Preserve every saved API task ID and plan fingerprint byte-for-byte; only a slice that skips earlier ones adds its list.
+  const own = task.countries ? [...legacy, task.transport ?? null, task.countries] : task.transport === undefined ? legacy : [...legacy, task.transport];
+  return task.exclude ? [...own, { exclude: task.exclude }] : own;
 }
+// Registers whose categories share records: a CQC provider gives several kinds of care, every Charity Commission
+// grant-maker is a charity, an SEC filer of any sector is a public company.
+const OVERLAPPING: Partial<Record<HeEngRegistryProvider, (a: string, b: string) => boolean>> = {
+  cqc: () => true, charity_commission: () => true, sec_companies: heEngSecSectorsOverlap,
+};
 /** Every country one slice may return: its own, or each country of a global slice. */
 export function heEngRegistryTaskCountries(task: Pick<HeEngRegistryTask, 'country' | 'countries'>): readonly string[] {
   return task.countries ?? [task.country];
@@ -321,6 +326,14 @@ export function createHeEngRegistryPlan(input: {
       tasks.push(task);
     }
   }
+  // A record of overlapping categories goes to the plan's first slice that reads it: one source per company.
+  for (const [index, task] of tasks.entries()) {
+    const overlaps = OVERLAPPING[task.provider];
+    const earlier = overlaps ? [...new Set(tasks.slice(0, index).filter(other => other.provider === task.provider && other.country === task.country &&
+      String(other.countries ?? '') === String(task.countries ?? '') && other.category !== task.category && overlaps(other.category, task.category))
+      .map(other => other.category))].sort() : [];
+    if (earlier.length) { task.exclude = earlier; task.id = taskId(input.scopeKey, task); }
+  }
   if (tasks.length > MAX_TASKS) throw new Error('ENG registry plan is too large.');
   const plan: HeEngRegistryPlan = { version: 1, scopeKey: input.scopeKey, fingerprint: fingerprint(input.scopeKey, tasks), tasks };
   validateHeEngRegistryPlan(plan, input.scopeKey);
@@ -329,7 +342,10 @@ export function createHeEngRegistryPlan(input: {
 
 export function validateHeEngRegistryTask(task: HeEngRegistryTask): void {
   if (!task || typeof task !== 'object' || Array.isArray(task) ||
-    Object.keys(task).some(key => !['id', 'provider', 'country', 'countries', 'category', 'transport', 'minEmployees', 'maxEmployees'].includes(key)) ||
+    Object.keys(task).some(key => !['id', 'provider', 'country', 'countries', 'category', 'transport', 'minEmployees', 'maxEmployees', 'exclude'].includes(key)) ||
+    (task.exclude !== undefined && (!OVERLAPPING[task.provider] || !Array.isArray(task.exclude) || !task.exclude.length ||
+      task.exclude.some((category, index) => typeof category !== 'string' || category === task.category ||
+        !HE_ENG_REGISTRY_CATEGORIES[task.provider]?.includes(category) || (index > 0 && task.exclude![index - 1] >= category)))) ||
     typeof task.id !== 'string' || !/^[a-f0-9]{24}$/.test(task.id) ||
     !Object.hasOwn(HE_ENG_REGISTRY_CATEGORIES, task.provider) ||
     !HE_ENG_REGISTRY_CATEGORIES[task.provider].includes(task.category) ||

@@ -276,9 +276,12 @@ export async function readHeEngCharityCommissionRegistryPage(task: HeEngRegistry
     fail('registry_invalid_task');
   }
   const all = await charities(options);
-  const key = `${task.category}:${task.minEmployees ?? ''}:${task.maxEmployees ?? ''}`;
+  const key = `${task.category}:${task.minEmployees ?? ''}:${task.maxEmployees ?? ''}:${(task.exclude ?? []).join(',')}`;
   if (ordered?.list !== all || ordered.key !== key) {
-    ordered = { list: all, key, charities: slice(task.category === 'foundations' ? all.filter(charity => charity.grantMaker) : all, task) };
+    // Every grant-maker is a charity: a slice skips the charities of the categories an earlier slice reads.
+    const inCategory = (charity: Charity, category: string) => category !== 'foundations' || charity.grantMaker;
+    ordered = { list: all, key, charities: slice(all.filter(charity => inCategory(charity, task.category) &&
+      !task.exclude?.some(category => inCategory(charity, category))), task) };
   }
   const page = ordered.charities.slice(position, position + PAGE_SIZE);
   return { candidates: page.map(candidate), nextPosition: position + PAGE_SIZE, exhausted: position + page.length >= ordered.charities.length,

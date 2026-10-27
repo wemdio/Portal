@@ -17,6 +17,12 @@ export interface HeEngRegistryTask {
   countries?: string[];
   minEmployees?: number;
   maxEmployees?: number;
+  /**
+   * Categories of the same register that earlier slices of the plan read: a
+   * record in one of them is theirs, and this slice skips it, so a company comes
+   * from one slice only (a CQC provider of care homes and home care).
+   */
+  exclude?: string[];
 }
 
 export interface HeEngRegistryPlan {

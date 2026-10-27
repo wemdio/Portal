@@ -182,7 +182,9 @@ function staff(provider: Provider, category: string): number {
 }
 function slice(list: readonly Provider[], task: HeEngRegistryTask): Provider[] {
   const min = task.minEmployees ?? 0; const max = task.maxEmployees;
-  const kept = list.filter(provider => provider.kinds.has(task.category)).map(provider => ({ provider, staff: staff(provider, task.category) }))
+  // A provider of kinds an earlier slice reads is that slice's.
+  const kept = list.filter(provider => provider.kinds.has(task.category) && !task.exclude?.some(kind => provider.kinds.has(kind)))
+    .map(provider => ({ provider, staff: staff(provider, task.category) }))
     .filter(item => item.staff * STAFF_TOLERANCE >= min && (max === undefined || item.staff / STAFF_TOLERANCE <= max));
   const middle = max === undefined ? null : Math.log(Math.sqrt(Math.max(1, min) * Math.max(1, max)));
   return kept.sort((a, b) => (middle === null ? b.staff - a.staff : Math.abs(Math.log(Math.max(1, a.staff)) - middle) - Math.abs(Math.log(Math.max(1, b.staff)) - middle)) ||
@@ -208,7 +210,7 @@ function candidate(provider: Provider, category: string): HeEngRegistryCandidate
 export async function readHeEngCqcRegistryPage(task: HeEngRegistryTask, position: number, options: Options = {}): Promise<HeEngRegistryPage> {
   if (task.provider !== 'cqc' || task.country !== 'united kingdom' || !HE_ENG_CQC_CATEGORIES.includes(task.category)) fail('registry_invalid_task');
   const all = await providers(options);
-  const key = `${task.category}:${task.minEmployees ?? ''}:${task.maxEmployees ?? ''}`;
+  const key = `${task.category}:${task.minEmployees ?? ''}:${task.maxEmployees ?? ''}:${(task.exclude ?? []).join(',')}`;
   if (ordered?.list !== all || ordered.key !== key) ordered = { list: all, key, providers: slice(all, task) };
   const page = ordered.providers.slice(position, position + PAGE_SIZE);
   return { candidates: page.map(provider => candidate(provider, task.category)), nextPosition: position + PAGE_SIZE,
