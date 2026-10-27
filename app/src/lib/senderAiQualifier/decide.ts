@@ -12,6 +12,20 @@ import {
 const RELEVANT = new Set<AiStep['relevant']>(['yes', 'no', 'unclear']);
 const OUTCOMES = new Set<AiStep['outcome']>(['continue', 'handoff', 'close', 'counter_offer']);
 
+/** Заглушки, которые модель пишет вместо контакта. */
+const CONTACT_PLACEHOLDER = /^(null|none|n\/?a|нет|не указан[оа]?|не указал[аи]?|отсутствует|unknown|-+|—+|–+)$/i;
+/**
+ * Похоже ли на контакт для связи: цифры (телефон, время, дата), почта или
+ * ник, мессенджер, «по почте», день или время суток.
+ */
+const CONTACT_SIGNAL = /\d|@|почт|e-?mail|mail|телеграм|telegram|\btg\b|whatsapp|ватсап|звон|call|zoom|зум|понедельник|вторник|сред[аеуы]|четверг|пятниц|суббот|воскресен|monday|tuesday|wednesday|thursday|friday|завтра|сегодня|tomorrow|today|утр|вечер|днём|morning|afternoon|evening/i;
+
+export function looksLikeContact(value: string | null): boolean {
+  if (!value) return false;
+  const text = value.trim();
+  return Boolean(text) && !CONTACT_PLACEHOLDER.test(text) && CONTACT_SIGNAL.test(text);
+}
+
 /**
  * Ответ модели → AiStep. Модель иногда оборачивает JSON в ```json или пишет
  * пояснение вокруг — берём объект от первой «{» до последней «}».
@@ -34,9 +48,10 @@ export function parseAiStep(raw: string): AiStep {
   return {
     relevant,
     outcome,
-    contact: contact || null,
+    contact: contact && !CONTACT_PLACEHOLDER.test(contact) ? contact : null,
     reply: typeof data.reply === 'string' ? data.reply.trim() : '',
     summary: typeof data.summary === 'string' ? data.summary.trim() : '',
+    stopRequested: data.stop_requested === true,
   };
 }
 
@@ -45,7 +60,9 @@ export function parseAiStep(raw: string): AiStep {
  * присланном контакте — что бы ни написала модель в outcome.
  */
 export function decideStep(step: AiStep, ctx: { aiMessages: number; stopRequested: boolean }): AiDecision {
-  if (step.relevant === 'yes' && step.contact) {
+  // Просьба не писать важнее всего остального: ни передачи, ни прощания.
+  if (ctx.stopRequested || step.stopRequested) return { kind: 'close', letter: null };
+  if (step.relevant === 'yes' && step.contact && looksLikeContact(step.contact)) {
     if (!step.reply) throw new Error('Модель не написала письмо передачи');
     return { kind: 'handoff', letter: step.reply, contact: step.contact, summary: step.summary };
   }

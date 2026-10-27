@@ -19,6 +19,8 @@ export interface AiStep {
   reply: string;
   /** 1–3 строки для менеджера: кто, что нужно, что прислал. */
   summary: string;
+  /** Лид просит больше не писать — отвечать нельзя ни строкой. */
+  stopRequested: boolean;
 }
 
 /** Что делает движок после хода: решает код, а не модель. */
@@ -56,3 +58,8 @@ export const REMINDER_BUSINESS_DAYS = 2;
 export const REPLY_DELAY_MS = 5 * 60_000;
 /** После стольких сбоев модели лид уходит менеджерам прежним путём. */
 export const MAX_AI_ATTEMPTS = 3;
+/**
+ * Начало ошибки, которой manualWorker отменяет письмо ИИ перед отправкой
+ * (отписка, ручная метка, ответ оператора). Это не сбой отправки.
+ */
+export const AI_LETTER_CANCELLED = 'Письмо ИИ отменено';

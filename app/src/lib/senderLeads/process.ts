@@ -296,12 +296,13 @@ async function deliverLeads(db: SupabaseClient, tg: LeadTelegramConfig, log: Log
     if (!campaign) { await skip('рассылка не найдена'); continue; }
     if (!campaign.settings.telegram) { await skip('отправка в чат выключена у папки'); continue; }
 
-    // Переписку ведёт квалифицирующий ИИ: в чат уходит только строка его
-    // передачи. После сбоя ИИ лид идёт прежним путём.
+    // Пока квалифицирующий ИИ ведёт переписку, лид в чат не идёт; после
+    // передачи — только строка его передачи. Когда разговор кончился (не
+    // ответил, закрыт, остановлен, сбой), новые лиды идут прежним путём.
     const { data: conv, error: convError } = await db.from('sender_ai_conversations')
       .select('state, handoff_reply_id').eq('recipient_id', row.recipient_id).maybeSingle();
     if (convError) { log('warn', `ТГ: разговор ИИ ${row.recipient_id} не прочитан: ${convError.message}`); continue; }
-    if (conv && conv.state !== 'failed' && !(conv.state === 'handed_off' && conv.handoff_reply_id === row.reply_id)) {
+    if (conv && (conv.state === 'active' || (conv.state === 'handed_off' && conv.handoff_reply_id !== row.reply_id))) {
       await skip('Переписку ведёт ИИ');
       continue;
     }

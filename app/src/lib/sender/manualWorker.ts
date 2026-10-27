@@ -3,6 +3,7 @@ import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { authForMailbox } from './mailboxAuth';
 import { sendSenderMail } from './smtp';
+import { AI_LETTER_CANCELLED } from '@/lib/senderAiQualifier/types';
 import type { MailboxRow } from './types';
 
 /**
@@ -108,7 +109,7 @@ export async function processManualMessages(opts: { egressIp: string; log?: Log;
         conversation.data?.state === 'stopped' || operator.data?.length || suppression.data?.length;
       if (blocked) {
         await db.from('sender_manual_messages').update({ status: 'failed',
-          error: 'Письмо ИИ отменено: переписка остановлена, отписка, ручная метка или ответ оператора', updated_at: nowIso }).eq('id', message.id);
+          error: `${AI_LETTER_CANCELLED}: переписка остановлена, отписка, ручная метка или ответ оператора`, updated_at: nowIso }).eq('id', message.id);
         continue;
       }
     }

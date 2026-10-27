@@ -9,7 +9,7 @@ import type { Log } from '@/lib/senderLeads/process';
 import { aiQualifierConfig, requestAiStep, type AiPromptInput } from './ai';
 import { hasOpenAmoDeal } from './amo';
 import { decideStep, reminderDueAt, replyDueAt } from './decide';
-import { MAX_AI_ATTEMPTS, MAX_AI_LETTERS, type AiConversationRow, type AiFolderKey, type AiState } from './types';
+import { AI_LETTER_CANCELLED, MAX_AI_ATTEMPTS, MAX_AI_LETTERS, type AiConversationRow, type AiFolderKey, type AiState } from './types';
 
 /**
  * Движок квалифицирующего ИИ: запускает разговор по ответу с интересом и
@@ -55,6 +55,7 @@ interface RecipientRow {
   email: string;
   status: string;
   mailbox_id: string | null;
+  lead_verdict: string | null;
   lead_verdict_source: string | null;
   reply_language: string | null;
   sender_mailboxes: { email: string } | null;
@@ -69,6 +70,11 @@ export interface AiPassResult {
 
 const FOLDER_SELECT = 'id, key, timezone, send_hour_from, send_hour_to, send_weekdays, ai_enabled, ai_enabled_at, ai_offer_text, leads_enabled, leads_telegram';
 const REPLY_SELECT = 'id, recipient_id, from_email, subject, body, message_id, received_at, created_at';
+const RECIPIENT_SELECT = 'id, email, status, mailbox_id, lead_verdict, lead_verdict_source, reply_language, sender_mailboxes(email)';
+/** Письмо ИИ в «sending» дольше этого — считаем, что отправка оборвалась. */
+const LETTER_STUCK_SENDING_MS = 60 * 60_000;
+/** Письмо ИИ в очереди дольше этого — sender-хост не работает. */
+const LETTER_STUCK_QUEUED_MS = 6 * 60 * 60_000;
 
 function windowOf(folder: FolderRow): SendWindow {
   return {
@@ -114,7 +120,7 @@ async function hasOperatorMessage(db: SupabaseClient, recipientId: string): Prom
 
 async function loadRecipient(db: SupabaseClient, recipientId: string): Promise<RecipientRow | null> {
   const { data, error } = await db.from('sender_recipients')
-    .select('id, email, status, mailbox_id, lead_verdict_source, reply_language, sender_mailboxes(email)')
+    .select(RECIPIENT_SELECT)
     .eq('id', recipientId).maybeSingle();
   if (error) throw new Error(`sender_recipients: ${error.message}`);
   return (data as unknown as RecipientRow | null) ?? null;
@@ -260,6 +266,7 @@ async function finish(db: SupabaseClient, conv: AiConversationRow, state: AiStat
 
 interface StepContext {
   folder: FolderRow;
+  recipient: RecipientRow;
   ccEmails: string[];
   newest: ReplyRow | null;
   result: AiPassResult;
@@ -267,15 +274,13 @@ interface StepContext {
 
 /** Один ход разговора; если делать пока нечего — только переносит срок. */
 async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx: StepContext): Promise<void> {
-  const { folder, newest } = ctx;
+  const { folder, newest, recipient } = ctx;
   const now = new Date();
-
-  if (!folder.ai_enabled) {
-    // ИИ выключили посреди разговора — лид уходит менеджерам как раньше.
-    await finish(db, conv, 'failed', 'ИИ выключен в настройках папки');
-    await releaseToManagers(db, conv);
-    return;
-  }
+  const planNext = async (due: Date) => {
+    if (!conv.next_action_at || Date.parse(conv.next_action_at) !== due.getTime()) {
+      await patchConversation(db, conv.recipient_id, { next_action_at: due.toISOString() });
+    }
+  };
 
   const hasNew = Boolean(newest && newest.id !== conv.last_reply_id);
   let mode: AiPromptInput['mode'];
@@ -284,25 +289,24 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
     mode = 'reply';
     due = replyDueAt(replyAt(newest!), windowOf(folder));
   } else if (conv.last_ai_sent_at) {
+    due = reminderDueAt(new Date(conv.last_ai_sent_at), folder.timezone);
     if (conv.reminder_sent || conv.ai_messages >= MAX_AI_LETTERS) {
-      due = reminderDueAt(new Date(conv.last_ai_sent_at), folder.timezone);
       if (now >= due) await finish(db, conv, 'no_reply', null);
-      else if (conv.next_action_at !== due.toISOString()) await patchConversation(db, conv.recipient_id, { next_action_at: due.toISOString() });
+      else await planNext(due);
       return;
     }
     mode = 'reminder';
-    due = reminderDueAt(new Date(conv.last_ai_sent_at), folder.timezone);
   } else {
     await finish(db, conv, 'stopped', 'письмо лида не найдено');
     return;
   }
 
   if (now < due) {
-    if (conv.next_action_at !== due.toISOString()) await patchConversation(db, conv.recipient_id, { next_action_at: due.toISOString() });
+    await planNext(due);
     return;
   }
   if (!isWithinWindow(now, windowOf(folder))) {
-    await patchConversation(db, conv.recipient_id, { next_action_at: nextWindowSlot(now, windowOf(folder)).toISOString() });
+    await planNext(nextWindowSlot(now, windowOf(folder)));
     return;
   }
 
@@ -311,13 +315,6 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
     const { data: q, error } = await db.from('sender_reply_qualifications').select('status').eq('reply_id', newest!.id).maybeSingle();
     if (error) throw new Error(`sender_reply_qualifications: ${error.message}`);
     if (!q || q.status === 'pending') return;
-  }
-
-  const recipient = await loadRecipient(db, conv.recipient_id);
-  if (!recipient || CLOSED_RECIPIENT.includes(recipient.status) || recipient.lead_verdict_source === 'manual'
-    || await hasOperatorMessage(db, conv.recipient_id)) {
-    await finish(db, conv, 'stopped', 'переписка остановлена, отмечена вручную или ответил оператор');
-    return;
   }
   if (!newest) {
     await finish(db, conv, 'stopped', 'письмо лида не найдено');
@@ -342,6 +339,8 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
   const processed = { last_reply_id: newest.id, attempts: 0 };
 
   if (decision.kind === 'no_reply') {
+    // Лимит писем исчерпан, а лид ответил: его новое письмо уходит менеджерам
+    // прежним путём (deliverLeads не глушит лидов вне активного разговора).
     await patchConversation(db, conv.recipient_id, { ...processed, state: 'no_reply', next_action_at: null, last_error: null });
     return;
   }
@@ -355,18 +354,19 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
     return;
   }
   if (decision.kind === 'handoff') {
+    // Сначала строка лида для чата и AMO (повтор безопасен), потом письмо, потом
+    // состояние: если шаг сорвётся, менеджеры всё равно не потеряют лида.
+    const reason = `Передал ИИ. Контакт: ${decision.contact}.${decision.summary ? ` ${decision.summary}` : ''}`;
+    const { error } = await db.from('sender_reply_qualifications')
+      .update({ status: 'lead', ai_reason: reason.slice(0, 2000), tg_attempts: 0, tg_error: null, updated_at: now.toISOString() })
+      .eq('reply_id', newest.id);
+    if (error) throw new Error(`sender_reply_qualifications: ${error.message}`);
     await enqueueAiLetter(db, { conv, recipient, replyTo: newest, text: decision.letter, cc, history });
     await patchConversation(db, conv.recipient_id, {
       ...processed, state: 'handed_off', handoff_reply_id: newest.id, handoff_contact: decision.contact,
       summary: decision.summary || null, ai_messages: conv.ai_messages + 1, last_ai_sent_at: now.toISOString(),
       next_action_at: null, last_error: null,
     });
-    // Строка этого письма становится лидом для доставки в чат и AMO: в ней контакт и выжимка.
-    const reason = `Передал ИИ. Контакт: ${decision.contact}.${decision.summary ? ` ${decision.summary}` : ''}`;
-    const { error } = await db.from('sender_reply_qualifications')
-      .update({ status: 'lead', ai_reason: reason.slice(0, 2000), tg_attempts: 0, tg_error: null, updated_at: now.toISOString() })
-      .eq('reply_id', newest.id);
-    if (error) throw new Error(`sender_reply_qualifications: ${error.message}`);
     ctx.result.letters += 1;
     ctx.result.handedOff += 1;
     return;
@@ -395,6 +395,54 @@ async function newestReplies(db: SupabaseClient, recipientIds: string[]): Promis
   return out;
 }
 
+interface AiLetterRow {
+  recipient_id: string;
+  status: string;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Состояние для всех активных разговоров одним набором запросов: получатели,
+ * ответы оператора и последнее письмо ИИ. Стоп-условия проверяются каждый
+ * круг, а не только когда настал срок хода.
+ */
+async function loadActiveContext(db: SupabaseClient, ids: string[]): Promise<{
+  recipients: Map<string, RecipientRow>; operator: Set<string>; letters: Map<string, AiLetterRow>;
+}> {
+  const recipients = new Map<string, RecipientRow>();
+  const operator = new Set<string>();
+  const letters = new Map<string, AiLetterRow>();
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    const [r, o, l] = await Promise.all([
+      db.from('sender_recipients').select(RECIPIENT_SELECT).in('id', chunk),
+      db.from('sender_manual_messages').select('recipient_id')
+        .in('recipient_id', chunk).is('agency_handoff_id', null).is('handoff', null).eq('by_ai', false),
+      db.from('sender_manual_messages').select('recipient_id, status, error, created_at, updated_at')
+        .in('recipient_id', chunk).eq('by_ai', true),
+    ]);
+    for (const res of [r, o, l]) if (res.error) throw new Error(`состояние разговоров: ${res.error.message}`);
+    for (const row of (r.data ?? []) as unknown as RecipientRow[]) recipients.set(row.id, row);
+    for (const row of (o.data ?? []) as Array<{ recipient_id: string }>) operator.add(row.recipient_id);
+    for (const row of (l.data ?? []) as AiLetterRow[]) {
+      const prev = letters.get(row.recipient_id);
+      if (!prev || Date.parse(row.created_at) > Date.parse(prev.created_at)) letters.set(row.recipient_id, row);
+    }
+  }
+  return { recipients, operator, letters };
+}
+
+/** Письмо ИИ не ушло (ящик, SMTP) или зависло: разговор продолжать бессмысленно. */
+function letterProblem(letter: AiLetterRow | undefined, now: number): string | null {
+  if (!letter) return null;
+  if (letter.status === 'failed' && !letter.error?.startsWith(AI_LETTER_CANCELLED)) return `письмо ИИ не ушло: ${letter.error ?? 'ошибка отправки'}`;
+  if (letter.status === 'sending' && now - Date.parse(letter.updated_at) > LETTER_STUCK_SENDING_MS) return 'письмо ИИ зависло в отправке';
+  if (letter.status === 'queued' && now - Date.parse(letter.created_at) > LETTER_STUCK_QUEUED_MS) return 'письмо ИИ давно ждёт отправки';
+  return null;
+}
+
 export async function runSenderAiQualifier(db: SupabaseClient, log: Log): Promise<AiPassResult> {
   const result: AiPassResult = { started: 0, letters: 0, handedOff: 0, closed: 0 };
   const { folders, campaignFolder } = await loadAiFolders(db);
@@ -408,17 +456,41 @@ export async function runSenderAiQualifier(db: SupabaseClient, log: Log): Promis
   const active = (data ?? []) as AiConversationRow[];
   if (!active.length) return result;
 
-  const newest = await newestReplies(db, active.map((c) => c.recipient_id));
-  const handoff = await loadHandoffSettings(db);
+  const ids = active.map((c) => c.recipient_id);
+  const [newest, context, handoff] = await Promise.all([
+    newestReplies(db, ids), loadActiveContext(db, ids), loadHandoffSettings(db),
+  ]);
   const now = Date.now();
   for (const conv of active) {
-    // Пауза после сбоя: следующий ход не раньше назначенного времени.
-    if (conv.attempts > 0 && conv.next_action_at && Date.parse(conv.next_action_at) > now) continue;
-    const folder = folders.get(campaignFolder.get(conv.campaign_id) ?? '');
-    if (!folder) continue;
-    const ccEmails = handoff.find((s) => s.scope === conv.folder_key)?.cc_emails ?? [];
     try {
-      await stepConversation(db, conv, { folder, ccEmails, newest: newest.get(conv.recipient_id) ?? null, result });
+      const folder = folders.get(campaignFolder.get(conv.campaign_id) ?? '');
+      const recipient = context.recipients.get(conv.recipient_id);
+      if (!folder?.ai_enabled) {
+        // ИИ выключили посреди разговора — лид уходит менеджерам как раньше.
+        await finish(db, conv, 'failed', 'ИИ выключен в настройках папки');
+        await releaseToManagers(db, conv);
+        continue;
+      }
+      const closed = !recipient || CLOSED_RECIPIENT.includes(recipient.status);
+      const manualNotLead = recipient?.lead_verdict_source === 'manual' && recipient.lead_verdict === 'not_lead';
+      if (!recipient || closed || recipient.lead_verdict_source === 'manual' || context.operator.has(conv.recipient_id)) {
+        await finish(db, conv, 'stopped', 'переписка остановлена, отмечена вручную или ответил оператор');
+        // Человек взял лида сам (ответил или поставил «лид») — лид должен дойти
+        // до чата и AMO, как раньше. Отписку и «не лид» менеджерам не отдаём.
+        if (!closed && !manualNotLead) await releaseToManagers(db, conv);
+        continue;
+      }
+      const problem = letterProblem(context.letters.get(conv.recipient_id), now);
+      if (problem) {
+        await finish(db, conv, 'failed', problem);
+        await releaseToManagers(db, conv);
+        log('warn', `ИИ-квалификатор: ${conv.recipient_id} передан менеджерам — ${problem}`);
+        continue;
+      }
+      // Пауза после сбоя: следующий ход не раньше назначенного времени.
+      if (conv.attempts > 0 && conv.next_action_at && Date.parse(conv.next_action_at) > now) continue;
+      const ccEmails = handoff.find((s) => s.scope === conv.folder_key)?.cc_emails ?? [];
+      await stepConversation(db, conv, { folder, recipient, ccEmails, newest: newest.get(conv.recipient_id) ?? null, result });
     } catch (err) {
       await recordFailure(db, conv, err, log);
     }
