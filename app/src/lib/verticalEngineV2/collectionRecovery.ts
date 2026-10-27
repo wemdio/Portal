@@ -25,6 +25,7 @@ import { isVeAudienceScopeEnabled } from './audienceScope';
 import { veAutomaticAudienceReviewRows } from './audienceReviewHold';
 import { needsLegacyFintechAudienceRefresh, needsLegacyRetailAudienceRefresh, readVeCollectionAudienceSnapshot, veAudienceNicheProfile, veSourceDiscoveryIsExistingOnly, type VeSourceAudienceHypothesis } from './sourceAudience';
 import { isVeTwoGisTask, veTwoGisTwinKeys, withoutVeTwoGisRows } from './twoGisQuarantine';
+import { veTwoGisOut } from './twoGisTwin';
 
 export interface VeCollectionContinuation {
   available: boolean;
@@ -130,7 +131,8 @@ export function getVeCollectionContinuation(base: Record<string, unknown>, curre
     || !Number.isSafeInteger(target.round) || Number(target.round) < 1 || checkpoint?.completed_round !== target.round) {
     return unavailable('invalid_checkpoint', 'Сохранённый этап не готов к продолжению. Требуется проверка состояния базы.');
   }
-  // Близнеца 2ГИС эта версия не читает: он не продолжение, не удержание и не задача плана.
+  // Близнец 2ГИС — не удержание, не правка источников и не задача плана; продолжение он даёт, только
+  // пока жив (veTwoGisOut — тот же предикат, что у тика; настройки здесь не читаются) — ниже.
   const tasks = records(info.tasks).filter((task) => !isVeTwoGisTask(task));
   // An operator repair is a one-off source correction, never a grant of more
   // work when someone later presses the ordinary Continue button.
@@ -244,7 +246,8 @@ export function getVeCollectionContinuation(base: Record<string, unknown>, curre
   };
   // Старая задача карт (живой парсер до 16.09) тоже продолжаема: следующий
   // раунд читает её запросы из готового каталога.
-  if (tasks.some((task) => !taskHeld(task) && (task.status === 'pending' || isVeRenewableSourceTask(task)))) {
+  if (tasks.some((task) => !taskHeld(task) && (task.status === 'pending' || isVeRenewableSourceTask(task)))
+    || records(info.tasks).some((task) => isVeTwoGisTask(task) && !taskHeld(task) && !veTwoGisOut(info, task))) {
     return available('sources_available', 'Сбор продолжится с сохранённой позиции источников.', 'resume_collection');
   }
   // План выбран до дна, но база ещё не расширяла срез сама (вторая очередь

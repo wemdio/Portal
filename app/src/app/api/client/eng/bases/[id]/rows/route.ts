@@ -26,7 +26,7 @@ import {
 } from '@/lib/hypothesisEngine/launchHandoff';
 import { projectMarket } from '@/lib/hypothesisEngine/market';
 import { selectHeEngEmailRows } from '@/lib/hypothesisEngine/engEmailPolicy';
-import { HE_ENG_UNVERIFIED_SITE_EMAIL } from '@/lib/hypothesisEngine/engCollectionTarget';
+import { heEngHeldSiteEmailRow } from '@/lib/hypothesisEngine/engCollectionTarget';
 import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -113,7 +113,7 @@ function countReadyToSend(input: {
     checked += 1;
     if (isAutoBase && row._low_relevance === true) {
       flagged += 1;
-    } else if (verdict === 'rejected' && row._email_unverified === HE_ENG_UNVERIFIED_SITE_EMAIL) {
+    } else if (verdict === 'rejected' && heEngHeldSiteEmailRow(row)) {
       unverified += 1;
     } else if (verdict === 'rejected') {
       failed += 1;

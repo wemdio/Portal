@@ -2269,11 +2269,32 @@ function isPhoneRequestToDiscussInquiry(authoredReply: string): boolean {
  * request must stay with semantic assessment. Missing history is NOT an opener. */
 function isGenericKpIntroductionRequest(authoredReply: string): boolean {
   const request = /^(?:пожалуйста[,\s]+)?(?:пришлите|отправьте|направьте|скиньте|(?:можете|можно)\s+(?:прислать|отправить|направить))\s+(?:пожалуйста[,\s]+)?(?:(?:ваше|сво[её])\s+)?(?:кп|коммерческое(?:\s+предложение)?)(?:\s+(?:сюда|мне|нам))?(?:\s+на\s+(?:эту\s+)?почту)?(?:[,\s]+пожалуйста)?[.!?]*$/iu;
-  const statement = normalizeDiscussionReadiness(authoredReply);
+  // A quote boundary can leave its divider at the end of the authored block.
+  // Remove only a final divider line, never text or an internal paragraph.
+  const withoutDivider = authoredReply.replace(/\n[^\S\n]*[-–—_=]{3,}\s*$/u, '').trim();
+  const statement = normalizeDiscussionReadiness(withoutDivider);
   if (request.test(statement)) return true;
+  // A generic KP request followed ONLY by a colleague's topic + address is
+  // still an introduction. Do not strip arbitrary email-bearing sentences:
+  // a task, price, appointment or unknown continuation must remain with AI.
+  const topic = String.raw`(?:отзывами|поиском|репутацией|маркетингом|рекламой|пиаром|pr|продажами|закупками|снабжением|логистикой|подбором\s+персонала)`;
+  const colleagueRouting = new RegExp(
+    String.raw`^${topic}(?:\s+и\s+${topic}){0,2}\s+занимается\s+(?:наш[а]?\s+)?коллега\s+([\p{L}-]+(?:\s+[\p{L}-]+){0,2})\s+<?(?:mailto:)?${CONTACT_EMAIL_SOURCE}>?[.!]*$`,
+    'iu',
+  );
+  for (const boundary of withoutDivider.matchAll(/[.!?;]\s+|\n+/gu)) {
+    // A generic introduction is short; avoid rescanning an arbitrary long
+    // body for later requests or treating preceding prose as framing.
+    if (boundary.index > 500) break;
+    const prefix = withoutDivider.slice(0, boundary.index);
+    if (!request.test(normalizeDiscussionReadiness(prefix))) continue;
+    const tail = withoutDivider.slice(boundary.index + boundary[0].length).replace(/\s+/gu, ' ').trim();
+    const routed = colleagueRouting.exec(tail);
+    if (routed && isLikelyContactName(routed[1])) return true;
+  }
   // A preceding first-contact introduction does not make a generic KP request
   // specific. Consume only an independently recognized readiness/clarification.
-  const lines = authoredReply.trim().split(/\n+/);
+  const lines = withoutDivider.split(/\n+/);
   return lines.length > 1 && request.test(normalizeAuthoredStatement(lines.at(-1) ?? '')) &&
     (isGenericDiscussionReadiness(lines.slice(0, -1).join('\n')) ||
       isPhoneRequestToDiscussInquiry(lines.slice(0, -1).join('\n')));

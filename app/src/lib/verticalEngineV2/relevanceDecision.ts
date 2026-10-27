@@ -37,6 +37,10 @@ export const veRelevanceDecisionSchema = z.object({
   /** Present only when the triage itself decided. `final`: a reject that is not re-reviewed. */
   triage: z.object({ outcome: z.enum(['admit', 'reject']), activity: z.number().min(0).max(1),
     final: z.literal(true).optional() }).optional().catch(undefined),
+  /** 2ГИС: свой сайт не подтвердил компанию (или сайт ИП без разрешения, или ИНН владельца в исключениях) — окончательный отказ, повтор его не перепроверяет. */
+  source_site_final: z.literal(true).optional().catch(undefined),
+  /** 2ГИС: свой сайт хотя бы раз подтвердил компанию — неудачное перечтение после смены контекста не окончательно. */
+  source_site_verified: z.literal(true).optional().catch(undefined),
 });
 
 export type VeRelevanceDecision = z.infer<typeof veRelevanceDecisionSchema>;

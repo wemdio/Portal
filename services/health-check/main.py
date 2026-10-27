@@ -3567,15 +3567,63 @@ async def check_ve2_sender() -> list[str]:
 
 # ── 2ГИС → VE2 (план docs/reports/2026-10-26-2gis-ve2-plan.md, шаг «Мон») ─────
 # Свой пользователь VE2 в базе 2ГИС (twogis_ve2, Ш3) и модуль 2ГИС воркера (R3).
-# 1) строки pg_hba для twogis_ve2: файл живёт в контейнере main-postgres и
-#    пропадает при его пересоздании — тогда роль войдёт и в основную базу;
+# 1) строки pg_hba для twogis_ve2 и, пока у сборщика Ш5 включён вход, для
+#    twogis_ve2_builder: файл живёт в контейнере main-postgres и пропадает при
+#    его пересоздании — тогда роль войдёт и в основную базу;
 # 2) twogis_ve2 занят (не idle) всеми своими соединениями 3 цикла подряд,
 #    инстанс у предела;
 # 3) ve_twogis_source_status (R2): пауза или серия ошибок, пока mode ≠ off.
+# 4) ve_bases.public_info.two_gis_sleep (R3 части 4–5): collecting-база с активной задачей
+#    base_collect спит дольше HEALTH_TWOGIS_VE2_SLEEP_MIN; причина — на момент засыпания;
+#    ключ — база + since, напоминание раз в сутки от since. От роли twogis_ve2 не зависит.
 # Ключи — по эпизоду; когда проблемы нет, ключи эпизода удаляются.
 TWOGIS_VE2_REPEAT_MINUTES = _env_int("HEALTH_TWOGIS_VE2_REPEAT_MIN", 1440, 60)
 _TWOGIS_VE2_FULL_POOL_CYCLES: list[int] = [0]
 _TWOGIS_VE2_FULL_POOL_SINCE: list[datetime | None] = [None]
+
+# П.4. Читаем только срез public_info (его считает триггер при записи collect_info): даже
+# collect_info->'two_gis_sleep' разворачивает на сервере весь документ. Без среза (миграция
+# части 5) ключа нет — монитор молчит. Активная задача — условия частичного индекса
+# ve_jobs_one_active_base_collect_per_base: пауза подготовки снимает задачу и оставляет метку,
+# у failed-базы задачи нет. Данных карточек 2ГИС в запросе нет.
+TWOGIS_VE2_SLEEP_MINUTES = _env_int("HEALTH_TWOGIS_VE2_SLEEP_MIN", 1440, 60)
+_TWOGIS_VE2_SLEEP_GROUP_MIN = 3
+_TWOGIS_VE2_SLEEP_MAX_ITEMS = 6
+# Блоки сна идут в одно сообщение с пунктами 1–3; send_telegram не режет 4096 знаков,
+# а отклонённое сообщение потеряло бы все ключи, взятые в этом цикле.
+_TWOGIS_VE2_SLEEP_MAX_CHARS = 2400
+_TWOGIS_VE2_SLEEP_REASONS = {
+    "settings_unavailable": "настройки 2ГИС не читаются",
+    "closed": "выдача закрыта (client_use = off)",
+    "reads_disabled": "чтение выключено (reads_enabled = false)",
+    "quiet": "тихое окно",
+    "outreachos": "идёт OutreachOS или его статус не читается",
+    "import": "идёт импорт 2ГИС",
+    "busy": "пул 2ГИС занят",
+    "paused": "модуль 2ГИС на паузе",
+    "read_failed": "сбои чтения 2ГИС",
+    "error": "ошибки страницы 2ГИС",
+    "journal": "сбой журнала ve_twogis_rows",
+    "model": "сбой подбора рубрик",
+}
+_TWOGIS_VE2_SLEEP_SQL = (
+    "SELECT b.id::text AS id, p.name AS project_name, h.title AS hypothesis, j.id::text AS job_id, "
+    "       b.public_info->'two_gis_sleep'->>'since' AS since, b.public_info->'two_gis_sleep'->>'reason' AS reason "
+    "FROM public.ve_bases b "
+    "JOIN LATERAL (SELECT j.id FROM public.ve_jobs j "
+    "              WHERE j.stage = 'base_collect' AND j.status IN ('pending', 'running') "
+    "                AND jsonb_typeof(j.payload->'base_id') = 'string' "
+    "                AND nullif(btrim(j.payload->>'base_id'), '') IS NOT NULL "
+    "                AND j.payload->>'base_id' = b.id::text LIMIT 1) j ON true "
+    "LEFT JOIN public.ve_projects p ON p.id = b.project_id "
+    "LEFT JOIN public.ve_hypotheses h ON h.id = b.hypothesis_id "
+    "WHERE b.status = 'collecting' AND jsonb_typeof(b.public_info->'two_gis_sleep') = 'object'"
+)
+# Срез знает сон, только если функция среза его выдаёт (миграция части 5).
+_TWOGIS_VE2_SLEEP_SLICE_SQL = (
+    "SELECT position('two_gis_sleep' in pg_get_functiondef("
+    "'public.ve_base_public_info(public.ve_bases)'::regprocedure)) > 0"
+)
 
 
 async def _twogis_ve2_recovered(conn, prefix: str) -> None:
@@ -3585,30 +3633,53 @@ async def _twogis_ve2_recovered(conn, prefix: str) -> None:
 async def _check_twogis_ve2(conn) -> list[str]:
     problems: list[str] = []
     role = await conn.fetchrow("SELECT oid, rolconnlimit FROM pg_roles WHERE rolname = 'twogis_ve2'")
-    if role is None:
+    # Сборщик Ш5 создаётся без входа; вход включают только на окно сборки.
+    builder_login = await conn.fetchval("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'twogis_ve2_builder'")
+    if role is None and not builder_login:
+        await _twogis_ve2_recovered(conn, "builder-hba")
         return []  # Ш3 ещё не сделан или откачен: проверять нечего.
 
-    # 1. pg_hba: запрет для twogis_ve2 должен стоять раньше первой общей строки host.
+    # 1. pg_hba: запрет для роли должен стоять раньше первой общей строки host.
     rules = await conn.fetch(
         "SELECT line_number, type, database, user_name, auth_method, error FROM pg_hba_file_rules ORDER BY line_number"
     )
     first_general = next((r["line_number"] for r in rules if r["type"] == "host"
                           and "all" in (r["user_name"] or []) and r["auth_method"] != "reject"), None)
-    reject = next((r["line_number"] for r in rules if r["type"] == "host" and r["auth_method"] == "reject"
-                   and "twogis_ve2" in (r["user_name"] or []) and "all" in (r["database"] or [])), None)
-    hba_ok = reject is not None and (first_general is None or reject < first_general) and not any(r["error"] for r in rules)
-    if hba_ok:
-        await _twogis_ve2_recovered(conn, "hba")
+    rules_broken = any(r["error"] for r in rules)
+
+    def hba_ok(user: str) -> bool:
+        reject = next((r["line_number"] for r in rules if r["type"] == "host" and r["auth_method"] == "reject"
+                       and user in (r["user_name"] or []) and "all" in (r["database"] or [])), None)
+        return reject is not None and (first_general is None or reject < first_general) and not rules_broken
+
+    if role is not None:
+        if hba_ok("twogis_ve2"):
+            await _twogis_ve2_recovered(conn, "hba")
+        else:
+            loaded = await conn.fetchval("SELECT pg_conf_load_time()")
+            key = f"twogis-ve2:hba:{loaded.isoformat()}:{_repeat_bucket(loaded, TWOGIS_VE2_REPEAT_MINUTES)}"
+            if await _claim_job_alert(conn, key):
+                problems.append(
+                    "🔓 <b>pg_hba main-postgres</b>: нет строк для <code>twogis_ve2</code> выше общих правил "
+                    "(пересоздан контейнер?). Пользователь VE2 сейчас может войти и в основную базу.\n"
+                    "Вернуть две строки из <code>app/scripts/2gis-dataset/README.md</code> («VE2 user»), "
+                    "затем <code>SELECT pg_reload_conf();</code>"
+                )
+    if not builder_login or hba_ok("twogis_ve2_builder"):
+        await _twogis_ve2_recovered(conn, "builder-hba")
     else:
         loaded = await conn.fetchval("SELECT pg_conf_load_time()")
-        key = f"twogis-ve2:hba:{loaded.isoformat()}:{_repeat_bucket(loaded, TWOGIS_VE2_REPEAT_MINUTES)}"
+        key = f"twogis-ve2:builder-hba:{loaded.isoformat()}:{_repeat_bucket(loaded, TWOGIS_VE2_REPEAT_MINUTES)}"
         if await _claim_job_alert(conn, key):
             problems.append(
-                "🔓 <b>pg_hba main-postgres</b>: нет строк для <code>twogis_ve2</code> выше общих правил "
-                "(пересоздан контейнер?). Пользователь VE2 сейчас может войти и в основную базу.\n"
-                "Вернуть две строки из <code>app/scripts/2gis-dataset/README.md</code> («VE2 user»), "
-                "затем <code>SELECT pg_reload_conf();</code>"
+                "🔓 <b>pg_hba main-postgres</b>: нет строк для <code>twogis_ve2_builder</code> выше общих правил, "
+                "а вход сборщику включён. Сборщик Ш5 сейчас может войти и в основную базу.\n"
+                "Вернуть две строки из <code>app/scripts/2gis-dataset/README.md</code> («Builder login»), "
+                "затем <code>SELECT pg_reload_conf();</code> — или, если окно Ш5 закрыто, "
+                "<code>ALTER ROLE twogis_ve2_builder NOLOGIN;</code>"
             )
+    if role is None:
+        return problems
 
     # 2. Соединения: twogis_ve2 занят всеми своими соединениями 3 цикла подряд; инстанс у предела.
     # Простаивающие (idle) не считаем: пул может держать их между тиками, а зависнуть
@@ -3653,8 +3724,12 @@ async def _check_twogis_ve2(conn) -> list[str]:
     paused = fresh and status["paused_until"] is not None and status["paused_until"] > now
     failing = fresh and status["error_since"] is not None and (status["consecutive_errors"] >= 3
                                                              or status["last_error_kind"] == "role_limit")
-    if status is None or status["mode"] == "off" or not (paused or failing):
+    if status is None or status["mode"] == "off" or (fresh and not (paused or failing)):
         await _twogis_ve2_recovered(conn, "status")
+        return problems
+    if not (paused or failing):
+        # Строка устарела (чтений не было 15 мин): состояние неизвестно, а не исправно —
+        # ключ эпизода остаётся, и напоминание идёт раз в сутки, а не после каждой паузы.
         return problems
     anchor = status["error_since"] or status["paused_until"]
     kind = status["last_error_kind"] or "pause"
@@ -3663,10 +3738,144 @@ async def _check_twogis_ve2(conn) -> list[str]:
         what = {"role_limit": "упёрся в лимит соединений роли", "connect": "не подключается", "timeout": "тайм-ауты",
                 "snapshot": "снимок 2ГИС сменился", "other": "ошибки чтения"}.get(kind, "пауза чтения")
         until = f", пауза до {_msk(status['paused_until'])}" if paused else ""
+        if kind == "snapshot":
+            # Смена снимка паузы не ставит: близнец на первом же чтении закрывается (3b: retire).
+            tail = ("Близнецы баз закрываются на первом чтении, пока <code>ve2.card_features</code> не на текущем "
+                    "снимке. Нужна пересборка Ш5 (<code>004_ve2_features.sql</code>: prepare "
+                    "<code>-v new_build=1</code> → сборщик → index → swap) и новые snapshot_id/features_version "
+                    "в <code>ve_twogis_source_settings</code>; <code>reads_enabled = false</code> лишь заставит "
+                    "новых близнецов ждать, а не закрываться.")
+        else:
+            tail = ("Базы ждут, не останавливаются; выключить чтение: "
+                    "<code>update ve_twogis_source_settings set reads_enabled = false where market = 'ru'</code>")
         problems.append(f"🗺 <b>2ГИС VE2</b>: {what} — {status['consecutive_errors']} подряд с {_msk(anchor)}{until}. "
-                        "Базы ждут, не останавливаются; выключить чтение: "
-                        "<code>update ve_twogis_source_settings set reads_enabled = false where market = 'ru'</code>")
+                        + tail)
     return problems
+
+
+def _twogis_sleep_since(raw) -> datetime | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        ts = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _twogis_sleep_log(job_ids: list[str]) -> str:
+    """Строки лога задач: воркер пишет их с префиксом «[base_collect <8 знаков id задачи>]».
+    Окно — по времени, не по строкам: спящая база пишет раз в 15–60 мин, а воркер общий."""
+    shown = [_ve2_text(job[:8], 8) for job in job_ids[:_TWOGIS_VE2_SLEEP_MAX_ITEMS]]
+    pattern = f"base_collect {shown[0]}" if len(shown) == 1 else f"base_collect ({'|'.join(shown)})"
+    rest = f" (и ещё {len(job_ids) - len(shown)})" if len(job_ids) > len(shown) else ""
+    return (f"Лог: <code>docker logs portal-worker-vertical-engine-v2 --since 2h 2&gt;&amp;1 | grep -E '{pattern}'</code>"
+            f"{rest}")
+
+
+def _twogis_sleep_verb(count: int) -> str:
+    return "спит" if count % 10 == 1 and count % 100 != 11 else "спят"
+
+
+def _format_twogis_sleep(items: list, now: datetime) -> list[str]:
+    hours_min = TWOGIS_VE2_SLEEP_MINUTES // 60
+    groups: dict[str, list] = {}
+    for row, since in sorted(items, key=lambda item: (item[1], str(item[0]["id"]))):
+        groups.setdefault(str(row["reason"] or ""), []).append((row, since))
+    blocks: list[tuple[str, int]] = []  # текст блока и число баз в нём
+    for reason, members in groups.items():
+        label = _ve2_text(_TWOGIS_VE2_SLEEP_REASONS.get(reason, "причина не распознана"), 80)
+        code = f" (<code>{_ve2_text(reason or '—', 40)}</code>)"
+        jobs = [str(row["job_id"] or "") for row, _ in members]
+        if len(members) >= _TWOGIS_VE2_SLEEP_GROUP_MIN:
+            projects = Counter(str(row["project_name"] or "без проекта") for row, _ in members)
+            shown = projects.most_common(_TWOGIS_VE2_SLEEP_MAX_ITEMS)
+            listed = ", ".join(_ve2_text(name, 80) + (f" ({count})" if count > 1 else "") for name, count in shown)
+            if len(projects) > len(shown):
+                listed += f" и ещё {len(projects) - len(shown)}"
+            count = len(members)
+            blocks.append((f"🛌 <b>2ГИС VE2</b>: {count} {_bases_word(count)} с близнецом {_twogis_sleep_verb(count)} "
+                           f"дольше {hours_min} ч (самая ранняя — с {_msk(members[0][1])}); причина при засыпании — "
+                           f"{label}{code}.\nПроекты: {listed}\n{_twogis_sleep_log(jobs)}", count))
+            continue
+        for (row, since), job in zip(members, jobs):
+            hours = int((now - since).total_seconds() // 3600)
+            detail = f" · {_ve2_text(row['hypothesis'], 80)}" if row["hypothesis"] else ""
+            blocks.append((f"🛌 <b>2ГИС VE2</b>: база с близнецом спит {hours} ч (дольше {hours_min} ч) — с {_msk(since)}, "
+                           f"причина при засыпании — {label}{code}.\n"
+                           f"Проект: <b>{_ve2_text(row['project_name'] or 'без проекта', 80)}</b>{detail} · "
+                           f"<code>#{_ve2_text(str(row['id'])[:8], 8)}</code>\n{_twogis_sleep_log([job])}", 1))
+    kept: list[str] = []
+    for block, _ in blocks:
+        used = sum(len(b) + 2 for b in kept)
+        if len(kept) >= _TWOGIS_VE2_SLEEP_MAX_ITEMS or used + len(block) > _TWOGIS_VE2_SLEEP_MAX_CHARS:
+            break
+        kept.append(block)
+    hidden = sum(count for _, count in blocks[len(kept):])  # ключи этих баз уже взяты: считаем базы, а не блоки
+    if hidden:
+        kept.append(f"…и ещё {hidden} {_bases_word(hidden)} — в карточках проектов.")
+    if kept:
+        kept.append("Закрытая выдача и сбои чтения закрывают близнеца сами через сутки; остальные причины — нет, "
+                    "нужен оператор. Закрыть близнецов всех баз: <code>update ve_twogis_source_settings set "
+                    "mode = 'off' where market = 'ru'</code> (для этих баз необратимо).")
+    return kept
+
+
+async def _twogis_ve2_sleep_slice(conn) -> list[str]:
+    """D18: при mode = on сон баз виден монитору только через срез public_info (миграция части 5)."""
+    try:
+        mode = await conn.fetchval("SELECT mode FROM public.ve_twogis_source_settings WHERE market = 'ru'")
+    except asyncpg.exceptions.UndefinedTableError:
+        return []
+    if mode != "on" or await conn.fetchval(_TWOGIS_VE2_SLEEP_SLICE_SQL):
+        await _twogis_ve2_recovered(conn, "sleep-slice")
+        return []
+    if not await _claim_job_alert(conn, f"twogis-ve2:sleep-slice:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"):
+        return []
+    return ["🛌 <b>2ГИС VE2</b>: сон баз 2ГИС не виден — в <code>ve_base_public_info</code> нет "
+            "<code>two_gis_sleep</code> (миграция части 5 не применена), а <code>mode = on</code>. "
+            "Пока её нет, алерт «база с близнецом спит дольше суток» молчит. Миграции ставит деплой портала. "
+            "Базы, уснувшие до него, срез увидит только со следующей записи collect_info — после деплоя "
+            "пересчитать им срез: <code>update ve_bases set collect_info = collect_info where status = 'collecting' "
+            "and public_info-&gt;'two_gis_sleep' is null and collect_info ? 'two_gis_sleep'</code>"]
+
+
+async def _check_twogis_ve2_sleep(conn) -> list[str]:
+    """Сон баз 2ГИС (п.4). Не бросает: сбой — пропуск цикла; уже взятые ключи уходят в сообщение."""
+    blocks: list[str] = []
+    try:
+        blocks = await _twogis_ve2_sleep_slice(conn)
+    except Exception as e:
+        print(f"[health] twogis-ve2 sleep slice check skipped: {_format_exception_message(e)}")
+    fresh: list = []
+    now = datetime.now(timezone.utc)
+    try:
+        rows = await conn.fetch(_TWOGIS_VE2_SLEEP_SQL, timeout=10)
+        long_sleep: list = []
+        for row in rows:
+            since = _twogis_sleep_since(row["since"])
+            if since is None:
+                print(f"[health] twogis-ve2 sleep marker unreadable: #{str(row['id'])[:8]}")
+            elif now - since >= timedelta(minutes=TWOGIS_VE2_SLEEP_MINUTES):
+                long_sleep.append((row, since))
+        episodes = [f"twogis-ve2:sleep:{row['id']}:{since.isoformat()}" for row, since in long_sleep]
+        # Чистим по возрасту, а не по отсутствию: во время полного тика метка на секунды пропадает и
+        # возвращается с тем же since, и удаление «нет в этом цикле» повторяло бы тот же алерт. Ключ старше
+        # окна напоминания + 60 мин взять заново нельзя (его окно прошло); новый эпизод — новый since и ключ.
+        await conn.execute(f"DELETE FROM {JOB_ALERTS_TABLE} WHERE alert_key LIKE 'twogis-ve2:sleep:%' "
+                           "AND NOT (alert_key LIKE ANY($1::text[])) "
+                           "AND alerted_at < now() - make_interval(mins => $2)",
+                           [f"{key}:%" for key in episodes], TWOGIS_VE2_REPEAT_MINUTES + 60)
+        for (row, since), episode in zip(long_sleep, episodes):
+            if await _claim_job_alert(conn, f"{episode}:{_repeat_bucket(since, TWOGIS_VE2_REPEAT_MINUTES)}"):
+                fresh.append((row, since))
+    except Exception as e:
+        print(f"[health] twogis-ve2 sleep check skipped: {_format_exception_message(e)}")
+    try:
+        return blocks + _format_twogis_sleep(fresh, now)
+    except Exception as e:
+        print(f"[health] twogis-ve2 sleep message failed: {_format_exception_message(e)}")
+        return blocks
 
 
 async def check_twogis_ve2() -> list[str]:
@@ -3680,7 +3889,13 @@ async def check_twogis_ve2() -> list[str]:
             print(f"[health] twogis-ve2 connect error: {_normalize_network_error(e)}")
             return []
         try:
-            return await _check_twogis_ve2(conn)
+            # Сон баз — не внутри _check_twogis_ve2: та выходит рано, когда роли нет.
+            problems: list[str] = []
+            try:
+                problems = await _check_twogis_ve2(conn)
+            except Exception as e:
+                print(f"[health] twogis-ve2 monitor error: {_format_exception_message(e, 300)}")
+            return problems + await _check_twogis_ve2_sleep(conn)
         finally:
             try:
                 await conn.close()

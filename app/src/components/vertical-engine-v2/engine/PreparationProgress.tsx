@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import type { VeOutreachPreparation } from '@/lib/verticalEngineV2/outreachSetup';
 import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
 import { veRequestyBillingWaitState } from '@/lib/verticalEngineV2/requestyBillingState';
+import { veTwoGisSleepReasonLabel } from '@/lib/verticalEngineV2/twoGisMarker';
 import type { VeBaseSummary, VeCollectInfo, VeJobSummary, VePreparationAction } from './api';
 import { collectCount, describeCompletedCollection, describeReadyComposition, getCollectionProgress, isPartialPreview } from './collectionProgress';
 import { HE, StatusDot } from './design';
@@ -287,6 +288,19 @@ function getPreparationStage(props: PreparationProgressProps): PreparationPresen
     description: 'Другая сборка по этой же гипотезе ещё работает. Эта база продолжится автоматически после неё.',
     currentStep: 0, tone: 'muted',
   };
+  // Метку сна оставляют и упавшие, и отменённые базы: подпись — только у идущего сбора.
+  if (base?.status === 'collecting' && info?.two_gis_sleep) {
+    const sleep = info.two_gis_sleep;
+    const since = typeof sleep.since === 'string' ? Date.parse(sleep.since) : Number.NaN;
+    const from = Number.isFinite(since) ? ` с ${new Date(since).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow',
+      day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} МСК` : '';
+    const label = veTwoGisSleepReasonLabel(sleep.reason);
+    return {
+      title: 'Ждём справочник организаций',
+      description: `${label.charAt(0).toUpperCase()}${label.slice(1)}${from}. Сбор продолжится сам.`,
+      currentStep: 0, tone: 'muted',
+    };
+  }
   if (job?.status === 'pending' && getVeCollectionFailure(job.error).kind === 'provider') return {
     title: 'Проверка продолжится автоматически после сбоя поиска',
     description: 'Сервис поиска Serper временно не ответил. Повторная попытка поставлена в очередь с паузой. Система продолжит с сохранённого этапа; повторно нажимать кнопку не нужно.',

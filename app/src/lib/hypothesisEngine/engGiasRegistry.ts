@@ -4,7 +4,7 @@ import { heEngCharityNameKey, readHeEngCorporateCharities, type HeEngCorporateCh
 import type { HeEngRegistryCandidate, HeEngRegistryPage, HeEngRegistryTask } from './engPublicRegistryTypes';
 import { discardHeEngRegistryBulkFile, heEngRegistryBackgroundList, heEngRegistryCacheFile, heEngRegistryCsvRows, ownHeEngRegistryText,
   readHeEngRegistryBulkFile, type HeEngRegistryBuildOptions } from './engRegistryBulkFile';
-import { heEngListedWebsite, heEngWebsiteNamesOrganisation } from './engSecAdviserRegistry';
+import { heEngListedWebsite, heEngSiteHost, heEngWebsiteNamesOrganisation } from './engSecAdviserRegistry';
 
 /**
  * Schools and colleges in England from the Department for Education's «Get
@@ -86,9 +86,6 @@ function schoolCategory(group: string, type: string): string {
 
 // Words every school's name has: a domain carrying only these («myschoolsite») does not name one school.
 const SCHOOL_WORDS = /\b(?:schools?|primary|secondary|junior|infants?|nursery|academy|college|church|england|cofe|catholic|high|community|federation|trust|saint|st)\b/gi;
-function siteHost(site: string): string {
-  try { return new URL(site).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; }
-}
 
 async function parse(schoolsFile: string, groupsFile: string, charities: HeEngCorporateCharities | null): Promise<Map<string, School[]>> {
   const lists = new Map(HE_ENG_GIAS_CATEGORIES.map(category => [category, [] as School[]]));
@@ -107,7 +104,7 @@ async function parse(schoolsFile: string, groupsFile: string, charities: HeEngCo
     const postcode = cell('Postcode', 12);
     if (!['Open', 'Open, but proposed to close'].includes(status) || !category || !/^\d{5,7}$/.test(id) || !name || !street || !town || !postcode) continue;
     const website = heEngListedWebsite(cell('SchoolWebsite', 2048), { home: true });
-    const host = siteHost(website);
+    const host = heEngSiteHost(website);
     if (host) {
       const shared = hosts.get(host); const code = postcode.toUpperCase().replace(/\s+/g, '');
       if (!shared) hosts.set(host, { schools: 1, postcode: code });
@@ -136,7 +133,7 @@ async function parse(schoolsFile: string, groupsFile: string, charities: HeEngCo
   // whose own name it carries; given more widely (a trust's or federation's site, a platform's), it is dropped for all.
   const byHost = new Map<string, School[]>();
   for (const list of lists.values()) for (const school of list) {
-    const host = siteHost(school.website);
+    const host = heEngSiteHost(school.website);
     if ((hosts.get(host)?.schools ?? 0) > 1) byHost.set(host, [...(byHost.get(host) ?? []), school]);
   }
   for (const [host, group] of byHost) {

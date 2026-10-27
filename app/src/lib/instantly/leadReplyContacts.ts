@@ -238,7 +238,18 @@ function phoneInLine(line: string, signature: boolean): string | null {
     const greetingPhoneRow = candidates.length === 1 && russianFull &&
       /^(?:добрый\s+(?:день|вечер)|доброе\s+утро|здравствуйте)[,.!]?[ \t]*$/iu.test(before) &&
       /^[ \t]*[.!]?[ \t]*$/u.test(after);
-    if (!signature && !framed && !onlyPhoneRow && !greetingPhoneRow && residue && !isPersonName(residue) && !signatureNameInLine(contactName)) continue;
+    // Complete contact instructions can put the messenger after the number,
+    // or separate "напишите" from it with politeness/personal pronouns.
+    // Keep these anchored and single-number: "номер" alone also labels IDs.
+    const contactBefore = before.trim().replace(
+      /^(?:добрый\s+(?:день|вечер)|доброе\s+утро|здравствуйте)[,.!]\s*/iu, '',
+    );
+    const explicitPhoneReplyRow = candidates.length === 1 && russianFull && (
+      (/^жд[её]м(?:\s+от\s+вас)?\s+звонка,?\s+по\s+номеру:\s*$/iu.test(contactBefore) && /^[\s.!]*$/u.test(after)) ||
+      (/^на\s*$/iu.test(contactBefore) && /^\s*в\s+(?:тг|telegram|максе|max)[.!]?\s*$/iu.test(after)) ||
+      (/^напишите(?:,?\s*пожалуйста,?)?(?:\s+мне)?\s+в\s+(?:максе|мах|max|тг|телеграм(?:е)?|telegram)\s*$/iu.test(contactBefore) && /^[\s.!]*$/u.test(after))
+    );
+    if (!signature && !framed && !onlyPhoneRow && !greetingPhoneRow && !explicitPhoneReplyRow && residue && !isPersonName(residue) && !signatureNameInLine(contactName)) continue;
     phones.push(value);
   }
   return joinLeadPhones(phones);

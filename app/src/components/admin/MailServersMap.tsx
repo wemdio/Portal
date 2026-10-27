@@ -6,6 +6,7 @@ import {
   addressRows,
   attentionItems,
   freshness,
+  KIND_ORDER,
   providerOf,
   type AddressRow,
   type Freshness,
@@ -14,10 +15,14 @@ import {
   type RowState,
 } from '@/lib/mailServers/heartbeat';
 
-/** Цвет слота — чей адрес: клиента, наш или на паузе. */
+/**
+ * Цвет слота — чей адрес: клиента, наш, ещё не в Instantly или на паузе. Только цвета, у которых в тёмной теме
+ * портала есть правила (globals.css): у teal их нет — текст «наших неименных» сливался с фоном.
+ */
 const SLOT: Record<IpKind, string> = {
   client: 'bg-indigo-50 border-indigo-200 text-indigo-950',
-  ours: 'bg-teal-50 border-teal-200 text-teal-950',
+  ours: 'bg-emerald-50 border-emerald-200 text-emerald-950',
+  pending: 'bg-amber-50 border-amber-300 border-dashed text-amber-950',
   paused: 'bg-gray-50 border-gray-300 border-dashed text-gray-500',
   idle: 'bg-white border-gray-300 border-dashed text-gray-400',
 };
@@ -110,7 +115,7 @@ export function MailServersMap({ rows, now, initialSelected = null }: { rows: Ma
   // Провайдер → серверы (клиентские первыми) → слоты-адреса
   const map = useMemo(() => {
     const order = (row: MailServerRow) =>
-      Math.min(...addresses.filter((a) => a.serverId === row.server_id).map((a) => ({ client: 0, ours: 1, paused: 2, idle: 3 })[a.kind]), 3);
+      Math.min(...addresses.filter((a) => a.serverId === row.server_id).map((a) => KIND_ORDER[a.kind]), KIND_ORDER.idle);
     const groups = new Map<string, MailServerRow[]>();
     for (const row of [...rows].sort((a, b) => order(a) - order(b) || a.payload.server.label.localeCompare(b.payload.server.label))) {
       const key = providerOf(row);
@@ -189,7 +194,8 @@ export function MailServersMap({ rows, now, initialSelected = null }: { rows: Ma
       {rows.length > 0 && (
         <div className="mb-8 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-gray-500">
           <span className="inline-flex items-center gap-1.5"><span className="h-3 w-5 rounded border border-indigo-200 bg-indigo-50" /> клиент</span>
-          <span className="inline-flex items-center gap-1.5"><span className="h-3 w-5 rounded border border-teal-200 bg-teal-50" /> наши неименные</span>
+          <span className="inline-flex items-center gap-1.5"><span className="h-3 w-5 rounded border border-emerald-200 bg-emerald-50" /> наши неименные</span>
+          <span className="inline-flex items-center gap-1.5"><span className="h-3 w-5 rounded border border-dashed border-amber-300 bg-amber-50" /> ещё не в Instantly</span>
           <span className="inline-flex items-center gap-1.5"><span className="h-3 w-5 rounded border border-dashed border-gray-300 bg-gray-50" /> на паузе</span>
           <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-500" /> в порядке</span>
           <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-amber-400" /> есть проблема</span>

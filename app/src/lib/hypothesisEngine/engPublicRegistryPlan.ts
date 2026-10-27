@@ -4,12 +4,13 @@ import { engCountryIso2, normalizeEngCountry } from './engCountries';
 import { HE_ENG_CHARITY_COMMISSION_CATEGORIES } from './engCharityCommissionRegistry';
 import { HE_ENG_CQC_CATEGORIES } from './engCqcRegistry';
 import { HE_ENG_ESMA_MEMBER_STATES } from './engEsmaRegistry';
+import { HE_ENG_EU_TRANSPARENCY_CATEGORIES } from './engEuTransparencyRegistry';
 import { HE_ENG_GIAS_CATEGORIES } from './engGiasRegistry';
 import { HE_ENG_GLEIF_TERMS, HE_ENG_OSM_TAGS } from './engGlobalRegistryCatalog';
 import { HE_ENG_IRS_CATEGORIES } from './engIrsRegistry';
 import { HE_ENG_NACE_CLASSES, heEngNaceSources } from './engNaceRegistryCatalog';
 import { HE_ENG_NCES_CATEGORIES } from './engNcesRegistry';
-import { HE_ENG_SEC_SIC_SECTORS } from './engSecCompanyRegistry';
+import { HE_ENG_SEC_SIC_SECTORS, heEngSecSectorsOverlap } from './engSecCompanyRegistry';
 import { HE_ENG_WIKIDATA_SECTORS } from './engWikidataRegistry';
 import type { HeEngRegistryPlan, HeEngRegistryProvider, HeEngRegistryTask } from './engPublicRegistryTypes';
 
@@ -34,9 +35,12 @@ export const HE_ENG_REGISTRY_CATEGORIES: Readonly<Record<HeEngRegistryProvider, 
   esma: ['fund_managers'],
   // EBA register of PSD2 payment and e-money institutions in the EU/EEA (engEbaRegistry.ts).
   eba: ['payment_institutions'],
-  // National registers filing NACE classes (engNaceRegistryCatalog.ts): Finland,
-  // Czechia, Ireland and Estonia; a category is a NACE Rev. 2.1 class.
-  prh: HE_ENG_NACE_CLASSES, czso: HE_ENG_NACE_CLASSES, cro: HE_ENG_NACE_CLASSES, ariregister: HE_ENG_NACE_CLASSES,
+  // National registers filing NACE classes (engNaceRegistryCatalog.ts): Finland, Czechia, Ireland, Estonia, Sweden
+  // and Germany's energy market register; a category is a NACE Rev. 2.1 class.
+  prh: HE_ENG_NACE_CLASSES, czso: HE_ENG_NACE_CLASSES, cro: HE_ENG_NACE_CLASSES, ariregister: HE_ENG_NACE_CLASSES, scb: HE_ENG_NACE_CLASSES,
+  mastr: HE_ENG_NACE_CLASSES,
+  // The EU Transparency Register's organisations of any country by registration category (engEuTransparencyRegistry.ts).
+  eu_transparency: Object.keys(HE_ENG_EU_TRANSPARENCY_CATEGORIES),
   // Wikidata organisations of a sector in any country (engWikidataRegistry.ts).
   wikidata: Object.keys(HE_ENG_WIKIDATA_SECTORS),
   // US lists: companies filing with the SEC by SIC sector and SEC-registered investment
@@ -50,14 +54,15 @@ export const HE_ENG_REGISTRY_CATEGORIES: Readonly<Record<HeEngRegistryProvider, 
   charity_commission: HE_ENG_CHARITY_COMMISSION_CATEGORIES, gias: HE_ENG_GIAS_CATEGORIES, cqc: HE_ENG_CQC_CATEGORIES, ncua: ['credit_unions'],
 };
 
-type NationalProvider = Exclude<HeEngRegistryProvider, 'gleif' | 'osm' | 'esma' | 'eba' | 'wikidata' | 'sec_companies' | 'sec_advisers'>;
+type NationalProvider = Exclude<HeEngRegistryProvider, 'gleif' | 'osm' | 'esma' | 'eba' | 'wikidata' | 'sec_companies' | 'sec_advisers' | 'eu_transparency'>;
 const PROVIDER_ISO: Readonly<Record<NationalProvider, string>> = {
   brreg: 'no', france: 'fr', companies_house: 'gb', fdic: 'us', nppes: 'us', fmcsa: 'us', pra: 'gb',
   prh: 'fi', czso: 'cz', cro: 'ie', ariregister: 'ee', irs: 'us', nces: 'us', charity_commission: 'gb', gias: 'gb', cqc: 'gb', ncua: 'us',
+  scb: 'se', mastr: 'de',
 };
 /** Sources covering many countries: one slice per sector reads all allowed countries. */
 export const HE_ENG_GLOBAL_REGISTRY_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set(['gleif', 'osm', 'esma', 'eba', 'wikidata',
-  'sec_companies', 'sec_advisers']);
+  'sec_companies', 'sec_advisers', 'eu_transparency']);
 // The EU authorities' registers hold firms of the EU and the EEA only.
 const EEA_REGISTRY_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set(['esma', 'eba']);
 /** A global source's countries. */
@@ -67,8 +72,8 @@ function providerCovers(provider: HeEngRegistryProvider, country: string): boole
 // A plan over this throws and the base cannot start. Each NACE register adds a
 // slice per class of the brief for its own country: ten countries and five
 // broad hypotheses make about 140 slices; a brief naming every sector in ten or
-// twenty countries, with the US lists, about 325.
-const MAX_TASKS = 400;
+// twenty countries, with the US, Swedish and German lists, about 390.
+const MAX_TASKS = 500;
 const MAX_TASK_COUNTRIES = 40;
 // An EU register slice is read whole and paged within the 80-page safety limit
 // (2 000 firms); ten countries stay under it. ESMA holds about 3 200 managers in
@@ -157,7 +162,7 @@ const SECTORS: readonly Sector[] = [
       wikidata: ['insurance_brokers'], sec_companies: ['insurance_brokers'], ...heEngNaceSources('insurance_brokers') } },
   { match: /\b(?:law (?:firms?|offices?|practices?)|lawyers?|attorneys?|solicitors?|barristers?|legal (?:practices?|firms?))\b/i,
     sources: { brreg: ['69.1'], france: ['69.10Z'], companies_house: ['69101', '69102', '69109'], gleif: ['law_firms'], osm: ['law_firms'],
-      wikidata: ['law_firms'], ...heEngNaceSources('law_firms') } },
+      wikidata: ['law_firms'], eu_transparency: ['law_firms'], ...heEngNaceSources('law_firms') } },
   { match: /\b(?:accounting (?:firms?|practices?|offices?)|accountants?|accountancy (?:firms?|practices?)|bookkeep(?:ers?|ing (?:firms?|services?))|tax (?:advis(?:ers?|ors?|ory firms?)|consultants?)|audit(?:ing)? firms?|auditors?|cpa firms?)\b/i,
     sources: { brreg: ['69.2'], france: ['69.20Z'], companies_house: ['69201', '69202', '69203'], gleif: ['accounting'], osm: ['accounting'],
       wikidata: ['accounting'], ...heEngNaceSources('accounting') } },
@@ -200,14 +205,27 @@ const SECTORS: readonly Sector[] = [
     sources: { sec_companies: ['public_companies'] } },
   // The organisations themselves, not «nonprofit hospitals»: their own sector reads them.
   { match: new RegExp(String.raw`\b(?:nonprofits|non-profits|not-for-profits|(?:nonprofit|non-profit|not-for-profit|charitable|voluntary) (?:organi[sz]ations?|sector|groups?)|charities|ngos?)${SELLERS}\b|\b501\(c\)\(3\)(?:s\b|(?!\w))`, 'i'),
-    sources: { irs: ['charities'], charity_commission: ['charities'] } },
+    sources: { irs: ['charities'], charity_commission: ['charities'], eu_transparency: ['ngos'] } },
   { match: /\b(?:(?:private|family|charitable|philanthropic|grant-?making|community|corporate) foundations?|grant-?makers?|philanthropic organi[sz]ations?)\b/i,
     sources: { irs: ['foundations'], charity_commission: ['foundations'] } },
   { match: /\b(?:trade (?:associations?|bodies|organi[sz]ations)|industry (?:associations?|bodies)|business (?:associations?|leagues?)|professional (?:associations?|bodies|societies)|membership (?:associations?|organi[sz]ations)|chambers? of commerce)\b/i,
-    sources: { irs: ['trade_associations'] } },
+    sources: { irs: ['trade_associations'], eu_transparency: ['trade_associations', 'professional_associations'] } },
+  // Organisations of any country that represent interests to the EU (the EU Transparency Register): consultancies,
+  // think tanks, public affairs. IT, engineering and tax consultancies have their own sectors.
+  { match: new RegExp(String.raw`\b(?:(?:management|strategy|business|public affairs|policy|political|communications?|pr) consult(?:ing|anc(?:y|ies)|ants?)(?: (?:firms?|companies|agencies))?|consulting (?:firms?|companies)|consultanc(?:y|ies) (?:firms?|companies))${SELLERS}\b`, 'i'),
+    omit: /\b(?:it|ict|tech|technology|software|engineering|environmental|tax|hr|recruitment|security|cyber(?:security)?|data|cloud|digital|sap|erp|crm)[ -]+consult(?:ing|anc(?:y|ies)|ants?)(?: (?:firms?|companies|agencies))?\b/gi,
+    sources: { eu_transparency: ['consultancies'] } },
+  // «Market research institutes» sell research; they are not think tanks.
+  { match: new RegExp(String.raw`\b(?:think[ -]?tanks?|policy (?:institutes?|research (?:institutes?|cent(?:er|re)s?))|(?<!\b(?:market|opinion|clinical|contract)\s)research institut(?:es?|ions?))${SELLERS}\b`, 'i'),
+    sources: { eu_transparency: ['think_tanks'] } },
+  // Organisations that lobby, not the consultancies that do it for them (the sector above) or the vendors that sell to them.
+  { match: new RegExp(String.raw`\b(?:lobby(?:ing|ists?)(?! (?:firms?|consult\w*|agenc(?:y|ies)))(?: (?:groups?|organi[sz]ations?))?|public affairs(?! (?:consult\w*|agenc(?:y|ies)|firms?|advis\w*))|government (?:relations|affairs)|eu affairs)${SELLERS}\b`, 'i'),
+    sources: { eu_transparency: ['companies', 'trade_associations'] } },
+  { match: /\blobbying (?:firms?|consult\w*|agenc(?:y|ies))\b/i,
+    sources: { eu_transparency: ['consultancies'] } },
   // Plurals and named kinds only: «college graduates» or «university hospitals» are not buyers here.
   { match: new RegExp(String.raw`\b(?:universities|colleges|community colleges?|higher[ -]education(?:\s+(?:institutions?|providers?|organi[sz]ations))?|institutions? of higher (?:education|learning)|(?:private|public|state|liberal arts|technical|research) (?:universit(?:y|ies)|colleges?))${EDUCATION_SELLERS}\b`, 'i'),
-    sources: { nces: ['colleges'], irs: ['higher_education'], gias: ['colleges'] } },
+    sources: { nces: ['colleges'], irs: ['higher_education'], gias: ['colleges'], eu_transparency: ['academic'] } },
   // Schools: public ones are bought for by their district; a private school buys for itself.
   { match: new RegExp(String.raw`\b(?:k-?12 (?:schools?|school districts?|districts?|education)|school districts?|public schools?|charter schools?|(?:primary|secondary|elementary|middle|high) schools|public (?:and|or|&) private schools|private (?:and|or|&) public schools)${EDUCATION_SELLERS}\b${BARE_SCHOOLS}`, 'i'),
     sources: { nces: ['school_districts'], gias: ['state_schools', 'academy_trusts'] } },
@@ -225,10 +243,15 @@ const SECTORS: readonly Sector[] = [
 function hash(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 function fields(task: HeEngRegistryTask): unknown[] {
   const legacy = [task.provider, task.country, task.category, task.minEmployees ?? null, task.maxEmployees ?? null];
-  if (task.countries) return [...legacy, task.transport ?? null, task.countries];
-  // Preserve every saved API task ID and plan fingerprint byte-for-byte.
-  return task.transport === undefined ? legacy : [...legacy, task.transport];
+  // Preserve every saved API task ID and plan fingerprint byte-for-byte; only a slice that skips earlier ones adds its list.
+  const own = task.countries ? [...legacy, task.transport ?? null, task.countries] : task.transport === undefined ? legacy : [...legacy, task.transport];
+  return task.exclude ? [...own, { exclude: task.exclude }] : own;
 }
+// Registers whose categories share records: a CQC provider gives several kinds of care, every Charity Commission
+// grant-maker is a charity, an SEC filer of any sector is a public company.
+const OVERLAPPING: Partial<Record<HeEngRegistryProvider, (a: string, b: string) => boolean>> = {
+  cqc: () => true, charity_commission: () => true, sec_companies: heEngSecSectorsOverlap,
+};
 /** Every country one slice may return: its own, or each country of a global slice. */
 export function heEngRegistryTaskCountries(task: Pick<HeEngRegistryTask, 'country' | 'countries'>): readonly string[] {
   return task.countries ?? [task.country];
@@ -303,6 +326,14 @@ export function createHeEngRegistryPlan(input: {
       tasks.push(task);
     }
   }
+  // A record of overlapping categories goes to the plan's first slice that reads it: one source per company.
+  for (const [index, task] of tasks.entries()) {
+    const overlaps = OVERLAPPING[task.provider];
+    const earlier = overlaps ? [...new Set(tasks.slice(0, index).filter(other => other.provider === task.provider && other.country === task.country &&
+      String(other.countries ?? '') === String(task.countries ?? '') && other.category !== task.category && overlaps(other.category, task.category))
+      .map(other => other.category))].sort() : [];
+    if (earlier.length) { task.exclude = earlier; task.id = taskId(input.scopeKey, task); }
+  }
   if (tasks.length > MAX_TASKS) throw new Error('ENG registry plan is too large.');
   const plan: HeEngRegistryPlan = { version: 1, scopeKey: input.scopeKey, fingerprint: fingerprint(input.scopeKey, tasks), tasks };
   validateHeEngRegistryPlan(plan, input.scopeKey);
@@ -311,7 +342,10 @@ export function createHeEngRegistryPlan(input: {
 
 export function validateHeEngRegistryTask(task: HeEngRegistryTask): void {
   if (!task || typeof task !== 'object' || Array.isArray(task) ||
-    Object.keys(task).some(key => !['id', 'provider', 'country', 'countries', 'category', 'transport', 'minEmployees', 'maxEmployees'].includes(key)) ||
+    Object.keys(task).some(key => !['id', 'provider', 'country', 'countries', 'category', 'transport', 'minEmployees', 'maxEmployees', 'exclude'].includes(key)) ||
+    (task.exclude !== undefined && (!OVERLAPPING[task.provider] || !Array.isArray(task.exclude) || !task.exclude.length ||
+      task.exclude.some((category, index) => typeof category !== 'string' || category === task.category ||
+        !HE_ENG_REGISTRY_CATEGORIES[task.provider]?.includes(category) || (index > 0 && task.exclude![index - 1] >= category)))) ||
     typeof task.id !== 'string' || !/^[a-f0-9]{24}$/.test(task.id) ||
     !Object.hasOwn(HE_ENG_REGISTRY_CATEGORIES, task.provider) ||
     !HE_ENG_REGISTRY_CATEGORIES[task.provider].includes(task.category) ||

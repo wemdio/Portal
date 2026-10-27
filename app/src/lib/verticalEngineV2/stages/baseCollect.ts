@@ -124,7 +124,7 @@ import { buildVeSeenCompanies, veSeenCompanyCovers, veUnseenCompanyEmails, type 
 import { getVeDirectoryPlanPopulation, veDirectoryPopulationSlice, veUnsizedSourceLabels } from '../directoryPopulation';
 import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
-import { findIrrelevantRows, type VeRelevanceDecision } from '../relevanceGate';
+import { findIrrelevantRows, type VeRelevanceDecision, type VeRelevanceGateResult } from '../relevanceGate';
 import { veRelevanceGeographySourceRows } from '../relevanceGeography';
 import { isVePaidWebsiteSearchEnabled } from '../paidSearchPolicy';
 import { licenceSnapshotReady } from '@/lib/companiesDirectory/licences';
@@ -143,8 +143,23 @@ import { recoverVeSavedEmails, needsVeSavedEmailReview, hasPendingVeSavedEmailRe
 import { finalizeVeTwoGisTwins, isVeTwoGisRow, isVeTwoGisTask, pairVeTwoGisStates, retireVeOrphanTwoGisTwins, retireVeTwoGisTwin,
   veCountedPlanTasks, veTwoGisImportMarker, veTwoGisInputMarkers, veTwoGisTwinKeys, VE_TWO_GIS_ROW_FIELD, withoutVeTwoGisRows,
   withVeTwoGisTwins } from '../twoGisQuarantine';
-import { readVeTwoGisSettings, readVeTwoGisSourceFlag, veTwoGisFlagAllowed, veTwoGisFlagCurrent,
-  type VeTwoGisSourceFlag } from '../twoGisSettings';
+import { readVeOutreachOsRunning, readVeTwoGisSettings, readVeTwoGisSourceFlag, veTwoGisFlagAllowed, veTwoGisFlagCurrent, veTwoGisOutputState,
+  veTwoGisReadBlock, type VeTwoGisSettings, type VeTwoGisSourceFlag } from '../twoGisSettings';
+// 2ГИС только через twoGisPage: twoGisSource (pg) напрямую из стадии не импортируется.
+import { readVeTwoGisPage, readVeTwoGisRubricDictionary, VeTwoGisUnavailableError, VE_TWO_GIS_PAGE_ROWS } from '../twoGisPage';
+import { resolveVeTwoGisRubrics, veTwoGisMappingFailure, VeTwoGisRubricsUnavailableError, VE_TWO_GIS_MAPPING_REVISION } from '../twoGisRubrics';
+import { claimVeTwoGisRows, markVeTwoGisOutcome, readVeTwoGisClaimedDomains, releaseVeTwoGisClaims, VeTwoGisJournalError, type VeTwoGisClaim, type VeTwoGisClaimResult,
+  type VeTwoGisRejectReason } from '../twoGisJournal';
+import { readVeTwoGisTwinState, fitVeTwoGisCursor, veTwoGisClaimedByBase, veTwoGisAllow, compactVeTwoGisAllow, expandVeTwoGisAllow,
+  veTwoGisIpAllowedByBase, VE_TWO_GIS_MAX_ERRORS, VE_TWO_GIS_TWIN_NOTES, type VeTwoGisCursor, bumpVeTwoGisReadFailing, readVeTwoGisTwinWait,
+  veTwoGisCap, veTwoGisLadderMs, veTwoGisOut, veTwoGisPostponed, veTwoGisSettingsVerdict, veTwoGisStaticRetire, VE_TWO_GIS_BUSY_MS,
+  VE_TWO_GIS_PAUSE_FALLBACK_MS, VE_TWO_GIS_READ_FAIL_MS, VE_TWO_GIS_RETRY_MS, type VeTwoGisEventReason, type VeTwoGisPostponed,
+  type VeTwoGisPostponeReason, type VeTwoGisTickGate, type VeTwoGisTwinWait } from '../twoGisTwin';
+import { VE_TWO_GIS_IP_SITE_REASON, VE_TWO_GIS_OWNER_INN_EXCLUDED_REASON } from '../twoGisMarker';
+import { admitVeTwoGisMailboxes } from '../twoGisMailbox';
+import { mapTwoGisRow, veTwoGisWebsiteHost, veTwoGisSiteKind, veTwoGisSiteDomain, isVeTwoGisGovernmentHost } from '../twoGisRows';
+import { isVeNonOfficialWebsiteHost } from '../relevanceEvidence';
+import { isVeStageDbInterruption } from '../stageDb';
 import { singleVeSavedEmail } from '../savedEmailReviewEligibility';
 import { companyNameSource, isCompanyNameReady, VE_COMPANY_NAME_FIELD, type VeCompanyNameCleanupSummary } from '../companyNames';
 import { prepareSegmentationAudience } from '../segmentationAudit';
@@ -207,6 +222,7 @@ import {
   veNextIdleRounds,
   veProbeCollectionMode,
   veRoundAdvanced,
+  veTwoGisSleepMs,
   type VeBaseCollectProbe,
 } from '../baseCollectIdle';
 import {
@@ -593,8 +609,8 @@ async function estimatePlanDirectorySegment(
   excludeInns: Iterable<string> = [],
 ): Promise<NonNullable<VeCollectInfo['estimate']>> {
   const slices = plan.tasks.map(veDirectoryPopulationSlice).filter((slice) => slice !== null);
-  // Близнец two_gis в R1 не источник: в подписи «без размера рынка» его нет (R3 даст ему метку).
-  const unsized = veUnsizedSourceLabels(plan.tasks.filter((task) => !isVeTwoGisTask(task)));
+  // Близнец two_gis — «справочник организаций» (directoryPopulation): размера рынка у снимка нет.
+  const unsized = veUnsizedSourceLabels(plan.tasks);
   const provenance = { version: 2 as const, population_method: 'plan_union' as const,
     population_as_of: new Date().toISOString(), population_filters: directoryEstimateScope(plan),
     ...(unsized.length ? { unsized_sources: unsized } : {}) };
@@ -697,8 +713,10 @@ export interface VeCollectTaskState {
   note?: string;
   /** Связь Яндекс-задачи и её близнеца `two_gis`: один id в обоих состояниях. */
   two_gis_pair_id?: string;
-  /** Курсор и отсрочка близнеца `two_gis`; форму задаёт модуль 2ГИС, здесь — только перенос. */
+  /** Курсор близнеца `two_gis`: форма — twoGisTwin.ts (VeTwoGisCursor или маркер сбоев подбора). */
   two_gis?: { version: 1 } & Record<string, unknown>;
+  /** Отсрочка и таймеры близнеца (часть 4) — рядом с курсором, не внутри: twoGisTwin.ts, VeTwoGisTwinWait. */
+  two_gis_wait?: VeTwoGisTwinWait;
 }
 
 /** Состояние фазы CONSTRUCT в collect_info (обогащение конструктором баз). */
@@ -829,6 +847,8 @@ export interface VeCollectInfo {
   supply_batch_id?: string;
   supply_hold?: boolean;
   supply_hold_since?: string;
+  /** Сон 2ГИС (часть 4): источник базы — только отложенный близнец; since — начало лестницы пробуждений. */
+  two_gis_sleep?: { since: string; reason: VeTwoGisPostponeReason };
   /** Last billing hold excluded from parent dispatch timers; repeated wakes are idempotent. */
   requesty_billing_timer_recovery?: { blocked_at: string; resumed_at: string };
   /** Explicit legacy supply repair keeps the original batch and exact budget. */
@@ -1006,6 +1026,52 @@ function isChildFailed(source: VeCollectSource, status: string): boolean {
 // Each invocation receives its own context object. Never reuse policy state
 // across projects, worker wakes or concurrent jobs, and never fetch identities.
 const collectionProjectRules = new WeakMap<VeStageContext, { rules: VeProjectExclusions; info: VeCollectInfo }>();
+// Настройки 2ГИС — одно чтение за вызов стадии (тот же принцип: ctx — свой объект на вызов).
+const tickTwoGisSettings = new WeakMap<VeStageContext, Promise<VeTwoGisSettings | null>>();
+
+/** Настройки 2ГИС тика, общие для близнецов и копии флага поставки. readVeTwoGisSettings не бросает. */
+function readTickVeTwoGisSettings(ctx: VeStageContext): Promise<VeTwoGisSettings | null> {
+  let read = tickTwoGisSettings.get(ctx);
+  if (!read) {
+    read = readVeTwoGisSettings(ctx.supabase);
+    tickTwoGisSettings.set(ctx, read);
+  }
+  return read;
+}
+
+// 2ГИС, часть 4: одно now и один вердикт отсрочки на тик (тот же принцип: ctx — свой объект на вызов).
+const tickTwoGisNow = new WeakMap<VeStageContext, Date>();
+const tickTwoGisGate = new WeakMap<VeStageContext, VeTwoGisTickGate>();
+
+function veTwoGisTickNow(ctx: VeStageContext): Date {
+  let now = tickTwoGisNow.get(ctx);
+  if (!now) {
+    now = new Date();
+    tickTwoGisNow.set(ctx, now);
+  }
+  return now;
+}
+
+/** Ворота тика: настройки (тот же кэш тика), now, потолок и OutreachOS — его читаем, только когда настройки разрешают чтение. */
+async function loadTickVeTwoGisGate(ctx: VeStageContext, info: VeCollectInfo, projectId: string): Promise<VeTwoGisTickGate | null> {
+  const cached = tickTwoGisGate.get(ctx);
+  if (cached) return cached;
+  const flag = readVeTwoGisSourceFlag(info.two_gis_source);
+  if (!flag) return null;
+  const settings = await readTickVeTwoGisSettings(ctx);
+  const now = veTwoGisTickNow(ctx);
+  const gate: VeTwoGisTickGate = { now, flag, projectId, cap: veTwoGisCap(info, flag), settings, outreachOs: 'not_read' };
+  if (veTwoGisSettingsVerdict(flag, settings, projectId, now).kind === 'read') gate.outreachOs = await readVeOutreachOsRunning(ctx.supabase, now);
+  tickTwoGisGate.set(ctx, gate);
+  return gate;
+}
+
+/** Близнец отложен на этом тике. Без ворот (нет флага или живого близнеца) — нет. */
+function veTwoGisPostponedNow(ctx: VeStageContext, state: VeCollectTaskState): boolean {
+  if (!isVeTwoGisTask(state)) return false;
+  const gate = tickTwoGisGate.get(ctx);
+  return !!gate && veTwoGisPostponed(state, gate).kind === 'wait';
+}
 
 async function refreshCollectionProjectRules(ctx: VeStageContext): Promise<void> {
   const current = collectionProjectRules.get(ctx);
@@ -1060,6 +1126,36 @@ function recordProjectExclusionCoverage(ctx: VeStageContext, rows: Array<Record<
 
 /** A failed/unknown save must not stamp its error over a newer base snapshot. */
 class VePreviewCheckpointSaveError extends VeRelevanceCheckpointError {}
+
+/**
+ * 2ГИС: база вышла из сбора (сохранён статус не collecting) — её claimed в журнале линии
+ * освобождаются. Лучшее усилие: сбой — только код в лог; запасной путь — перехват следующей
+ * базой линии. До onCheckpoint: после запроса остановки он бросает VeWorkerShutdownError.
+ */
+async function releaseTwoGisClaimsOnExit(ctx: VeStageContext, baseId: string, info: VeCollectInfo,
+  patch: Record<string, unknown>): Promise<void> {
+  if (patch.status === undefined || patch.status === 'collecting') return;
+  // two_gis_source покрывает и ремонт географии (близнецы ушли в previous_tasks).
+  if (info.two_gis_source === undefined && !info.tasks?.some(isVeTwoGisTask)) return;
+  if (ctx.signal?.aborted) return;
+  try {
+    await releaseVeTwoGisClaims(ctx.supabase, baseId, ctx.signal);
+  } catch (error) {
+    stageLog(ctx, `[base_collect] 2gis release: ${error instanceof VeTwoGisJournalError ? error.code : 'error'}`);
+  }
+}
+
+/** 2ГИС: окончательный отказ карточек в журнале линии. Лучшее усилие: сбой — только код в лог; база не падает. */
+async function markTwoGisOutcomeBestEffort(ctx: VeStageContext, baseId: string, cardIds: readonly string[],
+  reason: VeTwoGisRejectReason): Promise<void> {
+  if (!cardIds.length || ctx.signal?.aborted) return;
+  try {
+    await markVeTwoGisOutcome(ctx.supabase, baseId, cardIds, 'rejected', reason, ctx.signal);
+  } catch (error) {
+    ctx.signal?.throwIfAborted();
+    stageLog(ctx, `[base_collect] 2gis outcome: ${error instanceof VeTwoGisJournalError ? error.code : 'error'}`);
+  }
+}
 
 async function persistCollectInfo(
   ctx: VeStageContext,
@@ -1129,6 +1225,7 @@ async function persistCollectInfo(
         ctx.signal?.throwIfAborted();
         info.preview_pipeline.revision = revision + 1;
         info.preview_pipeline.checkpoint_id = checkpointId;
+        await releaseTwoGisClaimsOnExit(ctx, baseId, info, patch);
         ctx.onCheckpoint?.();
         return;
       }
@@ -1146,6 +1243,7 @@ async function persistCollectInfo(
     .update({ ...patch, collect_info: stored, updated_at: new Date().toISOString() })
     .eq('id', baseId);
   if (error) throw new Error(`ve_bases collect_info update: ${error.message}`);
+  await releaseTwoGisClaimsOnExit(ctx, baseId, info, patch);
   ctx.onCheckpoint?.();
 }
 
@@ -2069,6 +2167,370 @@ async function fetchEngHiringRows(
   return out;
 }
 
+/* ─────────────── 2ГИС: близнец two_gis (план 26.10, R3 часть 3б) ─────────────── */
+
+/** Только для близнеца базы с флагом; рынок RU — по построению (DISPATCH). */
+interface VeTwoGisDispatch {
+  flag: VeTwoGisSourceFlag;
+  projectId: string;
+  hypothesisId: string | null;
+  baseId: string;
+  /** Потолок доменов, которые база заявляет в журнале линии (флаг или max_candidates цели). */
+  candidateCap: number;
+  /** Живой info.tasks: claimed близнецов считается по нему сразу после страницы. */
+  tasks: readonly VeCollectTaskState[];
+}
+
+/** Не сбой источника: остановка, чекпоинт, лимит и оплата Requesty, учёт расходов — выше близнеца. */
+const isVeTwoGisRethrow = (e: unknown) => (e instanceof Error && e.name === 'VeWorkerShutdownError') || e instanceof VeRelevanceCheckpointError
+  || e instanceof VeLlmRateLimitError || isVeProviderBillingError(e) || e instanceof ProviderUsageWriteError;
+
+const TWO_GIS_DOMAIN = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/;
+
+/**
+ * Близнец two_gis базы с флагом: подбор рубрик (один раз, в курсор), до 4 страниц снимка, фильтры
+ * строк, claim в журнале линии по странице. Никогда не failed: закрыть (done + unavailable с
+ * заметкой), отложить или сосчитать сбой (третий подряд закрывает). Часть 4: выход без продвижения
+ * (ни одной применённой страницы) всегда закрывает, считает сбой или ставит two_gis_wait.postponed с
+ * not_before — иначе живой pending близнец в ожидании будил бы базу каждые 30 с.
+ * Записи collect_info здесь нет: её делает вызывающий один раз за диспатч (решение чата VE2 п.8);
+ * журнал пишется по странице, повтор после потерянной записи узнаёт свои claim.
+ */
+async function dispatchVeTwoGisTwin(ctx: VeStageContext, state: VeCollectTaskState, limit: number,
+  getExcludedKeys: () => Promise<VeBaseExclusionKeys>, usage: VeUsage, audienceContext: string | undefined,
+  twoGis: VeTwoGisDispatch, profiled: boolean): Promise<void> {
+  const notes = VE_TWO_GIS_TWIN_NOTES;
+  const retire = (note: string) => { retireVeTwoGisTwin(state, note); };
+  const now = veTwoGisTickNow(ctx);
+  const wait = readVeTwoGisTwinWait(state.two_gis_wait);
+  const setWait = (next: VeTwoGisTwinWait) => {
+    if (next.postponed || next.read_failing || next.was_active) state.two_gis_wait = next; else delete state.two_gis_wait;
+  };
+  /** Событийная отсрочка: та же причина подряд сохраняет since (своя лестница от начала серии). */
+  const postpone = (reason: VeTwoGisEventReason, ms: number) => setWait({ ...readVeTwoGisTwinWait(state.two_gis_wait), postponed: { reason,
+    since: wait.postponed?.reason === reason ? wait.postponed.since : now.toISOString(), not_before: new Date(now.getTime() + ms).toISOString() } });
+  /** БД 2ГИС ответила: отсрочка и серия сбоев чтения сняты. */
+  const readOk = () => {
+    const next = readVeTwoGisTwinWait(state.two_gis_wait);
+    delete next.postponed;
+    delete next.read_failing;
+    setWait(next);
+  };
+  /** 2ГИС недоступен (не 'other'): true — близнец закрыт (сутки сбоев чтения). */
+  const failRead = (error: VeTwoGisUnavailableError): boolean => {
+    if (error.kind === 'busy') { postpone('busy', VE_TWO_GIS_BUSY_MS); return false; }
+    const bumped = bumpVeTwoGisReadFailing(readVeTwoGisTwinWait(state.two_gis_wait).read_failing, now);
+    setWait({ ...readVeTwoGisTwinWait(state.two_gis_wait), read_failing: bumped.read_failing });
+    if (bumped.failingMs >= VE_TWO_GIS_READ_FAIL_MS) { retire(notes.readFailing); return true; }
+    if (error.kind === 'paused') {
+      postpone('paused', Math.max(VE_TWO_GIS_BUSY_MS, error.pausedUntil ? error.pausedUntil.getTime() - now.getTime() : VE_TWO_GIS_PAUSE_FALLBACK_MS));
+    } else postpone('read_failed', veTwoGisLadderMs(bumped.failingMs)); // connect | role_limit | timeout | not_configured
+    return false;
+  };
+  const importLadder = () => veTwoGisLadderMs(wait.postponed?.reason === 'import' ? now.getTime() - Date.parse(wait.postponed.since) : 0);
+  if (limit < 1) { state.status = 'done'; return; }
+  // Профилям близнеца не дают (buildPlan): у него нет фильтра рубрик профиля.
+  if (profiled) return retire(notes.profile);
+  // В карточках ИНН нет: правило проекта по ИНН строку 2ГИС не поймало бы.
+  if (collectionProjectRules.get(ctx)?.rules.inns.length) return retire(notes.projectInns);
+  const query = state.task.two_gis_query;
+  const scope = query?.from_queries?.length ? veTwoGisQueryScope(query) : null;
+  if (!query || !scope) return retire(notes.scope);
+  const saved = readVeTwoGisTwinState(state.two_gis, twoGis.flag);
+  if (saved.kind === 'invalid') return retire(notes.cursor);
+  // Две проверки ниже — защита: живого близнеца в эти состояния DISPATCH не отдаёт (тот же вердикт тика
+  // veTwoGisPostponedNow, те же настройки и now), а неживого не ждёт ожидание.
+  const settings = await readTickVeTwoGisSettings(ctx);
+  if (!settings) return;
+  if (settings.mode !== 'on') return retire(notes.off);
+  if (!veTwoGisFlagCurrent(twoGis.flag, settings)) return retire(notes.snapshot);
+  const output = veTwoGisOutputState(settings, twoGis.projectId);
+  if (output === 'removed') return retire(notes.removed);
+  if (output !== 'open' || veTwoGisReadBlock(settings, now)) return;
+  const cap = twoGis.candidateCap;
+  if (veTwoGisClaimedByBase(twoGis.tasks) >= cap) {
+    state.hit_ceiling = true; state.status = 'done'; state.note = notes.ceiling;
+    return;
+  }
+  // Чтение исключений — не сбой близнеца (его ошибки уходят в DISPATCH) и до платного подбора.
+  const excluded = await getExcludedKeys();
+  const flag = { snapshot_id: twoGis.flag.snapshot_id, features_version: twoGis.flag.features_version };
+
+  let cursor: VeTwoGisCursor;
+  if (saved.kind === 'cursor') cursor = saved.cursor;
+  else {
+    const failedMapping = (what: string, reason: 'error' | 'model') => {
+      const failures = saved.mappingFailures + 1;
+      stageLog(ctx, `[base_collect] 2gis: ${what}, сбой подбора ${failures} из ${VE_TWO_GIS_MAX_ERRORS}`);
+      if (failures >= VE_TWO_GIS_MAX_ERRORS) retire(notes.mapping);
+      else {
+        state.two_gis = { version: 1, mapping_failures: failures };
+        postpone(reason, VE_TWO_GIS_RETRY_MS);
+      }
+    };
+    let dictionary: Awaited<ReturnType<typeof readVeTwoGisRubricDictionary>>;
+    try {
+      dictionary = await readVeTwoGisRubricDictionary(flag, { db: ctx.supabase });
+      ctx.signal?.throwIfAborted();
+    } catch (error) {
+      ctx.signal?.throwIfAborted();
+      if (isVeTwoGisRethrow(error)) throw error;
+      if (error instanceof VeTwoGisUnavailableError && error.kind === 'snapshot') return retire(notes.snapshot);
+      if (error instanceof VeTwoGisUnavailableError && error.kind !== 'other') { failRead(error); return; }
+      return failedMapping('словарь рубрик не прочитан', 'error');
+    }
+    if (dictionary.kind === 'import') { postpone('import', importLadder()); return; }
+    if (dictionary.kind === 'stale') return retire(notes.snapshot);
+    readOk(); // БД ответила: серия сбоев чтения окончена
+    const pair = twoGis.tasks.find((other) => other !== state && !isVeTwoGisTask(other)
+      && !!state.two_gis_pair_id && other.two_gis_pair_id === state.two_gis_pair_id);
+    let resolved: Awaited<ReturnType<typeof resolveVeTwoGisRubrics>>;
+    try {
+      // Контекст — гипотезы базы или задача пары; своё rationale близнеца — служебный текст.
+      resolved = await resolveVeTwoGisRubrics({ dictionary: dictionary.rubrics, queries: query.from_queries,
+        context: audienceContext ?? pair?.task.rationale, signal: ctx.signal, onUsage: (used) => addUsage(usage, used) });
+    } catch (error) {
+      ctx.signal?.throwIfAborted();
+      if (isVeTwoGisRethrow(error)) throw error;
+      const verdict = veTwoGisMappingFailure(error);
+      if (verdict === 'pending') { postpone('model', VE_TWO_GIS_RETRY_MS); return; } // 3 сбоя не считает (как в 3б)
+      if (verdict === 'retire') {
+        if (error instanceof VeTwoGisRubricsUnavailableError) stageLog(ctx, `[base_collect] 2gis: ${error.message}`);
+        return retire(error instanceof VeTwoGisRubricsUnavailableError
+          ? error.reason === 'oversize' ? notes.dictionarySize : notes.dictionary : notes.modelConfig);
+      }
+      return failedMapping('рубрики не подобраны', 'model');
+    }
+    const marks = compactVeTwoGisAllow(veTwoGisAllow({ rubrics: resolved.rubrics, tasks: twoGis.tasks }));
+    const fitted = fitVeTwoGisCursor({ version: 1, ...flag, mapping_revision: VE_TWO_GIS_MAPPING_REVISION,
+      rubrics: resolved.rubrics, ...(marks ? { allow: marks } : {}), after: '', claimed: 0, pages: 0 });
+    if (!fitted) return retire(notes.cursor);
+    cursor = fitted;
+    state.two_gis = cursor;
+    stageLog(ctx, `[base_collect] 2gis: рубрик ${cursor.rubrics.length}${resolved.viaModel ? ' (модель)' : ''}`);
+  }
+
+  const line = { projectId: twoGis.projectId, hypothesisId: twoGis.hypothesisId, baseId: twoGis.baseId, snapshotId: flag.snapshot_id };
+  const allow = expandVeTwoGisAllow(cursor.allow);
+  // Домены всех близнецов базы, и закрытых: домен соседа — «уже просмотрен» и в журнал не идёт. Иначе
+  // правило повтора (свой base_id и тот же card_id) приняло бы его второй раз, и потолок считался бы дважды.
+  // Продвижение страницы очищает harvest: тогда домены добирает журнал (ниже); потолок — по сумме курсоров.
+  const domains = new Set(twoGis.tasks.filter(isVeTwoGisTask).flatMap((twin) => twin.harvest ?? [])
+    .map((row) => veTwoGisSiteDomain(row.website)).filter((domain): domain is string => !!domain));
+  const harvested = () => state.harvest?.length ?? 0;
+  /** Сбой страницы или журнала: курсор и строки страницы не меняются; третий подряд закрывает. */
+  const countError = (what: string): boolean => {
+    const errors = (cursor.errors ?? 0) + 1;
+    stageLog(ctx, `[base_collect] 2gis: ${what}, сбой ${errors} из ${VE_TWO_GIS_MAX_ERRORS}`);
+    if (errors >= VE_TWO_GIS_MAX_ERRORS) { retire(notes.errors); return true; }
+    cursor = { ...cursor, errors };
+    state.two_gis = cursor;
+    return false;
+  };
+  // Заявлено больше доменов, чем видно в harvest (очищен продвижением страницы): свои claimed из журнала.
+  if (veTwoGisClaimedByBase(twoGis.tasks) > domains.size) {
+    try {
+      for (const domain of await readVeTwoGisClaimedDomains(ctx.supabase, twoGis.baseId, ctx.signal)) domains.add(domain);
+    } catch (error) {
+      ctx.signal?.throwIfAborted();
+      if (isVeTwoGisRethrow(error)) throw error;
+      if (error instanceof VeTwoGisJournalError && error.transient) { postpone('journal', VE_TWO_GIS_RETRY_MS); return; }
+      if (!countError(`журнал: ${error instanceof VeTwoGisJournalError ? `${error.step} ${error.code}` : 'error'}`)) postpone('journal', VE_TWO_GIS_RETRY_MS);
+      return;
+    }
+  }
+  let applied = 0;
+  for (let page = 0; page < 4 && harvested() < limit && !state.exhausted; page++) {
+    const room = cap - veTwoGisClaimedByBase(twoGis.tasks);
+    if (room < 1) { state.hit_ceiling = true; state.note = notes.ceiling; break; }
+    const take = Math.min(VE_TWO_GIS_PAGE_ROWS, limit - harvested(), room);
+    if (take < 1) break;
+    let read: Awaited<ReturnType<typeof readVeTwoGisPage>>;
+    try {
+      read = await readVeTwoGisPage({ flag, rubrics: cursor.rubrics, after: cursor.after, scope, allow, limit: take },
+        { db: ctx.supabase });
+      ctx.signal?.throwIfAborted();
+      ctx.onActivity?.();
+    } catch (error) {
+      ctx.signal?.throwIfAborted();
+      if (isVeTwoGisRethrow(error)) throw error;
+      if (error instanceof VeTwoGisUnavailableError && error.kind === 'snapshot') return retire(notes.snapshot);
+      if (error instanceof VeTwoGisUnavailableError && error.kind !== 'other') {
+        if (failRead(error)) return;
+        break;
+      }
+      // 'other' — и ошибки кода внутри транзакции (курсор не продвинулся), и неверный вход страницы.
+      if (countError(`страница не прочитана: ${error instanceof VeTwoGisUnavailableError ? error.kind : 'вход'}`)) return;
+      postpone('error', VE_TWO_GIS_RETRY_MS);
+      break;
+    }
+    if (read.kind === 'import') { postpone('import', importLadder()); break; }
+    if (read.kind === 'stale') return retire(notes.snapshot);
+    // Окно без продвижения курсора и без исчерпания — сбой страницы, а не продвижение (читатель так не отвечает).
+    if (read.cursor === cursor.after && !read.exhausted) {
+      if (countError('курсор страницы не продвинулся')) return;
+      postpone('error', VE_TWO_GIS_RETRY_MS);
+      break;
+    }
+
+    // Фильтры строк — по порядку страницы; счётчики применяются только вместе со страницей.
+    let filterExcluded = 0;
+    let filterSeen = 0;
+    const candidates: Array<{ claim: VeTwoGisClaim; row: VeUnifiedRow }> = [];
+    for (const card of read.rows) {
+      const row = mapTwoGisRow(card, flag.snapshot_id);
+      const host = veTwoGisWebsiteHost(card.host);
+      const domain = card.registrable_domain;
+      const kind = host ? veTwoGisSiteKind(host) : null;
+      // Корни конструкторов и ссылки справочника — 'catalog'; соцсети и сам 2ГИС — isVeNonOfficialWebsiteHost.
+      if (!host || !TWO_GIS_DOMAIN.test(domain) || isVeNonOfficialWebsiteHost(host) || (kind !== 'own' && kind !== 'builder')
+        || !normalizeCompanyForDedup(row.company) || (!allow.government && isVeTwoGisGovernmentHost(host))) {
+        filterExcluded += 1;
+        continue;
+      }
+      if (!allowedByProject(ctx, row)) continue;
+      const kept = pruneBaseRowAgainstExclusion(excluded, row);
+      if (!kept) {
+        if (excludedByOtherBases(excluded, row)) filterExcluded += 1; else filterSeen += 1;
+        continue;
+      }
+      if (domains.has(domain)) { filterSeen += 1; continue; }
+      candidates.push({ claim: { registrable_domain: domain, host, card_id: card.card_id }, row: kept });
+    }
+    let claim: VeTwoGisClaimResult | null = null;
+    if (candidates.length) {
+      try {
+        claim = await claimVeTwoGisRows(ctx.supabase, line, candidates.map((candidate) => candidate.claim), ctx.signal);
+      } catch (error) {
+        ctx.signal?.throwIfAborted();
+        if (isVeTwoGisRethrow(error)) throw error;
+        // Страница не применяется: курсор, строки, счётчики и claimed прежние, прошлые страницы — в памяти.
+        if (error instanceof VeTwoGisJournalError && error.transient) {
+          stageLog(ctx, `[base_collect] 2gis журнал: ${error.step} ${error.code}, отложено`);
+          postpone('journal', VE_TWO_GIS_RETRY_MS);
+          break;
+        }
+        if (countError(`журнал: ${error instanceof VeTwoGisJournalError ? `${error.step} ${error.code}` : 'error'}`)) return;
+        postpone('journal', VE_TWO_GIS_RETRY_MS);
+        break;
+      }
+    }
+    const accepted = claim?.accepted ?? new Set<string>();
+    const taken = candidates.filter((candidate) => accepted.has(candidate.claim.registrable_domain));
+    if (taken.length) {
+      state.harvest ??= [];
+      for (const candidate of taken) {
+        state.harvest.push(candidate.row);
+        domains.add(candidate.claim.registrable_domain);
+      }
+    }
+    const excludedCount = filterExcluded + (claim?.held ?? 0);
+    const seenCount = filterSeen + (claim?.duplicate ?? 0);
+    if (excludedCount) state.excluded_during_fetch = (state.excluded_during_fetch ?? 0) + excludedCount;
+    if (seenCount) state.already_seen_during_fetch = (state.already_seen_during_fetch ?? 0) + seenCount;
+    cursor = { ...cursor, after: read.cursor, claimed: cursor.claimed + accepted.size, pages: cursor.pages + 1 };
+    delete cursor.errors; // удачная страница обнуляет серию сбоев
+    state.two_gis = cursor;
+    readOk();
+    if (read.exhausted) state.exhausted = true;
+    state.rows = harvested();
+    applied += 1;
+    // Без доменов: в логе только счёт.
+    stageLog(ctx, `[base_collect] 2gis page ${cursor.pages}: окно ${read.windowIds}, строк ${read.rows.length}, взято ${taken.length}, `
+      + `повтор ${claim?.replayed ?? 0}, перехвачено ${claim?.takenOver ?? 0}, занято ${claim?.held ?? 0}${read.exhausted ? ', исчерпано' : ''}`);
+  }
+  if (state.exhausted || harvested() >= limit || state.hit_ceiling) state.status = 'done';
+  if (state.exhausted) state.note = notes.exhausted;
+  else if (state.hit_ceiling) state.note = notes.ceiling;
+  else if (applied) state.note = notes.progress;
+}
+
+/**
+ * Проход тика (часть 4): закрытия без чтения (профиль, ИНН проекта, география, курсор) и по настройкам
+ * (mode≠on, снимок, проект убран, выдача закрыта сутки) — до выбора источника, чтобы близнец, которого
+ * DISPATCH не трогает, не оставался живым. Настройки — только если живой близнец остался. true — нужна запись.
+ */
+async function prepareVeTwoGisTick(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo, market: VeMarket): Promise<boolean> {
+  const flag = readVeTwoGisSourceFlag(info.two_gis_source);
+  if (!flag) return false;
+  const facts = { profiled: veTwoGisProfiled(info, market, base.hypothesis_id), projectInnRules: !!collectionProjectRules.get(ctx)?.rules.inns.length };
+  let changed = false;
+  for (const state of info.tasks ?? []) {
+    if (!isVeTwoGisTask(state) || (state.status === 'done' && state.unavailable)) continue;
+    const note = veTwoGisStaticRetire(state, flag, facts);
+    if (note) changed = retireVeTwoGisTwin(state, note) || changed;
+  }
+  const live = (info.tasks ?? []).filter((state) => isVeTwoGisTask(state) && !veTwoGisOut(info, state));
+  if (!live.length) return changed;
+  const gate = await loadTickVeTwoGisGate(ctx, info, job.project_id);
+  if (!gate) return changed;
+  for (const state of live) {
+    const verdict = veTwoGisPostponed(state, gate);
+    if (verdict.kind === 'retire') changed = retireVeTwoGisTwin(state, verdict.note) || changed;
+  }
+  return changed;
+}
+
+/** Близнецы, ради которых база спит: живые и не остановленные по выходу. Сухой остаётся: днём его читают. */
+function veTwoGisSleepTwins(info: VeCollectInfo): VeCollectTaskState[] {
+  return (info.tasks ?? []).filter((state) => isVeTwoGisTask(state) && !veTwoGisOut(info, state) && !veTaskAcquisitionDeferred(info, state));
+}
+
+/** Метка сна с конечным since; иначе null (битую метку снимает выход из сна). */
+function readVeTwoGisSleep(value: unknown): { since: string; reason: VeTwoGisPostponeReason } | null {
+  const sleep = value && typeof value === 'object' && !Array.isArray(value) ? value as { since?: unknown; reason?: unknown } : null;
+  return sleep && typeof sleep.since === 'string' && Number.isFinite(Date.parse(sleep.since))
+    ? { since: sleep.since, reason: sleep.reason as VeTwoGisPostponeReason } : null;
+}
+
+/** Состояния, в которых база не спит, а идёт обычным путём (своя работа, восстановление, цель набрана). */
+function veTwoGisSleepBlocked(info: VeCollectInfo, job: VeJob, target: VeCollectionTargetProgress): boolean {
+  const adaptive = info.adaptive_collection;
+  return target.ready_rows >= target.ready_target || target.candidates_processed >= target.max_candidates
+    || !adaptive || !!adaptive.pending || !!info.preview_pipeline?.error || !!info.preview_pipeline?.batches.length
+    || !!info.construct || (info.tasks ?? []).some((state) => state.status === 'failed' || state.status === 'dispatched')
+    || !!info.saved_email_recovery?.batch || !!info.validation_retry || !!info.relevance_review_requested
+    || !!info.company_name_recovery || !!info.audience_scope_refresh_requested || job.payload?.review_relevance === true;
+}
+
+/** Другой источник ещё даст кандидатов. Сухой и отложенный по выходу не в счёт: иначе ночь ушла бы в холостые раунды. */
+function veTwoGisNonTwinCanSupply(info: VeCollectInfo): boolean {
+  const adaptive = info.adaptive_collection;
+  return (info.tasks ?? []).some((state) => {
+    if (isVeTwoGisTask(state) || state.status === 'failed' || !veTaskCanSupply(state, info)) return false;
+    const key = veSourceStrategyKey(state.task);
+    return !adaptive || (!veAdaptiveSourceDry(adaptive.completed, key) && !veAdaptiveSourceDeferred(adaptive, key));
+  });
+}
+
+/**
+ * Пробуждение спящей базы: всё ещё только отложенные близнецы — снова сон по лестнице, без записей,
+ * без чтения других баз, HARVEST и подсказок. Иначе null: тик идёт дальше и выходит из сна.
+ */
+async function sleepVeTwoGisBase(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
+  target: VeCollectionTargetProgress, usage: VeUsage): Promise<VeStageResult | null> {
+  if (ctx.market && ctx.market !== 'ru') return null;
+  if (veTwoGisSleepBlocked(info, job, target)) return null;
+  const flag = readVeTwoGisSourceFlag(info.two_gis_source);
+  const sleep = readVeTwoGisSleep(info.two_gis_sleep);
+  if (!flag || !sleep) return null;
+  const live = veTwoGisSleepTwins(info);
+  if (!live.length) return null;
+  const facts = { profiled: veTwoGisProfiled(info, 'ru', base.hypothesis_id), projectInnRules: !!collectionProjectRules.get(ctx)?.rules.inns.length };
+  if (live.some((state) => veTwoGisStaticRetire(state, flag, facts))) return null;
+  if (veTwoGisNonTwinCanSupply(info)) return null;
+  const gate = await loadTickVeTwoGisGate(ctx, info, job.project_id);
+  if (!gate) return null;
+  const verdicts = live.map((state) => veTwoGisPostponed(state, gate));
+  // Закрытие по настройкам делает проход тика: здесь только выходим из сна.
+  if (verdicts.some((verdict) => verdict.kind !== 'wait')) return null;
+  const waits = verdicts as Array<Extract<VeTwoGisPostponed, { kind: 'wait' }>>;
+  const step = Math.min(...waits.map((v) => veTwoGisSleepMs({ reason: v.reason, since: sleep.since, now: gate.now, notBefore: v.notBefore })));
+  stageLog(ctx, `[base_collect] 2gis сон: ${waits[0].reason}, пробуждение через ${Math.round(step / 1000)} с`);
+  await requeueSelf(ctx, job, step);
+  return { result: { waiting: true, base_id: base.id, two_gis_sleep: waits[0].reason }, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
+}
+
 async function dispatchTask(
   ctx: VeStageContext,
   state: VeCollectTaskState,
@@ -2084,6 +2546,7 @@ async function dispatchTask(
   mediaProfile?: VeMediaSourceProfile | null,
   savedSourceInfo?: Pick<VeCollectInfo, 'source_contact_recovery' | 'search_policy'>,
   retailProfile?: VeRetailSourceProfile | null,
+  twoGis?: VeTwoGisDispatch | null,
 ): Promise<void> {
   const { task } = state;
 
@@ -2326,6 +2789,14 @@ async function dispatchTask(
     state.status = 'done';
     state.rows = state.harvest.length;
     state.child_job_id = null;
+    return;
+  }
+
+  // 2ГИС (R3 3б): близнец базы с флагом читает снимок; без флага — защита R1 ниже. До created_by: дочерней джобы нет.
+  // Запись — у вызывающего (DISPATCH), один раз за диспатч (решение чата VE2 п.8).
+  if (task.source === 'two_gis' && twoGis) {
+    await dispatchVeTwoGisTwin(ctx, state, limit, getExcludedKeys, usage, audienceContext, twoGis,
+      !!(sourceProfile || clinicProfile || mediaProfile || retailProfile));
     return;
   }
 
@@ -2821,12 +3292,36 @@ async function findOlderCollectingBase(
       .filter((id): id is string => typeof id === 'string' && id.length > 0),
   );
   const now = Date.now();
-  const blocking = older.find((candidate) => {
+  const blockers = older.filter((candidate) => {
     if (activeBaseIds.has(candidate.id)) return true;
     const createdAt = baseCreatedAtMs(candidate);
     return createdAt > 0 && now - createdAt < COLLECTING_JOB_GRACE_MS;
   });
-  return blocking?.id ?? null;
+  if (blockers.length === 0) return null;
+  // 2ГИС (часть 4): спящая база (метка сна) очередь не держит, как и удержанная поставка. Метку читаем
+  // только у тех, кто держал бы: без держащих — те же запросы, что раньше. Порога возраста нет: две метки
+  // друг друга не ждут. Второе условие — для мока, который отдаёт строку целиком.
+  // Сбой этого чтения — ответ как до части 4 (первая держащая база): лишнее чтение итог не меняет.
+  let marks: unknown[] | null;
+  try {
+    const { data, error: marksError } = await ctx.supabase
+      .from('ve_bases')
+      .select('id, two_gis_sleep:collect_info->two_gis_sleep')
+      .in('id', blockers.map((candidate) => candidate.id));
+    if (marksError) {
+      console.warn(`[ve2-2gis] sleep markers unreadable: ${String((marksError as { code?: unknown }).code ?? 'error')}`);
+      return blockers[0].id;
+    }
+    marks = data;
+  } catch (error) {
+    ctx.signal?.throwIfAborted();
+    if (error instanceof Error && error.name === 'VeWorkerShutdownError') throw error;
+    console.warn(`[ve2-2gis] sleep markers unreadable: ${error instanceof Error ? error.name : 'error'}`);
+    return blockers[0].id;
+  }
+  const sleeping = new Set(((marks ?? []) as Array<{ id: string; two_gis_sleep?: unknown; collect_info?: VeCollectInfo }>)
+    .filter((row) => row.two_gis_sleep != null || row.collect_info?.two_gis_sleep != null).map((row) => row.id));
+  return blockers.find((candidate) => !sleeping.has(candidate.id) && candidate.collect_info?.two_gis_sleep == null)?.id ?? null;
 }
 
 /* ─────────────────────────── Фаза CONSTRUCT ─────────────────────────── */
@@ -3121,7 +3616,8 @@ function applyCollectionGeography(info: VeCollectInfo): boolean {
   let changed = false;
   info.tasks.forEach((state, index) => {
     if (JSON.stringify(state.task) === JSON.stringify(tasks[index])) return;
-    const progressed = state.status !== 'pending' || !!state.child_job_id || state.rows > 0 || !!state.harvest?.length;
+    const progressed = state.status !== 'pending' || !!state.child_job_id || state.rows > 0 || !!state.harvest?.length
+      || (isVeTwoGisTask(state) && veTwoGisClaimedByBase([state]) > 0);
     if (progressed && isVeTwoGisTask(state)) {
       // Близнеца с прогрессом по прежней географии не пересчитывают (заметка R1 № 8) и базу им не валят:
       // закрыт, harvest/курсор/пара остаются; задача прежняя — атрибуция строк не меняется. Повтор — no-op.
@@ -3150,11 +3646,11 @@ function applyCollectionGeography(info: VeCollectInfo): boolean {
 
 /** 2ГИС (R3 «Флаг»): база поставки берёт флаг одобренного превью, только если сейчас mode=on, снимок
  * проверен, выдача проекту открыта и снимок с таблицей сайтов — те же, что во флаге. Зовётся только до
- * плана (isNew) и только при флаге в линии: прочие базы поставки нового чтения не получают. Часть 4
- * заменит чтение настройками тика из ctx. */
+ * плана (isNew) и только при флаге в линии: прочие базы поставки нового чтения не получают. Настройки
+ * тика из ctx (readTickVeTwoGisSettings), общие с близнецом. */
 async function inheritVeSupplyTwoGisSource(ctx: VeStageContext, projectId: string, info: VeCollectInfo,
   flag: VeTwoGisSourceFlag, market: VeMarket): Promise<boolean> {
-  const settings = market === 'ru' ? await readVeTwoGisSettings(ctx.supabase) : null;
+  const settings = market === 'ru' ? await readTickVeTwoGisSettings(ctx) : null;
   const allowed = veTwoGisFlagAllowed(settings, projectId);
   const current = allowed && veTwoGisFlagCurrent(flag, settings);
   const before = JSON.stringify(info.two_gis_source ?? null);
@@ -3355,6 +3851,17 @@ function clinicProfileForInfo(info: VeCollectInfo, market: VeMarket | undefined,
     ? detectVeClinicSourceProfile(info.hypotheses) : null;
 }
 
+/** Профиль аудитории, при котором близнец 2ГИС не читается: из тех же аргументов, что DISPATCH отдаёт
+ * dispatchTask (sourceProfile, clinic, media, retail) — держать в синхроне. */
+function veTwoGisProfiled(info: VeCollectInfo, market: VeMarket, hypothesisId: string | null | undefined): boolean {
+  const sourceProfile = info.audience_snapshot ? veAudienceNicheProfile(info.audience_snapshot.hypotheses) ?? undefined : info.source_selection?.profile;
+  const clinicProfile = clinicProfileForInfo(info, market, hypothesisId);
+  const mediaProfile = hypothesisId && !info.audience_snapshot?.hypotheses.some((h) => h.audience_scope)
+    ? detectVeMediaSourceProfile({ market, hypotheses: info.hypotheses ?? [] }) : null;
+  const retailProfile = info.audience_snapshot && market === 'ru' ? veAudienceRetailProfile(info.audience_snapshot.hypotheses) : null;
+  return !!(sourceProfile || clinicProfile || mediaProfile || retailProfile);
+}
+
 /** Read the selected hypothesis once for old title-only media checkpoints.
  * This restores audience metadata, never source cursors, verdicts or budgets. */
 async function pinMediaAudience(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
@@ -3511,13 +4018,29 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
   if (!policy || policy.pending || info.preview_pipeline?.batches.length || !target || target.ready_rows >= target.ready_target
     || target.candidates_processed >= target.max_candidates) return;
   const tasks = info.tasks ?? [];
+  // 2ГИС (часть 4): близнец, с которого ушли на время отсрочки, снова активный, как только читается.
+  const back = readVeTwoGisSourceFlag(info.two_gis_source) ? tasks.find((s) => isVeTwoGisTask(s) && readVeTwoGisTwinWait(s.two_gis_wait).was_active
+    && !veTwoGisOut(info, s) && !veTwoGisPostponedNow(ctx, s) && !veTaskAcquisitionDeferred(info, s)
+    && !veAdaptiveSourceDry(policy.completed, veSourceStrategyKey(s.task))) : undefined;
+  if (back) {
+    const wait = readVeTwoGisTwinWait(back.two_gis_wait);
+    delete wait.was_active;
+    if (wait.postponed || wait.read_failing) back.two_gis_wait = wait; else delete back.two_gis_wait;
+    policy.active_source = veSourceStrategyKey(back.task);
+    // Как переключение на альтернативу без LLM: отложенный низкий выход снят, платного реплана на следующем
+    // тике нет. Возврат после отсрочки — не смена стратегии: switches не растёт (ход «туда-обратно» — ноль).
+    if (policy.replan_needed && policy.replan_reason !== 'plan_exhausted') { policy.replan_needed = false; delete policy.replan_reason; }
+    await persistCollectInfo(ctx, base.id, info);
+    return;
+  }
   const consumed = buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []);
-  // Близнеца 2ГИС эта версия не читает: он не выбирается и не держит active_source
-  // (нижний блок уведёт с него на живой источник); в состоянии остаётся для R3.
-  const available = tasks.filter((task) => !isVeTwoGisTask(task) && !veTaskAcquisitionDeferred(info, task) && task.status !== 'failed' && (task.status !== 'done'
+  // Близнец 2ГИС выбирается, пока жив и не отложен. Отложенного не видят выбор, альтернативы и реплан
+  // (нижний блок уводит с него); строки близнеца в карантине и живым его не делают.
+  const available = tasks.filter((task) => !veTwoGisOut(info, task) && !veTwoGisPostponedNow(ctx, task)
+    && !veTaskAcquisitionDeferred(info, task) && task.status !== 'failed' && (task.status !== 'done'
     || isVeRenewableSourceTask(task)
-    || (task.harvest ?? []).some((row) => (!usesExistingSourceContacts(info) || hasExistingSourceContact(row))
-      && !baseRowMatchesExclusion(consumed, row))));
+    || (!isVeTwoGisTask(task) && (task.harvest ?? []).some((row) => (!usesExistingSourceContacts(info) || hasExistingSourceContact(row))
+      && !baseRowMatchesExclusion(consumed, row)))));
   const alternatives = available.filter((task) => veSourceStrategyKey(task.task) !== policy.active_source
     && !veAdaptiveLowYield(policy.completed, veSourceStrategyKey(task.task))
     && !veAdaptiveSourceDry(policy.completed, veSourceStrategyKey(task.task)));
@@ -3608,6 +4131,11 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
     } else if (policy.active_source && chosen && policy.active_source !== chosen && preferredKeys.length < availableKeys.length) {
       policy.switches += 1;
       policy.note = 'Сначала проверяем профильный каталог клиник. Остальные источники и их позиции сохранены.';
+    }
+    // Уходим с отложенного близнеца 2ГИС: отметка вернёт его, когда он снова читается (возврат выше).
+    if (policy.active_source && chosen && chosen !== policy.active_source) {
+      const leaving = tasks.find((s) => isVeTwoGisTask(s) && veSourceStrategyKey(s.task) === policy.active_source && veTwoGisPostponedNow(ctx, s));
+      if (leaving) leaving.two_gis_wait = { ...readVeTwoGisTwinWait(leaving.two_gis_wait), was_active: true };
     }
     policy.active_source = chosen;
     await persistCollectInfo(ctx, base.id, info);
@@ -3838,9 +4366,15 @@ async function importConstructRows(ctx: VeStageContext, bcJobId: string): Promis
 
 /** R1 (2ГИС): результат конструктора по строке справочника не идёт в шлюз (там
  * платный поиск по имени), а остаётся в резерве непроверенным, с признаком.
- * Сетка теряет приватные поля — признак берём у строк пачки (inputs). */
-function holdVeTwoGisConstructRows<T extends VeUnifiedRow>(rows: T[], statuses: Array<string | null> | null,
-  inputs: ReadonlyArray<object>, twinKeys: ReadonlySet<string>): { rows: T[]; statuses: Array<string | null> | null; held: Array<Record<string, unknown>> } {
+ * Сетка теряет приватные поля — признак берём у строк пачки (inputs). 3в: ящики — только
+ * опубликованные свои и бесплатные; noMailbox (окончательный отказ) — только при crawled: сайты
+ * обошёл завершившийся конструктор, иначе пустой ящик значит «не искали», а не «нет». На деле это
+ * карточки, все найденные адреса которых чужие, хостинга, технические или артефакты разбора; карточку
+ * без найденного адреса validate_emails отбрасывает до импорта — она в журнал не пишется и остаётся
+ * доступной (у find_emails нет итога обхода по строке, таймаут не отличить от «ящика нет», D3). */
+export function holdVeTwoGisConstructRows<T extends VeUnifiedRow>(rows: T[], statuses: Array<string | null> | null,
+  inputs: ReadonlyArray<object>, twinKeys: ReadonlySet<string>, crawled: boolean): { rows: T[]; statuses: Array<string | null> | null;
+  held: Array<Record<string, unknown>>; noMailbox: string[] } {
   const markers = veTwoGisInputMarkers(inputs, twinKeys);
   const held: Array<Record<string, unknown>> = [];
   const keep = rows.map((row, index) => {
@@ -3849,8 +4383,11 @@ function holdVeTwoGisConstructRows<T extends VeUnifiedRow>(rows: T[], statuses: 
       [VE_TWO_GIS_ROW_FIELD]: marker, _relevance_unchecked: true });
     return !marker;
   });
-  return held.length ? { rows: rows.filter((_, index) => keep[index]),
-    statuses: statuses ? statuses.filter((_, index) => keep[index]) : null, held } : { rows, statuses, held };
+  if (!held.length) return { rows, statuses, held, noMailbox: [] };
+  // 3в: только опубликованные ящики своего домена и бесплатной почты; адрес не составляем (п.5 Сергея, 26.10).
+  const admitted = admitVeTwoGisMailboxes(held);
+  return { rows: rows.filter((_, index) => keep[index]), statuses: statuses ? statuses.filter((_, index) => keep[index]) : null,
+    held: admitted.rows, noMailbox: crawled ? admitted.noMailbox : [] };
 }
 
 /** R1 (2ГИС): партия близнеца вне конвейера, у которой нет отметки конструктора (R3 оборвался
@@ -3907,14 +4444,17 @@ async function settleStaleConstruct(ctx: VeStageContext, base: VeAutoBase, info:
   // R1 (2ГИС): признак — по строкам пачки этой записи (до их удаления ниже).
   const twoGisTwinKeys = veTwoGisTwinKeys(info.tasks);
   const twoGisMarkers = veTwoGisInputMarkers(info.search_policy?.construct_rows ?? [], twoGisTwinKeys);
-  const moved = (imported?.rows ?? []).flatMap((row, index) => {
+  const built = (imported?.rows ?? []).map((row, index) => {
     const status = imported!.emailStatuses[index];
     const twoGis = veTwoGisImportMarker(row, twoGisMarkers, twoGisTwinKeys);
     const saved: Record<string, unknown> = { ...row, ...(status ? { _email_status: status } : {}),
       ...(twoGis ? { [VE_TWO_GIS_ROW_FIELD]: twoGis } : {}), _relevance_unchecked: true };
     if (!cell(row.description)) delete saved.description;
-    return known.has(veRelevanceRowKey(saved)) ? [] : [saved];
+    return saved;
   });
+  // 3в: ящики строк 2ГИС — до ключа known (он включает адрес). Без помеченных строк — тот же массив.
+  const admitted = admitVeTwoGisMailboxes(built);
+  const moved = admitted.rows.filter((saved) => !known.has(veRelevanceRowKey(saved)));
   if (moved.length) {
     info.relevance_reserve = { ...(info.relevance_reserve ?? { version: 1 }), version: 1,
       rows: retainProjectExclusions(ctx, mergeVeRelevanceRows(reserve, moved)) };
@@ -3922,6 +4462,8 @@ async function settleStaleConstruct(ctx: VeStageContext, base: VeAutoBase, info:
   delete info.construct;
   if (info.search_policy) delete info.search_policy.construct_rows;
   await persistCollectInfo(ctx, base.id, info);
+  // Отказ «нет ящика» — только по сетке завершённого конструктора: у failed/cancelled строки могут быть необработаны.
+  if (bc?.status === 'completed') await markTwoGisOutcomeBestEffort(ctx, base.id, admitted.noMailbox, 'no_published_mailbox');
   stageLog(ctx, `[base_collect] конструктор ${construct.bc_job_id} (${bc?.status ?? 'не найден'}) остался от закрытого раунда: `
     + (moved.length ? `${moved.length} строк перенесено в резерв на проверку` : 'переносить нечего') + ', запись снята');
 }
@@ -4043,6 +4585,40 @@ class VeRelevanceRetryScheduled extends Error {
   }
 }
 
+/**
+ * 2ГИС: единственный ИНН владельца сайта — сверка с исключениями проекта и ИНН других баз. Совпадение — отказ на
+ * месте: строку не удаляем (индексы finalEmailStatuses у вызывающих). row.inn не пишем. Окончательный
+ * (source_site_final, журнал rejected) — только по ИНН другой базы: правило проекта могут снять, поэтому по нему
+ * отказ без отметки — claim остаётся claimed и освобождается при выходе базы.
+ */
+export function applyVeTwoGisOwnerInnExclusions(
+  gate: Pick<VeRelevanceGateResult, 'ownerInns' | 'decisions' | 'flagged' | 'review' | 'unchecked' | 'errored'>,
+  otherBaseInns: ReadonlySet<string>, projectExcluded: (inn: string) => boolean,
+): void {
+  for (const [index, inn] of gate.ownerInns ?? []) {
+    const decision = gate.decisions.get(index);
+    const otherBase = otherBaseInns.has(inn);
+    if (!decision || (!otherBase && !projectExcluded(inn))) continue;
+    const next: VeRelevanceDecision = { ...decision, status: 'irrelevant', reason: VE_TWO_GIS_OWNER_INN_EXCLUDED_REASON, evidence: [],
+      ...(otherBase ? { source_site_final: true as const } : {}) };
+    if (!otherBase) delete next.source_site_final;
+    delete next.search_deferred;
+    gate.decisions.set(index, next);
+    gate.flagged.add(index);
+    gate.review.delete(index);
+    gate.unchecked.delete(index);
+    gate.errored.delete(index);
+  }
+}
+
+/** Ключи других баз — от вызывающего; нет — читаются только сейчас, когда шлюз вернул ownerInns. */
+async function excludeVeTwoGisOwnerInns(ctx: VeStageContext, job: VeJob, base: VeAutoBase,
+  gate: Pick<VeRelevanceGateResult, 'ownerInns' | 'decisions' | 'flagged' | 'review' | 'unchecked' | 'errored'>,
+  otherBaseKeys?: VeBaseExclusionKeys): Promise<void> {
+  const keys = otherBaseKeys ?? await loadOtherBaseExclusionKeys(ctx, job.project_id, base.id, base.hypothesis_id);
+  applyVeTwoGisOwnerInnExclusions(gate, keys.inns, (inn) => !allowedByProject(ctx, { inn }));
+}
+
 async function checkCollectedRelevance(args: {
   ctx: VeStageContext; job: VeJob; base: VeAutoBase; info: VeCollectInfo;
   finalRows: VeUnifiedRow[]; finalEmailStatuses: Array<string | null> | null;
@@ -4050,6 +4626,8 @@ async function checkCollectedRelevance(args: {
   previousRelevanceCheckpoint?: unknown;
   /** Company facts only: these rows must never become output recipients. */
   evidenceRows?: Array<Record<string, unknown>>;
+  /** 2ГИС: ключи других баз для сверки ИНН владельца; нет — читаются, только если шлюз вернул ownerInns. */
+  twoGisOtherBaseKeys?: VeBaseExclusionKeys;
 }) {
   const { ctx, job, base, info, finalRows, finalEmailStatuses, market, usage } = args;
   // ─── QUALITY GATE (до refill/финала: пометки нужны обоим путям) ───
@@ -4184,6 +4762,8 @@ async function checkCollectedRelevance(args: {
         && (!info.target_progress || info.target_progress.ready_rows < info.target_progress.ready_target),
       websiteLimit: info.target_progress ? Math.max(0, info.target_progress.ready_target - info.target_progress.ready_rows) : undefined,
       triage: isVeRelevanceTriageEnabled(job.project_id),
+      // 2ГИС: разрешение ИП — только при строке 2ГИС на входе; иначе ключ входа не меняется.
+      ...(storedRows.some((row) => isVeTwoGisRow(row)) ? { twoGisAllowIp: veTwoGisIpAllowedByBase(info.tasks) } : {}),
       checkpoint: [job.result?.relevance_checkpoint, args.previousRelevanceCheckpoint, info.relevance_checkpoint],
       onCheckpoint: async (checkpoint, options) => {
         ctx.signal?.throwIfAborted();
@@ -4254,6 +4834,7 @@ async function checkCollectedRelevance(args: {
         throw new VeRelevanceRetryScheduled(base.id, { ...usage });
       }
     }
+    if (gate.ownerInns?.size) await excludeVeTwoGisOwnerInns(ctx, job, base, gate, args.twoGisOtherBaseKeys);
     lowRelevanceCount = gate.flagged.size;
     relevanceUncheckedCount = gate.unchecked.size;
     relevanceNeedsReviewCount = gate.review.size;
@@ -4300,6 +4881,18 @@ async function checkCollectedRelevance(args: {
     );
   }
   storedRows.forEach((row, index) => { combinedRows[eligibleIndices[index]] = row; });
+  // 2ГИС: окончательные отказы (сайт, ИП, ИНН владельца) закрывают домен для линии гипотезы; не окончательные — нет:
+  // их повторная проверка может стать relevant, а rejected в журнале — навсегда для линии.
+  const twoGisRejects = new Map<VeTwoGisRejectReason, string[]>();
+  for (const row of storedRows) {
+    const decision = row._ve_relevance;
+    const card = ((row as Record<string, unknown>)[VE_TWO_GIS_ROW_FIELD] as { card_id?: unknown } | undefined)?.card_id;
+    if (decision?.source_site_final !== true || !isVeTwoGisRow(row) || typeof card !== 'string' || !card.trim()) continue;
+    const reason: VeTwoGisRejectReason = decision.reason === VE_TWO_GIS_IP_SITE_REASON ? 'ip_site'
+      : decision.reason === VE_TWO_GIS_OWNER_INN_EXCLUDED_REASON ? 'owner_inn_excluded' : 'site_unconfirmed';
+    twoGisRejects.set(reason, [...twoGisRejects.get(reason) ?? [], card]);
+  }
+  for (const [reason, cards] of twoGisRejects) await markTwoGisOutcomeBestEffort(ctx, base.id, cards, reason);
   return { storedRows: combinedRows, lowRelevanceCount, relevanceUncheckedCount, relevanceNeedsReviewCount, relevanceErrorCount,
     relevanceCheckedCompanies, relevanceTotalCompanies, relevanceCoverageComplete, relevanceError };
 }
@@ -4339,6 +4932,10 @@ async function resumeSavedPreviewValidation(
   if (!imported || imported.emailStatuses.some((status) => status === null)) {
     throw new Error('Saved constructor email verdicts are incomplete');
   }
+  // 2ГИС: «нет ящика» — по полному выходу конструктора (продолжение берёт только завершённый, с проверкой почт),
+  // до отсева готовых и исключённых ниже: свой ящик, уже готовый или снятый правилом, — не отказ.
+  const twoGisInputs = [...(info.search_policy?.construct_rows ?? []), ...readVeRelevanceSourceRows(info.relevance_reserve)];
+  const twoGisNoMailbox = holdVeTwoGisConstructRows(imported.rows, imported.emailStatuses, twoGisInputs, veTwoGisTwinKeys(info.tasks), true).noMailbox;
   // Legacy partial previews retained their verified recipients, but not the
   // rejected/unchecked verdicts. Keep those recipients; recheck the remaining BC
   // output for this same immutable hypothesis, including legacy rejected rows.
@@ -4369,11 +4966,11 @@ async function resumeSavedPreviewValidation(
   if (finalEmailStatuses.some((status) => status === null)) throw new Error('Saved preview email verdicts are incomplete');
   // R1 (2ГИС): строки справочника в шлюз не идут, а остаются в резерве непроверенными.
   // У пайплайна строк пачки уже может не быть — признак берём и из source_rows.
-  const twoGis = holdVeTwoGisConstructRows(finalRows, finalEmailStatuses,
-    [...(info.search_policy?.construct_rows ?? []), ...readVeRelevanceSourceRows(info.relevance_reserve)], veTwoGisTwinKeys(info.tasks));
+  const twoGis = holdVeTwoGisConstructRows(finalRows, finalEmailStatuses, twoGisInputs, veTwoGisTwinKeys(info.tasks), false);
+  await markTwoGisOutcomeBestEffort(ctx, base.id, twoGisNoMailbox, 'no_published_mailbox');
   stageLog(ctx, `[base_collect] продолжаем проверку сохранённых ${twoGis.rows.length} строк; источники и конструктор не перезапускаются`);
   const gate = await checkCollectedRelevance({ ctx, job, base, info, finalRows: twoGis.rows, finalEmailStatuses: twoGis.statuses, market, usage,
-    previousRelevanceCheckpoint: previous?.result?.relevance_checkpoint });
+    previousRelevanceCheckpoint: previous?.result?.relevance_checkpoint, twoGisOtherBaseKeys: keys });
   const seenKeys = addAcquisitionReceipts(buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []), info.target_checkpoint?.seen_rows ?? [], info.tasks?.flatMap((task) => task.harvest ?? []) ?? []);
   // Харвест близнеца 2ГИС в карантине: кандидатов не даёт.
   const hasBufferedCandidates = (info.tasks ?? []).some((task) => !isVeTwoGisTask(task) && !veTaskAcquisitionDeferred(info, task) && task.status === 'done'
@@ -4667,9 +5264,9 @@ async function readVeContactLimit(ctx: VeStageContext, job: VeJob, base: VeAutoB
 
 /** Источник ещё может дать кандидатов без нового плана. */
 function veTaskCanSupply(task: VeCollectTaskState, info: VeCollectInfo): boolean {
-  // Близнеца 2ГИС эта версия не читает: он не источник, в каком бы состоянии ни был.
-  // R3 заменяет это жёсткое правило своим предикатом отсрочки, а не дополняет его.
-  if (isVeTwoGisTask(task)) return false;
+  // Близнец 2ГИС — источник, пока жив (veTwoGisTwinLive: флаг, не закрыт и не исчерпан, под потолком базы);
+  // отсрочка живость не отнимает. Без флага — жёсткое правило R1: не источник ни в каком состоянии.
+  if (veTwoGisOut(info, task)) return false;
   return task.status === 'dispatched' || (!veTaskAcquisitionDeferred(info, task)
     && (task.status === 'pending' || isVeRenewableSourceTask(task)));
 }
@@ -4771,6 +5368,7 @@ async function completeTargetRound(args: {
   continueRequestedReview?: boolean;
 }): Promise<VeStageResult> {
   const { ctx, job, base, info } = args;
+  delete info.two_gis_sleep; // закрытый раунд и терминальные статусы метки сна 2ГИС не несут
   // Sources/SMTP/fit may have been in flight while the specialist edited the
   // rules. Recheck existing identities before any saved row becomes ready.
   await refreshCollectionProjectRules(ctx);
@@ -4872,10 +5470,12 @@ async function completeTargetRound(args: {
   }
   // Старая задача карт тоже продолжаема: следующий раунд читает её запросы
   // из готового каталога (sourceRenewal).
-  // R1: близнец 2ГИС не держит раунд открытым своим курсором — до части 4 (там предикат отсрочки).
-  const renewableDirectory = tasks.some((task) => !isVeTwoGisTask(task) && !veTaskAcquisitionDeferred(info, task) && isVeRenewableSourceTask(task));
-  // Близнец 2ГИС (эта версия его не читает) не держит план открытым — ни закрытый, ни отложенный pending.
-  const exhausted = !args.hasBufferedCandidates && veCountedPlanTasks(tasks).length > 0 && tasks.every((task) => isVeTwoGisTask(task)
+  // Живой близнец 2ГИС с курсором держит раунд открытым, и отложенный тоже (часть 4); без флага — правило R1.
+  const renewableDirectory = tasks.some((task) => !veTwoGisOut(info, task) && !veTaskAcquisitionDeferred(info, task) && isVeRenewableSourceTask(task));
+  // План исчерпан, только если и близнец исчерпан. Без флага и закрытый близнец план не держат (R1); отложенный,
+  // продолжаемый, упёршийся в потолок или pending — держат: потолок даёт limited, а не «рынок исчерпан».
+  const exhausted = !args.hasBufferedCandidates && veCountedPlanTasks(tasks).length > 0 && tasks.every((task) =>
+    (isVeTwoGisTask(task) && (!readVeTwoGisSourceFlag(info.two_gis_source) || task.unavailable === true))
     || ((task.source === 'companies_directory' || veHasSourceCursor(task)) && task.status === 'done' && task.exhausted && !task.hit_ceiling),
   );
   // A saved-only review does not retry sources: their old failure remains in
@@ -4883,7 +5483,7 @@ async function completeTargetRound(args: {
   const taskError = reviewOnly ? undefined : tasks.find((task) => task.status === 'failed');
   const pipeline = info.preview_pipeline;
   const pendingBatches = pipeline?.batches.filter((batch) => batch.id !== pipeline.active_batch_id) ?? [];
-  const pendingSources = tasks.some((task) => !isVeTwoGisTask(task) && (task.status === 'dispatched'
+  const pendingSources = tasks.some((task) => !veTwoGisOut(info, task) && (task.status === 'dispatched'
     || (task.status === 'pending' && !veTaskAcquisitionDeferred(info, task))));
   const existingFirst = usesExistingSourceContacts(info);
   const discoveryPaused = info.source_contact_budget?.paused === true;
@@ -5326,9 +5926,10 @@ async function completeTargetRound(args: {
     && (next.status === 'collecting' || emptyRound)) {
     // Живой источник — задача, которая ещё может читать, или непросмотренные
     // строки в её выдаче. Исчерпанные источники в решение не входят.
-    const liveKeys = tasks.filter((task) => task.status !== 'failed' && !isVeTwoGisTask(task) && (veTaskCanSupply(task, info)
-      || (task.harvest ?? []).some((row) => allowedByProject(ctx, row) && pruneBaseRowAgainstExclusion(freshKeys, row) !== null
-        && !baseRowMatchesExclusion(consumedExisting, row))))
+    // Близнец 2ГИС входит только через veTaskCanSupply: его строки в карантине живым его не делают.
+    const liveKeys = tasks.filter((task) => task.status !== 'failed' && !veTwoGisOut(info, task) && (veTaskCanSupply(task, info)
+      || (!isVeTwoGisTask(task) && (task.harvest ?? []).some((row) => allowedByProject(ctx, row) && pruneBaseRowAgainstExclusion(freshKeys, row) !== null
+        && !baseRowMatchesExclusion(consumedExisting, row)))))
       .map((task) => veSourceStrategyKey(task.task));
     const dry = veDryLiveSources(adaptive.completed, liveKeys);
     if (dry) {
@@ -5648,7 +6249,15 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   if (target && await holdInactiveSupply(ctx, job, base, info)) {
     return { result: { waiting: true, base_id: baseId, supply_held: true } };
   }
-  const olderCollectingBaseId = await findOlderCollectingBase(ctx, job.project_id, base, info.supply_hold === true);
+  // 2ГИС (часть 4): база спит, пока её источник — только отложенный близнец; пробуждение без записей.
+  if (target && info.two_gis_sleep) {
+    const slept = await sleepVeTwoGisBase(ctx, job, base, info, target, usage);
+    if (slept) return slept;
+  }
+  // Метка сна до выхода из сна: early exit ниже возвращает её же, и since лестницы не сдвигается.
+  const sleptAtTickStart = info.two_gis_sleep;
+  const olderCollectingBaseId = await findOlderCollectingBase(ctx, job.project_id, base,
+    info.supply_hold === true || info.two_gis_sleep != null);
   if (olderCollectingBaseId) {
     // result при self-requeue не сохраняется воркером. Очередь должна быть
     // видна через саму базу, но большой collect_info не переписываем без нужды.
@@ -5660,15 +6269,19 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       ctx,
       `[base_collect] база ${baseId} ждёт старшую сборку проекта ${olderCollectingBaseId}, чтобы не дублировать контакты`,
     );
-    await requeueSelf(ctx, job);
+    // Проснувшаяся база ждёт по лестнице сна (не реже 5 мин), а не каждые 30 с.
+    await requeueSelf(ctx, job, info.two_gis_sleep ? veTwoGisSleepMs({ reason: null, since: info.two_gis_sleep.since,
+      now: veTwoGisTickNow(ctx), notBefore: null }) : undefined);
     return {
       result: { waiting: true, base_id: baseId, waiting_for_base_id: olderCollectingBaseId },
       tokensUsed: usage.tokensUsed,
       costUsd: usage.costUsd,
     };
   }
-  if (info.waiting_for_base_id) {
+  // Выход из сна 2ГИС — той же записью, что снимает ожидание другой базы.
+  if (info.waiting_for_base_id || info.two_gis_sleep) {
     delete info.waiting_for_base_id;
+    delete info.two_gis_sleep;
     await persistCollectInfo(ctx, baseId, info);
   }
   if (info.supply_hold) {
@@ -5802,6 +6415,11 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // 2ГИС: близнец без Яндекс-задачи с тем же two_gis_pair_id (ремонт, замена, reopen) — done+unavailable
   // «пара потеряна». Только при флаге: без флага ни новой проверки, ни записи.
   if (info.two_gis_source && retireVeOrphanTwoGisTwins(info.tasks)) await persistCollectInfo(ctx, baseId, info);
+  // 2ГИС (часть 4): закрытия без чтения и по настройкам — до выбора источника, чтобы близнец, которого DISPATCH
+  // не трогает, не оставался живым. Без флага — ни чтений, ни записи (близнецы под правилом R1).
+  if (info.two_gis_source && target && market === 'ru' && await prepareVeTwoGisTick(ctx, job, base, info, market)) {
+    await persistCollectInfo(ctx, baseId, info);
+  }
   if (target) await adaptCollectionSources(ctx, job, base, info, vertical, market, usage);
   if (applyCollectionGeography(info)) await persistCollectInfo(ctx, baseId, info);
 
@@ -5860,8 +6478,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       const pendingDiscovery = new Set(!existingFirst && !state.task.widened && !info.source_contact_budget?.paused
         ? pendingVeSourceContacts(harvest, info.source_contact_recovery) : []);
       if (canAcquire && (info.preview_pipeline?.batches.length ?? 0) < PREVIEW_IN_FLIGHT
-        // R1: курсор близнеца эта версия не продолжает — до части 4 (там предикат отсрочки).
-        && !isVeTwoGisTask(state) && !veTaskAcquisitionDeferred(info, state) && isVeRenewableSourceTask(state)
+        && !veTwoGisOut(info, state) && !veTwoGisPostponedNow(ctx, state) && !veTaskAcquisitionDeferred(info, state) && isVeRenewableSourceTask(state)
         && !recovered.some((row, index) => normalizeCompanyForDedup(row.company) !== ''
           && !isRetiredNicheHarvestRow(info, state, row) && allowedByProject(ctx, row)
           && (hasExistingSourceContact(row) || pendingDiscovery.has(harvest[index]))
@@ -5884,9 +6501,12 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     }
   }
 
+  const twoGisFlag = target && market === 'ru' ? readVeTwoGisSourceFlag(info.two_gis_source) : null;
   // ─── DISPATCH ───
   for (const state of tasks) {
     if (state.status !== 'pending' || info.adaptive_collection?.pending || veTaskAcquisitionDeferred(info, state)) continue;
+    // Отложенный близнец 2ГИС: без диспатча и без записи DISPATCH.
+    if (veTwoGisPostponedNow(ctx, state)) continue;
     if (info.adaptive_collection?.active_source && veSourceStrategyKey(state.task) !== info.adaptive_collection.active_source) continue;
     if (info.preview_pipeline && target && (info.preview_pipeline.error || target.ready_rows >= target.ready_target)) continue;
     try {
@@ -5901,10 +6521,14 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       await dispatchTask(ctx, state, project, limit, sourceExclusions, usage,
         () => persistCollectInfo(ctx, baseId, info), existingFirst || Boolean(state.task.widened),
         info.audience_snapshot ? veAudienceNicheProfile(info.audience_snapshot.hypotheses) ?? undefined : info.source_selection?.profile, info.hypotheses?.map((hypothesis) => [hypothesis.title, hypothesis.description].filter(Boolean).join(': ')).join('\n'),
+        // Профили ниже — те же, что veTwoGisProfiled (проход тика и сон): держать в синхроне.
         clinicProfileForInfo(info, market, base.hypothesis_id),
         base.hypothesis_id && !info.audience_snapshot?.hypotheses.some((h) => h.audience_scope)
           ? detectVeMediaSourceProfile({ market, hypotheses: info.hypotheses ?? [] }) : null, info,
-        info.audience_snapshot && market === 'ru' ? veAudienceRetailProfile(info.audience_snapshot.hypotheses) : null);
+        info.audience_snapshot && market === 'ru' ? veAudienceRetailProfile(info.audience_snapshot.hypotheses) : null,
+        isVeTwoGisTask(state) && twoGisFlag && target ? { flag: twoGisFlag, projectId: job.project_id,
+          hypothesisId: base.hypothesis_id ?? null, baseId, candidateCap: veTwoGisCap(info, twoGisFlag),
+          tasks: info.tasks ?? [] } : null);
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
@@ -5919,9 +6543,19 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       if (e instanceof VeLlmRateLimitError || isVeProviderBillingError(e)) throw e;
       if ((state.source === 'companies_directory' && isVeTransientDirectoryError(e))
         || (state.source === 'yandex_maps' && isVeTransientCatalogError(e))) throw e;
-      state.status = 'failed';
-      state.error = e instanceof Error ? e.message : String(e);
-      stageLog(ctx, `[base_collect] dispatch ${state.source} упал: ${state.error}`);
+      if (isVeTwoGisTask(state)) {
+        // 2ГИС: близнец не становится failed (его failed сделал бы раунд 'error'). Сбой учёта расходов и
+        // временный сбой БД (чтение исключений) — ожидание и повтор, как выше; прочее — закрыт один близнец,
+        // а не повтор всей джобы по кругу.
+        if (e instanceof ProviderUsageWriteError || isTransientDbError(e)
+          || isVeStageDbInterruption(e instanceof Error ? e.message : String(e))) throw e;
+        retireVeTwoGisTwin(state, VE_TWO_GIS_TWIN_NOTES.readError);
+        stageLog(ctx, `[base_collect] dispatch two_gis закрыт: ${e instanceof Error ? e.message : String(e)}`);
+      } else {
+        state.status = 'failed';
+        state.error = e instanceof Error ? e.message : String(e);
+        stageLog(ctx, `[base_collect] dispatch ${state.source} упал: ${state.error}`);
+      }
     }
     await persistCollectInfo(ctx, baseId, info);
   }
@@ -5943,8 +6577,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   retainDeferredSourceRows(info);
 
   // Other pending sources are alternatives, not children we must await.
-  // Близнец 2ГИС дочерней джобы не имеет: ждать нечего (R1 его не читает, R3 пропускает отложенного).
-  const waiting = tasks.filter((t) => !isVeTwoGisTask(t) && (t.status === 'dispatched' || (t.status === 'pending' && !veTaskAcquisitionDeferred(info, t)
+  // Живой неотложенный близнец 2ГИС ждётся, как каталог Яндекса: каждый его выход без продвижения ставит
+  // отсрочку с not_before (часть 4), так что ожидание не крутится. Близнец вне игры и отложенный — не ждутся.
+  const waiting = tasks.filter((t) => !veTwoGisOut(info, t) && !veTwoGisPostponedNow(ctx, t) && (t.status === 'dispatched' || (t.status === 'pending' && !veTaskAcquisitionDeferred(info, t)
     && (!info.adaptive_collection?.active_source || veSourceStrategyKey(t.task) === info.adaptive_collection.active_source))));
   if (waiting.length > 0 && !info.preview_pipeline) {
     await requeueSelf(ctx, job);
@@ -6099,14 +6734,20 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
 
   if (merged.length === 0 && !hasDispatchedConstruct && target && info.adaptive_collection && !info.adaptive_collection.pending
     && !info.preview_pipeline?.error && !failed.length && waiting.length === 0 && target.ready_rows < target.ready_target) {
-    const nextSources = tasks.filter((task) => task.status === 'pending' && !isVeTwoGisTask(task) && !veTaskAcquisitionDeferred(info, task)
+    const nextSources = tasks.filter((task) => task.status === 'pending' && !veTwoGisOut(info, task) && !veTwoGisPostponedNow(ctx, task)
+      && !veTaskAcquisitionDeferred(info, task)
       && veSourceStrategyKey(task.task) !== info.adaptive_collection!.active_source
       && !veAdaptiveSourceDry(info.adaptive_collection!.completed, veSourceStrategyKey(task.task)));
     const nextKey = clinicSourceKeys(info, nextSources.map((task) => veSourceStrategyKey(task.task)), market, base.hypothesis_id)[0];
     const nextSource = nextSources.find((task) => veSourceStrategyKey(task.task) === nextKey);
     if (nextSource) {
-      info.adaptive_collection.active_source = veSourceStrategyKey(nextSource.task);
-      info.adaptive_collection.switches += 1;
+      const policy = info.adaptive_collection;
+      // Уходим с близнеца, отложенного DISPATCH этого тика: та же отметка, что в нижнем блоке выбора, — вернётся,
+      // когда снова читается. Счётчик здесь не выходит за предел проверки чекпойнта (1000).
+      const leaving = tasks.find((s) => isVeTwoGisTask(s) && veSourceStrategyKey(s.task) === policy.active_source && veTwoGisPostponedNow(ctx, s));
+      if (leaving) leaving.two_gis_wait = { ...readVeTwoGisTwinWait(leaving.two_gis_wait), was_active: true };
+      policy.active_source = veSourceStrategyKey(nextSource.task);
+      if (!leaving || policy.switches < 1000) policy.switches += 1;
       info.adaptive_collection.note = 'Текущий источник не дал новых кандидатов. Проверяем следующий источник из плана.';
       await persistCollectInfo(ctx, baseId, info);
       await requeueSelf(ctx, job, 1_000);
@@ -6119,6 +6760,27 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     await requeueSelf(ctx, job, 15_000);
     return { result: { waiting: true, base_id: baseId, pending_sources: waiting.map((task) => task.source) },
       tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
+  }
+
+  // 2ГИС (часть 4): дать кандидатов могут только отложенные живые близнецы с флагом — база засыпает до
+  // срока отсрочки по лестнице. Раунд не закрывается, idle_streak, idle_rounds и data не трогаются.
+  const twoGisGate = tickTwoGisGate.get(ctx);
+  const sleepingTwins = twoGisGate && target ? veTwoGisSleepTwins(info) : [];
+  if (sleepingTwins.length && merged.length === 0 && !hasDispatchedConstruct && !failed.length
+    && !veTwoGisSleepBlocked(info, job, target!) && !veTwoGisNonTwinCanSupply(info)
+    && !(pendingSourceRows.size && !existingFirst && !info.source_contact_budget?.paused)
+    && sleepingTwins.every((s) => veTwoGisPostponedNow(ctx, s))) {
+    const verdicts = sleepingTwins.map((s) => veTwoGisPostponed(s, twoGisGate!)) as Array<Extract<VeTwoGisPostponed, { kind: 'wait' }>>;
+    if (!info.two_gis_sleep) {
+      // Тик начался во сне: та же метка (since лестницы не сдвигается), иначе — вход в сон.
+      info.two_gis_sleep = readVeTwoGisSleep(sleptAtTickStart) ?? { since: twoGisGate!.now.toISOString(), reason: verdicts[0].reason };
+      await persistCollectInfo(ctx, baseId, info);
+    }
+    const step = Math.min(...verdicts.map((v) => veTwoGisSleepMs({ reason: v.reason, since: info.two_gis_sleep!.since,
+      now: twoGisGate!.now, notBefore: v.notBefore })));
+    stageLog(ctx, `[base_collect] 2gis сон: ${verdicts[0].reason}, пробуждение через ${Math.round(step / 1000)} с`);
+    await requeueSelf(ctx, job, step);
+    return { result: { waiting: true, base_id: baseId, two_gis_sleep: verdicts[0].reason }, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
   }
 
   let stats: NonNullable<VeCollectInfo['stats']> = {
@@ -6211,6 +6873,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // пометке строк (_email_status) при финальной записи: null, когда
   // конструктор не запускался / вернул пусто.
   let finalEmailStatuses: Array<string | null> | null = null;
+  // 2ГИС: «нет опубликованного ящика» — окончательно, только если конструктор действительно обошёл сайты
+  // (завершился и вернул сетку); сырые или частичные строки уходят в резерв без отказа, как в 3б.
+  let twoGisCrawled = false;
   // Это реальные кандидаты после дедупа, ещё не готовые получатели. row_count
   // остаётся счётчиком финальных строк, а finished_at до финала не публикуем.
   const candidateStats = { ...stats };
@@ -6309,6 +6974,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       // excluded. Old row-level verdicts still cannot identify which sibling
       // email was validated, so discard that legacy result without a new job.
       const imported = legacyWithoutSplit ? null : await importConstructRows(ctx, bcJobId);
+      twoGisCrawled = !!imported && bcStatus === 'completed';
       const failNote =
         bcStatus === 'completed'
           ? null
@@ -6363,6 +7029,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     }
   }
 
+  // 2ГИС: «нет ящика» — по ПОЛНОМУ выходу конструктора по карточке, до исключений и дедупа ниже: свой ящик,
+  // снятый правилом проекта или уже готовый в другой базе, — всё равно опубликованный ящик, не отказ.
+  const twoGisNoMailbox = target && twoGisCrawled
+    ? holdVeTwoGisConstructRows(finalRows, finalEmailStatuses, merged, twoGisTwinKeys, true).noMailbox : [];
   // Пока конструктор валидирует/разносит email, другая база проекта могла уже
   // завершиться. Повторяем дедуп свежим чтением и уже по email тоже: именно
   // здесь ловятся контакты, найденные конструктором под разными названиями
@@ -6401,8 +7071,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
 
   // R1 (2ГИС): шлюз проверил бы строку справочника с платным поиском по имени — держим
   // её в резерве непроверенной. Сетка конструктора теряет приватные поля: признак — у строк пачки (merged).
-  const twoGisHeld = target ? holdVeTwoGisConstructRows(finalRows, finalEmailStatuses, merged, twoGisTwinKeys) : null;
+  // Здесь — только строки и удержание; вердикт «нет ящика» взят выше, по полному выходу.
+  const twoGisHeld = target ? holdVeTwoGisConstructRows(finalRows, finalEmailStatuses, merged, twoGisTwinKeys, false) : null;
   if (twoGisHeld?.held.length) { finalRows = twoGisHeld.rows; finalEmailStatuses = twoGisHeld.statuses; }
+  await markTwoGisOutcomeBestEffort(ctx, baseId, twoGisNoMailbox, 'no_published_mailbox');
 
   if (finalRows.length === 0) {
     if (target) return await completeTargetRound({
@@ -6440,7 +7112,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
 
   const gate = await checkCollectedRelevance({
-    ctx, job, base, info, finalRows, finalEmailStatuses, market, usage,
+    ctx, job, base, info, finalRows, finalEmailStatuses, market, usage, twoGisOtherBaseKeys: freshExistingKeys,
   });
   const { lowRelevanceCount, relevanceUncheckedCount, relevanceNeedsReviewCount, relevanceErrorCount,
     relevanceCheckedCompanies, relevanceTotalCompanies, relevanceCoverageComplete, relevanceError } = gate;
