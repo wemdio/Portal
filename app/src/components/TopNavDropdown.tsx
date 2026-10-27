@@ -28,6 +28,14 @@ const CLOSE_DELAY_MS = 220;
 const MENU_MIN_WIDTH = 208;
 
 /**
+ * Открыт может быть только один список. Задержка закрытия (CLOSE_DELAY_MS)
+ * иначе оставляла прежний список на экране, пока курсор уже открыл соседний, —
+ * панели перекрывали друг друга. Открывшийся список объявляет о себе, остальные
+ * закрываются сразу.
+ */
+const OPEN_EVENT = 'portal-nav-dropdown-open';
+
+/**
  * Пункт верхнего меню с выпадающим списком.
  *
  * Открывается наведением (основной сценарий), кликом (тач) и с клавиатуры
@@ -101,9 +109,18 @@ export function TopNavDropdown({
     updateCoords();
     pendingFocus.current = focus;
     setOpen(true);
-  }, [cancelScheduledClose, updateCoords]);
+    window.dispatchEvent(new CustomEvent(OPEN_EVENT, { detail: menuId }));
+  }, [cancelScheduledClose, updateCoords, menuId]);
 
   useEffect(() => cancelScheduledClose, [cancelScheduledClose]);
+
+  useEffect(() => {
+    const onOtherOpen = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== menuId) closeMenu(false);
+    };
+    window.addEventListener(OPEN_EVENT, onOtherOpen);
+    return () => window.removeEventListener(OPEN_EVENT, onOtherOpen);
+  }, [menuId, closeMenu]);
 
   // Панель fixed — её координаты нужно пересчитывать, пока она открыта:
   // лента пунктов скроллится по горизонтали, окно меняет размер.
