@@ -8,6 +8,7 @@ import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, ge
 import { isVeProviderBillingError } from './collectionErrors';
 import { VeLlmRateLimitError, type VeLlmRateLimit } from './llmRateLimit';
 import { readRelevanceCheckpoint, relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint, type VeRelevanceFailureCode } from './relevanceCheckpoint';
+import { isVeTwoGisMarkedRow, veTwoGisOwnerInnVerdict, VE_TWO_GIS_IP_SITE_REASON, VE_TWO_GIS_SITE_FIRST_REASON, VE_TWO_GIS_SITE_UNCONFIRMED_REASON } from './twoGisMarker';
 import { VE_RELEVANCE_RULES_VERSION, VE_RELEVANCE_WEBSITE_VERSION, veRelevanceDecisionSchema, hasVePaymentPointOnlyEvidence, isVeActivityEvidenceGuarded, type VeRelevanceDecision } from './relevanceDecision';
 import { fetchVeRelevanceEvidence, VE_RELEVANCE_EVIDENCE_MAX_MS, type VeRelevanceEvidence } from './relevanceEvidence';
 import { proxyPoolHealth } from '@/lib/enrich/proxyPool';
@@ -362,6 +363,8 @@ export interface VeRelevanceGateResult {
   /** Technical completeness includes needs_review, but those rows are NOT launch-ready. */
   coverage: { checkedCompanies: number; totalCompanies: number; complete: boolean };
   tokensUsed: number; costUsd: number;
+  /** 2ГИС: строка входа → единственный ИНН владельца сайта (компания, или ИП при разрешении) — BC сверяет с исключениями. Создаётся лениво. */
+  ownerInns?: Map<number, string>;
 }
 export async function findIrrelevantRows(input: {
   rows: Array<Record<string, unknown>>; verticalName: string; verticalSummary?: string;
@@ -392,6 +395,8 @@ export async function findIrrelevantRows(input: {
   /** Opt-in calibrated triage before the LLM (isVeRelevanceTriageEnabled). Does
    * not enter the context hash: saved verdicts stay valid when it is toggled. */
   triage?: boolean;
+  /** 2ГИС: план базы берёт ИП (замороженная отметка i близнецов). Не входит в контекст и ключ: смена не перепокупает проверки. Нет — ИП нельзя. */
+  twoGisAllowIp?: boolean;
 }): Promise<VeRelevanceGateResult> {
   const signal = input.signal ?? getVeActiveJobSignal(); signal?.throwIfAborted();
   const audienceScope = readVeAudienceScope(input.audienceScope);
@@ -433,6 +438,9 @@ export async function findIrrelevantRows(input: {
     // checkpoint of unrelated companies. The old guard discarded valid short
     // activity labels before saving their evidence, so they cannot be repaired
     // merely by reinterpreting the saved verdict.
+    // 2ГИС — только по строкам-получателям: строки-наблюдения (evidenceRows) записи не делают.
+    const twoGisIndex = group.rowIndices.find((index) => isVeTwoGisMarkedRow(input.rows[index]));
+    const twoGisOnly = twoGisIndex !== undefined;
     const keyParts: unknown[] = [identity, fields];
     if (!identity && !fields.website) {
       const addresses = [...new Set(group.rows.map((row) => rowText(row, ['address', 'адрес'])).filter(Boolean))].sort();
@@ -442,10 +450,28 @@ export async function findIrrelevantRows(input: {
       .some((value) => isCompleteShortActivityQuote(field, value, fields[field] ?? '')))) {
       keyParts.push('complete-short-activity-evidence-v1');
     }
-    return { group, fields, identity, key: relevanceHash(keyParts), cacheable: Boolean(identity || fields.company || fields.website), attempts };
+    // Последней частью: старые вердикты по описанию (до 3в) под этим ключом не находятся.
+    if (twoGisOnly) keyParts.push('two-gis-source-site-v1');
+    return { group, fields, identity, key: relevanceHash(keyParts), cacheable: Boolean(identity || fields.company || fields.website), attempts, twoGisOnly,
+      twoGisRow: twoGisIndex === undefined ? undefined : input.rows[twoGisIndex] };
   });
   type Entry = typeof entries[number];
   const current = new Map<Entry, VeRelevanceDecision>();
+  // 2ГИС: сайт уже подтверждал компанию — след и на вердикте строки: смена контекста или ключа обнуляет чекпойнт.
+  const sourceVerified = new Set(entries.filter((entry) => entry.twoGisOnly && entry.group.rowIndices.some((index) =>
+    veRelevanceDecisionSchema.safeParse(input.rows[index]._ve_relevance).data?.source_site_verified)));
+  // Поля 2ГИС — только у записей 2ГИС. В сохранённом вердикте, предложении смысловой проверки и следе сайта обычной
+  // записи их снимаем: схема до 3в их отбрасывала, а такой флаг пропускал бы смысловую перепроверку.
+  const stripTwoGisFlags = (decision: VeRelevanceDecision | undefined) => {
+    if (decision) { delete decision.source_site_final; delete decision.source_site_verified; }
+  };
+  const unmarkedKeys = new Set(entries.filter((entry) => !entry.twoGisOnly).map((entry) => entry.key));
+  for (const key of unmarkedKeys) {
+    stripTwoGisFlags(checkpoint.verdicts[key]);
+    const evidence = checkpoint.website_evidence[key];
+    if (evidence) { delete evidence.owner_inns; delete evidence.site_verified; }
+  }
+  for (const review of Object.values(checkpoint.semantic_reviews)) if (unmarkedKeys.has(review.company_key)) stripTwoGisFlags(review.proposal);
   const activityGuarded = new Set<Entry>();
   const errorDecision = (reason: string, attempts = 0): VeRelevanceDecision => ({ version: 2, status: 'error', reason, evidence: [], context_hash: contextHash, review_attempts: attempts });
   const save = async (canYield = true) => {
@@ -460,6 +486,9 @@ export async function findIrrelevantRows(input: {
     if (checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]]?.staffing_correction_version === VE_STAFFING_CORRECTION_VERSION) {
       decision.staffing_correction_version = VE_STAFFING_CORRECTION_VERSION;
     }
+    if (entry.twoGisOnly && sourceVerified.has(entry)) decision.source_site_verified = true;
+    // Флаги 2ГИС — только у записи 2ГИС: из сохранённого вердикта обычной строки (охрана рубрики, найм) их не переносим.
+    if (!entry.twoGisOnly) stripTwoGisFlags(decision);
     current.set(entry, decision); if (entry.cacheable) checkpoint.verdicts[entry.key] = decision;
   };
   const guardActivityEvidence = (entry: Entry, decision: VeRelevanceDecision): boolean => {
@@ -1267,8 +1296,10 @@ export async function findIrrelevantRows(input: {
           applySemantic(entry, semantic); recoveredRepair = true; return false;
         }
       }
-      // A final triage reject carries no excerpt to review and is not re-bought.
-      if ((cached.status === 'relevant' || cached.status === 'irrelevant') && cached.triage?.final !== true) {
+      // A final triage reject carries no excerpt to review and is not re-bought; neither is a final 2GIS reject
+      // (only for a 2GIS entry: an unmarked verdict with the flag is re-checked as before).
+      if ((cached.status === 'relevant' || cached.status === 'irrelevant') && cached.triage?.final !== true
+        && !(entry.twoGisOnly && cached.source_site_final === true)) {
         const verified = semantic?.company_key === entry.key && semantic.status === 'finished'
           && semantic.result && reviewHash === semanticHash(entry, cached) && confirms(cached, semantic.result);
         if (!verified) {
@@ -1309,7 +1340,7 @@ export async function findIrrelevantRows(input: {
       if (cached.status !== 'error' || pendingRefinement) {
         current.set(entry, cached);
         // Saved uncertainty the triage has not seen yet: the bulk of a stalled reserve.
-        if (triageEnabled && !staffingOnly.has(entry) && cached.status === 'needs_review' && !pendingRefinement
+        if (triageEnabled && !staffingOnly.has(entry) && !entry.twoGisOnly && cached.status === 'needs_review' && !pendingRefinement
           && cached.triage_version !== VE_RELEVANCE_TRIAGE_VERSION) triageBacklog.push(entry);
         return false;
       }
@@ -1326,7 +1357,7 @@ export async function findIrrelevantRows(input: {
   // now, as it would have without the recheck; otherwise the final loop would mark it as read.
   if (triageEnabled) for (const entry of rulesRechecked) {
     const decision = current.get(entry);
-    if (decision?.status === 'needs_review' && decision.triage_version !== VE_RELEVANCE_TRIAGE_VERSION) triageBacklog.push(entry);
+    if (!entry.twoGisOnly && decision?.status === 'needs_review' && decision.triage_version !== VE_RELEVANCE_TRIAGE_VERSION) triageBacklog.push(entry);
   }
   if (triageBacklog.length) {
     const known = triageBacklog.filter((entry) => ACTIVITY_FIELDS.some((field) => activityQuote(entry.fields[field] ?? '')));
@@ -1347,14 +1378,22 @@ export async function findIrrelevantRows(input: {
     // numeric registry codes alone. Save that same uncertainty for free and
     // retain the normal website/discovery path, including paid-search gates.
     // Filter before batching so sparse sources do not fragment paid batches.
+    let siteFirst = 0;
     const initial = eligible.filter((entry) => {
+      // 2ГИС: сначала свой сайт (бренд, город, владелец); описание конструктора без сайта не допускает.
+      if (entry.twoGisOnly) {
+        record(entry, { ...errorDecision(VE_TWO_GIS_SITE_FIRST_REASON, entry.attempts), status: 'needs_review' });
+        siteFirst += 1;
+        return false;
+      }
       if (ACTIVITY_FIELDS.some((field) => activityQuote(entry.fields[field] ?? ''))) return true;
       record(entry, { ...errorDecision('Нет сведений о деятельности; требуется подтверждение по сайту.', entry.attempts),
         status: 'needs_review' });
       return false;
     });
     if (initial.length !== eligible.length) {
-      input.log?.('[relevanceGate] без платной первичной классификации: ' + (eligible.length - initial.length) + ' компаний без сведений о деятельности');
+      if (eligible.length - initial.length - siteFirst) input.log?.('[relevanceGate] без платной первичной классификации: ' + (eligible.length - initial.length - siteFirst) + ' компаний без сведений о деятельности');
+      if (siteFirst) input.log?.('[relevanceGate] сначала сайт: ' + siteFirst + ' компаний из справочника организаций');
       await save();
     }
     const unresolved = await runTriage(initial, 'initial');
@@ -1424,23 +1463,25 @@ export async function findIrrelevantRows(input: {
         }
         const companyStartedAt = Date.now();
         const readEvidence = input.fetchEvidence ?? fetchVeRelevanceEvidence;
+        // 2ГИС: читаем сайт своей карточки (как имя и адрес — по строке-получателю), не первый сайт группы.
+        const readWebsite = entry.twoGisRow ? (rowText(entry.twoGisRow, ['website', 'site', 'сайт']) || entry.fields.website) : entry.fields.website;
         let evidence: VeRelevanceEvidence;
         try {
           // Волна ждёт каждую компанию (Promise.all): одна неограниченная
           // компания держала бы всю волну и сохранение без конца. Собственный
           // предел и сигнал задачи — снаружи, какой бы ни была её внутренность.
           evidence = stripUnstorableJsonChars(await withVeDeadline(WEBSITE_COMPANY_DEADLINE_LABEL, WEBSITE_COMPANY_DEADLINE_MS, signal,
-            (companySignal) => readEvidence(entry.fields.website, { signal: companySignal,
-              companyInn: entry.identity, companyName: entry.fields.company,
-              companyAddress: entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean),
+            (companySignal) => readEvidence(readWebsite, { signal: companySignal,
+              companyInn: entry.identity, companyName: entry.twoGisRow ? rowText(entry.twoGisRow, ['company', 'компания']) : entry.fields.company,
+              companyAddress: (entry.twoGisRow && rowText(entry.twoGisRow, ['address', 'адрес'])) || entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean),
               companyEmail: entry.group.rows.map((row) => rowText(row, ['email', 'e-mail', 'почта'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' '),
-              allowPaidSearch: input.allowPaidSearch })));
+              allowPaidSearch: entry.twoGisOnly ? false : input.allowPaidSearch, ...(entry.twoGisOnly ? { sourceSiteOnly: true } : {}) })));
         } catch (error) {
           signal?.throwIfAborted();
           if (!(error instanceof VeOperationTimeoutError) || error.label !== WEBSITE_COMPANY_DEADLINE_LABEL) throw error;
           // Тот же ярлык, что у истёкшего общего дедлайна читателя: компания
           // остаётся в резерве и получает ограниченный повтор (read_error_attempts).
-          evidence = { status: 'unavailable', text: '', url: entry.fields.website, reason: 'website_evidence_timeout', timeout: 'deadline', pages: 0 };
+          evidence = { status: 'unavailable', text: '', url: readWebsite, reason: 'website_evidence_timeout', timeout: 'deadline', pages: 0 };
         }
         input.onActivity?.();
         // Занятость слота снимается ДО throwIfAborted: иначе отменённая волна
@@ -1491,8 +1532,30 @@ export async function findIrrelevantRows(input: {
             ? { read_error_attempts: (cached?.reason === evidence.reason ? cached.read_error_attempts ?? 1 : 0) + 1 } : {}),
         };
         // This write is durably saved below BEFORE the paid refinement call.
+        // 2ГИС: ИНН владельцев — в чекпойнт, чтобы повтор и закешированный проход их не теряли.
+        const ownerInns = entry.twoGisOnly ? (evidence.owner_inns ?? []).filter((inn) => /^\d{10}(\d{2})?$/.test(inn)).slice(0, 10) : [];
+        if (ownerInns.length) checkpoint.website_evidence[entry.key].owner_inns = ownerInns;
+        // 2ГИС: сайт, однажды подтвердивший компанию, неудачное перечтение (ручная проверка, новая версия читателя)
+        // окончательным отказом не делает — сколько бы раз оно ни повторилось: след подтверждения переносится дальше
+        // (в чекпойнте и на вердикте строки — на случай смены контекста).
+        if (entry.twoGisOnly && usable) sourceVerified.add(entry);
+        const siteVerified = entry.twoGisOnly && !usable && (cached?.status === 'ok' || cached?.site_verified === true || sourceVerified.has(entry));
+        if (siteVerified) { checkpoint.website_evidence[entry.key].site_verified = true; sourceVerified.add(entry); }
         record(entry, { ...current.get(entry)!, review_attempts: entry.attempts });
-        if (usable) { entry.fields.website_text = sliceWholeChars(evidence.text, 0, 6000); enriched.push(entry); }
+        // Владелец строки с ИНН — сам ИНН строки (реестр): чтение такой строки на совпадении бренда останавливается.
+        const ipOwner = entry.twoGisOnly && usable
+          && veTwoGisOwnerInnVerdict(entry.identity ? [entry.identity] : ownerInns, input.twoGisAllowIp === true).kind === 'ip_rejected';
+        if (ipOwner) {
+          // record, не stageDecision (10% отказов ушли бы на платную проверку); finishWebsite — иначе текст ждёт
+          // уточнения и платная классификация перепишет отказ.
+          record(entry, { ...current.get(entry)!, status: 'irrelevant', evidence: [], reason: VE_TWO_GIS_IP_SITE_REASON, source_site_final: true });
+          finishWebsite(entry);
+        } else if (entry.twoGisOnly && !usable && evidence.reason !== 'website_evidence_timeout' && !siteVerified) {
+          // Свой сайт не подтвердил компанию или не открылся: поиска для 2ГИС нет, ответ окончательный (таймаут — повтор).
+          // Уже D2: сайт, однажды подтвердивший компанию, при любом числе неудачных перечтений окончательным отказом
+          // не становится — бесплатный needs_review ниже.
+          record(entry, { ...current.get(entry)!, status: 'irrelevant', evidence: [], reason: VE_TWO_GIS_SITE_UNCONFIRMED_REASON, source_site_final: true });
+        } else if (usable) { entry.fields.website_text = sliceWholeChars(evidence.text, 0, 6000); enriched.push(entry); }
         else {
           const decision: VeRelevanceDecision = { ...current.get(entry)!, status: 'needs_review', evidence: [], review_attempts: entry.attempts,
             reason: evidence.reason === 'website_evidence_timeout' ? WEBSITE_TIMEOUT_REASON : WEBSITE_UNCONFIRMED_REASON };
@@ -1595,6 +1658,10 @@ export async function findIrrelevantRows(input: {
       triageStamped = true;
     }
     if (decision.status !== 'error') result.coverage.checkedCompanies += 1;
+    // 2ГИС: из чекпойнта, не из чтения — повтор и закешированный проход сайт не читают, а сверка в BC нужна каждый раз.
+    const owner = entry.twoGisOnly && (decision.status === 'relevant' || decision.status === 'needs_review')
+      ? veTwoGisOwnerInnVerdict(entry.identity ? [entry.identity] : website?.owner_inns, input.twoGisAllowIp === true) : null;
+    if (owner && (owner.kind === 'company' || owner.kind === 'ip_allowed')) for (const index of entry.group.rowIndices) (result.ownerInns ??= new Map()).set(index, owner.inn);
     for (const index of entry.group.rowIndices) {
       result.decisions.set(index, decision);
       if (decision.status === 'irrelevant') result.flagged.add(index);

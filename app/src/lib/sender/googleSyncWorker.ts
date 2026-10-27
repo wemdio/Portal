@@ -182,8 +182,10 @@ export async function syncGoogleWorkspaceMailboxes(
       continue;
     }
 
+    // Имя каталога — только начальное значение для нового ящика. У существующего
+    // имя может прийти из Instantly или быть задано/очищено специалистом:
+    // синк состояния Workspace не должен каждый час заменять его именем Google.
     const patch: Record<string, unknown> = {
-      display_name: user.fullName,
       google_state: state,
       google_account: account,
       directory_synced_at: nowIso,

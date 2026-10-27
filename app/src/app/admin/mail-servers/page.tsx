@@ -39,7 +39,7 @@ export default function AdminMailServersPage() {
   }, [load]);
 
   const addresses = useMemo(() => addressRows(rows, now), [rows, now]);
-  const boxes = addresses.reduce((n, a) => n + (a.kind === 'paused' ? 0 : a.boxes), 0);
+  const boxes = addresses.reduce((n, a) => n + (a.kind === 'client' || a.kind === 'ours' ? a.boxes : 0), 0);
   const clients = new Set(addresses.filter((a) => a.kind === 'client').map((a) => a.who)).size;
 
   return (

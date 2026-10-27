@@ -50,6 +50,11 @@ const DIRECTORY_HOSTS = new Set(['linkedin.com', 'facebook.com', 'instagram.com'
   // UK registers and care, school and credit union directories.
   'charitycommission.gov.uk', 'get-information-schools.service.gov.uk', 'compare-school-performance.service.gov.uk', 'ofsted.gov.uk',
   'cqc.org.uk', 'carehome.co.uk', 'homecare.co.uk', 'ncua.gov', 'mycreditunion.gov', 'creditunionsonline.com',
+  // Swedish, German and EU registers and the directories that copy them.
+  'bolagsverket.se', 'scb.se', 'allabolag.se', 'ratsit.se', 'hitta.se', 'merinfo.se', 'bolagsfakta.se', 'proff.se', 'eniro.se', 'syna.se',
+  'marktstammdatenregister.de', 'bundesnetzagentur.de', 'unternehmensregister.de', 'handelsregister.de', 'online-handelsregister.de',
+  'firmenwissen.de', 'creditreform.de', 'dasoertliche.de', 'gelbeseiten.de', 'wlw.de', 'transparency-register.europa.eu', 'lobbyfacts.eu',
+  'integritywatch.eu',
   'manageo.fr', 'proff.no', 'purehelp.no', '1881.no', 'gulesider.no', 'bizapedia.com', 'manta.com',
   'buzzfile.com', 'yelp.com', 'bbb.org', 'sophymarine.com', 'experian.com', 'ebay.com', 'amazon.com']);
 // Legal-form words: the register says «LTD», the company's own footer «Limited».
@@ -66,7 +71,12 @@ const LEGAL_FORM_PHRASES: readonly string[][] = [
   // Czech, Estonian and Irish forms: «JetBrains s.r.o.», «Veriff OÜ», «Intercom R&D Unlimited Company».
   ['spol', 's', 'r', 'o'], ['s', 'r', 'o'], ['sro'], ['v', 'o', 's'], ['k', 's'], ['oü'], ['ou'], ['unlimited', 'company'],
   ['designated', 'activity', 'company'],
+  // Swedish and German forms: «Fortnox AB (publ)», «Advokatfirman Vinge KB», «… ekonomisk förening», «… e.V.», «… gGmbH».
+  ['publ'], ['aktiebolag'], ['bankaktiebolag'], ['försäkringsaktiebolag'], ['kommanditbolag'], ['kb'], ['handelsbolag'], ['hb'],
+  ['ekonomisk', 'förening'], ['ek', 'för'], ['e', 'v'], ['ev'], ['ggmbh'], ['ohg'], ['kgaa'], ['ug'],
 ];
+// Swedish names may open with the form: «Aktiebolaget Volvo», «Kommanditbolaget Advokaterna Peyron».
+const LEADING_LEGAL_FORMS: ReadonlySet<string> = new Set(['aktiebolaget', 'kommanditbolaget', 'handelsbolaget']);
 
 export type HeEngRegistryResolutionReason = 'confirmed_registry' | 'confirmed_website' | 'invalid_website' |
   'website_not_found' | 'website_search_unavailable' | 'website_unavailable' | 'identity_unconfirmed' |
@@ -106,6 +116,7 @@ function nameWords(value: unknown): string[] {
 /** The legal name without its trailing legal form, for comparing register, catalog and site. */
 function legalNameKey(value: unknown): string {
   const words = nameWords(value);
+  while (words.length > 1 && LEADING_LEGAL_FORMS.has(words[0])) words.shift();
   for (let changed = true; changed && words.length > 1;) {
     changed = false;
     for (const phrase of LEGAL_FORM_PHRASES) {
@@ -146,7 +157,8 @@ function candidateFingerprint(candidate: HeEngRegistryCandidate): string {
     candidate.emails, candidate.description, candidate.sourceUrl,
     // Only some registries carry them; older candidates keep their fingerprint.
     ...(candidate.localRegistryId !== undefined ? [candidate.localRegistryId] : []),
-    ...(candidate.supervisorReference !== undefined ? [{ supervisorReference: candidate.supervisorReference }] : [])]);
+    ...(candidate.supervisorReference !== undefined ? [{ supervisorReference: candidate.supervisorReference }] : []),
+    ...(candidate.vatNumber !== undefined ? [{ vatNumber: candidate.vatNumber }] : [])]);
 }
 function hasRegistryCountry(candidate: HeEngRegistryCandidate): boolean {
   // The adapter validates the record address; never infer country from the
@@ -156,7 +168,7 @@ function hasRegistryCountry(candidate: HeEngRegistryCandidate): boolean {
   // Finnish, Czech, Irish and Estonian registers hold only domestic companies,
   // as do the IRS, NCES and NCUA lists (a mailing address in a US state) and the Charity Commission's (England and Wales).
   return (candidate.addressKind === 'business' ||
-      (['companies_house', 'france', 'pra', 'prh', 'czso', 'cro', 'ariregister', 'irs', 'nces', 'ncua', 'charity_commission'].includes(candidate.provider) &&
+      (['companies_house', 'france', 'pra', 'prh', 'czso', 'cro', 'ariregister', 'irs', 'nces', 'ncua', 'charity_commission', 'scb', 'mastr'].includes(candidate.provider) &&
         candidate.addressKind === 'registered')) &&
     text(candidate.address).length >= 5 &&
     heEngRegistryRecordValid(candidate.provider, candidate.recordId, country(candidate.country), candidate.sourceUrl);
@@ -321,8 +333,11 @@ const ADVISER_THIRD_PARTY = /\b(?:offered|provided|conducted|transacted)\s+(?:th
 // Example Trust, registered charity no. 1062876», «in aid of …», «a subsidiary of …».
 // Not «in partnership with» or «on behalf of»: a charity's own footer says them too («We work in partnership with the NHS»).
 const CHARITY_THIRD_PARTY = /\b(?:in\s+aid\s+of|in\s+support\s+of|proudly\s+support(?:s|ing)|rais(?:e|es|ed|ing)\s+(?:funds|money)\s+for|fundrais\w*\s+(?:for|on\s+behalf\s+of)|proceeds\s+(?:go|goes|will\s+go|are\s+(?:donated|given|going))\s+to|subsidiary\s+of|trading\s+(?:arm|company)\s+of|(?:charity|charitable)\s+partners?|(?:official|chosen|nominated|partner)\s+charity|charity\s+of\s+the\s+year)\b/i;
+// A Swedish shop's, dealer's or subsidiary's footer prints the bank, finance company or parent it names: «faktura och
+// delbetalning via Klarna Bank AB (publ), org.nr 556737-0431», «dotterbolag till AB Volvo (org.nr 556012-5790)».
+const SWEDISH_THIRD_PARTY = /\b(?:faktura|delbetalning|avbetalning|finansiering|betalning(?:ar)?|kredit(?:er)?|leasing|försäkring(?:ar)?)\b[^.]{0,80}?\b(?:via|genom|hos|från|av|med)\b|\b(?:helägt\s+)?dotterbolag\s+(?:till|i|inom)\b|\b(?:i\s+samarbete\s+med|i\s+partnerskap\s+med|ombud\s+för|återförsäljare\s+(?:för|av)|auktoriserad\s+(?:återförsäljare|partner)|tillhandahålls\s+av|levereras\s+av|förmedlas\s+av|in\s+partnership\s+with|subsidiary\s+of|provided\s+by|powered\s+by)\b/i;
 const THIRD_PARTY: Partial<Record<HeEngRegistryCandidate['provider'], RegExp>> = {
-  pra: PRA_THIRD_PARTY, sec_advisers: ADVISER_THIRD_PARTY, charity_commission: CHARITY_THIRD_PARTY,
+  pra: PRA_THIRD_PARTY, sec_advisers: ADVISER_THIRD_PARTY, charity_commission: CHARITY_THIRD_PARTY, scb: SWEDISH_THIRD_PARTY,
 };
 /**
  * A legal block names this entity. With `numberAlone` (the site's own footer) a
@@ -377,6 +392,12 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
     gias: 'urn|unique\\s+reference\\s+number|dfe\\s+(?:no|number)',
     cqc: 'cqc\\s+(?:provider\\s+)?(?:id|registration(?:\\s+(?:no|number))?)',
     ncua: '(?:ncua\\s+)?charter(?:\\s+(?:no|number))?',
+    // «Org.nr 556036-0793», «Organisationsnummer: …», «Corporate identity number …».
+    scb: 'org(?:anisations)?\\.?[\\s-]*(?:nr|nummer|number|no)|corporate\\s+identity\\s+(?:number|no)|company\\s+reg(?:istration)?\\.?\\s*(?:no|number)',
+    // A MaStR number never appears on a site; the commercial register and VAT numbers are matched below.
+    mastr: '(?!)',
+    // A federation's site lists its members' Transparency Register ids; the register's records bring their website.
+    eu_transparency: '(?!)',
   };
   const id = identifierKey(candidate.recordId);
   const thirdParty = THIRD_PARTY[candidate.provider] ?? null;
@@ -466,9 +487,10 @@ const LOCAL_REGISTRY_LABELS = '(?:handelsregister|registernummer|registergericht
 function localRegistryNumber(value: string, candidate: HeEngRegistryCandidate, thirdParty: RegExp | null = null): boolean {
   // ESMA fund managers and PRA banks carry the same GLEIF number, looked up by their LEI;
   // EBA firms the one GLEIF holds for their exact legal name, and their supervisor's reference.
-  // Charities, academy trusts and care providers carry their Companies House number.
-  if (!['gleif', 'esma', 'pra', 'eba', 'charity_commission', 'gias', 'cqc'].includes(candidate.provider)) return false;
-  return [candidate.localRegistryId, candidate.supervisorReference].some(number => {
+  // Charities, academy trusts and care providers carry their Companies House number; German market
+  // actors their commercial register number («HRB 84446») and VAT number.
+  if (!['gleif', 'esma', 'pra', 'eba', 'charity_commission', 'gias', 'cqc', 'mastr'].includes(candidate.provider)) return false;
+  return [candidate.localRegistryId, candidate.supervisorReference, candidate.vatNumber].some(number => {
     const chars = (number ?? '').normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
     if (chars.length < 5 || chars.length > 30) return false;
     // GLEIF keeps a Companies House number padded («01167327»); the site writes

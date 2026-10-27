@@ -9,12 +9,15 @@ import { readHeEngCroRegistryPage } from './engCroRegistry';
 import { readHeEngCzsoRegistryPage } from './engCzsoRegistry';
 import { readHeEngEbaRegistryPage } from './engEbaRegistry';
 import { readHeEngEsmaRegistryPage } from './engEsmaRegistry';
+import { readHeEngEuTransparencyRegistryPage } from './engEuTransparencyRegistry';
 import { readHeEngGiasRegistryPage } from './engGiasRegistry';
 import { readHeEngIrsRegistryPage } from './engIrsRegistry';
+import { readHeEngMastrRegistryPage } from './engMastrRegistry';
 import { readHeEngNcesRegistryPage } from './engNcesRegistry';
 import { readHeEngNcuaRegistryPage } from './engNcuaRegistry';
 import { readHeEngPraRegistryPage } from './engPraRegistry';
 import { readHeEngPrhRegistryPage } from './engPrhRegistry';
+import { readHeEngScbRegistryPage } from './engScbRegistry';
 import { readHeEngSecAdviserRegistryPage } from './engSecAdviserRegistry';
 import { readHeEngSecCompanyRegistryPage } from './engSecCompanyRegistry';
 import { readHeEngWikidataRegistryPage } from './engWikidataRegistry';
@@ -34,11 +37,11 @@ const US_STATES = new Set('AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY
 // Sources with their own readers: engPraRegistry.ts, engEsmaRegistry.ts, engEbaRegistry.ts,
 // engPrhRegistry.ts, engCzsoRegistry.ts, engCroRegistry.ts, engAriregisterRegistry.ts, engWikidataRegistry.ts,
 // engSecCompanyRegistry.ts, engSecAdviserRegistry.ts, engIrsRegistry.ts, engNcesRegistry.ts, engCharityCommissionRegistry.ts,
-// engGiasRegistry.ts, engCqcRegistry.ts, engNcuaRegistry.ts.
+// engGiasRegistry.ts, engCqcRegistry.ts, engNcuaRegistry.ts, engScbRegistry.ts, engMastrRegistry.ts, engEuTransparencyRegistry.ts.
 type WholeListProvider = 'pra' | 'esma' | 'eba' | 'prh' | 'czso' | 'cro' | 'ariregister' | 'wikidata' | 'sec_companies' | 'sec_advisers' | 'irs' | 'nces'
-  | 'charity_commission' | 'gias' | 'cqc' | 'ncua';
+  | 'charity_commission' | 'gias' | 'cqc' | 'ncua' | 'scb' | 'mastr' | 'eu_transparency';
 const WHOLE_LIST_PROVIDERS: ReadonlySet<HeEngRegistryProvider> = new Set<WholeListProvider>(['pra', 'esma', 'eba', 'prh', 'czso', 'cro',
-  'ariregister', 'wikidata', 'sec_companies', 'sec_advisers', 'irs', 'nces', 'charity_commission', 'gias', 'cqc', 'ncua']);
+  'ariregister', 'wikidata', 'sec_companies', 'sec_advisers', 'irs', 'nces', 'charity_commission', 'gias', 'cqc', 'ncua', 'scb', 'mastr', 'eu_transparency']);
 function wholeList(provider: HeEngRegistryProvider): provider is WholeListProvider { return WHOLE_LIST_PROVIDERS.has(provider); }
 const ENDPOINTS: Readonly<Record<Exclude<HeEngRegistryProvider, WholeListProvider>, string>> = {
   brreg: 'https://data.brreg.no/enhetsregisteret/api/enheter',
@@ -445,6 +448,9 @@ export async function readHeEngRegistryPage(task: HeEngRegistryTask, position: n
   if (task.provider === 'gias') return readHeEngGiasRegistryPage(task, position, options);
   if (task.provider === 'cqc') return readHeEngCqcRegistryPage(task, position, options);
   if (task.provider === 'ncua') return readHeEngNcuaRegistryPage(task, position, options);
+  if (task.provider === 'scb') return readHeEngScbRegistryPage(task, position, options);
+  if (task.provider === 'mastr') return readHeEngMastrRegistryPage(task, position, options);
+  if (task.provider === 'eu_transparency') return readHeEngEuTransparencyRegistryPage(task, position, options);
   const raw = await jsonResponse(task, position, options); const body = object(raw);
   let rows: unknown[]; let total: number | null = null;
   switch (task.provider) {

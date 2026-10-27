@@ -243,7 +243,7 @@ import {
   type HeTemplateLaunchInfo,
   type HeTemplateLaunchPending,
 } from './launchHandoff';
-import { HE_ENG_UNVERIFIED_SITE_EMAIL } from './engCollectionTarget';
+import { heEngHeldSiteEmailRow } from './engCollectionTarget';
 import { heCompanySiteIdentity, normalizeCompanyForDedup } from './collectionIdentity';
 
 export type HeLaunchLocale = 'ru' | 'en';
@@ -2036,8 +2036,10 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
         if (gateEmailColumn && String(r[gateEmailColumn] ?? '').trim() === '') return true;
         const verdict = heLaunchEmailVerdict(r._email_status, { allowCatchAll });
         // Marked by the ENG collection (engCollectionTarget): kept in the base,
-        // never sent together with the checked addresses.
-        if (verdict === 'rejected' && allowCatchAll && r._email_unverified === HE_ENG_UNVERIFIED_SITE_EMAIL) {
+        // never sent together with the checked addresses. Re-checked against the
+        // current rule: a marked row it now refuses (www page text, a template,
+        // a complaints or press box) counts as invalid.
+        if (verdict === 'rejected' && allowCatchAll && heEngHeldSiteEmailRow(r)) {
           heldSiteRows.push(r);
           return false;
         }

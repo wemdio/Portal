@@ -104,7 +104,7 @@ export function canRefreshVeAudienceSources(info: RefreshableInfo): boolean {
   return info.collection_mode === 'preview' && !info.refill && !info.campaign_id && !info.supply_batch_id
     && !info.audience_snapshot && (!info.construct || info.construct.status === 'done') && !info.preview_pipeline?.batches.length && !info.adaptive_collection?.pending
     && !info.company_name_recovery && !info.saved_email_recovery?.batch && !info.validation_retry && !info.relevance_review_requested
-    // Отложенный близнец 2ГИС (откат с R3) эта версия не читает — это не незавершённая работа.
+    // Отложенный близнец 2ГИС синхронный и без дочерней задачи: это не незавершённая работа.
     && !info.tasks?.some((task) => !isVeTwoGisTask(task) && (task.status === 'dispatched' || task.status === 'pending'));
 }
 export function needsLegacyFintechAudienceRefresh(info: RefreshableInfo): boolean {

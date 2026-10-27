@@ -13,6 +13,7 @@
  */
 
 import type { VeCollectionTargetProgress } from './collectionTarget';
+import type { VeTwoGisPostponeReason } from './twoGisTwin';
 
 /**
  * Узкая проекция строки ve_bases для входа стадии.
@@ -85,6 +86,31 @@ export function veIdleRequeueMs(
   // Infinity на испорченном счётчике из старого collect_info.
   const grown = floor * 2 ** Math.min(idleRounds, 30);
   return Math.min(cap, Number.isFinite(grown) ? grown : cap);
+}
+
+/**
+ * Шаг сна базы, у которой источник — только отложенный близнец 2ГИС (часть 4). Тихое окно — час, но
+ * не дальше его конца; OutreachOS — 15 мин; прочее (и null — ожидание другой базы после причины) —
+ * границы since+5, +20, +80 мин, дальше каждый час. Лестница считается от since и не хранится:
+ * промежуточные пробуждения ничего не пишут. Всегда не дальше not_before; в пределах [60 с, 60 мин].
+ * Если до not_before остаётся меньше минимального шага после ступени (since с прошлого тика,
+ * not_before — с этого), ждём сразу до not_before: лишнего минутного пробуждения нет.
+ */
+export function veTwoGisSleepMs(input: { reason: VeTwoGisPostponeReason | null; since: string; now: Date; notBefore: Date | null }): number {
+  const now = input.now.getTime();
+  let rung: number;
+  if (input.reason === 'quiet') rung = 60 * 60_000;
+  else if (input.reason === 'outreachos') rung = 15 * 60_000;
+  else {
+    const start = Date.parse(input.since);
+    const elapsed = Number.isFinite(start) ? Math.max(0, now - start) : 0;
+    const next = elapsed < 5 * 60_000 ? 5 * 60_000 : elapsed < 20 * 60_000 ? 20 * 60_000
+      : 80 * 60_000 + (Math.floor((elapsed - 80 * 60_000) / 3_600_000) + 1) * 3_600_000;
+    rung = next - elapsed;
+  }
+  const untilNotBefore = input.notBefore ? input.notBefore.getTime() - now : Infinity;
+  const step = untilNotBefore < rung + 60_000 ? untilNotBefore : rung;
+  return Math.min(3_600_000, Math.max(60_000, step));
 }
 
 /**

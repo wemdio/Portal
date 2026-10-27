@@ -98,6 +98,28 @@ export async function readVeTwoGisSettings(db: SupabaseClient): Promise<VeTwoGis
   return null;
 }
 
+/** Строка 'running' старше этого — зависший прогон (вахтёр снимает такие за ~25 мин): не учитывается. */
+export const VE_OUTREACHOS_RUN_STALE_MS = 12 * 3_600_000;
+
+/**
+ * Идёт ли дневной прогон OutreachOS по общим данным 2ГИС (основная БД, outreachos_pipeline_runs).
+ * Не бросает: сбой чтения — 'unreadable', для вызывающего это «идёт» (близнец ждёт). Читают и
+ * портал (шлюз конструктора, часть 5), и воркер; клиент воркера — сервисный, RLS сотрудников не мешает.
+ */
+export async function readVeOutreachOsRunning(db: SupabaseClient, now: Date): Promise<'idle' | 'running' | 'unreadable'> {
+  let problem: string;
+  try {
+    const { data, error } = await db.from('outreachos_pipeline_runs').select('id').eq('status', 'running')
+      .gte('started_at', new Date(now.getTime() - VE_OUTREACHOS_RUN_STALE_MS).toISOString()).limit(1);
+    if (!error) return Array.isArray(data) && data.length ? 'running' : 'idle';
+    problem = String(error.code ?? 'error');
+  } catch (error) {
+    problem = error instanceof Error ? error.name : 'error';
+  }
+  console.warn(`[ve2-2gis] outreachos status unreadable: ${problem}`);
+  return 'unreadable';
+}
+
 /**
  * Выдача строк 2ГИС проекту. open; closed — аварийное client_use='off' (отсрочка,
  * через сутки близнец закрывается, можно открыть обратно); removed — проект

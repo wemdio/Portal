@@ -90,13 +90,14 @@ async function readDetailPages(
 // Также удаляем checkpoints исключённых кандидатов и relevance-вердиктов; helper используется всеми
 // VE2-ответами, возвращающими карточку сборки, включая идемпотентный collect POST.
 export function stripTaskHarvest(base: Record<string, unknown>): Record<string, unknown> {
-  const info = base.collect_info as { geography_repair?: unknown; restaurant_source_refresh?: unknown; known_website_source?: unknown; audience_source_refresh?: unknown; adaptive_collection?: VeAdaptiveCollection; tasks?: unknown; search_policy?: { version: number; phase: string; deferred_rows?: unknown }; source_contact_recovery?: unknown; project_exclusion_reserve?: unknown; preview_pipeline?: unknown; target_checkpoint?: unknown; relevance_checkpoint?: unknown; relevance_reserve?: unknown; saved_email_recovery?: unknown; company_name_checkpoint?: unknown; company_name_recovery?: unknown } | null | undefined;
+  const info = base.collect_info as { geography_repair?: unknown; restaurant_source_refresh?: unknown; known_website_source?: unknown; audience_source_refresh?: unknown; adaptive_collection?: VeAdaptiveCollection; tasks?: unknown; search_policy?: { version: number; phase: string; deferred_rows?: unknown }; source_contact_recovery?: unknown; project_exclusion_reserve?: unknown; preview_pipeline?: unknown; target_checkpoint?: unknown; relevance_checkpoint?: unknown; relevance_reserve?: unknown; saved_email_recovery?: unknown; company_name_checkpoint?: unknown; company_name_recovery?: unknown; two_gis_source?: unknown } | null | undefined;
   if (!info) return base;
   const tasks = Array.isArray(info.tasks) ? info.tasks : [];
-  const hasHarvest = tasks.some(
-    (t) => t !== null && typeof t === 'object' && 'harvest' in (t as Record<string, unknown>),
-  );
-  if (!hasHarvest && !('target_checkpoint' in info) && !('relevance_checkpoint' in info) && !('relevance_reserve' in info) && !('project_exclusion_reserve' in info)
+  // Курсор близнеца 2ГИС (two_gis: after — card_id) и его отсрочка — тоже рабочее состояние воркера.
+  const hasTaskState = (t: unknown) => t !== null && typeof t === 'object'
+    && ('harvest' in t || 'two_gis' in t || 'two_gis_wait' in t);
+  const anyTaskState = tasks.some(hasTaskState);
+  if (!anyTaskState && !('two_gis_source' in info) && !('target_checkpoint' in info) && !('relevance_checkpoint' in info) && !('relevance_reserve' in info) && !('project_exclusion_reserve' in info)
     && !('geography_repair' in info) && !('restaurant_source_refresh' in info) && !('known_website_source' in info) && !('audience_source_refresh' in info) && !('adaptive_collection' in info) && !('search_policy' in info) && !('source_contact_recovery' in info) && !('saved_email_recovery' in info) && !('company_name_checkpoint' in info) && !('company_name_recovery' in info) && !('preview_pipeline' in info)) return base;
   const publicInfo = { ...info };
   // The repair receipt archives full excluded contacts and source checkpoints.
@@ -118,6 +119,7 @@ export function stripTaskHarvest(base: Record<string, unknown>): Record<string, 
   delete publicInfo.saved_email_recovery;
   delete publicInfo.source_contact_recovery;
   delete publicInfo.company_name_checkpoint;
+  delete publicInfo.two_gis_source;
   // Recovery marker is needed by the collect button but contains no raw contacts.
   return {
     ...base,
@@ -135,9 +137,11 @@ export function stripTaskHarvest(base: Record<string, unknown>): Record<string, 
       // Never send addresses, result hashes or the child job checkpoint in polls.
       ...(emailRecovery ? { saved_email_review_pending: !!emailRecovery.batch && !emailRecovery.error } : {}),
       tasks: tasks.map((t) => {
-        if (t === null || typeof t !== 'object' || !('harvest' in t)) return t;
+        if (!hasTaskState(t)) return t;
         const clone = { ...(t as Record<string, unknown>) };
         delete clone.harvest;
+        delete clone.two_gis;
+        delete clone.two_gis_wait;
         return clone;
       }),
     },

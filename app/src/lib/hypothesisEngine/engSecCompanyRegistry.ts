@@ -63,6 +63,11 @@ function fail(code: string): never { throw new Error(code); }
 function str(raw: unknown, max = 300): string {
   return typeof raw === 'string' ? sliceWholeChars(stripUnstorableJsonChars(raw).replace(/[\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim(), 0, max) : '';
 }
+/** Whether two sectors share SIC codes: every sector shares them with «public companies». */
+export function heEngSecSectorsOverlap(a: string, b: string): boolean {
+  const ranges = (sector: string) => (HE_ENG_SEC_SIC_SECTORS[sector] ?? []).map(code => typeof code === 'number' ? [code, code] as const : code);
+  return ranges(a).some(([low, high]) => ranges(b).some(([from, to]) => low <= to && from <= high));
+}
 export function heEngSecSicInSector(sector: string, sic: number): boolean {
   return !NOT_OPERATING.has(sic) && (HE_ENG_SEC_SIC_SECTORS[sector] ?? []).some(code => typeof code === 'number' ? code === sic : sic >= code[0] && sic <= code[1]);
 }
@@ -130,7 +135,8 @@ export async function readHeEngSecCompanyRegistryPage(task: HeEngRegistryTask, p
   const countries = task.countries ?? [];
   // No headcount in the list: the filer status orders the slice, the company's size is checked later.
   const small = task.maxEmployees !== undefined && task.maxEmployees < SMALL_SCOPE_MAX_EMPLOYEES;
-  const list = (await filers(options)).filter(filer => countries.includes(filer.country) && heEngSecSicInSector(task.category, filer.sic))
+  const list = (await filers(options)).filter(filer => countries.includes(filer.country) && heEngSecSicInSector(task.category, filer.sic) &&
+    !task.exclude?.some(sector => heEngSecSicInSector(sector, filer.sic)))
     .sort((a, b) => ((STATUS_RANK[b.status] ?? 1) - (STATUS_RANK[a.status] ?? 1)) * (small ? -1 : 1) || Number(a.cik) - Number(b.cik));
   const page = list.slice(position, position + PAGE_SIZE);
   return { candidates: page.map(candidate), nextPosition: position + PAGE_SIZE, exhausted: position + page.length >= list.length,

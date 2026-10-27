@@ -12,8 +12,11 @@ import { assertTwoGisDatasetTarget } from '@/lib/twoGis/importGuard';
  * и новый контейнер вместе укладываются в 2), простаивающее закрывается через 2 с.
  * Очередь — свой семафор: ожидание своей очереди не считается сбоем базы, а
  * 3 с на подключение меряют только настоящее подключение. Каждое чтение — одна
- * короткая read-only транзакция. Три сбоя подряд — пауза 10 мин; состояние для
- * health-check пишется в ve_twogis_source_status уже после возврата соединения.
+ * короткая read-only транзакция. Три сбоя базы подряд — пауза 10 мин. Смена
+ * снимка — ответ живой базы: в статусе считается как ошибка (с третьей подряд —
+ * серия для health-check), но паузу не ставит, серию сбоев для паузы обнуляет, а
+ * соединение после отката возвращается в пул. Состояние для health-check пишется
+ * в ve_twogis_source_status уже после возврата соединения.
  */
 export const VE_TWO_GIS_APPLICATION_NAME = 'portal-ve2-2gis';
 export const VE_TWO_GIS_ENV = 'TWOGIS_VE2_DATABASE_URL';
@@ -65,7 +68,10 @@ interface SourceState {
   pool: Pool | null;
   url: string | null;
   verified: boolean;
+  /** Все ошибки подряд, включая смену снимка: для статуса и health-check. */
   consecutiveErrors: number;
+  /** Сбои базы подряд (без смены снимка): только они ставят паузу. */
+  pauseStreak: number;
   errorSince: Date | null;
   pausedUntil: Date | null;
   pauseSetAt: number;
@@ -78,7 +84,7 @@ interface SourceState {
 }
 
 const state: SourceState = {
-  pool: null, url: null, verified: false, consecutiveErrors: 0, errorSince: null, pausedUntil: null, pauseSetAt: 0,
+  pool: null, url: null, verified: false, consecutiveErrors: 0, pauseStreak: 0, errorSince: null, pausedUntil: null, pauseSetAt: 0,
   lastErrorKind: null, lastErrorAt: null, statusSignature: null, statusWrittenAt: 0, statusChain: Promise.resolve(),
   closing: false,
 };
@@ -146,7 +152,10 @@ function recordStatus(db: SupabaseClient | undefined, clock: () => Date): Promis
   state.statusChain = state.statusChain.then(async () => {
     const now = clock().getTime();
     const paused = !!state.pausedUntil && state.pausedUntil.getTime() > now;
-    const signature = state.consecutiveErrors === 0 ? 'ok' : `${state.lastErrorKind}:${paused ? 'paused' : 'error'}`;
+    // Переход в серию (третья ошибка подряд) — тоже смена: без паузы пачка ошибок снимка
+    // иначе записалась бы один раз с n=1, и health-check её не увидел бы.
+    const signature = state.consecutiveErrors === 0 ? 'ok' : `${state.lastErrorKind}:${paused ? 'paused' : 'error'}:`
+      + (state.consecutiveErrors >= PAUSE_AFTER_ERRORS ? 'series' : 'start');
     if (signature === state.statusSignature && now - state.statusWrittenAt < STATUS_REPEAT_MS) return;
     const patch = state.consecutiveErrors === 0
       ? { consecutive_errors: 0, error_since: null, paused_until: null }
@@ -167,11 +176,19 @@ function recordStatus(db: SupabaseClient | undefined, clock: () => Date): Promis
 
 function noteFailure(error: unknown, now: Date): VeTwoGisUnavailableError {
   const kind = classifyVeTwoGisError(error);
+  // Смена снимка и сбои базы — разные серии статуса: переход между ними начинает счёт заново.
+  if (state.consecutiveErrors > 0 && (kind === 'snapshot') !== (state.lastErrorKind === 'snapshot')) {
+    state.consecutiveErrors = 0;
+    state.errorSince = null;
+  }
   state.consecutiveErrors += 1;
   state.errorSince ??= now;
   state.lastErrorKind = kind;
   state.lastErrorAt = now;
-  if (state.consecutiveErrors >= PAUSE_AFTER_ERRORS) {
+  // Смена снимка — ответ базы: паузу не ставит и серию сбоев обнуляет, так что каждый
+  // близнец на своём первом чтении получает 'snapshot' и уходит, а не 'paused'.
+  state.pauseStreak = kind === 'snapshot' ? 0 : state.pauseStreak + 1;
+  if (state.pauseStreak >= PAUSE_AFTER_ERRORS) {
     state.pausedUntil = new Date(now.getTime() + PAUSE_MS);
     state.pauseSetAt = now.getTime();
   }
@@ -184,6 +201,7 @@ function noteSuccess(started: Date): void {
   // Успех чтения, начатого до последней паузы, не снимает паузу от более новых сбоев.
   if (started.getTime() < state.pauseSetAt) return;
   state.consecutiveErrors = 0;
+  state.pauseStreak = 0;
   state.errorSince = null;
   state.pausedUntil = null;
 }
@@ -236,15 +254,26 @@ export async function withVeTwoGisReadOnly<T>(fn: (client: PoolClient) => Promis
     await client.query('COMMIT');
     outcome = { ok: true, value };
   } catch (error) {
-    // ROLLBACK не шлём: соединение после ошибки уничтожается, сервер откатит сам,
-    // а на зависшем сокете ROLLBACK встал бы в очередь за запросом.
-    broken ??= error instanceof Error ? error : new Error(String(error));
+    if (error instanceof VeTwoGisSnapshotError && client && !broken) {
+      // Смена снимка: запросы ответили, сокет цел — откатываем и возвращаем соединение
+      // в пул. Не вышел откат — соединение уничтожается, как после любого сбоя.
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        broken ??= rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
+      }
+    } else {
+      // ROLLBACK не шлём: соединение после ошибки уничтожается, сервер откатит сам,
+      // а на зависшем сокете ROLLBACK встал бы в очередь за запросом.
+      broken ??= error instanceof Error ? error : new Error(String(error));
+    }
     outcome = { ok: false, error: noteFailure(error, now()) };
   } finally {
     try {
       if (client) {
         client.removeListener('error', onClientError);
-        // Соединение после ошибки не возвращаем в пул: оно могло остаться в странном состоянии.
+        // Соединение после сбоя (broken) не возвращаем в пул: оно могло остаться в странном
+        // состоянии. Без broken — успех или откат после смены снимка.
         client.release(broken);
       }
     } finally {

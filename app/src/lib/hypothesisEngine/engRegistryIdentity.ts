@@ -83,6 +83,15 @@ export function heEngRegistryRecordValid(provider: unknown, id: unknown, country
     case 'cqc': return country === 'united kingdom' && /^1-\d{6,12}$/.test(id) && url.href === `https://www.cqc.org.uk/provider/${id}`;
     // A US credit union by its NCUA charter number on the NCUA locator.
     case 'ncua': return country === 'united states' && /^\d{1,8}$/.test(id) && url.href === `https://mapping.ncua.gov/CreditUnionDetails/${id}`;
+    // A Swedish company by its organisation number on Bolagsverket's company page, which its legal form also keys.
+    case 'scb': return country === 'sweden' && /^\d{10}$/.test(id) &&
+      /^https:\/\/foretagsinfo\.bolagsverket\.se\/sok-foretagsinformation-web\/foretag\/(\d{10})\/foretagsform\/[A-Z]{1,5}$/.exec(url.href)?.[1] === id;
+    // A German market actor by its MaStR number: the register's public list filtered to that number.
+    case 'mastr': return country === 'germany' && /^[A-Z]{3}9\d{11}$/.test(id) &&
+      url.href === `https://www.marktstammdatenregister.de/MaStR/Akteur/Marktakteur/IndexOeffentlich?filter=MaStR-Nr.~eq~%27${id}%27`;
+    // An organisation in the EU Transparency Register by its identification number; the country comes from its head office.
+    case 'eu_transparency': return engCountry(country) && /^\d{9,15}-\d{2}$/.test(id) &&
+      url.href === `https://transparency-register.europa.eu/search-register-or-update/organisation-detail_en?id=${id}`;
     // Global sources: the country comes from the record itself (GLEIF headquarters,
     // or the OpenStreetMap country boundary containing the premises).
     case 'gleif': return engCountry(country) && validLei(id) && url.href === `https://api.gleif.org/api/v1/lei-records/${id}`;

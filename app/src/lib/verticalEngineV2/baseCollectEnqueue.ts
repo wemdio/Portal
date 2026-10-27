@@ -196,6 +196,9 @@ async function resumeFailedPreview(
     ...(refreshAudience ? { audience_scope_refresh_requested: true,
       cost_policy: { version: 1, website_discovery: 'existing_only' } } : {}),
   };
+  // 2ГИС (часть 4): база упала во сне (финальный fail воркера collect_info не трогает) — метку снимаем;
+  // близнецы с курсором и отсрочкой остаются как есть, отсрочка истекает сама.
+  delete (info as { two_gis_sleep?: unknown }).two_gis_sleep;
   if (refreshGeography) {
     try {
       const prepared = prepareVeGeographyRepairContinuation(info);

@@ -116,15 +116,22 @@ export function freshness(receivedAt: string, now: Date): Freshness {
   return 'silent';
 }
 
-export type IpKind = 'ours' | 'client' | 'paused' | 'idle';
+export type IpKind = 'ours' | 'client' | 'pending' | 'paused' | 'idle';
 
-/** Что на адресе: наши неименные ящики (теги «пилот-…»), ящики клиента, всё на паузе или пусто. */
+/**
+ * Что на адресе: ящики клиента, наши неименные (теги «пилот-…»), ещё не подключённые к Instantly, всё на паузе
+ * или пусто. Ящики без тега — не «наши неименные»: так выглядит новый клиент до импорта (mail-client-3, 27.10).
+ */
 export function ipKind(ip: MailIp): IpKind {
   const boxes = ip.domains.reduce((s, d) => s + d.boxes, 0);
   if (boxes === 0) return 'idle';
   if (ip.domains.every((d) => d.paused === d.boxes)) return 'paused';
-  return ip.domains.some((d) => d.tag && !d.tag.toLowerCase().startsWith('пилот')) ? 'client' : 'ours';
+  if (ip.domains.some((d) => d.tag && !d.tag.toLowerCase().startsWith('пилот'))) return 'client';
+  return ip.domains.some((d) => d.tag) ? 'ours' : 'pending';
 }
+
+/** Порядок слотов и серверов: клиенты, ждущие подключения, наши, пауза, пустые. */
+export const KIND_ORDER: Record<IpKind, number> = { client: 0, pending: 1, ours: 2, paused: 3, idle: 4 };
 
 /** Клиенты на адресе — по тегам ящиков; для наших неименных пусто. */
 export function ipClients(ip: MailIp): string[] {
@@ -169,7 +176,15 @@ export interface AddressRow {
   tags: MailTag[];
 }
 
-const KIND_ORDER: Record<IpKind, number> = { client: 0, ours: 1, paused: 2, idle: 3 };
+const WHO: Record<Exclude<IpKind, 'client'>, string> = {
+  ours: 'Наши неименные',
+  pending: 'Ещё не в Instantly',
+  paused: 'Наши, на паузе',
+  idle: 'Свободный адрес',
+};
+
+/** Ящики адреса, которые ждут импорта в Instantly (pending.txt сервера). */
+const waitingOn = (ip: MailIp) => ip.domains.reduce((n, d) => n + d.pending, 0);
 
 function silentFor(receivedAt: string, now: Date): string {
   const min = Math.round((now.getTime() - new Date(receivedAt).getTime()) / 60_000);
@@ -200,6 +215,10 @@ export function addressRows(rows: MailServerRow[], now: Date): AddressRow[] {
       } else if (listedHere) {
         state = 'warn';
         stateText = `${listedHere} дом. в чёрных списках`;
+      } else if (kind === 'pending') {
+        const waiting = waitingOn(ip);
+        state = waiting ? 'off' : 'warn';
+        stateText = waiting ? `${waiting} ящ. ждут подключения` : 'нет тега в Instantly — бот их не проверяет';
       } else if (broken) {
         state = 'warn';
         stateText = `${broken} ящ. с ошибкой в Instantly`;
@@ -211,7 +230,7 @@ export function addressRows(rows: MailServerRow[], now: Date): AddressRow[] {
         pos,
         ip: ip.ip,
         ptr: ip.ptr,
-        who: kind === 'client' ? clients.join(', ') : kind === 'ours' ? 'Наши неименные' : kind === 'paused' ? 'Наши, на паузе' : 'Свободный адрес',
+        who: kind === 'client' ? clients.join(', ') : WHO[kind],
         kind,
         boxes: ip.domains.reduce((n, d) => n + d.boxes, 0),
         server: r.server.label,
@@ -271,6 +290,12 @@ export function attentionItems(rows: MailServerRow[], now: Date): AttentionItem[
     }
     for (const t of r.instantly.tags) {
       if (t.problems.length) items.push({ level: 'warn', text: `${name}, «${t.label}»: ${t.problems.length} ящ. с ошибкой в Instantly` });
+    }
+    for (const ip of r.ips) {
+      if (ipKind(ip) === 'pending' && !waitingOn(ip)) {
+        const n = ip.domains.reduce((s, d) => s + d.boxes, 0);
+        items.push({ level: 'warn', text: `${name}, ${ip.ip}: ${n} ящ. без тега в Instantly — бот их не проверяет` });
+      }
     }
     if (r.server.disk_used_pct >= 80) items.push({ level: 'warn', text: `${name}: диск занят на ${r.server.disk_used_pct}%` });
     if (r.server.queue >= 100) items.push({ level: 'warn', text: `${name}: в очереди ${r.server.queue} писем` });

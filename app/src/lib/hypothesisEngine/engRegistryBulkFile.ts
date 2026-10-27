@@ -200,24 +200,55 @@ export async function readHeEngRegistryRemoteZipDirectory(url: string, options: 
   let eocd = -1;
   for (let i = tail.bytes.length - 22; i >= 0; i -= 1) if (tail.bytes.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
   if (eocd < 0) fail();
-  const directorySize = tail.bytes.readUInt32LE(eocd + 12);
-  const directoryOffset = tail.bytes.readUInt32LE(eocd + 16);
-  // ZIP64 offsets (archives of 4 GB and more) are not read; a ZIP64 entry count alone is fine (the directory is walked by size).
-  if (directorySize === 0xffffffff || directoryOffset === 0xffffffff || directoryOffset + directorySize > tail.total) fail();
+  let directorySize = tail.bytes.readUInt32LE(eocd + 12);
+  let directoryOffset = tail.bytes.readUInt32LE(eocd + 16);
+  // An archive of 4 GB and more (MaStR's daily export is 3.3 GB and growing) keeps them in the ZIP64 end record, which
+  // the locator just before the end record points to. A ZIP64 entry count alone is fine: the directory is walked by size.
+  if (directorySize === 0xffffffff || directoryOffset === 0xffffffff) {
+    const locator = eocd - 20;
+    if (locator < 0 || tail.bytes.readUInt32LE(locator) !== 0x07064b50) fail();
+    const recordOffset = Number(tail.bytes.readBigUInt64LE(locator + 8));
+    if (!Number.isSafeInteger(recordOffset) || recordOffset + 56 > tail.total) fail();
+    const record = recordOffset >= tailStart && recordOffset - tailStart + 56 <= tail.bytes.length
+      ? tail.bytes.subarray(recordOffset - tailStart, recordOffset - tailStart + 56)
+      : (await rangeBytes(url, recordOffset, recordOffset + 55, options)).bytes;
+    if (record.readUInt32LE(0) !== 0x06064b50) fail();
+    directorySize = Number(record.readBigUInt64LE(40)); directoryOffset = Number(record.readBigUInt64LE(48));
+  }
+  if (!Number.isSafeInteger(directoryOffset + directorySize) || directoryOffset + directorySize > tail.total) fail();
   const directory = directoryOffset >= tailStart
     ? tail.bytes.subarray(directoryOffset - tailStart, directoryOffset - tailStart + directorySize)
     : (await rangeBytes(url, directoryOffset, directoryOffset + directorySize - 1, options)).bytes;
   const entries = new Map<string, HeEngRegistryRemoteZipEntry>();
   for (let pos = 0; pos + 46 <= directory.length;) {
     if (directory.readUInt32LE(pos) !== 0x02014b50) fail();
-    const nameLength = directory.readUInt16LE(pos + 28);
+    const nameLength = directory.readUInt16LE(pos + 28); const extraLength = directory.readUInt16LE(pos + 30);
     const name = directory.subarray(pos + 46, pos + 46 + nameLength).toString('utf8');
     if (keep(name)) {
       if (entries.has(name)) fail();
-      entries.set(name, { method: directory.readUInt16LE(pos + 10), crc: directory.readUInt32LE(pos + 16), compressed: directory.readUInt32LE(pos + 20),
-        size: directory.readUInt32LE(pos + 24), offset: directory.readUInt32LE(pos + 42) });
+      let size = directory.readUInt32LE(pos + 24); let compressed = directory.readUInt32LE(pos + 20); let offset = directory.readUInt32LE(pos + 42);
+      // ZIP64: a full 4-byte field's value is in extra field 0x0001, 8 bytes each, in the order size, compressed size, offset.
+      if (size === 0xffffffff || compressed === 0xffffffff || offset === 0xffffffff) {
+        const extraEnd = Math.min(directory.length, pos + 46 + nameLength + extraLength);
+        for (let at = pos + 46 + nameLength; at + 4 <= extraEnd;) {
+          const id = directory.readUInt16LE(at); const length = directory.readUInt16LE(at + 2);
+          if (id === 0x0001) {
+            let field = at + 4;
+            const next = (): number => {
+              if (field + 8 > Math.min(extraEnd, at + 4 + length)) fail();
+              const value = Number(directory.readBigUInt64LE(field)); field += 8; return value;
+            };
+            if (size === 0xffffffff) size = next();
+            if (compressed === 0xffffffff) compressed = next();
+            if (offset === 0xffffffff) offset = next();
+            break;
+          }
+          at += 4 + length;
+        }
+      }
+      entries.set(name, { method: directory.readUInt16LE(pos + 10), crc: directory.readUInt32LE(pos + 16), compressed, size, offset });
     }
-    pos += 46 + nameLength + directory.readUInt16LE(pos + 30) + directory.readUInt16LE(pos + 32);
+    pos += 46 + nameLength + extraLength + directory.readUInt16LE(pos + 32);
   }
   return { entries, end: directoryOffset };
 }

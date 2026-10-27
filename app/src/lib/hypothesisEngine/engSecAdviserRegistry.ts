@@ -33,7 +33,7 @@ const PAGE_SIZE = 25;
 // An organisation's own website is the one to check; these are profiles, filings, link pages and donation platforms.
 // Registers and directories the UK lists name instead of a site (charitycommission.gov.uk, carehome.co.uk) are no site
 // either: the organisation is then searched, not dropped.
-const NOT_OWN_SITE = /(?:^|\.)(?:facebook|linkedin|twitter|x|instagram|youtube|vimeo|tiktok|pinterest|yelp|google|medium|bit|tinyurl)\.(?:com|ly)$|(?:^|\.)(?:sec\.gov|finra\.org|irs\.gov|linktr\.ee|guidestar\.org|candid\.org|propublica\.org|charitynavigator\.org|causeiq\.com|givebutter\.com|gofundme\.com|paypal\.com|eventbrite\.com|networkforgood\.org|classy\.org|donorbox\.org|charitycommission\.gov\.uk|cqc\.org\.uk|get-information-schools\.service\.gov\.uk|company-information\.service\.gov\.uk|ncua\.gov|mycreditunion\.gov|carehome\.co\.uk|homecare\.co\.uk|ofsted\.gov\.uk|enthuse\.com|justgiving\.com|virginmoneygiving\.com|localgiving\.org|totalgiving\.co\.uk|crowdfunder\.co\.uk)$|^(?:www\.)?gov\.uk$/;
+const NOT_OWN_SITE = /(?:^|\.)(?:facebook|linkedin|twitter|x|instagram|youtube|vimeo|tiktok|pinterest|yelp|google|medium|bit|tinyurl)\.(?:com|ly)$|(?:^|\.)(?:sec\.gov|finra\.org|irs\.gov|linktr\.ee|guidestar\.org|candid\.org|propublica\.org|charitynavigator\.org|causeiq\.com|givebutter\.com|gofundme\.com|paypal\.com|eventbrite\.com|networkforgood\.org|classy\.org|donorbox\.org|charitycommission\.gov\.uk|cqc\.org\.uk|get-information-schools\.service\.gov\.uk|company-information\.service\.gov\.uk|ncua\.gov|mycreditunion\.gov|carehome\.co\.uk|homecare\.co\.uk|ofsted\.gov\.uk|marktstammdatenregister\.de|bundesnetzagentur\.de|bolagsverket\.se|allabolag\.se|transparency-register\.europa\.eu|lobbyfacts\.eu|enthuse\.com|justgiving\.com|virginmoneygiving\.com|localgiving\.org|totalgiving\.co\.uk|crowdfunder\.co\.uk)$|^(?:www\.)?gov\.uk$/;
 // «no.website», «none.co.uk», «website.co.uk»: a placeholder typed into the field, someone else's domain.
 const PLACEHOLDER_LABELS = new Set(['none', 'no', 'nil', 'website', 'web', 'tbc', 'unknown', 'null', 'example', 'test', 'nowebsite', 'noweb']);
 // A home page; anything deeper is a page on someone's site («habitat.org/us-ca/…» for a chapter, a campus under its university).
@@ -68,6 +68,27 @@ export function heEngListedWebsite(raw: string, options: { home?: boolean } = {}
       (options.home && (!HOME_PATH.test(url.pathname) || url.search))) return '';
     return `${url.protocol}//${host}`;
   } catch { return ''; }
+}
+/** A website's host without «www.»: one organisation's site, whatever its paths. */
+export function heEngSiteHost(site: string): string {
+  try { return new URL(site).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; }
+}
+// Role mailboxes: on the parent domain only these are the organisation's.
+const ROLE_MAILBOX = /^(?:info|office|enquir(?:y|ies)|admin|hello|contact|mail|general|reception|secretary|clerk|team|support|accounts|finance|fundraising|donations?)@/;
+/**
+ * A register's e-mail when it is on the organisation's own website host or, for
+ * a role mailbox, that host's parent domain: cclp@hermes.cam.ac.uk and
+ * jd123@cam.ac.uk are people's university mailboxes, not cclp.group.cam.ac.uk's.
+ * Small organisations often give a trustee's or an owner's personal address.
+ */
+export function heEngSiteEmail(raw: string, site: string): string {
+  const email = raw.trim().toLowerCase();
+  const at = email.lastIndexOf('@');
+  if (!site || at < 1 || !/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,63}$/.test(email)) return '';
+  const mailHost = email.slice(at + 1); const host = heEngSiteHost(site);
+  // The parent must still be the organisation's registrable domain, not a public suffix.
+  return host && heCompanySiteIdentity(mailHost)?.registrable === heCompanySiteIdentity(site)?.registrable &&
+    (mailHost === host || (host.endsWith(`.${mailHost}`) && ROLE_MAILBOX.test(email))) ? email : '';
 }
 const LEGAL_WORDS = new Set(['the', 'and', 'of', 'llc', 'inc', 'incorporated', 'ltd', 'limited', 'llp', 'lp', 'plc', 'corp', 'corporation', 'co', 'company', 'sa', 'ag', 'gmbh']);
 const COMMON_WORDS = new Set([...LEGAL_WORDS, 'group', 'capital', 'management', 'advisors', 'advisers', 'advisory', 'investment', 'investments',

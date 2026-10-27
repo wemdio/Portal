@@ -39,6 +39,12 @@ export interface VeCollectTask {
   source?: string;
   status?: string;
   rows?: number;
+  /** Только у близнеца 2ГИС базы с флагом (срез public_info): закрыт, исчерпан, у потолка, пояснение, причина отсрочки. */
+  unavailable?: boolean;
+  exhausted?: boolean;
+  hit_ceiling?: boolean;
+  note?: string;
+  postponed?: string;
 }
 
 /**
@@ -138,6 +144,8 @@ export interface VeCollectInfo {
   target_progress?: import('@/lib/verticalEngineV2/collectionTarget').VeCollectionTargetProgress;
   /** Более ранняя база проекта, которую ждёт этот сбор. */
   waiting_for_base_id?: string | null;
+  /** База ждёт справочник организаций: с какого времени и почему (причина на момент засыпания). */
+  two_gis_sleep?: { since?: string; reason?: string } | null;
   /** Снимок обработки; не означает, что итоговая база уже сохранена. */
   construct?: {
     status?: string;
