@@ -1915,6 +1915,38 @@ async function backfillEmptyDialogs(
 
 export type TraceContext = { requestId: string };
 
+/** Как часто дочитывать список своих аккаунтов, пока кампания идёт. */
+const FLEET_REFRESH_MS = 10 * 60_000;
+const FLEET_PAGE = 1000;
+
+/**
+ * tg_user_id всех наших аккаунтов: во всех кампаниях и все напарники по
+ * прогреву (в том числе удалённые из портала). Чат с любым из них — прогрев,
+ * а не лид.
+ *
+ * 27.10.2026 аккаунт прогрели в «Polza Agency» и перенесли в «Lachestry».
+ * Своими тогда считались только аккаунты этой же кампании — напарники по
+ * прогреву оказались чужими: их чаты попали в «Диалоги» и в статистику
+ * («ответы», «требуют внимания»), а разбор 22 непрочитанных прогревочных чатов
+ * на минуты задержал первую рассылку по новой базе.
+ */
+async function loadFleetTgUserIds(db: SupabaseClient): Promise<Set<number>> {
+  const ids = new Set<number>();
+  for (const table of ['tg_outreach_accounts', 'tg_outreach_warmup_peers'] as const) {
+    for (let from = 0; ; from += FLEET_PAGE) {
+      const { data, error } = await db.from(table).select('tg_user_id')
+        .not('tg_user_id', 'is', null).order('tg_user_id').range(from, from + FLEET_PAGE - 1);
+      if (error) throw new Error(`${table}: ${error.message}`);
+      for (const row of (data ?? []) as Array<{ tg_user_id: number | string | null }>) {
+        const id = Number(row.tg_user_id);
+        if (Number.isFinite(id) && id > 0) ids.add(id);
+      }
+      if ((data ?? []).length < FLEET_PAGE) break;
+    }
+  }
+  return ids;
+}
+
 export async function runCampaignLoop(
   campaignId: string,
   db: SupabaseClient,
@@ -2087,7 +2119,8 @@ export async function runCampaignLoop(
     .eq('is_active', true);
 
   /**
-   * Собственные аккаунты кампании — ВСЕ, а не только те, кто сейчас в круге.
+   * Собственные аккаунты — ВСЕ, а не только те, кто сейчас в круге, и не
+   * только этой кампании (см. loadFleetTgUserIds).
    *
    * После прогрева (см. warmup/) у аккаунтов остаются диалоги друг с другом, и
    * без этого фильтра боевой цикл принимает свой же аккаунт за лида:
@@ -2104,15 +2137,14 @@ export async function runCampaignLoop(
    * Поэтому спрашиваем базу отдельно и без единого условия: своим аккаунт
    * остаётся независимо от того, включён он, греется или стоит на паузе.
    */
-  const { data: ownRows } = await db
-    .from('tg_outreach_accounts')
-    .select('tg_user_id')
-    .eq('campaign_id', campaignId);
-  const ownTgUserIds = new Set(
-    ((ownRows ?? []) as Array<{ tg_user_id: number | null }>)
-      .map((a) => a.tg_user_id)
-      .filter((v): v is number => typeof v === 'number'),
-  );
+  let ownTgUserIds = new Set<number>();
+  try {
+    ownTgUserIds = await loadFleetTgUserIds(db);
+  } catch (err) {
+    log('warning', `Не загрузил список своих аккаунтов: ${err instanceof Error ? err.message : String(err)} — повторю через ${FLEET_REFRESH_MS / 60_000} мин`);
+  }
+  // Не загрузился — повторим в первом же витке, а не через десять минут.
+  let fleetRefreshedAt = ownTgUserIds.size ? Date.now() : 0;
 
   /**
    * Порядок обхода — «кого дольше всех не брали, тот первый».
@@ -2388,6 +2420,15 @@ export async function runCampaignLoop(
       tick();
       try { fs.writeFileSync('/tmp/tg-outreach-heartbeat', Date.now().toString()); } catch { /* */ }
       await refreshSettings();
+      // Новые аккаунты и напарники по прогреву появляются, пока кампания идёт.
+      if (Date.now() - fleetRefreshedAt > FLEET_REFRESH_MS) {
+        fleetRefreshedAt = Date.now();
+        try {
+          for (const id of await loadFleetTgUserIds(db)) ownTgUserIds.add(id);
+        } catch (err) {
+          log('warning', `Не обновил список своих аккаунтов: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
 
       if (isInSleepPeriod(tg.sleep_periods, tg.timezone_offset)) {
         if (!inSleepPeriod) {
