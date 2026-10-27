@@ -28,7 +28,7 @@ const stamp = (e: { timestamp_email?: string; timestamp_created?: string }) =>
   Date.parse(e.timestamp_email ?? e.timestamp_created ?? '') || 0;
 
 /** Include actual correspondence so the new CC recipient can take over. */
-function withHistory(text: string, history: string): string {
+export function withHistory(text: string, history: string): string {
   return `${text}\n\n${history.slice(-20_000).split(/\r?\n/).map(line => `> ${line}`).join('\n')}`;
 }
 function ccFor(settings: AgencyHandoffSettings, sender: string, lead: string): string[] {
@@ -43,6 +43,11 @@ async function patch(db: SupabaseClient, id: string, values: Record<string, unkn
 }
 
 async function queueSender(db: SupabaseClient, row: HandoffRow, settings: AgencyHandoffSettings): Promise<void> {
+  // Переписку вёл квалифицирующий ИИ: его последнее письмо уже представило коллегу.
+  const { data: aiConversation, error: aiError } = await db.from('sender_ai_conversations')
+    .select('recipient_id').eq('recipient_id', row.recipient_id!).maybeSingle();
+  if (aiError) throw new Error(aiError.message);
+  if (aiConversation) throw new SkipHandoff('Переписку вёл ИИ');
   const [recipientResult, replyResult, manualResult, messagesResult, folderResult, latestResult] = await Promise.all([
     db.from('sender_recipients').select('email, campaign_id, mailbox_id, status, lead_verdict, lead_verdict_source, sender_mailboxes(email)')
       .eq('id', row.recipient_id!).maybeSingle(),

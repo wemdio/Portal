@@ -78,7 +78,6 @@ export const commonDictionary = {
   },
   login:         { ru: 'Вход',            en: 'Login',           de: 'Anmeldung',       fr: 'Connexion',        es: 'Inicio de sesión', it: 'Accesso' },
   maintenance:   { ru: 'Обновление портала', en: 'Portal maintenance', de: 'Portal-Wartung', fr: 'Maintenance du portail', es: 'Mantenimiento del portal', it: 'Manutenzione del portale' },
-  reviewBase:    { ru: 'Просмотр базы',   en: 'Database review', de: 'Datenbankprüfung', fr: 'Revue de la base', es: 'Revisión de base', it: 'Revisione database' },
   projects:      { ru: 'Проекты',         en: 'Projects',        de: 'Projekte',        fr: 'Projets',          es: 'Proyectos',        it: 'Progetti' },
   settings:      { ru: 'Настройки',       en: 'Settings',        de: 'Einstellungen',   fr: 'Paramètres',       es: 'Configuración',    it: 'Impostazioni' },
   regulation:    { ru: 'Регламент',       en: 'Regulation',      de: 'Regelwerk',       fr: 'Règlement',        es: 'Reglamento',       it: 'Regolamento' },

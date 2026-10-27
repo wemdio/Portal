@@ -81,7 +81,6 @@ function isPublicApiPath(p: string): boolean {
     p.startsWith('/api/bench/') ||
     p.startsWith('/api/telegram/verify') ||
     p.startsWith('/api/telegram/link') ||
-    p.startsWith('/api/database-review/guest/') ||
     p.startsWith('/api/lead-board/') || // гостевая таблица лидов — auth по токену
     p === '/api/mail-servers/heartbeat' || // отчёты почтовых серверов — auth по токену серверов в самом роуте
     p.startsWith('/api/cron/')
@@ -318,7 +317,6 @@ export async function middleware(request: NextRequest) {
       pathname.startsWith('/api/signup') ||
       pathname.startsWith('/api/telegram/verify') ||
       pathname.startsWith('/api/telegram/link') ||
-      pathname.startsWith('/review/base/') ||
       pathname.startsWith('/leads-board/')
 
     if (!user && !isPublicPath) {
@@ -571,7 +569,6 @@ export async function middleware(request: NextRequest) {
         pathname === '/maintenance' ||
         pathname === '/consent' ||
         pathname === '/privacy' ||
-        pathname.startsWith('/review/base/') ||
         pathname.startsWith('/leads-board/')
       if (!clientAllowed) {
         return NextResponse.redirect(new URL('/client', request.url))

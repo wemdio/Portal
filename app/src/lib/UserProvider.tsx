@@ -280,24 +280,14 @@ export function UserProvider({
     let cancelled = false;
     void (async () => {
       try {
-        const [toolsRes, submittedRes, reworkRes, notifRes] = await Promise.all([
+        const [toolsRes, notifRes] = await Promise.all([
           authFetch('/api/user/tools').then((r) => r.json()).catch(() => ({ toolIds: [] })),
-          authFetch('/api/database-review/requests?status=submitted').then((r) => r.json()).catch(() => ({ requests: [] })),
-          authFetch('/api/database-review/requests').then((r) => r.json()).catch(() => ({ requests: [] })),
           authFetch('/api/notifications').then((r) => r.json()).catch(() => ({ unread_count: 0 })),
         ]);
         if (cancelled) return;
         const tools = (toolsRes.toolIds ?? []) as string[];
         setVisibleTools(tools);
         setUnreadNotifications(notifRes.unread_count ?? 0);
-        const reworkStatuses = new Set(['needs_rework', 'client_requested_changes']);
-        const reworkCount = ((reworkRes.requests ?? []) as Array<{ status: string }>).filter(
-          (r) => reworkStatuses.has(r.status),
-        ).length;
-        setBadges({
-          'review-count': tools.includes('database-review') ? (submittedRes.requests ?? []).length : 0,
-          'rework-count': reworkCount,
-        });
       } catch (err) {
         console.error('[UserProvider] Failed to load user tools/badges:', err);
       }

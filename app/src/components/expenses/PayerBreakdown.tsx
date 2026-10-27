@@ -101,10 +101,13 @@ export default function PayerBreakdown({
           <div className="space-y-1.5">
             {withBars.map((item) => (
               <div key={rowKey(item)} className="flex items-center gap-2">
-                <span className="w-32 shrink-0 truncate text-xs text-zinc-700 sm:w-44" title={item.payerName}>
+                {/* Название плательщика важнее длины полосы: делят ширину 2 : 3
+                    (27.10.2026), а не узкая фиксированная колонка против
+                    полосы на всё остальное — «ОБЩЕСТВО С ОГРАНИЧЕН…» не читалось. */}
+                <span className="min-w-[8rem] flex-[2] truncate text-xs text-zinc-700" title={item.payerName}>
                   {item.payerName}
                 </span>
-                <span className="h-3.5 flex-1 rounded bg-zinc-100">
+                <span className="h-3.5 flex-[3] rounded bg-zinc-100">
                   <span
                     className="block h-3.5 rounded bg-emerald-700"
                     style={{ width: max > 0 ? `${(item.total / max) * 100}%` : '0%' }}

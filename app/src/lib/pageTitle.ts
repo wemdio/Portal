@@ -86,7 +86,6 @@ export function getPortalPageSectionTitle(pathname: string | null, locale: Local
     return dict(commonDictionary.login, locale);
   }
   if (pathname === '/maintenance') return dict(commonDictionary.maintenance, locale);
-  if (pathname.startsWith('/review/')) return dict(commonDictionary.reviewBase, locale);
 
   const norm = normalizePathnameForNav(pathname);
 

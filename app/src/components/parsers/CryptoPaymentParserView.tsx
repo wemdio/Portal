@@ -6,6 +6,7 @@ import { Loader2, Download, FileSpreadsheet, CirclePause, Trash2, Play, Info } f
 import { saveAs } from 'file-saver';
 import { supabase } from '@/lib/supabaseClient';
 import { readApiError } from '@/lib/apiError';
+import { decodeTextSpreadsheet } from '@/lib/spreadsheet/textEncoding';
 
 type ParsedCompany = {
   companyName: string;
@@ -98,7 +99,8 @@ async function parseWorkbook(file: File): Promise<ParsedCompany[]> {
     reader.onload = () => {
       try {
         const data = new Uint8Array(reader.result as ArrayBuffer);
-        const workbook = XLSX.read(data, { type: 'array' });
+        const text = decodeTextSpreadsheet(data);
+        const workbook = text === null ? XLSX.read(data, { type: 'array' }) : XLSX.read(text, { type: 'string' });
         const firstSheetName = workbook.SheetNames[0];
         if (!firstSheetName) throw new Error('Лист в файле не найден');
         const worksheet = workbook.Sheets[firstSheetName];

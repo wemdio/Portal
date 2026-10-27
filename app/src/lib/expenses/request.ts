@@ -206,6 +206,14 @@ export function parseIncomePayer(value: unknown): string {
   return payer;
 }
 
+/** За что пришли деньги — у ручного дохода обязательно (решение от 27.10.2026). */
+export function parseIncomeComment(value: unknown): string {
+  const comment = typeof value === 'string' ? value.trim() : '';
+  if (!comment) throw new Error('Укажи, за что деньги');
+  if (comment.length > 2000) throw new Error('«За что» — не длиннее 2000 символов');
+  return comment;
+}
+
 /** Способ получения ручного дохода; пусто — «Другое». */
 export function parseChannel(value: unknown): string {
   if (value === undefined || value === null || value === '') return 'Другое';
