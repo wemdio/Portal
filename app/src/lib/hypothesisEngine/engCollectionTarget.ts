@@ -135,15 +135,105 @@ export const HE_ENG_UNVERIFIED_SITE_EMAIL = 'site';
 const SITE_ONLY_REGISTRIES = new Set(['france', 'fdic', 'nppes', 'companies_house', 'gleif', 'pra', 'esma', 'eba',
   'prh', 'czso', 'cro', 'ariregister', 'wikidata', 'sec_companies', 'sec_advisers', 'irs', 'nces', 'gias', 'cqc', 'ncua', 'scb', 'eu_transparency']);
 
+/**
+ * Owner decision 2026-10-27, after the HST check base 5cde3648 (9 junk addresses
+ * and 10 boxes of the kinds below among 71 unverified ones): an unverified address
+ * is never page text glued to the site's www host (us@www.westernsouthern.com:
+ * such hosts have no mail server), a format template (firstname.lastname@), or a
+ * box for complaints, claims, fraud, press, HR or data protection. The local part
+ * is read as words in English and the ENG countries' languages (claims.motor,
+ * kunden-beschwerde, data.protection); stems that never occur in names are found
+ * inside a word too (rptfraud). Checked addresses keep the constructor's rules,
+ * where press@ and hr@ stay (owner 2026-10-23).
+ */
+export type HeEngUnverifiedEmailExclusion =
+  | 'web_host' | 'placeholder' | 'complaints' | 'claims' | 'fraud' | 'press' | 'hr' | 'data_protection';
+type HeEngNotForSales = Exclude<HeEngUnverifiedEmailExclusion, 'web_host' | 'placeholder'>;
+
+const NOT_FOR_SALES_WORDS: Record<HeEngNotForSales, readonly string[]> = {
+  complaints: ['complaint', 'complaints', 'beschwerde', 'beschwerden', 'reklamation', 'reklamationen', 'klage', 'klagen',
+    'klagomal', 'klacht', 'klachten', 'reclamation', 'reclamations', 'reclamacion', 'reclamaciones', 'reclami', 'reclamo',
+    'plainte', 'plaintes', 'valitus', 'reklamaatio', 'ombudsman', 'behandlungsfehler'],
+  claims: ['claim', 'claims', 'newclaim', 'newclaims', 'fnol', 'loss', 'losses', 'newloss', 'enewloss', 'lossreport',
+    'schaden', 'schadenservice', 'schadenmeldung', 'schadensmeldung', 'skade', 'skader', 'skademelding', 'skadeanmeldelse',
+    'skadeservice', 'skada', 'skador', 'skadeanmalan', 'vahinko', 'vahingot', 'vahinkoilmoitus', 'schade', 'schademelding',
+    'sinistre', 'sinistres', 'sinistri', 'siniestro', 'siniestros'],
+  fraud: ['fraud', 'antifraud', 'betrug', 'svindel', 'bedrageri', 'fraude'],
+  press: ['press', 'presse', 'pressoffice', 'pressroom', 'pressdesk', 'pressteam', 'pressestelle', 'pressekontakt',
+    'presskontakt', 'pressetjeneste', 'presstjanst', 'media', 'medien', 'mediarelations', 'newsroom', 'pr', 'perskamer',
+    'persvoorlichting'],
+  hr: ['hr', 'humanresources', 'personal', 'personalabteilung', 'personalwesen', 'job', 'jobs', 'career', 'careers',
+    'karriere', 'recruit', 'recruiting', 'recruitment', 'recruiter', 'bewerbung', 'bewerbungen', 'rekrytointi', 'rekrytering',
+    'rekruttering', 'talent', 'talents', 'hiring', 'vacature', 'vacatures', 'werkenbij'],
+  data_protection: ['privacy', 'dataprotection', 'dataprivacy', 'datenschutz', 'datenschutzbeauftragter', 'dpo', 'gdpr',
+    'rgpd', 'personvern', 'personvernombud', 'dataskydd', 'dataskyddsombud', 'databeskyttelse', 'tietosuoja',
+    'gegevensbescherming'],
+};
+const NOT_FOR_SALES_BY_WORD = new Map<string, HeEngNotForSales>();
+for (const [reason, words] of Object.entries(NOT_FOR_SALES_WORDS) as Array<[HeEngNotForSales, readonly string[]]>) {
+  for (const word of words) NOT_FOR_SALES_BY_WORD.set(word, reason);
+}
+// Inside a word as well: motorclaims@, kfzschaden@, rptfraud@, presseabteilung@, dataprotectionofficer@.
+const NOT_FOR_SALES_INSIDE: ReadonlyArray<readonly [HeEngNotForSales, readonly string[]]> = [
+  ['complaints', ['complaint', 'beschwerde', 'reklamation', 'klagomal', 'reclamation', 'reclamacion', 'behandlungsfehler']],
+  // Not «schaden» or «skade» alone: Schadenversicherung@, skadeforsikring@ are lines of business.
+  ['claims', ['claim', 'fnol', 'schadenmeld', 'schadensmeld', 'schadenservice', 'schadenabteil', 'kfzschaden', 'skadeanm',
+    'skademeld', 'schademeld', 'sinistr', 'siniestr']],
+  ['fraud', ['fraud', 'betrug', 'svindel', 'bedrageri']],
+  ['press', ['presse', 'pressoffice', 'mediarelation']],
+  ['hr', ['recruit', 'bewerbung', 'karriere', 'career', 'rekryt', 'rekrutt', 'humanresources', 'personalabteilung']],
+  ['data_protection', ['privacy', 'dataprotection', 'dataprivacy', 'datenschutz', 'personvern', 'dataskydd', 'databeskyttelse',
+    'tietosuoja', 'gegevensbescherming']],
+];
+
+// A template, not a mailbox, when every word is a name placeholder: firstname.lastname@,
+// f.lastname@, max.mustermann@, john.doe@. One common word stays: max@, john@, name@ can be real.
+const PLACEHOLDER_WORDS = new Set(['firstname', 'lastname', 'surname', 'familyname', 'givenname', 'vorname', 'nachname',
+  'familienname', 'fornavn', 'etternavn', 'efternavn', 'fornamn', 'efternamn', 'etunimi', 'sukunimi', 'voornaam',
+  'achternaam', 'prenom', 'nombre', 'apellido', 'cognome', 'yourname', 'youremail', 'username', 'mustermann', 'musterfrau',
+  'example', 'initials', 'firstnamelastname', 'firstlast', 'johndoe', 'janedoe', 'maxmustermann', 'vornamenachname']);
+const PLACEHOLDER_COMMON = new Set(['first', 'last', 'name', 'your', 'nom', 'max', 'erika', 'john', 'jane', 'doe', 'initial']);
+
+function placeholderLocal(words: readonly string[]): boolean {
+  const known = (word: string) => PLACEHOLDER_WORDS.has(word) || PLACEHOLDER_COMMON.has(word) || word.length === 1;
+  return words.every(known) && (words.some((word) => PLACEHOLDER_WORDS.has(word))
+    || (words.length > 1 && words.every((word) => PLACEHOLDER_COMMON.has(word))));
+}
+
+/** Why an address may not be kept unverified, or null. */
+export function heEngUnverifiedEmailExclusion(email: string): HeEngUnverifiedEmailExclusion | null {
+  const value = email.trim().toLowerCase();
+  const at = value.lastIndexOf('@');
+  if (at <= 0) return null;
+  if (/^www\d*\./.test(value.slice(at + 1))) return 'web_host';
+  const words = value.slice(0, at).split(/[._+\-0-9]+/).filter(Boolean);
+  if (words.length === 0) return null;
+  if (placeholderLocal(words)) return 'placeholder';
+  const joined = words.join('');
+  const listed = [...words, joined].map((word) => NOT_FOR_SALES_BY_WORD.get(word)).find((reason) => reason !== undefined);
+  if (listed) return listed;
+  return NOT_FOR_SALES_INSIDE.find(([, stems]) => stems.some((stem) => joined.includes(stem)))?.[0] ?? null;
+}
+
 export function heEngUnverifiedSiteEmail(status: unknown, row: HeEngCollectionRow): boolean {
   if (typeof status !== 'string' || status.trim().toLowerCase() !== 'unknown') return false;
   if (typeof row.source_detail !== 'string' || !row.source_detail.trim()) return false;
   if (row.source_detail.startsWith('eng_registry') && !SITE_ONLY_REGISTRIES.has(row.source_detail.slice('eng_registry:'.length))) return false;
   const email = typeof row.email === 'string' ? row.email.trim().toLowerCase() : '';
+  if (heEngUnverifiedEmailExclusion(email)) return false;
   const at = email.lastIndexOf('@');
   const domain = at > 0 && !/[\s,;]/.test(email) ? heCompanySiteIdentity(email.slice(at + 1))?.registrable : undefined;
   const proof = row._eng_company_qualification as { currentWebsite?: unknown } | null | undefined;
   return !!domain && [row.website, proof?.currentWebsite].some((site) => heCompanySiteIdentity(site)?.registrable === domain);
+}
+
+/**
+ * A base row the collection marked that still passes the rule today. Launch and
+ * the client's counts re-check it, so a base collected before a rule change
+ * holds back only what the current rule keeps.
+ */
+export function heEngHeldSiteEmailRow(row: HeEngCollectionRow): boolean {
+  return row._email_unverified === HE_ENG_UNVERIFIED_SITE_EMAIL && heEngUnverifiedSiteEmail(row._email_status, row);
 }
 
 /** Constructor rows have exactly one email per row; do not split unverified cells. */
