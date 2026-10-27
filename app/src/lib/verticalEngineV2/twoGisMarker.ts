@@ -21,6 +21,25 @@ export const VE_TWO_GIS_SITE_FIRST_REASON = 'Компания из справо�
 export const VE_TWO_GIS_SITE_UNCONFIRMED_REASON = 'Сайт из справочника организаций не подтвердил компанию: на нём нет её названия и города, или он не открылся. Компания отсеяна.';
 export const VE_TWO_GIS_IP_SITE_REASON = 'Сайт принадлежит ИП, а план базы ИП не берёт. Компания отсеяна.';
 export const VE_TWO_GIS_OWNER_INN_EXCLUDED_REASON = 'ИНН владельца сайта уже есть в исключениях проекта или в другой базе. Компания отсеяна.';
+/** Подписи причин сна базы и отсрочки близнеца (public_info: two_gis_sleep.reason, tasks[].postponed); карточка берёт их в клиентский bundle. */
+export const VE_TWO_GIS_SLEEP_REASON_LABELS: Record<string, string> = {
+  settings_unavailable: 'настройки справочника не прочитались',
+  closed: 'выдача справочника закрыта',
+  reads_disabled: 'чтение справочника выключено',
+  quiet: 'тихое окно справочника',
+  outreachos: 'идёт прогон OutreachOS',
+  import: 'идёт обновление справочника',
+  busy: 'справочник занят',
+  paused: 'справочник на паузе',
+  read_failed: 'справочник не читается',
+  error: 'ошибка страницы справочника',
+  journal: 'сбой журнала строк справочника',
+  model: 'рубрики не подобраны',
+};
+export const VE_TWO_GIS_SLEEP_REASON_FALLBACK = 'причина не распознана';
+export const veTwoGisSleepReasonLabel = (reason: unknown): string => (typeof reason === 'string'
+  && Object.prototype.hasOwnProperty.call(VE_TWO_GIS_SLEEP_REASON_LABELS, reason)
+  ? VE_TWO_GIS_SLEEP_REASON_LABELS[reason] : VE_TWO_GIS_SLEEP_REASON_FALLBACK);
 export type VeTwoGisOwnerInnVerdict = { kind: 'none' } | { kind: 'ip_rejected' | 'ip_allowed' | 'company'; inn: string };
 /** Только единственный владелец: 12 цифр — ИП (по разрешению плана), 10 — компания; иначе вердикта нет. */
 export function veTwoGisOwnerInnVerdict(ownerInns: readonly string[] | undefined, ipAllowed: boolean): VeTwoGisOwnerInnVerdict {

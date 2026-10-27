@@ -28,6 +28,7 @@ import { VE_LAUNCH_MAX_LEADS } from '@/lib/verticalEngineV2/launchHandoff';
 import { VE_PREVIEW_READY_TARGET, VE_COLLECTION_MAX_CANDIDATES } from '@/lib/verticalEngineV2/collectionTarget';
 import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
 import { companyNameCell, isCompanyNameReady, VE_COMPANY_NAME_FIELD } from '@/lib/verticalEngineV2/companyNames';
+import { veTwoGisSleepReasonLabel } from '@/lib/verticalEngineV2/twoGisMarker';
 import {
   VE_API,
   veEnginePost,
@@ -35,6 +36,7 @@ import {
   type VeBaseCreateResponse,
   type VeBaseSummary,
   type VeCollectInfo,
+  type VeCollectTask,
   type VeJobResponse,
   type VeJobSummary,
 } from '../api';
@@ -1124,8 +1126,18 @@ const COLLECT_SOURCE_LABELS: Record<string, string> = {
   yandex_maps: 'яндекс.карты',
   google_maps: 'google maps',
   gmaps: 'google maps',
-  two_gis: 'Справочник организаций',
+  two_gis: 'справочник организаций',
 };
+
+/** Правая подпись задачи-близнеца 2ГИС (поля приходят только у базы с флагом); null — обычная подпись. */
+function twoGisTaskState(task: VeCollectTask, base: VeBaseSummary): string | null {
+  if (task.source !== 'two_gis') return null;
+  if (task.unavailable) return 'закрыт';
+  if (task.exhausted) return 'исчерпан';
+  const sleep = base.status === 'collecting' ? base.collect_info?.two_gis_sleep : null;
+  const reason = task.postponed ?? sleep?.reason;
+  return task.postponed || sleep ? `ждёт: ${veTwoGisSleepReasonLabel(reason)}` : null;
+}
 
 function collectSourceLabel(source: string | undefined): string {
   const key = (source ?? '')
@@ -1477,8 +1489,9 @@ function CollectProgress({ base, job, queuedCount, queued, otherVertical }: {
               {collectTaskDone(task.status) && collectCount(task.rows) !== null ? (
                 <span className="text-gray-500">· {collectCount(task.rows)!.toLocaleString('ru-RU')} строк</span>
               ) : null}
-              <span className={`ml-auto ${HE.faint}`}>
-                {collectTaskDone(task.status) ? 'готово' : collectTaskFailed(task.status) ? 'ошибка' : 'в работе'}
+              <span className={`ml-auto ${HE.faint}`} title={task.source === 'two_gis' && task.unavailable ? task.note : undefined}>
+                {twoGisTaskState(task, base)
+                  ?? (collectTaskDone(task.status) ? 'готово' : collectTaskFailed(task.status) ? 'ошибка' : 'в работе')}
               </span>
             </li>
           ))}
