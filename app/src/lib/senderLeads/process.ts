@@ -4,6 +4,7 @@ import { loadSenderThread } from './context';
 import { loadCampaignSettings, type LeadSettings } from './settings';
 import { buildLeadMessage, leadTelegramConfig, sendLeadMessage, threadUrl, type LeadTelegramConfig } from './telegram';
 import { processSenderAutoLeadCrm } from './crm';
+import { runSenderAiQualifier, type AiPassResult } from '@/lib/senderAiQualifier/engine';
 
 /**
  * Один круг квалификатора ответов «Рассылки»
@@ -295,6 +296,16 @@ async function deliverLeads(db: SupabaseClient, tg: LeadTelegramConfig, log: Log
     if (!campaign) { await skip('рассылка не найдена'); continue; }
     if (!campaign.settings.telegram) { await skip('отправка в чат выключена у папки'); continue; }
 
+    // Переписку ведёт квалифицирующий ИИ: в чат уходит только строка его
+    // передачи. После сбоя ИИ лид идёт прежним путём.
+    const { data: conv, error: convError } = await db.from('sender_ai_conversations')
+      .select('state, handoff_reply_id').eq('recipient_id', row.recipient_id).maybeSingle();
+    if (convError) { log('warn', `ТГ: разговор ИИ ${row.recipient_id} не прочитан: ${convError.message}`); continue; }
+    if (conv && conv.state !== 'failed' && !(conv.state === 'handed_off' && conv.handoff_reply_id === row.reply_id)) {
+      await skip('Переписку ведёт ИИ');
+      continue;
+    }
+
     const [{ data: recipient }, { data: alreadySent }] = await Promise.all([
       db.from('sender_recipients').select('email, name, lead_verdict, lead_verdict_source').eq('id', row.recipient_id).maybeSingle(),
       db.from('sender_reply_qualifications').select('reply_id').eq('recipient_id', row.recipient_id).not('tg_sent_at', 'is', null).limit(1),
@@ -339,6 +350,7 @@ export interface PassResult {
   leads: number;
   delivered: number;
   crm: number;
+  ai: AiPassResult;
   recoveryHasMore: boolean;
 }
 
@@ -346,7 +358,10 @@ export async function runSenderLeadsPass(
   db: SupabaseClient, log: Log, recoverErrors = false,
 ): Promise<PassResult> {
   const ai = senderLeadsAi();
-  const result: PassResult = { qualified: 0, leads: 0, delivered: 0, crm: 0, recoveryHasMore: false };
+  const result: PassResult = {
+    qualified: 0, leads: 0, delivered: 0, crm: 0, recoveryHasMore: false,
+    ai: { started: 0, letters: 0, handedOff: 0, closed: 0 },
+  };
 
   const fresh = await claimNew(db);
   const retries = await dueRetries(db, new Set(fresh.map((r) => r.reply_id)));
@@ -369,6 +384,14 @@ export async function runSenderLeadsPass(
       result.qualified += 1;
       if (isLead) result.leads += 1;
     }
+  }
+
+  // До доставки: лид, которого берёт ИИ, не должен уйти в чат в этом же круге.
+  // Сбой ИИ не ломает доставку — без разговора лид идёт прежним путём.
+  try {
+    result.ai = await runSenderAiQualifier(db, log);
+  } catch (err) {
+    log('error', 'Круг квалифицирующего ИИ упал', err);
   }
 
   const tg = leadTelegramConfig();

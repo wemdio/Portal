@@ -39,6 +39,8 @@ interface ManualRow {
   agency_handoff_id?: string | null;
   /** Передача лида клиенту (lib/sender/clientHandoff): клиент в копии, повтора нет. */
   handoff?: Record<string, unknown> | null;
+  /** Письмо квалифицирующего ИИ (lib/senderAiQualifier): перепроверка перед SMTP, повтора нет. */
+  by_ai?: boolean;
   created_at?: string;
 }
 
@@ -87,6 +89,26 @@ export async function processManualMessages(opts: { egressIp: string; log?: Log;
       if (blocked) {
         await db.from('sender_manual_messages').update({ status: 'failed',
           error: 'Автопередача отменена: проверьте настройки, состояние переписки и ручные ответы', updated_at: nowIso }).eq('id', message.id);
+        continue;
+      }
+    }
+    if (message.by_ai) {
+      // Пока письмо ИИ ждало отправки, лид мог отписаться, оператор — ответить
+      // или поставить метку: тогда ИИ молчит.
+      const [recipient, conversation, operator, suppression] = await Promise.all([
+        db.from('sender_recipients').select('status, lead_verdict_source').eq('id', message.recipient_id!).maybeSingle(),
+        db.from('sender_ai_conversations').select('state').eq('recipient_id', message.recipient_id!).maybeSingle(),
+        db.from('sender_manual_messages').select('id').eq('recipient_id', message.recipient_id!)
+          .is('agency_handoff_id', null).is('handoff', null).eq('by_ai', false).limit(1),
+        db.from('sender_suppressions').select('email').eq('email', message.to_email).limit(1),
+      ]);
+      const r = recipient.data;
+      const blocked = recipient.error || conversation.error || operator.error || suppression.error || !r ||
+        ['unsubscribed', 'bounced', 'stopped'].includes(r.status) || r.lead_verdict_source === 'manual' ||
+        conversation.data?.state === 'stopped' || operator.data?.length || suppression.data?.length;
+      if (blocked) {
+        await db.from('sender_manual_messages').update({ status: 'failed',
+          error: 'Письмо ИИ отменено: переписка остановлена, отписка, ручная метка или ответ оператора', updated_at: nowIso }).eq('id', message.id);
         continue;
       }
     }
@@ -180,7 +202,7 @@ export async function processManualMessages(opts: { egressIp: string; log?: Log;
     // частичный приём (partial_accept): письмо могло уже дойти, повтор
     // прислал бы лиду дубль.
     // Передачу не повторяем сами: оператор видит ошибку и передаёт заново.
-    if (!message.agency_handoff_id && !message.handoff && attempts < MAX_ATTEMPTS && result.code !== 'recipient_rejected'
+    if (!message.agency_handoff_id && !message.handoff && !message.by_ai && attempts < MAX_ATTEMPTS && result.code !== 'recipient_rejected'
       && result.code !== 'rejected' && result.code !== 'inflight_drop' && result.code !== 'partial_accept') {
       await db.from('sender_manual_messages')
         .update({ attempts, error: result.error ?? null })
