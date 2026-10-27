@@ -145,17 +145,21 @@ function randomRange([min, max]: [number, number]): number {
  * осталась у напоминаний и догоняющих ответов.
  */
 const REPLY_AFTER_INCOMING_SEC: [number, number] = [30, 260];
-/** Больше часа на ответ — опечатка в настройке, а не замысел. */
-const REPLY_AFTER_INCOMING_MAX_SEC = 3600;
+/**
+ * Рамка для настройки кампании (27.10.2026, решение продаж): быстрее 30 с ответ
+ * выглядит как бот, дольше 5 минут — снова «долго ждать».
+ */
+const REPLY_AFTER_INCOMING_MIN_SEC = 30;
+const REPLY_AFTER_INCOMING_MAX_SEC = 300;
 
-/** Пределы ответа из настроек кампании; кривые или пустые — 30–260 с. */
+/** Пределы ответа из настроек кампании в рамке 30–300 с; кривые или пустые — 30–260. */
 function replyDelayRange(tg: TelegramSettings): [number, number] {
   const range = tg.reply_delay_range;
   if (!Array.isArray(range) || range.length !== 2) return REPLY_AFTER_INCOMING_SEC;
   const min = Math.round(Number(range[0]));
   const max = Math.round(Number(range[1]));
   if (!Number.isFinite(min) || !Number.isFinite(max)) return REPLY_AFTER_INCOMING_SEC;
-  const from = Math.min(Math.max(min, 0), REPLY_AFTER_INCOMING_MAX_SEC);
+  const from = Math.min(Math.max(min, REPLY_AFTER_INCOMING_MIN_SEC), REPLY_AFTER_INCOMING_MAX_SEC);
   return [from, Math.min(Math.max(max, from), REPLY_AFTER_INCOMING_MAX_SEC)];
 }
 /** За сколько до срока ответа браться за чат: прочитать историю и сгенерировать. */

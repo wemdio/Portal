@@ -8102,24 +8102,34 @@ function TimezoneField({ value, onChange }: { value: number; onChange: (v: numbe
 }
 
 /* Через сколько после сообщения собеседника уходит ответ: воркер берёт
-   случайное число секунд между «от» и «до» (27.10.2026). Пока оператор печатает,
-   «до» может оказаться меньше «от» — не поправляем на лету, иначе «260» не
-   набрать; воркер в таком случае отвечает через «от». */
+   случайное число секунд между «от» и «до» (27.10.2026), оба в рамке 30–300.
+   В рамку и по порядку приводим при уходе из поля, а не на каждой цифре:
+   иначе «45» не набрать — первая «4» сразу превратилась бы в 30. Воркер
+   держит ту же рамку, так что промежуточное значение ничего не сломает. */
+const REPLY_DELAY_MIN_SEC = 30;
+const REPLY_DELAY_MAX_SEC = 300;
+
 function ReplyDelayField({ value, onChange }: { value: [number, number]; onChange: (v: [number, number]) => void }) {
   const [from, to] = value;
-  const toSeconds = (raw: string) => Math.min(Math.max(Math.round(Number(raw)) || 0, 0), 3600);
+  const toSeconds = (raw: string) => Math.max(Math.round(Number(raw)) || 0, 0);
+  const inFrame = (n: number) => Math.min(Math.max(n, REPLY_DELAY_MIN_SEC), REPLY_DELAY_MAX_SEC);
+  const settle = () => {
+    const a = inFrame(from);
+    const b = Math.max(inFrame(to), a);
+    if (a !== from || b !== to) onChange([a, b]);
+  };
   const input = `w-16 rounded-lg border ${INPUT_BORDER} ${INPUT_BG} px-2 py-1.5 text-center text-xs text-gray-800 outline-none focus:border-indigo-400 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none`;
   return (
     <div className="space-y-1">
       <span className="block text-[11px] font-medium text-gray-500">Ответ через, сек</span>
       <div className="flex items-center gap-1.5 text-xs text-gray-400">
-        <input type="number" min={0} max={3600} aria-label="Ответ не раньше, сек" value={from}
-          onChange={e => onChange([toSeconds(e.target.value), to])} className={input} />
+        <input type="number" min={REPLY_DELAY_MIN_SEC} max={REPLY_DELAY_MAX_SEC} aria-label="Ответ не раньше, сек" value={from}
+          onChange={e => onChange([toSeconds(e.target.value), to])} onBlur={settle} className={input} />
         <span>—</span>
-        <input type="number" min={0} max={3600} aria-label="Ответ не позже, сек" value={to}
-          onChange={e => onChange([from, toSeconds(e.target.value)])} className={input} />
+        <input type="number" min={REPLY_DELAY_MIN_SEC} max={REPLY_DELAY_MAX_SEC} aria-label="Ответ не позже, сек" value={to}
+          onChange={e => onChange([from, toSeconds(e.target.value)])} onBlur={settle} className={input} />
       </div>
-      <p className="text-[11px] text-gray-400">Случайно в этих пределах.</p>
+      <p className="text-[11px] text-gray-400">Случайно, от 30 до 300.</p>
     </div>
   );
 }
