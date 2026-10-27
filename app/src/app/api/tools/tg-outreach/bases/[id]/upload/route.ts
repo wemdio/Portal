@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { parseBaseRows } from '@/lib/tgOutreach/firstTouch/parseBaseFile';
+import { decodeTextSpreadsheet } from '@/lib/spreadsheet/textEncoding';
 
 export const dynamic = 'force-dynamic';
 
@@ -32,7 +33,9 @@ export async function POST(req: NextRequest, ctx: Ctx) {
 
       let rows: unknown[][];
       try {
-        const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const text = decodeTextSpreadsheet(bytes);
+        const wb = text === null ? XLSX.read(bytes, { type: 'array' }) : XLSX.read(text, { type: 'string' });
         const sheet = wb.Sheets[wb.SheetNames[0]];
         // header: 1 — читаем как массив массивов: заголовок распознаёт parseBaseRows,
         // и делает это по содержимому первой ячейки, а не по вере в него.

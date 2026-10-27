@@ -5,6 +5,16 @@ import { Loader2 } from 'lucide-react';
 import type { LeadVerdict, ThreadVerdictDto } from '@/lib/senderLeads/history';
 import { fetchThreadVerdict, setLeadVerdict } from './api';
 
+/** Состояние разговора квалифицирующего ИИ — коротко, одной плашкой. */
+const AI_CONVERSATION: Record<string, string> = {
+  active: 'ИИ ведёт переписку',
+  handed_off: 'ИИ передал менеджерам',
+  no_reply: 'Не ответил ИИ',
+  closed: 'ИИ закрыл переписку',
+  stopped: 'ИИ остановлен',
+  failed: 'Сбой ИИ — передан как обычно',
+};
+
 const AI_STATUS: Record<string, string> = {
   lead: 'лид',
   not_lead: 'не лид',
@@ -80,6 +90,14 @@ export function LeadVerdictBar({ recipientId, onChange }: { recipientId: string;
             {label}
           </span>
           {last?.tgSentAt ? <span className="text-xs text-blue-700">ушёл в чат</span> : null}
+          {data.aiConversation ? (
+            <span
+              className="rounded-md bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700"
+              title={data.aiConversation.handoffContact ? `Контакт: ${data.aiConversation.handoffContact}` : undefined}
+            >
+              {AI_CONVERSATION[data.aiConversation.state] ?? data.aiConversation.state}
+            </span>
+          ) : null}
         </div>
         <div className="flex items-center gap-2">
           {busy ? <Loader2 className="h-4 w-4 animate-spin text-zinc-400" /> : null}

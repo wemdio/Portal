@@ -22,7 +22,7 @@ export async function GET(req: NextRequest) {
     const recipientId = new URL(req.url).searchParams.get('recipientId') ?? '';
     if (!UUID_RE.test(recipientId)) return jsonError('Не указана переписка', 400);
 
-    const [{ data: recipient, error }, { data: qualifications }] = await Promise.all([
+    const [{ data: recipient, error }, { data: qualifications }, { data: conversation }] = await Promise.all([
       supabaseAdmin
         .from('sender_recipients')
         .select('lead_verdict, lead_verdict_source, lead_verdict_at')
@@ -35,6 +35,11 @@ export async function GET(req: NextRequest) {
         .neq('status', 'skipped')
         .order('created_at', { ascending: false })
         .limit(1),
+      supabaseAdmin
+        .from('sender_ai_conversations')
+        .select('state, ai_messages, handoff_contact')
+        .eq('recipient_id', recipientId)
+        .maybeSingle(),
     ]);
     if (error) return jsonError(error.message, 500);
     if (!recipient) return jsonError('Переписка не найдена', 404);
@@ -46,6 +51,9 @@ export async function GET(req: NextRequest) {
       verdictAt: recipient.lead_verdict_at ?? null,
       lastQualification: last
         ? { status: last.status, aiReason: last.ai_reason, qualifiedAt: last.qualified_at, tgSentAt: last.tg_sent_at }
+        : null,
+      aiConversation: conversation
+        ? { state: conversation.state, aiMessages: conversation.ai_messages, handoffContact: conversation.handoff_contact }
         : null,
     };
     return NextResponse.json(body);

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { logAudit } from '@/lib/loggerServer';
 import { requireAdmin } from '@/lib/adminAuth';
 import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
-import { findFolderByKey, parseFolderKey, parseSettingsInput, settingsDto } from '@/lib/senderLeads/history';
+import { findFolderByKey, FOLDER_LEAD_SELECT, parseFolderKey, parseSettingsInput, settingsDto } from '@/lib/senderLeads/history';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -43,11 +43,19 @@ export async function PUT(req: NextRequest) {
     const parsed = parseSettingsInput(await req.json().catch(() => null));
     if (!parsed.ok) return jsonError(parsed.error, 400);
 
+    // ИИ берёт только ответы после включения: момент включения фиксируем при
+    // переходе «выкл → вкл», повторное сохранение его не сдвигает.
+    let aiEnabledAt: { ai_enabled_at: string } | null = null;
+    if (parsed.value.ai_enabled) {
+      const current = await findFolderByKey(supabaseAdmin, key);
+      if (current && !current.ai_enabled) aiEnabledAt = { ai_enabled_at: new Date().toISOString() };
+    }
+
     const { data, error } = await supabaseAdmin
       .from('sender_folders')
-      .update({ ...parsed.value, updated_at: new Date().toISOString() })
+      .update({ ...parsed.value, ...aiEnabledAt, updated_at: new Date().toISOString() })
       .eq('key', key)
-      .select('id, name, lead_criteria, leads_enabled, leads_telegram')
+      .select(FOLDER_LEAD_SELECT)
       .maybeSingle();
     if (error) return jsonError(error.message, 500);
     if (!data) return jsonError(NO_FOLDER, 404);
@@ -62,6 +70,8 @@ export async function PUT(req: NextRequest) {
         enabled: parsed.value.leads_enabled,
         telegram: parsed.value.leads_telegram,
         criteriaLength: parsed.value.lead_criteria?.length ?? 0,
+        aiEnabled: parsed.value.ai_enabled ?? null,
+        aiOfferTextLength: parsed.value.ai_offer_text?.length ?? null,
       },
       { userId: auth.user.id },
     );

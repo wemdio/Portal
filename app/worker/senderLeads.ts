@@ -67,6 +67,9 @@ async function main(): Promise<void> {
       if (pass.qualified || pass.delivered || pass.crm) {
         log('info', `Оценено ${pass.qualified}, лидов ${pass.leads}, в чат ушло ${pass.delivered}, AMO обработано ${pass.crm}`);
       }
+      if (pass.ai.started || pass.ai.letters || pass.ai.closed) {
+        log('info', `ИИ-квалификатор: начато ${pass.ai.started}, писем ${pass.ai.letters}, передано ${pass.ai.handedOff}, закрыто ${pass.ai.closed}`);
+      }
     } catch (err) {
       log('error', 'Круг квалификатора упал', err);
     }
