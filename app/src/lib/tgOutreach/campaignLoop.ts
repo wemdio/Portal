@@ -3414,8 +3414,6 @@ export async function runCampaignLoop(
               campaignId,
               account,
               perDay: tg.first_touch_per_account_per_day,
-              gapMinutes: tg.first_touch_gap_minutes,
-              perGap: tg.first_touch_per_gap,
               // maxChars не передаём: порог один на все кампании, см. resolveMaxChars.
               cooldownHours: tg.account_cooldown_hours,
               log,

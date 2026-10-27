@@ -451,8 +451,6 @@ function Collapsible({ title, hint, badge, children }: {
 const HIDDEN_TELEGRAM_KEYS = [
   'account_cooldown_hours',
   'account_concurrency',
-  'first_touch_gap_minutes',
-  'first_touch_per_gap',
   'read_reply_delay_range',
   'cycle_delay_range',
   'account_loop_delay_range',
@@ -485,7 +483,7 @@ function SettingsTab({ campaign, onSave }: {
   );
 
   /**
-   * Что уходит в базу. Скрытые с экрана поля (паузы, порции, параллельность)
+   * Что уходит в базу. Скрытые с экрана поля (паузы, параллельность)
    * пишем, только если они у кампании уже были: иначе дефолты экрана молча
    * поменяли бы поведение старой кампании, у которой воркер берёт свои.
    * CRM без воронки и этапа не сохраняем — остальное сохраняется.
@@ -628,7 +626,7 @@ function SettingsTab({ campaign, onSave }: {
         </SettingsGroup>
 
         {/* 22.10.2026 на экране оставлены только пояс и дневная норма (решение
-            пользователя). Паузы, порции, параллельность и паузу после
+            пользователя). Паузы, параллельность и паузу после
             ограничения кампания берёт из сохранённых значений, а новая — из
             DEFAULT_TELEGRAM_SETTINGS (lib/tgOutreach/types.ts). */}
         <SettingsGroup title="Рассылка" hint="Сколько первых сообщений уходит, когда аккаунты молчат и как быстро отвечают.">

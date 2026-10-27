@@ -8,7 +8,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { TelegramClient } from 'telegram';
 import { validateFirstTouch, describeFailure, resolveMaxChars } from './validateMessage';
-import { selectNextContacts, remainingDailyQuota, portionBudget, type PendingContact } from './selectContacts';
+import { selectNextContacts, remainingDailyQuota, type PendingContact } from './selectContacts';
 import * as fdb from './db';
 import {
   isFloodLimitReason,
@@ -55,17 +55,10 @@ export interface SendBatchArgs {
   };
   /** Дневная норма первых сообщений на аккаунт. Ноль = выключено. */
   perDay: number | undefined;
-  /**
-   * Минимальная пауза между порциями первых сообщений, минут. Отсутствие =
-   * 60 (см. portionBudget); 0 — вся норма одной очередью, как до разнесения.
-   */
-  gapMinutes?: number;
-  /** Писем за одну порцию. Отсутствие = 2. */
-  perGap?: number;
   log: LogFn;
   shouldStop?: () => boolean;
   onProgress?: () => void;
-  /** Пауза между отправками внутри порции, мс. */
+  /** Пауза между первыми сообщениями одного захода, мс. */
   gapMs?: number;
   /**
    * Порог длины первого сообщения из настроек кампании. Ноль или отсутствие =
@@ -407,24 +400,12 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
   if (quota <= 0) return result;
 
   /**
-   * Норма по дням, а не по часам: суточного «4» мало, Telegram читает очередь
-   * из 4 писем за две минуты как всплеск. Отправляем порциями — по `perGap`
-   * писем не чаще, чем раз в `gapMinutes` (счёт — от последнего фактического
-   * письма аккаунта, не от круга кампании). Не пора — тихо выходим: круг
-   * возвращается каждые несколько минут и сам зайдёт, когда пауза истечёт.
+   * Вся оставшаяся норма — за один заход. Порции (не больше N писем раз в час)
+   * сняты 27.10.2026: норма у кампаний 1–2 письма в сутки на аккаунт, порция
+   * была не меньше, и разнос по дню ни разу не срабатывал — настройка только
+   * путала. Между письмами захода остаётся пауза `gapMs`.
    */
-  const lastSentRaw = await fdb.lastFirstTouchSentAt(db, account.id);
-  const lastSentMs = lastSentRaw ? new Date(lastSentRaw).getTime() : null;
-  const plan = portionBudget({
-    perDay,
-    sentToday,
-    gapMinutes: args.gapMinutes,
-    perGap: args.perGap,
-    lastSentAtMs: lastSentMs !== null && Number.isFinite(lastSentMs) ? lastSentMs : null,
-    nowMs: Date.now(),
-  });
-  if (!plan.due) return result;
-  const sendBudget = plan.budget;
+  const sendBudget = quota;
 
   // Из включённых баз кампании аккаунту доступны те, где он в списке
   // рассыльщиков (пустой список у базы = шлют все). Аккаунт, исключённый из
