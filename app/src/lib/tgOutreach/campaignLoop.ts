@@ -140,10 +140,24 @@ function randomRange([min, max]: [number, number]): number {
  * 27.10.2026 по просьбе продаж: «рандомно 30–260 с после того, как нам
  * написали». Отсчёт от времени ЕГО сообщения, а не от момента, когда аккаунт до
  * него добрался: круг, нашедший сообщение получасовой давности, отвечает сразу.
- * read_reply_delay_range на ответы больше не действует — осталась у напоминаний
- * и догоняющих ответов.
+ * Это значение по умолчанию: свои пределы кампания задаёт на экране
+ * (reply_delay_range). read_reply_delay_range на ответы больше не действует —
+ * осталась у напоминаний и догоняющих ответов.
  */
 const REPLY_AFTER_INCOMING_SEC: [number, number] = [30, 260];
+/** Больше часа на ответ — опечатка в настройке, а не замысел. */
+const REPLY_AFTER_INCOMING_MAX_SEC = 3600;
+
+/** Пределы ответа из настроек кампании; кривые или пустые — 30–260 с. */
+function replyDelayRange(tg: TelegramSettings): [number, number] {
+  const range = tg.reply_delay_range;
+  if (!Array.isArray(range) || range.length !== 2) return REPLY_AFTER_INCOMING_SEC;
+  const min = Math.round(Number(range[0]));
+  const max = Math.round(Number(range[1]));
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return REPLY_AFTER_INCOMING_SEC;
+  const from = Math.min(Math.max(min, 0), REPLY_AFTER_INCOMING_MAX_SEC);
+  return [from, Math.min(Math.max(max, from), REPLY_AFTER_INCOMING_MAX_SEC)];
+}
 /** За сколько до срока ответа браться за чат: прочитать историю и сгенерировать. */
 const INCOMING_PREPARE_LEAD_MS = 30_000;
 /** Раньше этого после сообщения не читаем: часто дописывают вторым и третьим. */
@@ -1390,7 +1404,7 @@ export async function handleChat(
 
   const lastIncomingMs = Date.parse([...chatMessages].reverse().find((m) => m.role === 'user')?.timestamp ?? '');
   const replyAt = options?.replyAt
-    ?? (Number.isFinite(lastIncomingMs) ? lastIncomingMs + randomRange(REPLY_AFTER_INCOMING_SEC) * 1000 : Date.now());
+    ?? (Number.isFinite(lastIncomingMs) ? lastIncomingMs + randomRange(replyDelayRange(tg)) * 1000 : Date.now());
   const replyDelay = Math.max(0, replyAt - Date.now());
   if (shouldStop) await interruptibleSleep(replyDelay, shouldStop); else await sleep(replyDelay);
 
@@ -2506,7 +2520,7 @@ export async function runCampaignLoop(
       key,
       accountId,
       entity: sender,
-      dueAt: sentAt + randomRange(REPLY_AFTER_INCOMING_SEC) * 1000,
+      dueAt: sentAt + randomRange(replyDelayRange(tg)) * 1000,
       lastIncomingAt: sentAt,
       lastIncomingId: message.id,
       running: false,
@@ -2539,7 +2553,7 @@ export async function runCampaignLoop(
     } finally {
       // Дописал, пока мы готовили ответ, — новый срок от его последнего сообщения.
       if (!incomingStopped && job.lastIncomingId > Math.max(startId, seenId)) {
-        job.dueAt = job.lastIncomingAt + randomRange(REPLY_AFTER_INCOMING_SEC) * 1000;
+        job.dueAt = job.lastIncomingAt + randomRange(replyDelayRange(tg)) * 1000;
         job.running = false;
       } else {
         incoming.delete(job.key);

@@ -631,9 +631,10 @@ function SettingsTab({ campaign, onSave }: {
             пользователя). Паузы, порции, параллельность и паузу после
             ограничения кампания берёт из сохранённых значений, а новая — из
             DEFAULT_TELEGRAM_SETTINGS (lib/tgOutreach/types.ts). */}
-        <SettingsGroup title="Рассылка" hint="Сколько первых сообщений уходит и когда аккаунты молчат.">
-          {/* Одна строка: норма, периоды сна, часовой пояс. Периоды сна узкие —
-              в них помещается «00:00-08:00». Пояснение по сну — под полем. */}
+        <SettingsGroup title="Рассылка" hint="Сколько первых сообщений уходит, когда аккаунты молчат и как быстро отвечают.">
+          {/* Одна строка: норма, периоды сна, часовой пояс, пауза перед ответом.
+              Периоды сна узкие — в них помещается «00:00-08:00». Пояснение по
+              сну — под полем. */}
           <div className="flex flex-wrap items-start gap-x-6 gap-y-4">
             <StepperField
               label="Первых сообщений на аккаунт в сутки"
@@ -648,6 +649,7 @@ function SettingsTab({ campaign, onSave }: {
               <p className="text-[11px] text-gray-400">В эти часы аккаунты молчат.</p>
             </div>
             <TimezoneField value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
+            <ReplyDelayField value={telegram.reply_delay_range ?? [30, 260]} onChange={v => setTG('reply_delay_range', v)} />
           </div>
         </SettingsGroup>
 
@@ -8098,6 +8100,29 @@ function TimezoneField({ value, onChange }: { value: number; onChange: (v: numbe
         ))}
       </select>
     </label>
+  );
+}
+
+/* Через сколько после сообщения собеседника уходит ответ: воркер берёт
+   случайное число секунд между «от» и «до» (27.10.2026). Пока оператор печатает,
+   «до» может оказаться меньше «от» — не поправляем на лету, иначе «260» не
+   набрать; воркер в таком случае отвечает через «от». */
+function ReplyDelayField({ value, onChange }: { value: [number, number]; onChange: (v: [number, number]) => void }) {
+  const [from, to] = value;
+  const toSeconds = (raw: string) => Math.min(Math.max(Math.round(Number(raw)) || 0, 0), 3600);
+  const input = `w-16 rounded-lg border ${INPUT_BORDER} ${INPUT_BG} px-2 py-1.5 text-center text-xs text-gray-800 outline-none focus:border-indigo-400 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none`;
+  return (
+    <div className="space-y-1">
+      <span className="block text-[11px] font-medium text-gray-500">Ответ через, сек</span>
+      <div className="flex items-center gap-1.5 text-xs text-gray-400">
+        <input type="number" min={0} max={3600} aria-label="Ответ не раньше, сек" value={from}
+          onChange={e => onChange([toSeconds(e.target.value), to])} className={input} />
+        <span>—</span>
+        <input type="number" min={0} max={3600} aria-label="Ответ не позже, сек" value={to}
+          onChange={e => onChange([from, toSeconds(e.target.value)])} className={input} />
+      </div>
+      <p className="text-[11px] text-gray-400">Случайно в этих пределах.</p>
+    </div>
   );
 }
 
