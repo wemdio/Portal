@@ -28,6 +28,14 @@ const CLOSE_DELAY_MS = 220;
 const MENU_MIN_WIDTH = 208;
 
 /**
+ * Открыт может быть только один список. Задержка закрытия (CLOSE_DELAY_MS)
+ * иначе оставляла прежний список на экране, пока курсор уже открыл соседний, —
+ * панели перекрывали друг друга. Открывшийся список объявляет о себе, остальные
+ * закрываются сразу.
+ */
+const OPEN_EVENT = 'portal-nav-dropdown-open';
+
+/**
  * Пункт верхнего меню с выпадающим списком.
  *
  * Открывается наведением (основной сценарий), кликом (тач) и с клавиатуры
@@ -101,9 +109,18 @@ export function TopNavDropdown({
     updateCoords();
     pendingFocus.current = focus;
     setOpen(true);
-  }, [cancelScheduledClose, updateCoords]);
+    window.dispatchEvent(new CustomEvent(OPEN_EVENT, { detail: menuId }));
+  }, [cancelScheduledClose, updateCoords, menuId]);
 
   useEffect(() => cancelScheduledClose, [cancelScheduledClose]);
+
+  useEffect(() => {
+    const onOtherOpen = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== menuId) closeMenu(false);
+    };
+    window.addEventListener(OPEN_EVENT, onOtherOpen);
+    return () => window.removeEventListener(OPEN_EVENT, onOtherOpen);
+  }, [menuId, closeMenu]);
 
   // Панель fixed — её координаты нужно пересчитывать, пока она открыта:
   // лента пунктов скроллится по горизонтали, окно меняет размер.
@@ -277,13 +294,13 @@ export function TopNavDropdown({
                 href={item.href as Route}
                 prefetch={false}
                 role="menuitem"
+                aria-current={item.isActive ? 'page' : undefined}
+                data-active={item.isActive ? 'true' : undefined}
                 onClick={() => closeMenu(false)}
                 onKeyDown={(event) => handleItemKeyDown(event, index)}
-                className={`flex items-center gap-2 px-3 py-2 text-[12px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500/70 ${
-                  item.isActive
-                    ? 'bg-zinc-100 font-medium text-zinc-900'
-                    : 'text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900'
-                }`}
+                // Цвета наведения и текущей страницы — в globals.css (.portal-nav-item),
+                // отдельно для светлой и тёмной темы.
+                className="portal-nav-item flex items-center gap-2 px-3 py-2 text-[12px] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500/70"
               >
                 <span className="truncate">{item.label}</span>
                 {(item.badgeCount ?? 0) > 0 && (

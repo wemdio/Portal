@@ -1,8 +1,9 @@
 'use client';
 
 import { Fragment, useCallback, useEffect, useState } from 'react';
-import { Loader2, Search } from 'lucide-react';
-import { fetchCampaignRecipients, type CampaignDto, type CampaignRecipientDto } from './api';
+import { Download, Loader2, Search, Upload } from 'lucide-react';
+import { fetchCampaignRecipients, importTableToConstructor, type CampaignDto, type CampaignRecipientDto } from './api';
+import { downloadCsv, loadCampaignTable } from './recipientsExport';
 import { SenderModal } from './SenderModal';
 
 const STATUS_FILTERS = [
@@ -49,7 +50,7 @@ export function RecipientsModal({ campaign, onClose }: { campaign: CampaignDto; 
   const [columns, setColumns] = useState<string[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   const [total, setTotal] = useState(0);
-  const [pageSize, setPageSize] = useState(20);
+  const [pageSize, setPageSize] = useState(15);
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState('');
   const [search, setSearch] = useState('');
@@ -57,6 +58,35 @@ export function RecipientsModal({ campaign, onClose }: { campaign: CampaignDto; 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [timer, setTimer] = useState<number | null>(null);
+  const [transfer, setTransfer] = useState<
+    | { kind: 'download' | 'constructor'; done: number; total: number; step: 'load' | 'save' }
+    | { kind: 'ready'; jobId: string; rows: number }
+    | null
+  >(null);
+  const [transferError, setTransferError] = useState<string | null>(null);
+  const busy = transfer !== null && transfer.kind !== 'ready';
+
+  const exportBase = async (kind: 'download' | 'constructor') => {
+    setTransferError(null);
+    setTransfer({ kind, done: 0, total: campaign.stats?.recipients ?? total, step: 'load' });
+    try {
+      const table = await loadCampaignTable(campaign.id, (done, all) =>
+        setTransfer({ kind, done, total: all, step: 'load' }),
+      );
+      const baseName = campaign.name.replace(/[\\/:*?"<>|]+/g, ' ').trim() || 'base';
+      if (kind === 'download') {
+        downloadCsv(table, `${baseName}.csv`);
+        setTransfer(null);
+        return;
+      }
+      setTransfer({ kind, done: table.length - 1, total: table.length - 1, step: 'save' });
+      const { id } = await importTableToConstructor(table, `${baseName}.csv`);
+      setTransfer({ kind: 'ready', jobId: id, rows: table.length - 1 });
+    } catch (err) {
+      setTransfer(null);
+      setTransferError(err instanceof Error ? err.message : 'Не удалось выгрузить базу');
+    }
+  };
 
   const load = useCallback(
     async (targetPage: number) => {
@@ -106,7 +136,7 @@ export function RecipientsModal({ campaign, onClose }: { campaign: CampaignDto; 
     <SenderModal
       title={`База: ${campaign.name}`}
       subtitle={`${campaign.stats?.recipients ?? total} получателей · кому ушло ${campaign.stats?.reached ?? '—'} · ответили ${campaign.stats?.replied ?? 0}`}
-      size="wide"
+      size="xl"
       onClose={onClose}
       footer={
         <span className="mr-auto text-xs text-zinc-500">
@@ -114,6 +144,46 @@ export function RecipientsModal({ campaign, onClose }: { campaign: CampaignDto; 
         </span>
       }
     >
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <button type="button" disabled={busy} onClick={() => void exportBase('download')}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50">
+          <Download className="h-3.5 w-3.5" />
+          Скачать базу
+        </button>
+        <button type="button" disabled={busy} onClick={() => void exportBase('constructor')}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50">
+          <Upload className="h-3.5 w-3.5" />
+          Загрузить в конструктор баз
+        </button>
+        {transfer && transfer.kind !== 'ready' ? (
+          <div className="flex min-w-[220px] flex-1 items-center gap-2 text-xs text-zinc-500">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-200">
+              <div
+                className="h-full rounded-full bg-blue-500 transition-all"
+                style={{ width: `${transfer.total ? Math.round((transfer.done / transfer.total) * 100) : 0}%` }}
+              />
+            </div>
+            <span className="whitespace-nowrap">
+              {transfer.step === 'save'
+                ? 'Сохраняем в конструктор…'
+                : `${transfer.done.toLocaleString('ru-RU')} из ${transfer.total.toLocaleString('ru-RU')}`}
+            </span>
+          </div>
+        ) : null}
+        {transfer?.kind === 'ready' ? (
+          <div className="flex items-center gap-2 text-xs text-zinc-600">
+            <span>Загружено: {transfer.rows.toLocaleString('ru-RU')} контактов.</span>
+            <a
+              href={`/tools/base-constructor?job=${transfer.jobId}`}
+              className="rounded-lg bg-blue-600 px-3 py-1.5 font-medium text-white transition-colors hover:bg-blue-700"
+            >
+              Перейти в конструктор
+            </a>
+          </div>
+        ) : null}
+      </div>
+      {transferError ? <p className="mb-3 text-sm text-red-600">{transferError}</p> : null}
+
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative w-full max-w-xs">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
@@ -187,7 +257,7 @@ export function RecipientsModal({ campaign, onClose }: { campaign: CampaignDto; 
                       </button>
                     ) : null}
                   </td>
-                  <td className="py-2 pr-3 text-zinc-600">{recipient.statusLabel}</td>
+                  <td className="whitespace-nowrap py-2 pr-3 text-zinc-600">{recipient.statusLabel}</td>
                   <td className="py-2 pr-3 text-zinc-600">
                     {recipient.lastStepSent > 0 ? `шаг ${recipient.lastStepSent}` : '—'}
                   </td>
@@ -198,7 +268,7 @@ export function RecipientsModal({ campaign, onClose }: { campaign: CampaignDto; 
                       : new Date(recipient.updatedAt).toLocaleDateString('ru-RU')}
                   </td>
                   {columns.map((column) => (
-                    <td key={column} className="max-w-[240px] truncate py-2 pr-3 text-xs text-zinc-600" title={recipient.vars[column]}>
+                    <td key={column} className="max-w-[320px] truncate py-2 pr-3 text-xs text-zinc-600" title={recipient.vars[column]}>
                       {recipient.vars[column] || '—'}
                     </td>
                   ))}

@@ -15,6 +15,64 @@ const OPENROUTER_VIDEO_TRANSCRIPT_API_KEY = (
 ).trim();
 const OPENROUTER_MODEL = 'policy/transcription';
 
+// Voxtral (Mistral) через Requesty — основной движок с 27.10.2026: делит
+// звонок по собеседникам, ставит отметки времени и принимает словарь наших
+// слов. Ключ тот же OPENROUTER_VIDEO_TRANSCRIPT_API_KEY — это ключ Requesty.
+const VOXTRAL_MODEL =
+  (process.env.VOXTRAL_MODEL ?? '').trim() || 'mistral/voxtral-mini-transcribe-3-0';
+// Requesty принимает файл до 32 МБ; запас — на обвязку multipart.
+const MAX_VOXTRAL_AUDIO_BYTES = 30 * 1024 * 1024;
+// Звук сверх лимита пережимаем в 24 кбит/с: так в один запрос входит ~2,9 ч,
+// и собеседники нумеруются по всему звонку сразу. Что длиннее — режем на
+// куски по 2,5 ч, в каждом нумерация своя.
+const VOXTRAL_SQUEEZED_BITRATE = '24k';
+const VOXTRAL_CHUNK_SECONDS = 150 * 60;
+const VOXTRAL_TIMEOUT_MS = 20 * 60 * 1000;
+// Длинный монолог дробим на абзацы примерно такого размера, чтобы отметка
+// времени встречалась чаще, чем раз в пять минут.
+const TRANSCRIPT_PARAGRAPH_CHARS = 1200;
+
+// Слова, которые модель без подсказки пишет с ошибками («вид магнит»,
+// «контакты лета», «TGO3»). Дополняется без правки кода через
+// TRANSCRIPTION_VOCABULARY (через запятую). Список держим коротким: звук и
+// словарь вместе не должны превысить контекст модели, иначе Mistral ответит 400.
+const BASE_TRANSCRIPTION_VOCABULARY = [
+  'Polza Agency',
+  'Польза',
+  'лид',
+  'лиды',
+  'лид-магнит',
+  'ЛПР',
+  'MQL',
+  'MQL-лид',
+  'квалифицированный лид',
+  'аутрич',
+  'email-аутрич',
+  'Telegram-аутрич',
+  'LinkedIn-аутрич',
+  'автоаутрич',
+  'цепочка писем',
+  'оффер',
+  'бриф',
+  'гипотезы',
+  'соцдоказательства',
+  'холодная рассылка',
+  'прогрев почт',
+  'Instantly',
+  'LinkedIn',
+  'Телемост',
+  'amoCRM',
+];
+export const TRANSCRIPTION_VOCABULARY: readonly string[] = [
+  ...new Set([
+    ...BASE_TRANSCRIPTION_VOCABULARY,
+    ...(process.env.TRANSCRIPTION_VOCABULARY ?? '')
+      .split(',')
+      .map((term) => term.trim())
+      .filter(Boolean),
+  ]),
+];
+
 const GROQ_API_KEY = (process.env.GROQ_API_KEY ?? '').trim();
 // whisper-large-v3-turbo: ~190x real-time, tiny quality drop vs large-v3.
 // whisper-large-v3: ~165x real-time, best quality. Override via env if needed.
@@ -71,7 +129,7 @@ export class NoSpeechError extends Error {
 
 const FFMPEG_EXE = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
 
-type TranscriptionProvider = 'local' | 'openrouter' | 'groq';
+type TranscriptionProvider = 'local' | 'openrouter' | 'groq' | 'voxtral';
 
 const TRANSCRIPTION_PROVIDER: TranscriptionProvider =
   (process.env.TRANSCRIPTION_PROVIDER as TranscriptionProvider) || 'local';
@@ -679,14 +737,217 @@ async function callLocalTranscription(input: {
 }
 
 /**
+ * 'dialogue' — абзацы «[мм:сс] Спикер N: …» для звонков; 'plain' — сплошной
+ * текст без подписей (голосовые в TG-аутриче: там один говорящий, а текст
+ * уходит в промпт ИИ).
+ */
+export type TranscriptLayout = 'dialogue' | 'plain';
+
+export interface TranscriptSegment {
+  start: number;
+  text: string;
+  speaker?: string | null;
+}
+
+function formatTranscriptTimestamp(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(total / 3600);
+  const mm = String(Math.floor((total % 3600) / 60)).padStart(2, '0');
+  const ss = String(total % 60).padStart(2, '0');
+  return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+/**
+ * Склеивает сегменты в абзацы «[мм:сс] Спикер N: …». Новый абзац — при смене
+ * собеседника и в длинном монологе примерно каждые TRANSCRIPT_PARAGRAPH_CHARS
+ * знаков. Собеседники нумеруются по порядку появления; если говорит один,
+ * подпись не нужна и остаются только отметки времени.
+ */
+export function formatTranscriptByTurns(segments: readonly TranscriptSegment[]): string {
+  const numbers = new Map<string, number>();
+  for (const segment of segments) {
+    if (segment.speaker && !numbers.has(segment.speaker)) {
+      numbers.set(segment.speaker, numbers.size + 1);
+    }
+  }
+  const labelled = numbers.size > 1;
+
+  type Paragraph = { speaker: string | null; start: number; parts: string[]; length: number };
+  const paragraphs: string[] = [];
+  const pushParagraph = (paragraph: Paragraph) => {
+    const label = labelled && paragraph.speaker ? ` Спикер ${numbers.get(paragraph.speaker)}:` : '';
+    paragraphs.push(`[${formatTranscriptTimestamp(paragraph.start)}]${label} ${paragraph.parts.join(' ')}`);
+  };
+
+  let current: Paragraph | null = null;
+  for (const segment of segments) {
+    const speaker = segment.speaker ?? null;
+    if (!current || speaker !== current.speaker || current.length >= TRANSCRIPT_PARAGRAPH_CHARS) {
+      if (current) pushParagraph(current);
+      current = { speaker, start: segment.start, parts: [], length: 0 };
+    }
+    current.parts.push(segment.text);
+    current.length += segment.text.length + 1;
+  }
+  if (current) pushParagraph(current);
+  return paragraphs.join('\n\n');
+}
+
+async function recompressMp3(audioMp3: Buffer, bitrate: string): Promise<Buffer> {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-audio-squeeze-'));
+  const inPath = path.join(tmpDir, 'in.mp3');
+  const outPath = path.join(tmpDir, 'out.mp3');
+  try {
+    await fs.writeFile(inPath, audioMp3);
+    await runFfmpeg(['-y', '-i', inPath, '-ac', '1', '-ar', '16000', '-b:a', bitrate, outPath]);
+    return await fs.readFile(outPath);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function callVoxtralTranscriptionSingle(input: {
+  audioMp3: Buffer;
+  filename?: string;
+}): Promise<TranscriptSegment[]> {
+  if (!OPENROUTER_VIDEO_TRANSCRIPT_API_KEY) {
+    throw new Error(
+      'Сервис расшифровки Voxtral не настроен (OPENROUTER_VIDEO_TRANSCRIPT_API_KEY отсутствует в окружении).',
+    );
+  }
+
+  const blob = new Blob([Uint8Array.from(input.audioMp3)], { type: 'audio/mpeg' });
+  const maxAttempts = 3;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    // Язык не передаём: Requesty отбивает language вместе с
+    // timestamp_granularities (400), а без отметок времени нет и деления
+    // по собеседникам. Русский модель определяет сама.
+    const form = new FormData();
+    form.append('file', blob, input.filename ?? 'audio.mp3');
+    form.append('model', VOXTRAL_MODEL);
+    form.append('response_format', 'verbose_json');
+    form.append('timestamp_granularities[]', 'segment');
+    form.append('diarize', 'true');
+    for (const term of TRANSCRIPTION_VOCABULARY) form.append('context_bias', term);
+
+    let res: Response;
+    try {
+      res = await fetch('https://router.requesty.ai/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${OPENROUTER_VIDEO_TRANSCRIPT_API_KEY}`,
+          'X-Title': 'Portal Audio Transcribe',
+        },
+        body: form,
+        signal: AbortSignal.timeout(VOXTRAL_TIMEOUT_MS),
+      });
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= maxAttempts) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 5_000 * attempt));
+      continue;
+    }
+
+    const raw = await res.text().catch(() => '');
+    if (res.status === 429 || res.status >= 500) {
+      lastErr = new Error(`Voxtral (${res.status}): ${raw || res.statusText}`);
+      if (attempt >= maxAttempts) throw lastErr;
+      await new Promise((resolve) => setTimeout(resolve, 10_000 * attempt));
+      continue;
+    }
+    if (!res.ok) {
+      throw new Error(`Voxtral (${res.status}): ${raw || res.statusText || 'unknown error'}`);
+    }
+
+    const json = JSON.parse(raw) as {
+      text?: string;
+      segments?: Array<{ start?: number; text?: string; speaker?: string | null }>;
+    };
+    const segments = (json.segments ?? [])
+      .map((segment) => ({
+        start: Number(segment.start) || 0,
+        text: (segment.text ?? '').trim(),
+        speaker: segment.speaker ?? null,
+      }))
+      .filter((segment) => segment.text);
+    if (segments.length === 0 && json.text?.trim()) {
+      return [{ start: 0, text: json.text.trim(), speaker: null }];
+    }
+    return segments;
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('Voxtral transcription failed');
+}
+
+export async function callVoxtralTranscription(input: {
+  audioMp3: Buffer;
+  filename?: string;
+  layout?: TranscriptLayout;
+}): Promise<string> {
+  let audio = input.audioMp3;
+  if (audio.byteLength > MAX_VOXTRAL_AUDIO_BYTES) {
+    audio = await recompressMp3(audio, VOXTRAL_SQUEEZED_BITRATE);
+  }
+  const chunks = audio.byteLength > MAX_VOXTRAL_AUDIO_BYTES
+    ? await splitMp3ForTranscription(audio, VOXTRAL_CHUNK_SECONDS)
+    : [audio];
+
+  const segments: TranscriptSegment[] = [];
+  for (let i = 0; i < chunks.length; i += 1) {
+    const part = await callVoxtralTranscriptionSingle({
+      audioMp3: chunks[i],
+      filename: chunks.length > 1 && input.filename
+        ? input.filename.replace(/(\.[^.]+)$/, `-part${i + 1}$1`)
+        : input.filename,
+    });
+    // В каждом куске Voxtral нумерует собеседников заново: помечаем кусок,
+    // чтобы «speaker_1» из разных кусков не слился в одного человека.
+    for (const segment of part) {
+      segments.push({
+        start: segment.start + i * VOXTRAL_CHUNK_SECONDS,
+        text: segment.text,
+        speaker: chunks.length > 1 && segment.speaker ? `${i + 1}:${segment.speaker}` : segment.speaker,
+      });
+    }
+  }
+
+  if (segments.length === 0) throw new NoSpeechError();
+  return input.layout === 'plain'
+    ? segments.map((segment) => segment.text).join(' ')
+    : formatTranscriptByTurns(segments);
+}
+
+/**
  * Unified entry point: routes to the configured provider.
  *
  * TRANSCRIPTION_PROVIDER values:
  *   - "local"      → self-hosted whisper (portal-transcribe-worker)
  *   - "openrouter" → Requesty policy/transcription (fallback path)
  *   - "groq"       → Groq's Whisper Large v3 Turbo (fast, cheap, rate-limited)
+ *   - "voxtral"    → Voxtral через Requesty: собеседники, отметки времени,
+ *                    словарь; при любом сбое — запасной Groq (если есть ключ)
  */
-export async function transcribeAudio(input: { audioMp3: Buffer; filename?: string; jobId?: string }): Promise<string> {
+export async function transcribeAudio(input: {
+  audioMp3: Buffer;
+  filename?: string;
+  jobId?: string;
+  layout?: TranscriptLayout;
+}): Promise<string> {
+  if (TRANSCRIPTION_PROVIDER === 'voxtral') {
+    try {
+      return await callVoxtralTranscription(input);
+    } catch (err) {
+      // Запасной путь и для «речи нет»: пустой ответ Voxtral на живой записи
+      // иначе навсегда пометил бы звонок пропущенным. Тишину Groq тоже не
+      // расслышит и сам выбросит NoSpeechError.
+      if (!GROQ_API_KEY) throw err;
+      console.warn(
+        '[transcription] Voxtral failed, falling back to Groq:',
+        err instanceof Error ? err.message : err,
+      );
+      return callGroqTranscription(input);
+    }
+  }
   if (TRANSCRIPTION_PROVIDER === 'local') {
     return callLocalTranscription(input);
   }

@@ -39,7 +39,6 @@ COPY app/ ./
 # Set environment variables for build
 ARG NEXT_PUBLIC_SUPABASE_URL
 ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
-ARG NEXT_PUBLIC_RDP_WS_URL
 # Comma-separated список хостов, на которых /login показывает кнопку
 # «Зарегистрироваться» (см. app/src/app/login/page.tsx, isSignupHost).
 # Пусто на polza-portal.ru → кнопки нет; «app.outreachos.pro» на новом домене.
@@ -48,7 +47,6 @@ ARG NEXT_PUBLIC_SIGNUP_HOSTS
 
 ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
 ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
-ENV NEXT_PUBLIC_RDP_WS_URL=$NEXT_PUBLIC_RDP_WS_URL
 ENV NEXT_PUBLIC_SIGNUP_HOSTS=$NEXT_PUBLIC_SIGNUP_HOSTS
 
 # Increase Node heap for Next.js build (avoids OOM in Docker)

@@ -2,7 +2,7 @@
 # Select production deploy targets from a newline-delimited list of changed files.
 # The functions are sourced by scheduled-deploy.yml and by the shell tests.
 
-ALL_CORE_SERVICES="portal yandexmaps googleparsers transcribe-worker guacd rdp-ws telegram-bot-api health-check loop-watchdog atmos-bot instantly-sync-bot portal-external-sync changelog-bot polza-reports autoheal"
+ALL_CORE_SERVICES="portal yandexmaps googleparsers transcribe-worker telegram-bot-api health-check loop-watchdog atmos-bot instantly-sync-bot portal-external-sync changelog-bot polza-reports autoheal"
 ALL_WORKER_SERVICES="worker-hh worker-eng-hiring worker-polza-outreach worker-search worker-enrich worker-enrich-2 worker-enrich-3 worker-enrich-4 worker-enrich-5 worker-enrich-6 worker-enrich-7 worker-enrich-8 worker-enrich-9 worker-enrich-coordinator worker-yandexmaps worker-googleparsers worker-emailvalidation worker-inn-enrich worker-website-inn-lookup worker-tg-outreach worker-aicaller worker-sales-copilot worker-sales-ai-analysis worker-leads-report worker-leads-report-bot worker-byo-send worker-byo-replies worker-sales-chat-logger worker-sales-chat-archive worker-tg-parser worker-tg-transcribe worker-instantly-leads worker-outreach worker-li-outreach worker-baseconstructor worker-baseconstructor-2 worker-baseconstructor-3 worker-baseconstructor-4 worker-baseconstructor-5 worker-baseconstructor-6 worker-baseconstructor-7 worker-baseconstructor-8 worker-baseconstructor-9 worker-baseconstructor-10 worker-baseconstructor-11 worker-baseconstructor-12 worker-client-report-exports worker-bob-scorer worker-manual-scoring worker-autopipeline worker-autorenew worker-fns-licences worker-hypothesis-engine worker-hypothesis-engine-eng worker-vertical-engine-v2 worker-handoff-check-bot worker-sender-leads"
 BASE_CONSTRUCTOR_WORKER_SERVICES="worker-baseconstructor worker-baseconstructor-2 worker-baseconstructor-3 worker-baseconstructor-4 worker-baseconstructor-5 worker-baseconstructor-6 worker-baseconstructor-7 worker-baseconstructor-8 worker-baseconstructor-9 worker-baseconstructor-10 worker-baseconstructor-11 worker-baseconstructor-12"
 
@@ -158,7 +158,6 @@ select_deploy_targets_from_files() {
       services/yandexmaps/*) add_core_service yandexmaps ;;
       services/googleparsers/*) add_core_service googleparsers ;;
       services/transcribe-worker/*) add_core_service transcribe-worker ;;
-      services/rdp-ws/*) add_core_service rdp-ws ;;
       services/health-check/*) add_core_service health-check ;;
       services/loop-watchdog/*) add_core_service loop-watchdog ;;
       services/atmos-bot/*) add_core_service atmos-bot ;;
@@ -168,7 +167,7 @@ select_deploy_targets_from_files() {
       services/polza-reports/*) add_core_service polza-reports ;;
 
       # Repository/CI/docs/ops-only changes do not require container restarts.
-      .semaphore/*|.github/*|.claude/*|.impeccable/*|docs/*|memory/*.md|wiki/*|scripts/*|deploy/nginx/*|deploy/static/*|supabase/operator-sql/*|deploy/main-db/*|deploy/main-db-prod/*|deploy/instantly-db-prod/*|services/smtp-proxy/*|drain-worker.sh|docker-compose.yml|docker-compose.rdp.yml|README.md|CLAUDE.md|DESIGN.md|PRODUCT.md|*.md|.gitignore|.dockerignore|test_*.py|tmp_*.py|package-lock.json)
+      .semaphore/*|.github/*|.claude/*|.impeccable/*|docs/*|memory/*.md|wiki/*|scripts/*|deploy/nginx/*|deploy/static/*|supabase/operator-sql/*|deploy/main-db/*|deploy/main-db-prod/*|deploy/instantly-db-prod/*|services/smtp-proxy/*|drain-worker.sh|docker-compose.yml|README.md|CLAUDE.md|DESIGN.md|PRODUCT.md|*.md|.gitignore|.dockerignore|test_*.py|tmp_*.py|package-lock.json)
         ;;
       *)
         # Unknown production-impacting paths fail safe: deploy everything until

@@ -60,7 +60,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         .limit(MAX_ITEMS),
       db
         .from('sender_manual_messages')
-        .select('id, subject, body, status, sent_at, created_at, error, to_email, cc_emails')
+        .select('id, subject, body, status, sent_at, created_at, error, to_email, cc_emails, by_ai')
         .eq('recipient_id', id)
         .order('created_at')
         .limit(MAX_ITEMS),
@@ -110,13 +110,15 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           ?? MANUAL_NOTES[String(x.status)]
           ?? (x.status === 'sent' && x.error ? x.error : null)
           ?? (x.status === 'sent' ? null : `${x.status}${x.error ? `: ${x.error}` : ''}`);
+        // Письмо квалифицирующего ИИ помечаем, чтобы его не приняли за ответ оператора.
+        const note = x.by_ai ? (status ? `ИИ · ${status}` : 'ИИ') : status;
         return {
           id: String(x.id),
           direction: 'out' as const,
           subject: x.subject,
           body: x.body,
           at: (x.sent_at ?? x.created_at) as string | null,
-          note: status,
+          note,
           fromEmail: null,
           // Кому ушло, если не самому адресату («Кому»), и копия (в том числе передача
           // лида клиенту) — отдельными полями: лента показывает их в шапке письма.

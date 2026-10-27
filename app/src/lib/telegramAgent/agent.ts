@@ -46,7 +46,6 @@ function describeAction(tool: string, args: Record<string, unknown>): string {
       const fields = Object.keys(a).filter((k) => k !== 'task_id');
       return `Обновить поля задачи: ${fields.join(', ')}`;
     },
-    update_review_status: (a) => `Изменить статус ревью → <b>${a.new_status}</b>`,
     launch_hh_parser: (a) => `Запустить HH-парсер: «${a.text}»${a.area ? ` (регион: ${a.area})` : ''}${a.salary_from ? ` от ${a.salary_from}₽` : ''}`,
     launch_search_parser: (a) => `Запустить поисковый парсер${a.queries ? `: ${String(a.queries).split('\n').length} запрос(ов)` : ''}${a.brief ? ` по брифу` : ''}`,
     launch_yandex_maps_parser: (a) => `Запустить поиск по каталогу Яндекс.Карт: ${String(a.cities ?? '').split(/[\n,]+/).filter(Boolean).length} город(ов) × ${String(a.rubrics ?? '').split(/[\n,]+/).filter(Boolean).length} рубрик`,

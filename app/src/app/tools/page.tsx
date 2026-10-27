@@ -6,28 +6,23 @@ import type { Route } from 'next';
 import {
   Database,
   Sparkles,
-  Mail,
   MailPlus,
   Search,
   PhoneCall,
   AudioLines,
   FileText,
   FileSpreadsheet,
-  ClipboardCheck,
   Send,
   Settings,
   Waves,
   Video,
   MessageSquareMore,
   Briefcase,
-  Building2,
   Users,
   Bot,
   Lightbulb,
   BookOpen,
-  ShieldAlert,
   Blocks,
-  PartyPopper,
   LayoutGrid,
   List,
   Telescope,
@@ -39,7 +34,6 @@ import { ALL_TOOL_IDS, TOOLS_CONFIG, TOOL_GROUPS, type ToolId } from '@/lib/tool
 import { sortToolIdsByTitle } from '@/lib/toolsSort';
 import { type ToolStatus } from '@/lib/toolStatus';
 import { isAdmin } from '@/lib/roles';
-import { RdpToolCard } from './RdpToolCard';
 import { ToolVisibilityModal } from './ToolVisibilityModal';
 import { usePortalBlockingLoad } from '@/components/PortalLoadingProvider';
 import { useUser } from '@/lib/UserProvider';
@@ -79,23 +73,18 @@ function TelegramIcon({ className }: { className?: string }) {
 }
 
 const TOOL_ICONS: Record<ToolId, ComponentType<{ className?: string }>> = {
-  'done-for-you': Sparkles,
   'base-constructor': Blocks,
   'ai-caller': PhoneCall,
   'ai-caller-v2': AudioLines,
   databases: Database,
-  'database-review': ClipboardCheck,
   parsers: Search,
-  'email-sequence': Mail,
   'email-sequence-v2': MailPlus,
   'auto-report': FileText,
   'replies-report': MessageSquareMore,
   'polza-reports': FileSpreadsheet,
   'audio-transcribe': Waves,
   'tg-transcribe': Video,
-  'cis-lead-finder': Building2,
   'li-outreach': Users,
-  rdp: FileText,
   instantly: Send,
   'tg-outreach': MessageSquareMore,
   'habr-career': Briefcase,
@@ -103,10 +92,6 @@ const TOOL_ICONS: Record<ToolId, ComponentType<{ className?: string }>> = {
   'sales-copilot': Bot,
   'sales-hypotheses': Lightbulb,
   'knowledge-base': BookOpen,
-  'bugor-outreach': Sparkles,
-  'nash-outreach': Building2,
-  'event-outreach': PartyPopper,
-  'reputation-finder': ShieldAlert,
   '2gis-parser': MapPin,
   'our-bases': Database,
   'inn-enrich': FileSpreadsheet,
@@ -300,21 +285,16 @@ export default function ToolsPage() {
 
   const adminViewer = isAdmin(userRole);
 
-  /** Карточка одного тула (RDP — особый, у него своя card-компонента). */
-  const renderToolCard = (toolId: string) =>
-    toolId === 'rdp' ? (
-      <div key="rdp" className="min-w-0 flex flex-col h-full">
-        <RdpToolCard />
-      </div>
-    ) : (
-      <ToolLinkCard
-        key={toolId}
-        toolId={toolId as ToolId}
-        locale={locale}
-        effectiveStatus={statuses[toolId]}
-        userRole={userRole}
-      />
-    );
+  /** Карточка одного тула. */
+  const renderToolCard = (toolId: string) => (
+    <ToolLinkCard
+      key={toolId}
+      toolId={toolId as ToolId}
+      locale={locale}
+      effectiveStatus={statuses[toolId]}
+      userRole={userRole}
+    />
+  );
 
   return (
     <div className="space-y-6 text-left max-w-full">

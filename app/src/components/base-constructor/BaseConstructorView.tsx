@@ -490,8 +490,11 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
       const jobs = await loadHistory();
       if (cancelled || !jobs || !historyInitialLoadRef.current) return;
       historyInitialLoadRef.current = false;
+      // ?job=<id> — открыть конкретную базу (например, только что загруженную из «Рассылки»).
+      const wanted = new URLSearchParams(window.location.search).get('job');
+      const target = wanted ? jobs.find((j) => j.id === wanted) : undefined;
       const running = jobs.find(isActiveManualConstructorJob);
-      if (running) setActiveJob(running);
+      if (target || running) setActiveJob(target ?? running ?? null);
     })();
     return () => {
       cancelled = true;

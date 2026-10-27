@@ -23,6 +23,11 @@ const POLZA_CAMPAIGN_RE = /^\s*\d+\s*\.\s*polza/i;
 // «ENagency …»: слово «ENagency» в начале названия.
 const ENAGENCY_CAMPAIGN_RE = /^\s*enagency\b/i;
 
+/** Английский аутрич студии: «ENagency …». Остальные наши кампании — русские «N. Polza_…». */
+export function isEnAgencyCampaign(campaignName: string | null | undefined): boolean {
+  return ENAGENCY_CAMPAIGN_RE.test(campaignName ?? '');
+}
+
 export function isOwnAgencyCampaign(campaignName: string | null | undefined): boolean {
   const name = campaignName ?? '';
   return POLZA_CAMPAIGN_RE.test(name) || ENAGENCY_CAMPAIGN_RE.test(name);

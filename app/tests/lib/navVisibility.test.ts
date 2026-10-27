@@ -184,8 +184,13 @@ describe('видимость группы «Дашборды»', () => {
 });
 
 describe('visibleNavEntries — остальное меню', () => {
+  // Пункты лежат и на верхнем уровне, и внутри групп («Проекты», «Админка»…):
+  // доступ проверяем по всем, вместе с id самих групп.
+  const allIds = (entries: ReturnType<typeof visibleNavEntries>) =>
+    entries.flatMap((entry) => (isNavGroup(entry) ? [entry.id, ...entry.children.map((child) => child.id)] : [entry.id]));
+
   it('менеджер не видит админские и лидовые пункты', () => {
-    const ids = visibleNavEntries(role('manager')).map((entry) => entry.id);
+    const ids = allIds(visibleNavEntries(role('manager')));
     expect(ids).toContain('projects');
     expect(ids).not.toContain('admin');
     expect(ids).not.toContain('mailbox-load');
@@ -193,7 +198,7 @@ describe('visibleNavEntries — остальное меню', () => {
   });
 
   it('админ видит админские пункты и группу дашбордов', () => {
-    const ids = visibleNavEntries(role('admin')).map((entry) => entry.id);
+    const ids = allIds(visibleNavEntries(role('admin')));
     expect(ids).toContain('admin');
     expect(ids).toContain('dashboards');
     expect(ids).toContain('invoices');

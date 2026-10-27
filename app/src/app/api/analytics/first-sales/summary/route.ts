@@ -19,9 +19,8 @@ export const dynamic = 'force-dynamic';
 const PIPELINE_ID = Number(process.env.FIRST_SALES_PIPELINE_ID ?? '7670334');
 
 export async function GET(req: NextRequest) {
-  // `'error' in gate` — принятое в проекте сужение размеченного объединения
-  // (см. src/app/api/database-review/requests/route.ts). Через `gate.error`
-  // TypeScript union не сузит.
+  // `'error' in gate` — принятое в проекте сужение размеченного объединения.
+  // Через `gate.error` TypeScript union не сузит.
   const gate = await requireFirstSalesAccess(req);
   if ('error' in gate) return gate.error;
   const db = gate.supabaseAdmin;

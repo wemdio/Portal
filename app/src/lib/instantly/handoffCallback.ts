@@ -5,7 +5,6 @@ import { createHmac, timingSafeEqual } from 'crypto';
  * Format: `h.{qualificationId}.{sig24}` — h(1)+.(1)+uuid(36)+.(1)+sig(24) = 63
  * bytes, within Telegram's 64-byte callback_data limit. The HMAC stops anyone
  * from forging a press for an arbitrary qualification id.
- * Mirrors the database-review callback pattern (lib/databaseReview/telegramCallback.ts).
  */
 
 const PREFIX = 'h';

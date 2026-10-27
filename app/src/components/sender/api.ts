@@ -1133,3 +1133,21 @@ export function deleteSeedBox(id: string) {
 export function fetchSeedHealth() {
   return authFetchJson<{ mailboxes: SeedHealthDto[] }>(`${BASE}/seed-boxes/health`);
 }
+
+/** Кусок базы кампании для выгрузки (адрес, имя и колонки файла). */
+export function fetchRecipientsExportChunk(campaignId: string, offset: number) {
+  return authFetchJson<{
+    rows: { email: string; name: string; vars: Record<string, string> }[];
+    total: number;
+    chunkSize: number;
+  }>(`${BASE}/campaigns/${campaignId}/recipients/export?offset=${offset}`);
+}
+
+/** Положить готовую таблицу в конструктор баз: задача сразу «завершена». */
+export function importTableToConstructor(data: string[][], fileName: string) {
+  return authFetchJson<{ id: string }>('/api/tools/base-constructor/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data, file_name: fileName }),
+  });
+}

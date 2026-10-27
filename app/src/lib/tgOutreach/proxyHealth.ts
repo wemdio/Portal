@@ -25,6 +25,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { OutreachAccount } from './types';
+import { accountLogName } from './accountLabel';
 
 // ---- Constants -------------------------------------------------------------
 
@@ -582,7 +583,7 @@ export async function handleProxyError(args: {
     if (cooldownSet) {
       log(
         'warning',
-        `Прокси аккаунта ${account.session_name}: ${r.consecutiveErrors} ошибок подряд (${reason}) — ставлю cooldown до ${new Date(r.cooldownUntil ?? '').toLocaleTimeString('ru-RU')}.`,
+        `Прокси аккаунта ${accountLogName(account)}: ${r.consecutiveErrors} ошибок подряд (${reason}) — ставлю cooldown до ${new Date(r.cooldownUntil ?? '').toLocaleTimeString('ru-RU')}.`,
       );
     } else {
       // До порога эта ветка молчала совсем: аккаунт не подключился, свап не
@@ -590,7 +591,7 @@ export async function handleProxyError(args: {
       // само», хотя аккаунт до следующего запуска кампании просто выпал.
       log(
         'info',
-        `Прокси аккаунта ${account.session_name}: ошибка ${r.consecutiveErrors} из ${CONSECUTIVE_ERROR_THRESHOLD} подряд (${reason}) — свап пока не делаю, жду подтверждения, что это не разовый сбой.`,
+        `Прокси аккаунта ${accountLogName(account)}: ошибка ${r.consecutiveErrors} из ${CONSECUTIVE_ERROR_THRESHOLD} подряд (${reason}) — свап пока не делаю, жду подтверждения, что это не разовый сбой.`,
       );
     }
   } catch (e) {
@@ -608,7 +609,7 @@ export async function handleProxyError(args: {
     if (degradedMarked) {
       log(
         'error',
-        `Аккаунт ${account.session_name}: ${a.consecutiveProxyFailures} разных прокси подряд не помогли — помечаю degraded, отлёжка 24ч. Сначала проверьте здоровье пула прокси кампании: если брак массовый и на других аккаунтах тоже, дело в пуле. Если пул чистый — похоже на shadow-ban или битую сессию, тогда перевыпустите session_data и снимите degraded в UI.`,
+        `Аккаунт ${accountLogName(account)}: ${a.consecutiveProxyFailures} разных прокси подряд не помогли — помечаю degraded, отлёжка 24ч. Сначала проверьте здоровье пула прокси кампании: если брак массовый и на других аккаунтах тоже, дело в пуле. Если пул чистый — похоже на shadow-ban или битую сессию, тогда перевыпустите session_data и снимите degraded в UI.`,
       );
     }
   } catch (e) {
@@ -633,7 +634,7 @@ export async function handleProxyError(args: {
     { fullOutage },
   );
   if (!swapGate.ok) {
-    log('info', `Автосвап прокси для аккаунта ${account.session_name} пропущен: ${swapGate.reason}.`);
+    log('info', `Автосвап прокси для аккаунта ${accountLogName(account)} пропущен: ${swapGate.reason}.`);
     return { swappedTo: null };
   }
 
@@ -649,7 +650,7 @@ export async function handleProxyError(args: {
   if (!free) {
     log(
       'warning',
-      `Нет свободного прокси в кампании для свапа у аккаунта ${account.session_name} (все либо в cooldown, либо заняты другими аккаунтами). Аккаунт продолжит на текущем прокси после истечения cooldown.`,
+      `Нет свободного прокси в кампании для свапа у аккаунта ${accountLogName(account)} (все либо в cooldown, либо заняты другими аккаунтами). Аккаунт продолжит на текущем прокси после истечения cooldown.`,
     );
     return { swappedTo: null };
   }
@@ -666,7 +667,7 @@ export async function handleProxyError(args: {
       await setAccountAfterSwapCooldown(db, account.id);
       log(
         'warning',
-        `Автосвап прокси: аккаунт ${account.session_name} переведён на ${free.url} (${res.swapsToday}-й свап сегодня, причина ${reason}${fullOutage ? ', полный отвал подключения' : ''}). Аккаунт на 30-мин паузе, чтобы Telegram стабилизировался на новом IP.`,
+        `Автосвап прокси: аккаунт ${accountLogName(account)} переведён на ${free.url} (${res.swapsToday}-й свап сегодня, причина ${reason}${fullOutage ? ', полный отвал подключения' : ''}). Аккаунт на 30-мин паузе, чтобы Telegram стабилизировался на новом IP.`,
       );
       // Обновляем in-memory state, чтобы следующие итерации видели новый proxy_id
       // и не повторили цикл «свап → ещё ошибка → ещё свап».
@@ -675,7 +676,7 @@ export async function handleProxyError(args: {
     } else {
       log(
         'info',
-        `Автосвап прокси для аккаунта ${account.session_name} не выполнен: ${res.refusalReason ?? 'unknown'}.`,
+        `Автосвап прокси для аккаунта ${accountLogName(account)} не выполнен: ${res.refusalReason ?? 'unknown'}.`,
       );
     }
   } catch (e) {

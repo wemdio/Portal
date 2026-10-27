@@ -93,9 +93,6 @@ lpr_candidates(id uuid, job_id, full_name, title, company_name, company_domain, 
 brief_scoring_jobs(id uuid, user_id, status, brief_text, total int, processed int, created_at, completed_at)
 brief_scoring_queue(id uuid, job_id, company_data jsonb, status, score int, reason, created_at)
 
--- Ревью баз
-database_review_requests(id uuid, owner_user_id, tab_name, project_id, specialist_comment, status, reviewer_user_id, reviewer_comment, created_at)
-
 -- Пайплайны
 agent_pipelines(id uuid, user_id, chat_id bigint, name, status, current_step_index int, steps jsonb, context jsonb, error_message, created_at, completed_at)
 

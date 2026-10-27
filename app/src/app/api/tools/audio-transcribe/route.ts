@@ -76,7 +76,7 @@ export async function POST(req: NextRequest) {
   // выдаёт ровно такой формат, любое отклонение = кто-то пытается прочитать
   // чужой файл через свою сессию.
   const expectedPrefix = `audio-transcribe/${user.id}/`;
-  if (!s3Key.startsWith(expectedPrefix)) {
+  if (!s3Key.startsWith(expectedPrefix) || s3Key.split('/').includes('..')) {
     return jsonError('Неверный ключ файла', 400);
   }
 

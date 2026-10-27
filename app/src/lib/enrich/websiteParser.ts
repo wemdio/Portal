@@ -195,25 +195,67 @@ export async function fetchHtmlWithPlaywright(
   if (!browser) return null;
   if (signal?.aborted) return null;
 
+  // Сайт из поисковой выдачи — чужой код, и его JS исполняется у нас в
+  // воркере. Каждый запрос страницы (документ, скрипты, fetch/XHR) проходит ту
+  // же проверку адреса, что обычное чтение сайтов: только публичный адрес и
+  // не наши серверы — иначе страница читала бы внутренние сервисы и
+  // отправляла их наружу (аудит 26.10.2026). Импорт динамический:
+  // publicAddress сам импортирует этот модуль.
+  const { createPublicWebsiteGuard, OWN_SERVER_ADDRESSES } = await import('@/lib/enrich/publicAddress');
+  const guard = createPublicWebsiteGuard({
+    allowHttpDowngrade: true,
+    maxRedirects: 10,
+    refusedAddresses: OWN_SERVER_ADDRESSES,
+  });
+  const allowedOrigins = new Map<string, Promise<boolean>>();
+  const isAllowedUrl = (raw: string): Promise<boolean> => {
+    let parsed: URL;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      return Promise.resolve(false);
+    }
+    if (parsed.protocol === 'data:' || parsed.protocol === 'blob:' || parsed.protocol === 'about:') {
+      return Promise.resolve(true);
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return Promise.resolve(false);
+    let verdict = allowedOrigins.get(parsed.origin);
+    if (!verdict) {
+      verdict = guard.checkUrl(parsed).then(() => true, () => false);
+      allowedOrigins.set(parsed.origin, verdict);
+    }
+    return verdict;
+  };
+
   const context = await browser.newContext({
     userAgent: BROWSER_USER_AGENT,
     viewport: { width: 1365, height: 768 },
     locale: 'ru-RU',
+    serviceWorkers: 'block',
   });
   const page = await context.newPage();
   page.setDefaultTimeout(timeout);
   page.setDefaultNavigationTimeout(timeout);
 
-  // Speed up: don't load heavy assets
+  // WebSocket сбору контактов не нужен, а page.route его не видит — глушим.
+  await page.routeWebSocket(/.*/, (ws) => { ws.close(); });
+
   await page.route('**/*', async (route) => {
     try {
-      const type = route.request().resourceType();
+      const request = route.request();
+      // Speed up: don't load heavy assets
+      const type = request.resourceType();
       if (type === 'image' || type === 'media' || type === 'font') {
         await route.abort();
         return;
       }
+      if (!(await isAllowedUrl(request.url()))) {
+        await route.abort('blockedbyclient');
+        return;
+      }
     } catch {
-      // ignore
+      await route.abort().catch(() => {});
+      return;
     }
     await route.continue();
   });
@@ -228,7 +270,13 @@ export async function fetchHtmlWithPlaywright(
   signal?.addEventListener('abort', abortListener, { once: true });
 
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+    // Шаги редиректа документа page.route не перехватывает: каждый из них
+    // проверяем по цепочке ответа, и страницу внутреннего адреса не отдаём.
+    for (let hop = response?.request() ?? null; hop; hop = hop.redirectedFrom()) {
+      if (!(await isAllowedUrl(hop.url()))) return null;
+    }
+    if (!(await isAllowedUrl(page.url()))) return null;
     // Give client-side rendering a moment (contacts/emails often injected)
     await page.waitForTimeout(900 + Math.round(Math.random() * 900));
     const html = await page.content();

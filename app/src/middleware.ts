@@ -48,12 +48,25 @@ function decodeMarketCache(raw: string, currentUserId: string): ClientMarket | n
 // Public / external API: authenticate with their OWN secret/signature or are
 // genuinely public. They skip the staff-only gate and enforce their own auth.
 // (The ai-caller Telegram webhook is excluded in its own block above.)
+// External webhook receivers (Instantly / Telegram / Unipile / YooKassa, etc.)
+// are called WITHOUT a user JWT and must validate their own secret/signature.
+// Exact list, not "path contains /webhook": under the old pattern any staff
+// route with a dynamic segment set to `webhook` became public (audit
+// 26.10.2026). The `.../webhooks` (plural) management routes stay staff-only.
+// A new webhook receiver must be added here.
+const PUBLIC_WEBHOOK_PATHS = new Set([
+  '/api/amo/funnel-guard/webhook',
+  '/api/amo/funnel-guard/webhook/reconcile',
+  '/api/invoices/webhook',
+  '/api/telegram/agent/webhook',
+  '/api/telegram/client-replies/webhook',
+  '/api/telegram/handoff/webhook',
+  '/api/tools/li-outreach/webhook',
+  '/api/tools/tg-transcribe/webhook',
+])
+
 function isPublicApiPath(p: string): boolean {
-  // External webhook receivers (Instantly / Telegram / Unipile / YooKassa, etc.)
-  // are called WITHOUT a user JWT and must validate their own secret/signature.
-  // Matches `.../webhook` and `.../webhook/...` but NOT the `.../webhooks` (plural)
-  // management routes, which stay staff-only.
-  if (p.endsWith('/webhook') || p.includes('/webhook/')) return true
+  if (PUBLIC_WEBHOOK_PATHS.has(p) || p.startsWith('/api/instantly/webhook/')) return true
   return (
     p === '/api/signup' ||
     p === '/api/auth/forgot-password' || // unauthenticated self-service password reset from /login
@@ -68,7 +81,6 @@ function isPublicApiPath(p: string): boolean {
     p.startsWith('/api/bench/') ||
     p.startsWith('/api/telegram/verify') ||
     p.startsWith('/api/telegram/link') ||
-    p.startsWith('/api/database-review/guest/') ||
     p.startsWith('/api/lead-board/') || // гостевая таблица лидов — auth по токену
     p === '/api/mail-servers/heartbeat' || // отчёты почтовых серверов — auth по токену серверов в самом роуте
     p.startsWith('/api/cron/')
@@ -305,7 +317,6 @@ export async function middleware(request: NextRequest) {
       pathname.startsWith('/api/signup') ||
       pathname.startsWith('/api/telegram/verify') ||
       pathname.startsWith('/api/telegram/link') ||
-      pathname.startsWith('/review/base/') ||
       pathname.startsWith('/leads-board/')
 
     if (!user && !isPublicPath) {
@@ -558,7 +569,6 @@ export async function middleware(request: NextRequest) {
         pathname === '/maintenance' ||
         pathname === '/consent' ||
         pathname === '/privacy' ||
-        pathname.startsWith('/review/base/') ||
         pathname.startsWith('/leads-board/')
       if (!clientAllowed) {
         return NextResponse.redirect(new URL('/client', request.url))
@@ -623,5 +633,8 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)'],
+  // `/api/:path*` отдельно: исключение картинок по расширению действовало и на
+  // API, и `/api/<route>/<id>.png` проходил мимо staff-проверки (аудит
+  // 26.10.2026). API, отдающих картинки по такому адресу, в портале нет.
+  matcher: ['/api/:path*', '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)'],
 }

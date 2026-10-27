@@ -22,24 +22,10 @@ function splitList(value: unknown): string[] {
   return value.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
 }
 
-const REVIEW_TRANSITIONS: Record<string, string[]> = {
-  submitted: ['review_approved', 'needs_rework'],
-  needs_rework: ['submitted'],
-  review_approved: ['sent_to_client', 'needs_rework'],
-  sent_to_client: ['client_approved', 'client_requested_changes'],
-  client_requested_changes: ['submitted'],
-};
-
 const STATUS_LABELS: Record<string, string> = {
   pending: 'Ожидает',
   in_progress: 'В работе',
   done: 'Завершено',
-  submitted: 'На проверке',
-  needs_rework: 'На доработке',
-  review_approved: 'Одобрено',
-  sent_to_client: 'Отправлено клиенту',
-  client_approved: 'Клиент одобрил',
-  client_requested_changes: 'Клиент просит изменения',
 };
 
 function label(status: string): string {
@@ -226,37 +212,6 @@ export const updateTaskFields: WriteToolHandler = async (params, user) => {
   const changed = Object.keys(fields).join(', ');
   await logAudit('telegram-agent.write.task-fields', `${task.title}: updated ${changed}`, { task_id: taskId, fields, userId: user.userId, userName: user.fullName });
   return `Задача «${task.title}» обновлена. Изменённые поля: ${changed}`;
-};
-
-export const updateReviewStatus: WriteToolHandler = async (params, user) => {
-  const sb = ensureAdmin();
-  const { review_id, new_status, comment } = params as { review_id: string; new_status: string; comment?: string };
-
-  const { data: review, error: fetchErr } = await sb
-    .from('database_review_requests')
-    .select('id, tab_name, status')
-    .eq('id', review_id)
-    .maybeSingle();
-
-  if (fetchErr || !review) return 'Ревью-запрос не найден.';
-
-  const allowed = REVIEW_TRANSITIONS[review.status];
-  if (!allowed?.includes(new_status)) {
-    return `Недопустимый переход: ${label(review.status)} → ${label(new_status)}. Допустимые: ${(allowed ?? []).map(label).join(', ')}`;
-  }
-
-  const update: Record<string, unknown> = { status: new_status, updated_at: new Date().toISOString() };
-  if (comment) update.reviewer_comment = comment;
-
-  const { error } = await sb
-    .from('database_review_requests')
-    .update(update)
-    .eq('id', review_id);
-
-  if (error) return `Ошибка: ${error.message}`;
-
-  await logAudit('telegram-agent.write.review-status', `${review.tab_name}: ${label(review.status)} → ${label(new_status)}`, { review_id, userId: user.userId, userName: user.fullName });
-  return `Ревью «${review.tab_name}»: ${label(review.status)} → ${label(new_status)}`;
 };
 
 export const launchHhParser: WriteToolHandler = async (params, user) => {
@@ -643,7 +598,6 @@ export const writeToolHandlers: Record<string, WriteToolHandler> = {
   create_task: createTask,
   update_task_status: updateTaskStatus,
   update_task_fields: updateTaskFields,
-  update_review_status: updateReviewStatus,
   launch_hh_parser: launchHhParser,
   launch_search_parser: launchSearchParser,
   launch_yandex_maps_parser: launchYandexMapsParser,

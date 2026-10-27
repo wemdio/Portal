@@ -18,15 +18,6 @@ import { runBriefScoringJob } from '@/lib/briefScoring/briefScoringWorker';
 import { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/lib/parsers/yandexMapsWorker';
 import { runEmailValidationJob } from '@/lib/emailValidation/emailValidationWorker';
 import { runInnEnrichJob } from '@/lib/innEnrich/runJob';
-import { runBugorSmtpValidation } from '@/lib/bugorOutreach/smtpValidationWorker';
-import { runNashSmtpValidation } from '@/lib/nashOutreach/smtpValidationWorker';
-import { collectRawSignals } from '@/lib/nashOutreach/collectLeads';
-import { enrichRawSignals } from '@/lib/nashOutreach/enrichLeads';
-import { findEmailsForLeads } from '@/lib/bugorOutreach/findEmails';
-import { validateLeadEmails } from '@/lib/bugorOutreach/validateEmails';
-import { runLeadImportJob } from '@/lib/cisLeads/leadImportWorker';
-import { runPhoneEnrichmentBatch } from '@/lib/cisLeads/phoneEnrichmentWorker';
-import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWorker';
 import { pollDurableQualificationReplies } from '@/lib/instantly/leadQualificationWorker';
 import { syncInstantlyCampaignAnalytics } from '@/lib/tools/instantlyCampaignCatalog';
 import { syncClientLeads } from '@/lib/instantly/clientLeadsSync';
@@ -357,30 +348,6 @@ async function claimInnEnrichJob(): Promise<string | null> {
   return claimed?.id as string ?? null;
 }
 
-async function claimLeadImportJob(): Promise<string | null> {
-  const db = supabaseAdmin!;
-
-  const { data: pending } = await db
-    .from('lead_import_jobs')
-    .select('id')
-    .eq('status', 'pending')
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (!pending) return null;
-
-  const { data: claimed } = await db
-    .from('lead_import_jobs')
-    .update({ status: 'running', started_at: new Date().toISOString() })
-    .eq('id', pending.id)
-    .eq('status', 'pending')
-    .select('id')
-    .maybeSingle();
-
-  return claimed?.id ?? null;
-}
-
 async function claimYandexDirectJob(): Promise<string | null> {
   const db = supabaseAdmin!;
 
@@ -403,60 +370,6 @@ async function claimYandexDirectJob(): Promise<string | null> {
     .maybeSingle();
 
   return claimed?.id ?? null;
-}
-
-// --------------------------------------------------------------------------
-// RDP booking expiry — marks bookings as 'expired' when starts_at + 5 min
-// has passed without an active session being started.
-// --------------------------------------------------------------------------
-
-async function checkRdpBookingExpiry(): Promise<void> {
-  if (!supabaseAdmin) return;
-  const db = supabaseAdmin;
-
-  const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-
-  const { data: expired, error } = await db
-    .from('rdp_bookings')
-    .update({ status: 'expired' })
-    .eq('status', 'pending')
-    .lt('starts_at', fiveMinAgo)
-    .select('id');
-
-  if (error) {
-    log('warn', 'RDP booking expiry check failed', error);
-  } else if (expired?.length) {
-    log('info', `Expired ${expired.length} RDP booking(s) (no-show after 5 min)`);
-  }
-}
-
-// --------------------------------------------------------------------------
-// RDP session inactivity — auto-ends sessions idle for 30+ minutes.
-// Safety net for closed tabs / browser crashes where the frontend can't
-// call DELETE /sessions itself.
-// --------------------------------------------------------------------------
-
-const RDP_INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
-
-async function checkRdpSessionInactivity(): Promise<void> {
-  if (!supabaseAdmin) return;
-  const db = supabaseAdmin;
-
-  const cutoff = new Date(Date.now() - RDP_INACTIVITY_TIMEOUT_MS).toISOString();
-  const now = new Date().toISOString();
-
-  const { data: ended, error } = await db
-    .from('rdp_sessions')
-    .update({ status: 'ended', ended_at: now })
-    .eq('status', 'active')
-    .lt('last_activity_at', cutoff)
-    .select('id, user_id');
-
-  if (error) {
-    log('warn', 'RDP session inactivity check failed', error);
-  } else if (ended?.length) {
-    log('info', `Auto-ended ${ended.length} RDP session(s) due to 30 min inactivity`);
-  }
 }
 
 // --------------------------------------------------------------------------
@@ -521,33 +434,6 @@ async function pollOnce(): Promise<boolean> {
     return true;
   }
 
-  try {
-    const bugorCount = await runBugorSmtpValidation();
-    if (bugorCount > 0) {
-      log('info', `Bugor SMTP validation processed ${bugorCount} lead(s)`);
-      return true;
-    }
-  } catch (err) {
-    log('warn', 'Bugor SMTP validation failed', err);
-  }
-
-  try {
-    const nashCount = await runNashSmtpValidation();
-    if (nashCount > 0) {
-      log('info', `Nash SMTP validation processed ${nashCount} lead(s)`);
-      return true;
-    }
-  } catch (err) {
-    log('warn', 'Nash SMTP validation failed', err);
-  }
-
-  const leadImportJobId = await claimLeadImportJob();
-  if (leadImportJobId) {
-    log('info', `Running lead import job ${leadImportJobId}`);
-    await runLeadImportJob(leadImportJobId);
-    return true;
-  }
-
   const yandexDirectJobId = await claimYandexDirectJob();
   if (yandexDirectJobId) {
     log('info', `Running Yandex Direct job ${yandexDirectJobId}`);
@@ -566,28 +452,6 @@ async function pollOnce(): Promise<boolean> {
     log('warn', 'Instantly lead qualification poll failed', err);
   }
 
-  // Low-priority continuous enrichment: probe phones for Telegram identity.
-  // Runs in small batches to avoid rate limits.
-  try {
-    const out = await runPhoneEnrichmentBatch();
-    if (out.processed > 0) {
-      log('info', `Phone enrichment processed ${out.processed} phone(s)`);
-      return true;
-    }
-  } catch (err) {
-    log('warn', 'Phone enrichment batch failed', err);
-  }
-
-  try {
-    const out = await runContactAggregationBatch();
-    if (out.processed > 0) {
-      log('info', `Contact aggregation processed ${out.processed} item(s)`);
-      return true;
-    }
-  } catch (err) {
-    log('warn', 'Contact aggregation batch failed', err);
-  }
-
   return false;
 }
 
@@ -603,7 +467,6 @@ const REALTIME_TABLES = [
   'yandex_maps_jobs',
   'email_validation_jobs',
   'inn_enrich_jobs',
-  'lead_import_jobs',
   'yandex_direct_jobs',
 ];
 const FALLBACK_POLL_MS = 30_000;
@@ -646,9 +509,6 @@ async function pollLoop(): Promise<void> {
 
   while (!shuttingDown) {
     try {
-      await checkRdpBookingExpiry();
-      await checkRdpSessionInactivity();
-
       const found = await pollOnce();
       if (!found) {
         if (channel) {
@@ -816,143 +676,6 @@ async function deadlineNotificationsLoop(): Promise<void> {
   }
 }
 
-// --------------------------------------------------------------------------
-// Scheduled Nash Outreach collection (daily at 07:00 Moscow time = 04:00 UTC)
-// --------------------------------------------------------------------------
-
-const NASH_COLLECT_HOUR_UTC = Number(process.env.NASH_COLLECT_HOUR_UTC ?? '4');
-
-function getNextRunMs(hourUtc: number): number {
-  const now = new Date();
-  const next = new Date(now);
-  next.setUTCHours(hourUtc, 0, 0, 0);
-  if (next.getTime() <= now.getTime()) next.setUTCDate(next.getUTCDate() + 1);
-  return next.getTime() - now.getTime();
-}
-
-async function runNashCollect(): Promise<void> {
-  if (!supabaseAdmin) return;
-  log('info', 'Nash Outreach scheduled collection starting...');
-
-  try {
-    const rawItems = await collectRawSignals();
-    log('info', `Nash collect: ${rawItems.length} raw items`);
-    if (rawItems.length === 0) return;
-
-    const enriched = await enrichRawSignals(rawItems);
-    log('info', `Nash collect: ${enriched.length} enriched leads`);
-    if (enriched.length === 0) return;
-
-    const today = new Date().toISOString().slice(0, 10);
-    const { data: existing } = await supabaseAdmin
-      .from('nash_outreach_leads')
-      .select('company_name, website')
-      .gte('batch_date', new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10));
-
-    const existingKeys = new Set(
-      (existing ?? []).map((r: { company_name?: string; website?: string }) =>
-        `${(r.company_name ?? '').toLowerCase()}|${(r.website ?? '').toLowerCase()}`),
-    );
-
-    const toInsert = enriched.filter((lead) => {
-      const key = `${lead.company_name.toLowerCase()}|${(lead.website ?? '').toLowerCase()}`;
-      if (existingKeys.has(key)) return false;
-      existingKeys.add(key);
-      return true;
-    });
-
-    if (toInsert.length === 0) {
-      log('info', 'Nash collect: all leads were duplicates');
-      return;
-    }
-
-    const rows = toInsert.map((lead) => ({
-      batch_date: today,
-      company_name: lead.company_name,
-      website: lead.website,
-      city: lead.city,
-      employee_count: lead.employee_count,
-      description: lead.description,
-      niche: lead.niche,
-      signal_type: lead.signal_type,
-      signal_detail: lead.signal_detail,
-      intent_score: lead.intent_score,
-      priority: lead.priority,
-      outreach_angle: lead.outreach_angle,
-      source_url: lead.source_url,
-      hh_employer_id: lead.hh_employer_id,
-      hh_vacancy_name: lead.hh_vacancy_name,
-      raw_data: { source: lead.source_url },
-    }));
-
-    const { data: insertedRows, error: insertError } = await supabaseAdmin
-      .from('nash_outreach_leads')
-      .insert(rows)
-      .select('id, company_name, website, source_url, emails_found');
-
-    if (insertError) {
-      log('error', `Nash collect insert error: ${insertError.message}`);
-      return;
-    }
-
-    const leads = insertedRows ?? [];
-    log('info', `Nash collect: inserted ${leads.length} leads`);
-
-    const emailResults = await findEmailsForLeads(
-      leads.map((l: { id: string; company_name: string; website?: string | null; source_url?: string | null }) => ({
-        id: l.id, company_name: l.company_name, website: l.website ?? null,
-        founder_name: null, source_url: l.source_url ?? null,
-      })),
-    );
-
-    let emailsFound = 0;
-    for (const er of emailResults) {
-      if (er.emails.length > 0) {
-        emailsFound++;
-        await supabaseAdmin.from('nash_outreach_leads')
-          .update({ emails_found: er.emails, smtp_tier: er.tier }).eq('id', er.id);
-      } else {
-        await supabaseAdmin.from('nash_outreach_leads')
-          .update({ smtp_status: 'skipped' }).eq('id', er.id);
-      }
-    }
-
-    const leadsWithEmails = emailResults.filter((er) => er.emails.length > 0);
-    if (leadsWithEmails.length > 0) {
-      const validationResults = await validateLeadEmails(
-        leadsWithEmails.map((er) => ({ id: er.id, emails: er.emails })),
-      );
-      let validated = 0;
-      for (const vr of validationResults) {
-        if (vr.validated.length > 0) {
-          validated++;
-          await supabaseAdmin.from('nash_outreach_leads')
-            .update({ emails_validated: vr.validated, smtp_status: 'pending' }).eq('id', vr.id);
-        } else {
-          await supabaseAdmin.from('nash_outreach_leads')
-            .update({ smtp_status: 'skipped' }).eq('id', vr.id);
-        }
-      }
-      log('info', `Nash collect: emails found=${emailsFound}, MX validated=${validated}`);
-    }
-
-    log('info', 'Nash collect complete (SMTP + sequences + upload handled by worker poll loop)');
-  } catch (err) {
-    log('error', 'Nash collect failed', err);
-  }
-}
-
-async function nashCollectScheduler(): Promise<void> {
-  while (!shuttingDown) {
-    const waitMs = getNextRunMs(NASH_COLLECT_HOUR_UTC);
-    const nextRun = new Date(Date.now() + waitMs).toISOString();
-    log('info', `Nash collect: next run at ${nextRun} (in ${Math.round(waitMs / 60_000)} min)`);
-    await sleep(waitMs);
-    if (shuttingDown) break;
-    await runNashCollect();
-  }
-}
-
 async function main(): Promise<void> {
   log('info', `Starting Portal worker (pid=${process.pid})`);
 
@@ -969,9 +692,6 @@ async function main(): Promise<void> {
 
   // Start periodic sync loop in the background (does not block job processing).
   void periodicSyncLoop();
-
-  // Start Nash Outreach daily collection scheduler (default 04:00 UTC = 07:00 MSK).
-  void nashCollectScheduler();
 
   // Start LinkedIn Outreach campaign tick loop (every 5 min by default).
   void liCampaignTickLoop();

@@ -4,6 +4,7 @@ import type { NextRequest } from 'next/server';
 import { GROUP_BY_VALUES, parseRange, type GroupBy } from '@/lib/expenses/period';
 import {
   CATEGORY_LABELS,
+  MANUAL_INCOME_CHANNELS,
   type ExpenseCategory,
   type ExpenseSource,
   type IncomeSource,
@@ -27,11 +28,12 @@ const SOURCE_MAP: Record<ExpenseSource, true> = {
   manual: true,
 };
 
-/** То же для дохода: два банка и криптокошелёк. */
+/** То же для дохода: два банка, криптокошелёк и ручной ввод. */
 const INCOME_SOURCE_MAP: Record<IncomeSource, true> = {
   tochka: true,
   tbank: true,
   crypto_usdt: true,
+  manual: true,
 };
 
 export const EXPENSE_SOURCES = Object.keys(SOURCE_MAP) as ExpenseSource[];
@@ -182,15 +184,69 @@ export function todayMsk(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Moscow' }).format(new Date());
 }
 
-/** Дата ручной траты: формат, существование в календаре и не в будущем. */
+/** Дата ручной записи: формат, существование в календаре и не в будущем. */
 export function parseOccurredOn(value: unknown): string {
   if (typeof value !== 'string' || !ISO_DATE_RE.test(value) || !isValid(parseISO(value))) {
     throw new Error('Дата в формате ГГГГ-ММ-ДД');
   }
   if (value > todayMsk()) {
-    throw new Error('Дата траты в будущем');
+    throw new Error('Дата не может быть в будущем');
   }
   return value;
+}
+
+/** Длинные строки ручного ввода — мусор, а не длинные названия. */
+const MAX_MANUAL_TEXT = 300;
+
+/** Кто принёс ручной доход — обязателен: без него в разбивке по плательщикам пустая строка. */
+export function parseIncomePayer(value: unknown): string {
+  const payer = typeof value === 'string' ? value.trim() : '';
+  if (!payer) throw new Error('Укажи, от кого деньги');
+  if (payer.length > MAX_MANUAL_TEXT) throw new Error(`«От кого» — не длиннее ${MAX_MANUAL_TEXT} символов`);
+  return payer;
+}
+
+/** За что пришли деньги — у ручного дохода обязательно (решение от 27.10.2026). */
+export function parseIncomeComment(value: unknown): string {
+  const comment = typeof value === 'string' ? value.trim() : '';
+  if (!comment) throw new Error('Укажи, за что деньги');
+  if (comment.length > 2000) throw new Error('«За что» — не длиннее 2000 символов');
+  return comment;
+}
+
+/** Способ получения ручного дохода; пусто — «Другое». */
+export function parseChannel(value: unknown): string {
+  if (value === undefined || value === null || value === '') return 'Другое';
+  if (typeof value !== 'string' || !(MANUAL_INCOME_CHANNELS as readonly string[]).includes(value)) {
+    throw new Error(`Способ получения: ${MANUAL_INCOME_CHANNELS.join(', ')}`);
+  }
+  return value;
+}
+
+/**
+ * Привязка ручной записи к проекту и сделке AMO. `undefined` — поле не
+ * пришло (правка его не трогает), `null` — привязку сняли.
+ */
+export function parseLinks(body: { projectId?: unknown; amoDealId?: unknown }): {
+  projectId: string | null | undefined;
+  amoDealId: number | null | undefined;
+} {
+  let projectId: string | null | undefined;
+  if (body.projectId === undefined) projectId = undefined;
+  else if (body.projectId === null || body.projectId === '') projectId = null;
+  else if (isUuid(body.projectId)) projectId = body.projectId;
+  else throw new Error('projectId: ожидается UUID');
+
+  let amoDealId: number | null | undefined;
+  if (body.amoDealId === undefined) amoDealId = undefined;
+  else if (body.amoDealId === null || body.amoDealId === '') amoDealId = null;
+  else {
+    amoDealId = Number(body.amoDealId);
+    if (!Number.isSafeInteger(amoDealId) || amoDealId <= 0) {
+      throw new Error('amoDealId: ожидается номер сделки AMO');
+    }
+  }
+  return { projectId, amoDealId };
 }
 
 /** Сумма ручной траты: положительное конечное число. */
