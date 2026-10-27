@@ -35,9 +35,7 @@
     "bench:parsers": "node --env-file ../.env scripts/bench/parsersBench.js",
     "parse:ats": "node scripts/ats-companies.mjs",
     "linkedin-probe": "node --env-file=../.env scripts/linkedinProbe.js",
-    "crypto-payment-probe": "node scripts/cryptoPaymentProbe.js",
-    "docker:rdp": "docker compose -f ../docker-compose.rdp.yml up --build",
-    "docker:rdp:down": "docker compose -f ../docker-compose.rdp.yml down"
+    "crypto-payment-probe": "node scripts/cryptoPaymentProbe.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.995.0",
@@ -86,7 +84,6 @@
     "file-saver": "^2.0.5",
     "googleapis": "^144.0.0",
     "gramjs-sqlitesession": "^1.1.1",
-    "guacamole-common-js": "^1.5.0",
     "iconv-lite": "^0.7.2",
     "imapflow": "^1.4.1",
     "jimp": "^1.6.0",

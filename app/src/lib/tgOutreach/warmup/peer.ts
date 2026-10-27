@@ -13,7 +13,7 @@
  * контактах» не образуется: такой клубок — легко вычисляемый след, по одному
  * спалившемуся аккаунту находится вся партия.
  *
- * Образец работы с ImportContacts — app/src/lib/cisLeads/phoneEnrichmentWorker.ts.
+ * Образец работы с ImportContacts — app/src/lib/cisLeads/phoneEnrichmentWorker.ts (удалён 27.10.2026, см. историю git).
  */
 import { Api } from 'telegram';
 import type { TelegramClient } from 'telegram';

@@ -268,22 +268,6 @@ export const WRITE_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
-      name: 'update_review_status',
-      description: 'Изменить статус ревью базы данных. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ. Допустимые переходы: submitted→review_approved|needs_rework, review_approved→sent_to_client|needs_rework, sent_to_client→client_approved|client_requested_changes.',
-      parameters: {
-        type: 'object',
-        properties: {
-          review_id: { type: 'string', description: 'UUID ревью-запроса' },
-          new_status: { type: 'string', enum: ['submitted', 'needs_rework', 'review_approved', 'sent_to_client', 'client_approved', 'client_requested_changes'] },
-          comment: { type: 'string', description: 'Комментарий ревьюера' },
-        },
-        required: ['review_id', 'new_status'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
       name: 'launch_hh_parser',
       description: 'Запустить парсер вакансий HeadHunter (hh.ru). ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
       parameters: {

@@ -1422,8 +1422,6 @@ const PAIRS: Array<[string, string]> = [
   ['Документ не найден', 'Document not found'],
   ['AI Бриф компании', 'AI company brief'],
 
-  // ── Tools: RDP ───────────────────────────────────────────
-  ['Удалённый рабочий стол', 'Remote desktop'],
   ['Подключиться', 'Connect'],
   ['Подключение...', 'Connecting...'],
   ['Подключено', 'Connected'],
@@ -1875,8 +1873,6 @@ const PAIRS: Array<[string, string]> = [
   ['Автоматическая расшифровка видео из Telegram-группы с разделением по авторам.', 'Automatic video transcription from a Telegram group with author split.'],
   ['Ищет ЛПР по ИНН и телефонам через ЕГРЮЛ.', 'Finds decision-makers by TIN and phones via EGRJUL.'],
   ['LinkedIn-аутрич: кампании, AI-персонализация, скрапинг лидов через Unipile.', 'LinkedIn outreach: campaigns, AI personalization, lead scraping via Unipile.'],
-  ['Удалённый рабочий стол', 'Remote desktop'],
-  ['Подключение к удалённому ПК через браузер.', 'Connect to a remote PC in the browser.'],
   ['Управление email-аутричем: кампании, аккаунты, лиды, аналитика.', 'Email outreach management: campaigns, accounts, leads, analytics.'],
   ['Массовый Telegram-аутрич: кампании, автоответы GPT, квалификация лидов.', 'Mass Telegram outreach: campaigns, GPT auto-replies, lead qualification.'],
   ['Парсинг вакансий и компаний с career.habr.com для сбора баз.', 'Parse jobs and companies from career.habr.com for database building.'],
