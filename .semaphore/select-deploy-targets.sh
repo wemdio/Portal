@@ -90,6 +90,14 @@ select_deploy_targets_from_files() {
         # must never join the Portal host worker fleet).
         DEPLOY_PORTAL=1
         DEPLOY_SENDER=1
+        # Name sync also runs in the central sender-leads worker. Its drain
+        # stops the shared worker pool, so restart that whole pool, just as
+        # an edit of worker/senderLeads.ts does.
+        case "$changed_path" in
+          app/src/lib/sender/instantlyNameSync.ts|app/src/lib/sender/backgroundLane.ts)
+            select_all_workers
+            ;;
+        esac
         ;;
       app/worker/sender.ts)
         # Entrypoint is exclusive to the sender host worker (as baseConstructor
