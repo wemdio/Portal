@@ -13,6 +13,7 @@ import {
   moveMailboxes,
   patchMailbox,
   startMailboxProbe,
+  syncMailboxNames,
   type BulkMailboxAction,
   type EgressIpDto,
   type MailboxDto,
@@ -42,6 +43,9 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
   // переход на другую страницу — кружок поверх уже показанных строк. Подменять
   // на заглушку и её тоже значит заставлять глаз заново искать, где он был.
   const [paging, setPaging] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshBusy = useRef(false);
+  const [reloadRevision, setReloadRevision] = useState(0);
   // «Добавить почты»: файл и каталог Google — в окне, список под ним свободен.
   const [addOpen, setAddOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -139,7 +143,7 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
     // 15 секунд зовёт load мимо этого эффекта и мигать ничем не должен.
     setPaging(true);
     void load(page).finally(() => setPaging(false));
-  }, [load, page]);
+  }, [load, page, reloadRevision]);
 
   useEffect(() => {
     // Ящики после загрузки проверяются воркером — подтягиваем статусы, пока
@@ -150,6 +154,43 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
   }, [load, page]);
 
   const maxPage = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  const refresh = async () => {
+    if (refreshBusy.current) return;
+    refreshBusy.current = true;
+    setRefreshing(true);
+    setError(null);
+    setNotice(null);
+    try {
+      if (mailboxes.length) {
+        const result = await syncMailboxNames(mailboxes.map((mailbox) => mailbox.id));
+        if (!result.configured) {
+          setNotice('Instantly не подключён — имена сохранены без изменений.');
+        } else {
+          if (result.failed) {
+            setError(`Не удалось синхронизировать имена у ${result.failed} ящиков. Повторите обновление позже.`);
+          } else if (result.conflicts) {
+            setError(`У ${result.conflicts} ящиков имена не изменены: данные расходятся между аккаунтами Instantly или были изменены во время синхронизации.`);
+          }
+          if (result.updated) {
+            setNotice(`Обновлено имён из Instantly: ${result.updated}.`);
+          } else if (!result.failed && !result.conflicts) {
+            setNotice(result.matched
+              ? 'Имена ящиков, найденных в Instantly, уже актуальны.'
+              : 'Ящики на этой странице не найдены в Instantly — имена сохранены без изменений.');
+          }
+        }
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось синхронизировать имена из Instantly');
+    } finally {
+      // За время запроса можно сменить фильтр или страницу. Эффект загрузит
+      // текущий список, а не страницу, с которой начиналась синхронизация.
+      setReloadRevision((revision) => revision + 1);
+      refreshBusy.current = false;
+      setRefreshing(false);
+    }
+  };
 
   const act = async (id: string, body: Record<string, unknown>) => {
     await patchMailbox(id, body);
@@ -366,8 +407,12 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
         />
       ) : null}
 
-      {notice ? <p className="text-sm text-emerald-600">{notice}</p> : null}
-      {error ? <p className="text-sm text-red-600">{error}</p> : null}
+      {notice ? <p role="status" className="text-sm text-emerald-600">{notice}</p> : null}
+      {error ? <p role="alert" className="text-sm text-red-600">{error}</p> : null}
+      <p className="text-xs text-zinc-500">
+        Для ящиков, подключённых к Instantly, меняйте имя там — здесь имена обновляются автоматически примерно каждые 15 минут.
+        {' '}«Обновить» синхронизирует имена на текущей странице сразу.
+      </p>
 
       {/* Поиск, фильтр тегов и «Добавить почты» — над списком: это про список,
           и нужны до того, как в нём начнёшь что-то искать глазами. */}
@@ -516,11 +561,13 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
           <div className="flex items-center gap-1">
             <button
               type="button"
-              onClick={() => void load(page)}
-              className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
+              onClick={() => void refresh()}
+              disabled={refreshing || loading || paging}
+              title="Обновить список и имена ящиков на этой странице из Instantly"
+              className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 disabled:cursor-wait disabled:opacity-50"
             >
-              <RefreshCw className="h-3.5 w-3.5" />
-              Обновить
+              <RefreshCw className={`h-3.5 w-3.5${refreshing ? ' animate-spin' : ''}`} />
+              {refreshing ? 'Обновляем…' : 'Обновить'}
             </button>
           </div>
         </div>
@@ -920,7 +967,7 @@ function SenderNameField({ value, onSave }: { value: string; onSave: (next: stri
           type="button"
           onClick={start}
           aria-label="Изменить имя отправителя"
-          title="Изменить имя отправителя"
+          title="Изменить имя только в Sender. Если ящик есть в Instantly, при синхронизации будет использовано имя из Instantly."
           className="rounded p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
         >
           <Pencil className="h-3 w-3" />

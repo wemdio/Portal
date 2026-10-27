@@ -341,6 +341,25 @@ export function fetchMailboxTags() {
   return authFetchJson<{ tags: MailboxTagDto[]; untagged: number }>(`${BASE}/tags`);
 }
 
+export interface MailboxNameSyncResult {
+  configured: boolean;
+  matched: number;
+  updated: number;
+  unchanged: number;
+  unmatched: number;
+  conflicts: number;
+  failed: number;
+}
+
+/** Сверить имена видимых ящиков; весь парк отдельно обновляет фоновый воркер. */
+export function syncMailboxNames(mailboxIds: string[]) {
+  return authFetchJson<MailboxNameSyncResult>(`${BASE}/mailboxes/sync-names`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mailboxIds }),
+  });
+}
+
 export function createMailboxTag(name: string) {
   return authFetchJson<MailboxTagRef>(`${BASE}/tags`, {
     method: 'POST',
