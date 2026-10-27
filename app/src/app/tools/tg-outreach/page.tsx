@@ -5863,8 +5863,8 @@ function CampaignBasesTab({
                 <RowMenu
                   label={`Действия: ${b.name}`}
                   items={[
-                    { label: 'Загрузить контакты', icon: <Upload className="h-3.5 w-3.5" />, onClick: () => { uploadTargetRef.current = b.id; uploadInputRef.current?.click(); } },
                     { label: 'Редактировать', icon: <Pencil className="h-3.5 w-3.5" />, onClick: () => setViewingBase({ id: b.id, name: b.name }) },
+                    { label: 'Загрузить контакты', icon: <Upload className="h-3.5 w-3.5" />, onClick: () => { uploadTargetRef.current = b.id; uploadInputRef.current?.click(); } },
                     ...(b.counts.total > 0 ? [{ label: 'Скачать в Excel', icon: <Download className="h-3.5 w-3.5" />, onClick: () => { void downloadBase(b); } }] : []),
                     ...(b.counts.failed > 0 ? [{ label: 'Вернуть отложенные в очередь', icon: <RefreshCw className="h-3.5 w-3.5" />, onClick: () => { void requeueBase(b); } }] : []),
                     ...(b.counts.total > 0 ? [{ label: 'Очистить базу', icon: <Eraser className="h-3.5 w-3.5" />, danger: true, onClick: () => { void clearBase(b); } }] : []),
