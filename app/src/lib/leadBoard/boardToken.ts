@@ -5,11 +5,10 @@ import { createHmac, timingSafeEqual, randomBytes } from 'crypto';
  *
  * Формат: lb_<base64url({pid, nonce})>.<hmac-sha256>. Без exp — ссылка вечная,
  * печатается в каждой TG-карточке лида; отзыв = регенерация (новый nonce →
- * старые ссылки умирают). Хранится целиком в project_lead_boards.token: в отличие
- * от review-ссылок (показали один раз), эту ссылку надо рендерить повторно.
+ * старые ссылки умирают). Хранится целиком в project_lead_boards.token: эту
+ * ссылку надо рендерить повторно.
  *
- * Секрет — как у database-review guestToken: GUEST_TOKEN_SECRET →
- * fallback SUPABASE_SERVICE_ROLE_KEY.
+ * Секрет: GUEST_TOKEN_SECRET → fallback SUPABASE_SERVICE_ROLE_KEY.
  */
 export function boardTokenSecret(): string {
   return process.env.GUEST_TOKEN_SECRET ?? process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';

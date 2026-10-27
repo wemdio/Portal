@@ -52,7 +52,6 @@ export const ALL_TOOL_IDS = [
   'ai-caller',
   'ai-caller-v2',
   'databases',
-  'database-review',
   'parsers',
   'email-sequence-v2',
   'auto-report',
@@ -83,7 +82,7 @@ export const ALL_TOOL_IDS = [
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
 
 /** Tool IDs that are disabled by default (no visibility row = off). */
-export const DEFAULT_OFF_TOOL_IDS: readonly ToolId[] = ['database-review', 'sales-chat-analyzer'] as const;
+export const DEFAULT_OFF_TOOL_IDS: readonly ToolId[] = ['sales-chat-analyzer'] as const;
 
 /**
  * Инструменты из DEFAULT_OFF_TOOL_IDS, которые всё же включены по умолчанию
@@ -147,15 +146,6 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description: 'Табличный редактор с вкладками и копированием.',
     description_en: 'Spreadsheet-style editor with tabs and copy workflows.',
     href: '/tools/databases',
-    accentColor: 'blue',
-  },
-  'database-review': {
-    id: 'database-review',
-    title: 'Проверка баз',
-    title_en: 'Database review',
-    description: 'Проверка и согласование баз: комментарии, пометки цветом, отправка клиенту.',
-    description_en: 'Review and approve databases: comments, color marks, and client handoff.',
-    href: '/tools/databases/review',
     accentColor: 'blue',
   },
   parsers: {
@@ -422,7 +412,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Базы и данные',
     label_en: 'Databases and data',
-    toolIds: ['base-constructor', 'databases', 'database-review', 'our-bases', 'inn-enrich'],
+    toolIds: ['base-constructor', 'databases', 'our-bases', 'inn-enrich'],
   },
   {
     label: 'Парсеры и поиск лидов',

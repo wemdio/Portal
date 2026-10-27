@@ -69,7 +69,6 @@ export function LayoutShell({
   const pathname = usePathname();
   const isSpreadsheetPage = pathname === '/tools/databases';
   const isTwoGisParserPage = pathname === '/tools/2gis-parser';
-  const isGuestReviewPage = pathname.startsWith('/review/');
   const isMaintenancePage = pathname === '/maintenance';
   const useDocumentScroll = pathname === '/payments';
   const isTma = useIsTma();
@@ -116,7 +115,7 @@ export function LayoutShell({
     );
   const mainOverflowClass = useDocumentScroll
     ? 'overflow-visible'
-    : !isTma && (isSpreadsheetPage || isGuestReviewPage) ? 'overflow-hidden' : 'overflow-y-auto';
+    : !isTma && isSpreadsheetPage ? 'overflow-hidden' : 'overflow-y-auto';
   const desktopDefaultPadding = shouldUseCompactDensity ? 'p-3 md:p-4' : 'p-6';
   const desktopToolsPadding = shouldUseCompactDensity ? 'px-6 py-6 md:p-8' : 'px-6 py-6 md:p-8';
   const contentPadding = isMaintenancePage
@@ -125,7 +124,7 @@ export function LayoutShell({
     ? (isSpreadsheetPage ? 'p-1.5' : 'px-4 py-4')
     : (isSpreadsheetPage ? 'p-1.5' : isToolsPage ? desktopToolsPadding : desktopDefaultPadding);
   const shouldUseFullHeightContent =
-    isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || pathname === '/';
+    isSpreadsheetPage || isMaintenancePage || pathname === '/';
   const contentWidth = shouldUseFullHeightContent ? 'w-full flex flex-1 min-h-0 flex-col' : 'w-full';
 
   // Long payment lists use the document as their only vertical scroller.
@@ -152,7 +151,7 @@ export function LayoutShell({
   // отсюда на /client или /, но если он сюда всё же попал (стейл-кука, прямой
   // переход) — не показываем ему портальную обвязку поверх формы регистрации.
   const isSignupPage = pathname === '/signup';
-  const hideNav = isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || isClientPortal || isLegalPage || isSignupPage;
+  const hideNav = isSpreadsheetPage || isMaintenancePage || isClientPortal || isLegalPage || isSignupPage;
 
   // /leads-board/<token> — публичная гостевая таблица лидов: рендерим голой,
   // как /offer и /signup — без TopNav/sidebar и без 100vh-шелла (длинная таблица
