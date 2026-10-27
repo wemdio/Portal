@@ -492,7 +492,7 @@ async function transcribeVoice(
     if (oggBuf.length === 0) return null;
 
     const mp3 = await extractOrConvertToMp3({ bytes: oggBuf, inputExt: '.ogg' });
-    const text = await transcribeAudio({ audioMp3: mp3 });
+    const text = await transcribeAudio({ audioMp3: mp3, layout: 'plain' });
     if (text) {
       log('info', `${label}: расшифровано голосовое (${duration}с → ${text.length} симв.)`);
     }
