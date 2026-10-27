@@ -1858,6 +1858,61 @@ html[data-portal-theme='dark'] .portal-shell {
 .mailbox-tag-chip[data-tone='6'] { --tag-tone: var(--tag-tone-6); }
 .mailbox-tag-chip[data-tone='7'] { --tag-tone: var(--tag-tone-7); }
 
+/* ─── Статус инструмента в модалке «Видимость инструментов» (/tools) ──────
+   Тон — по смыслу как плашки на карточках: «Новое» зелёное, BETA и
+   «В разработке» жёлтые, «Отключён» красноватый. «Активный» нейтральный:
+   это обычное состояние, взгляд должен цепляться только за исключения.
+   Заливка и обводка — тот же тон с прозрачностью, поэтому в тёмной теме нет
+   светлых кислотных плашек.
+
+   `html body` и !important — потому что /tools под стеклом (portal-glass.css),
+   а оно перекрашивает любой select с !important. */
+.portal-shell {
+  --tool-status-active: #52525b;
+  --tool-status-new: #047857;
+  --tool-status-beta: #b45309;
+  --tool-status-disabled: #be123c;
+}
+
+html[data-portal-theme='dark'] .portal-shell {
+  --tool-status-active: #a1a1aa;
+  --tool-status-new: #6ee7b7;
+  --tool-status-beta: #fcd34d;
+  --tool-status-disabled: #fda4af;
+}
+
+.tool-status {
+  --status-tone: var(--tool-status-active);
+  color: var(--status-tone);
+}
+.tool-status[data-status='new'] { --status-tone: var(--tool-status-new); }
+.tool-status[data-status='beta'],
+.tool-status[data-status='in_development'] { --status-tone: var(--tool-status-beta); }
+.tool-status[data-status='disabled'] { --status-tone: var(--tool-status-disabled); }
+
+html body .tool-status[data-status] > select.tool-status-select {
+  color: var(--status-tone);
+  background-color: color-mix(in srgb, var(--status-tone) 10%, transparent) !important;
+  border-color: color-mix(in srgb, var(--status-tone) 30%, transparent) !important;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+html body .tool-status[data-status] > select.tool-status-select:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--status-tone) 17%, transparent) !important;
+}
+html body .tool-status[data-status] > select.tool-status-select:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--status-tone) 50%, transparent);
+  outline-offset: 2px;
+}
+
+/* Пункты списка без своего фона наследуют заливку select'а — у «Отключён»
+   весь список был розовым. Тёмную тему покрывает общее правило для option. */
+.tool-status-select option {
+  color: #18181b;
+  background-color: #ffffff;
+}
+
 @media (max-width: 639px) {
   .client-portal .neu-card,
   .client-portal .neu-sm,
