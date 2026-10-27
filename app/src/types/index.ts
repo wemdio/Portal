@@ -7,7 +7,6 @@ export type ProjectStatus =
   | 'Отменен';
 
 export * from './parsers';
-export * from './email-sequence';
 export * from './email-sequence-v2';
 export * from './sales-chat-analyzer';
 export * from './reglament';
