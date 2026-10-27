@@ -14,7 +14,9 @@ import {
   leadTelegramConfig,
   sendLeadMessage,
 } from '@/lib/senderLeads/telegram';
-import { TG_OUTREACH_TOOL_URL } from './leadMessage';
+
+/** Инструмент, где ведётся переписка. Только для нашего чата: в карточку клиенту не идёт. */
+const TG_OUTREACH_TOOL_URL = 'https://polza-portal.ru/tools/tg-outreach';
 
 /** Переписка в сообщение не лезет целиком (предел Telegram 4096): оставляем конец, он свежее. */
 const DIALOG_MAX = 2200;
