@@ -91,6 +91,11 @@ services:
     volumes:
       - main-supabase-pg-data:/var/lib/postgresql/data
       - ./main-init:/docker-entrypoint-initdb.d:ro
+      # 27.10.2026: правила входа (снаружи только роли аналитиков). Без этой
+      # строки файл живёт внутри контейнера и пропадает при пересоздании.
+      # Файл обязан лежать в /opt/main-db/pg_hba.conf ДО пересоздания, иначе
+      # docker создаст на его месте каталог и база не стартует.
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
     # Параллельные воркеры обмениваются данными через /dev/shm
     # (dynamic_shared_memory_type = posix). Docker по умолчанию даёт 64 МБ, и на
     # больших параллельных сканах этого не хватает — запрос падает с
