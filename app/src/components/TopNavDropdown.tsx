@@ -294,13 +294,13 @@ export function TopNavDropdown({
                 href={item.href as Route}
                 prefetch={false}
                 role="menuitem"
+                aria-current={item.isActive ? 'page' : undefined}
+                data-active={item.isActive ? 'true' : undefined}
                 onClick={() => closeMenu(false)}
                 onKeyDown={(event) => handleItemKeyDown(event, index)}
-                className={`flex items-center gap-2 px-3 py-2 text-[12px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500/70 ${
-                  item.isActive
-                    ? 'bg-zinc-100 font-medium text-zinc-900'
-                    : 'text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900'
-                }`}
+                // Цвета наведения и текущей страницы — в globals.css (.portal-nav-item),
+                // отдельно для светлой и тёмной темы.
+                className="portal-nav-item flex items-center gap-2 px-3 py-2 text-[12px] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500/70"
               >
                 <span className="truncate">{item.label}</span>
                 {(item.badgeCount ?? 0) > 0 && (
