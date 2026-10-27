@@ -3,6 +3,7 @@ import path from 'path';
 import os from 'os';
 import { Api, helpers, utils } from 'telegram';
 import type { Dialog } from 'telegram/tl/custom/dialog';
+import { NewMessage, type NewMessageEvent } from 'telegram/events';
 import { Dialog as GramDialog } from 'telegram/tl/custom/dialog';
 import type { TelegramClient } from 'telegram';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -132,6 +133,21 @@ async function interruptibleSleep(ms: number, shouldStop: () => boolean, chunkMs
 function randomRange([min, max]: [number, number]): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
+
+/**
+ * Через сколько после сообщения собеседника уходит наш ответ, секунды.
+ *
+ * 27.10.2026 по просьбе продаж: «рандомно 30–260 с после того, как нам
+ * написали». Отсчёт от времени ЕГО сообщения, а не от момента, когда аккаунт до
+ * него добрался: круг, нашедший сообщение получасовой давности, отвечает сразу.
+ * read_reply_delay_range на ответы больше не действует — осталась у напоминаний
+ * и догоняющих ответов.
+ */
+const REPLY_AFTER_INCOMING_SEC: [number, number] = [30, 260];
+/** За сколько до срока ответа браться за чат: прочитать историю и сгенерировать. */
+const INCOMING_PREPARE_LEAD_MS = 30_000;
+/** Раньше этого после сообщения не читаем: часто дописывают вторым и третьим. */
+const INCOMING_MIN_READ_AFTER_MS = 15_000;
 
 
 /**
@@ -953,6 +969,15 @@ export interface HandleChatOptions {
    * подменный — переписка в ней текстом, оригиналы подменному недоступны.
    */
   getSpareClient?: (excludeAccountId: string) => { client: TelegramClient; accountName: string } | null;
+  /** Когда отправить ответ, мс. Нет — через 30–260 с от последнего сообщения собеседника. */
+  replyAt?: number;
+  /** Ответ по входящему: если последними уже ответили мы (успел круг), молчим. */
+  skipIfAnswered?: boolean;
+  /**
+   * Собеседник дописал после прочитанной истории (`seenMessageId` — последнее
+   * сообщение в ней)? Тогда этот ответ не шлём: ответим на всё сразу.
+   */
+  isStale?: (seenMessageId: number) => boolean;
 }
 
 export async function handleChat(
@@ -1037,6 +1062,10 @@ export async function handleChat(
   if (chatMessages.length === 0) {
     return { replied: false, triggerType: null };
   }
+  if (options?.skipIfAnswered && chatMessages.at(-1)?.role === 'assistant') {
+    return { replied: false, triggerType: null };
+  }
+  const seenMessageId = Math.max(0, ...[...history].map((m) => Number(m.id) || 0));
 
   await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, {
     tgIsBot,
@@ -1359,11 +1388,18 @@ export async function handleChat(
   }
   if (!replyText) return { replied: false, triggerType: null };
 
-  const readReplyDelay = randomRange(tg.read_reply_delay_range) * 1000;
-  if (shouldStop) await interruptibleSleep(readReplyDelay, shouldStop); else await sleep(readReplyDelay);
+  const lastIncomingMs = Date.parse([...chatMessages].reverse().find((m) => m.role === 'user')?.timestamp ?? '');
+  const replyAt = options?.replyAt
+    ?? (Number.isFinite(lastIncomingMs) ? lastIncomingMs + randomRange(REPLY_AFTER_INCOMING_SEC) * 1000 : Date.now());
+  const replyDelay = Math.max(0, replyAt - Date.now());
+  if (shouldStop) await interruptibleSleep(replyDelay, shouldStop); else await sleep(replyDelay);
 
   if (shouldStop?.() || !dialogUnchanged(editKey, revision)) {
     log('info', `${displayName}: остановка или изменение переписки — отменяю ответ по старой истории`);
+    return { replied: false, triggerType: null };
+  }
+  if (options?.isStale?.(seenMessageId)) {
+    log('info', `${displayName}: собеседник дописал, пока готовился ответ, — отвечу на всё сразу`);
     return { replied: false, triggerType: null };
   }
   let sent;
@@ -1503,6 +1539,8 @@ async function handleFollowUp(
   db: SupabaseClient,
   log: LogFn,
   shouldStop?: () => boolean,
+  /** Чат, где уже запланирован ответ по входящему: собеседник написал, напоминать нечего. */
+  isAnswering?: (tgUserId: number) => boolean,
 ) {
   const tg = campaign.telegram_settings as TelegramSettings;
   const oai = campaign.openai_settings as OpenAISettings;
@@ -1572,6 +1610,7 @@ async function handleFollowUp(
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
+    if (isAnswering?.(Number(tgUserId))) { stats.skip_last_not_assistant++; continue; }
     if (isBot) { stats.skip_bot++; continue; }
     if (!contacts.has(Number(tgUserId))) { stats.skip_not_campaign++; continue; }
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { stats.skip_blocked++; continue; }
@@ -1671,6 +1710,8 @@ async function handleMissedRepliesLastDays(
   db: SupabaseClient,
   log: LogFn,
   shouldStop?: () => boolean,
+  /** Чат, где уже запланирован ответ по входящему: второй ответ туда не шлём. */
+  isAnswering?: (tgUserId: number) => boolean,
 ) {
   const tg = campaign.telegram_settings as TelegramSettings;
   const oai = campaign.openai_settings as OpenAISettings;
@@ -1711,6 +1752,7 @@ async function handleMissedRepliesLastDays(
   let skipRepeat = 0;
   let skipCloser = 0;
   let skipNotCampaign = 0;
+  let skipAnswering = 0;
   let errorsCount = 0;
 
   let contacts: Set<number>;
@@ -1728,6 +1770,7 @@ async function handleMissedRepliesLastDays(
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
+    if (isAnswering?.(Number(tgUserId))) { skipAnswering++; continue; }
     if (isBot) { skipBot++; continue; }
     if (!contacts.has(Number(tgUserId))) { skipNotCampaign++; continue; }
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { skipBlocked++; continue; }
@@ -1812,9 +1855,10 @@ async function handleMissedRepliesLastDays(
   log(
     'info',
     `Аккаунт ${accountLogName(account)}: проверка пропущенных ответов (catch-up за ${CATCHUP_LOOKBACK_DAYS} дн.) — проверил ${processed} диалогов, отправил ${replied} ответов.` +
-      (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue || skipRepeat || skipCloser || skipNotCampaign
+      (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue || skipRepeat || skipCloser || skipNotCampaign || skipAnswering
         ? ' Не отправил по причинам:'
         : '') +
+      (skipAnswering ? ` ответ уже готовится по входящему — ${skipAnswering};` : '') +
       (skipNotCampaign ? ` не из баз кампании — ${skipNotCampaign};` : '') +
       (skipBot ? ` это боты — ${skipBot};` : '') +
       (skipBlocked ? ` в чёрном списке — ${skipBlocked};` : '') +
@@ -2332,6 +2376,204 @@ export async function runCampaignLoop(
     log('warning', `Опрос очереди передач остановился с ошибкой — ${err instanceof Error ? err.message : String(err)}. Передачи уйдут после перезапуска кампании.`);
   });
 
+  /**
+   * Ошибка ответа в чате — общая для круга и ответов по входящему.
+   *
+   * Заморозку и ограничение Telegram записываем в аккаунт (в базу и в объект
+   * круга), и дальше его не трогает ни круг, ни ответ по входящему. Недоступного
+   * собеседника выключаем, остальное — в лог.
+   */
+  const onChatError = async (
+    client: TelegramClient,
+    account: OutreachAccount,
+    entity: Api.User | null,
+    err: unknown,
+  ): Promise<'frozen' | 'flood' | 'unreachable' | 'error'> => {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    // Reconstruct a stable display label for the error log so the
+    // operator can search by ID/@username without scrolling.
+    const dialogId = entity ? Number(entity.id) : null;
+    const dialogLabel = entity?.username ? `@${entity.username}` : dialogId != null ? `ID:${dialogId}` : 'unknown';
+
+    if (classifyCheckError(errMsg).status === 'frozen') {
+      const frozen = await recordAccountFreeze({ db, client, account });
+      log(frozen.error ? 'error' : 'warning',
+        `Аккаунт ${accountLogName(account)}: ${frozen.detail}` +
+        (frozen.error ? ` Не удалось сохранить статус: ${frozen.error}` : ''));
+      return 'frozen';
+    }
+
+    if (
+      errMsg.includes('PeerFloodError') ||
+      errMsg.includes('FloodWaitError') ||
+      errMsg.includes('PEER_FLOOD')
+    ) {
+      // Срок паузы спрашиваем у @SpamBot этим же соединением: пауза
+      // из настроек ставилась вслепую и каждые сутки выпускала
+      // аккаунт ровно в то же ограничение.
+      const parked = await parkAccountAfterLimit({
+        db,
+        client,
+        account,
+        hours: tg.account_cooldown_hours,
+        reason: 'FloodError/Frozen',
+        rawError: errMsg,
+        log,
+      });
+      if (parked.parked) {
+        const cooldownDisplay = new Date(parked.untilIso).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
+        log('warning', `Аккаунт ${accountLogName(account)}: Telegram ограничил отправку (FloodError/Frozen на диалоге ${dialogLabel}). ${parked.diagnosis} Аккаунт на паузе до ${cooldownDisplay}.`);
+      }
+      return 'flood';
+    }
+
+    // Permanently unreachable peer: user deleted account, blocked
+    // us, or the peer reference is stale. Each cycle we'd otherwise
+    // burn another GPT call and another SendMessage. The helper
+    // flips can_send=false so canSendToDialog() short-circuits
+    // future rounds.
+    const unreachable = await disableDialogIfUnreachable(errMsg, {
+      db,
+      campaignId: campaign.id,
+      accountId: account.id,
+      tgUserId: dialogId,
+      dialogLabel,
+      log,
+    });
+    if (unreachable) return 'unreachable';
+
+    log('error', `Аккаунт ${accountLogName(account)}, диалог ${dialogLabel}: не смог обработать — ${errMsg}`);
+    return 'error';
+  };
+
+  /**
+   * Ответ по входящему — сразу, а не когда круг дойдёт до аккаунта.
+   *
+   * 27.10.2026: круг обходит аккаунты пачками по 5–6 с паузами и после всех
+   * отдыхает 5–10 минут; при 20–30 аккаунтах до каждого он доходит раз в 20–35
+   * минут, и в Polza Agency каждый четвёртый ответ ждал дольше 15 минут.
+   * Соединения при этом открыты весь запуск, и Telegram сам сообщает им о новом
+   * сообщении. По этому сигналу ставим ответ на 30–260 с от сообщения
+   * собеседника. Круг остаётся для первых касаний, напоминаний и всего, что
+   * сигнал пропустил: ночь, отлёжка, обрыв сокета, переподключение.
+   *
+   * Чат ведёт кто-то один. Запланированный здесь чат круг, напоминания и
+   * догоняющие ответы пропускают, а чат, который сейчас ведёт круг, здесь ждёт.
+   */
+  interface IncomingJob {
+    key: string;
+    accountId: string;
+    entity: Api.User;
+    dueAt: number;
+    lastIncomingAt: number;
+    lastIncomingId: number;
+    running: boolean;
+  }
+  const incoming = new Map<string, IncomingJob>();
+  const roundBusy = new Set<string>();
+  const activeIncoming = new Set<Promise<void>>();
+  const listened = new WeakSet<TelegramClient>();
+  let incomingStopped = false;
+  // Глобальный чёрный список перечитывает круг; ответы по входящему берут его отсюда.
+  let blockedUserIds = new Set<number>();
+  const incomingKey = (accountId: string, tgUserId: number) => `${accountId}:${tgUserId}`;
+  const canReply = (account: OutreachAccount) => account.check_status !== 'frozen'
+    && !(account.cooldown_until && Date.parse(account.cooldown_until) > Date.now());
+
+  const onIncoming = async (accountId: string, message: Api.Message): Promise<void> => {
+    if (incomingStopped || shouldStop() || message.out || !(message.peerId instanceof Api.PeerUser)) return;
+    const tgUserId = Number(message.peerId.userId);
+    if (ownTgUserIds.has(tgUserId) || tgUserId === TG_SERVICE_NOTIFICATIONS_USER_ID || blockedUserIds.has(tgUserId)) return;
+    const key = incomingKey(accountId, tgUserId);
+    const sentAt = (message.date || Math.floor(Date.now() / 1000)) * 1000;
+    const note = (job: IncomingJob) => {
+      job.lastIncomingAt = Math.max(job.lastIncomingAt, sentAt);
+      job.lastIncomingId = Math.max(job.lastIncomingId, message.id);
+    };
+    const known = incoming.get(key);
+    if (known) { note(known); return; }
+
+    const entry = clients.find((c) => c.account.id === accountId);
+    if (!entry || !canReply(entry.account) || isInSleepPeriod(tg.sleep_periods, tg.timezone_offset)) return;
+    const sender = await message.getSender();
+    if (!(sender instanceof Api.User) || sender.bot) return;
+    // Чужих оставляем кругу, как и раньше: он же решает, что с ними делать.
+    if (!(await isCampaignContact(db, campaignId, tgUserId))) return;
+    const raced = incoming.get(key);
+    if (raced) { note(raced); return; }
+
+    const job: IncomingJob = {
+      key,
+      accountId,
+      entity: sender,
+      dueAt: sentAt + randomRange(REPLY_AFTER_INCOMING_SEC) * 1000,
+      lastIncomingAt: sentAt,
+      lastIncomingId: message.id,
+      running: false,
+    };
+    incoming.set(key, job);
+    log('info', `Аккаунт ${accountLogName(entry.account)}: ${sender.username ? `@${sender.username}` : `ID:${tgUserId}`} написал — отвечу через ${Math.max(0, Math.round((job.dueAt - Date.now()) / 1000))} с`);
+  };
+
+  const runIncoming = async (job: IncomingJob): Promise<void> => {
+    const startId = job.lastIncomingId;
+    let seenId = 0;
+    const entry = clients.find((c) => c.account.id === job.accountId);
+    try {
+      // Аккаунт ушёл из круга, на паузе или наступила ночь — чат остался
+      // непрочитанным, его подхватит круг.
+      if (!entry || !canReply(entry.account) || isInSleepPeriod(tg.sleep_periods, tg.timezone_offset)) return;
+      await handleChat(entry.client, entry.account, { entity: job.entity } as Dialog, campaign as OutreachCampaign, db, log,
+        () => incomingStopped || shouldStop(), {
+          blockedUserIds,
+          getSpareClient: (excludeId) => pickSpareClient(clients, excludeId),
+          replyAt: Math.max(job.dueAt, Date.now()),
+          skipIfAnswered: true,
+          isStale: (seen) => {
+            seenId = seen;
+            return job.lastIncomingId > seen;
+          },
+        });
+    } catch (err) {
+      if (entry) await onChatError(entry.client, entry.account, job.entity, err);
+    } finally {
+      // Дописал, пока мы готовили ответ, — новый срок от его последнего сообщения.
+      if (!incomingStopped && job.lastIncomingId > Math.max(startId, seenId)) {
+        job.dueAt = job.lastIncomingAt + randomRange(REPLY_AFTER_INCOMING_SEC) * 1000;
+        job.running = false;
+      } else {
+        incoming.delete(job.key);
+      }
+    }
+  };
+
+  const incomingLoop = (async () => {
+    while (!incomingStopped && !shouldStop()) {
+      // Подписываем каждое соединение, в том числе пересозданное кругом и
+      // добавленное в состав: подписка живёт на объекте клиента.
+      for (const entry of clients) {
+        if (listened.has(entry.client)) continue;
+        listened.add(entry.client);
+        const accountId = entry.account.id;
+        entry.client.addEventHandler((event: NewMessageEvent) => {
+          onIncoming(accountId, event.message).catch((err) => {
+            log('warning', `Входящее не разобрал — отвечу в обычном круге: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        }, new NewMessage({ incoming: true }));
+      }
+      const now = Date.now();
+      for (const job of incoming.values()) {
+        if (job.running || roundBusy.has(job.key)) continue;
+        if (now < Math.max(job.dueAt - INCOMING_PREPARE_LEAD_MS, job.lastIncomingAt + INCOMING_MIN_READ_AFTER_MS)) continue;
+        job.running = true;
+        const pending = runIncoming(job);
+        activeIncoming.add(pending);
+        void pending.finally(() => activeIncoming.delete(pending));
+      }
+      await sleep(2000);
+    }
+  })();
+
   const offsetErrorCounts = new Map<string, number>();
   // Separate counter for the gramJS internal pagination bug — `getDialogs`
   // throws RangeError ("offset out of range") on accounts with thousands of
@@ -2460,7 +2702,6 @@ export async function runCampaignLoop(
       }
       idleAnnounced = false;
 
-      let blockedUserIds: Set<number>;
       try {
         blockedUserIds = await loadBlockedUserIds(db, campaign.user_id);
         log('info', `Загрузил глобальный чёрный список: ${blockedUserIds.size} пользователей будут пропущены`);
@@ -2540,6 +2781,7 @@ export async function runCampaignLoop(
           replied: 0,
           flood: 0,
           errors: 0,
+          incoming: 0,
         };
         const accountStartMs = Date.now();
         // Snapshot the gramJS unknown-constructor buffer so that, if this
@@ -2908,6 +3150,13 @@ export async function runCampaignLoop(
               continue;
             }
 
+            // Ответ уже запланирован по входящему — второй круг не шлёт.
+            const chatKey = incomingKey(account.id, Number(dialog.entity.id));
+            if (incoming.has(chatKey)) {
+              cycleStats.incoming++;
+              continue;
+            }
+            roundBusy.add(chatKey);
             try {
               const r = await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log, shouldStop, {
                 blockedUserIds,
@@ -2916,74 +3165,23 @@ export async function runCampaignLoop(
               cycleStats.processed++;
               if (r.replied) cycleStats.replied++;
             } catch (err: unknown) {
-              const errMsg = err instanceof Error ? err.message : String(err);
-              // Reconstruct a stable display label for the error log so the
-              // operator can search by ID/@username without scrolling.
-              const dialogId = dialog.entity instanceof Api.User ? Number(dialog.entity.id) : null;
-              const dialogLabel = dialog.entity instanceof Api.User && dialog.entity.username
-                ? `@${dialog.entity.username}`
-                : dialogId != null ? `ID:${dialogId}` : 'unknown';
-
-              if (classifyCheckError(errMsg).status === 'frozen') {
-                const frozen = await recordAccountFreeze({ db, client, account });
-                log(frozen.error ? 'error' : 'warning',
-                  `Аккаунт ${accountLogName(account)}: ${frozen.detail}` +
-                  (frozen.error ? ` Не удалось сохранить статус: ${frozen.error}` : ''));
-                break;
-              }
-
-              if (
-                errMsg.includes('PeerFloodError') ||
-                errMsg.includes('FloodWaitError') ||
-                errMsg.includes('PEER_FLOOD')
-              ) {
-                // Срок паузы спрашиваем у @SpamBot этим же соединением: пауза
-                // из настроек ставилась вслепую и каждые сутки выпускала
-                // аккаунт ровно в то же ограничение.
-                const parked = await parkAccountAfterLimit({
-                  db,
-                  client,
-                  account,
-                  hours: tg.account_cooldown_hours,
-                  reason: 'FloodError/Frozen',
-                  rawError: errMsg,
-                  log,
-                });
-                if (parked.parked) {
-                  const cooldownDisplay = new Date(parked.untilIso).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
-                  log('warning', `Аккаунт ${accountLogName(account)}: Telegram ограничил отправку (FloodError/Frozen на диалоге ${dialogLabel}). ${parked.diagnosis} Аккаунт на паузе до ${cooldownDisplay}.`);
-                }
+              const outcome = await onChatError(client, account, dialog.entity, err);
+              if (outcome === 'frozen') break;
+              if (outcome === 'flood') {
                 cycleStats.flood++;
                 break;
               }
-
-              // Permanently unreachable peer: user deleted account, blocked
-              // us, or the peer reference is stale. Each cycle we'd otherwise
-              // burn another GPT call and another SendMessage. The helper
-              // flips can_send=false so canSendToDialog() short-circuits
-              // future rounds.
-              const unreachable = await disableDialogIfUnreachable(errMsg, {
-                db,
-                campaignId: campaign.id,
-                accountId: account.id,
-                tgUserId: dialogId,
-                dialogLabel,
-                log,
-              });
-              if (unreachable) {
-                cycleStats.errors++;
-                continue;
-              }
-
               cycleStats.errors++;
-              log('error', `Аккаунт ${accountLogName(account)}, диалог ${dialogLabel}: не смог обработать — ${errMsg}`);
+            } finally {
+              roundBusy.delete(chatKey);
             }
           }
 
           if (account.check_status === 'frozen') continue;
 
-          await handleFollowUp(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop);
-          await handleMissedRepliesLastDays(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop);
+          const isAnswering = (tgUserId: number) => incoming.has(incomingKey(account.id, tgUserId));
+          await handleFollowUp(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop, isAnswering);
+          await handleMissedRepliesLastDays(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop, isAnswering);
 
           try {
             await backfillEmptyDialogs(client, account, campaign as unknown as OutreachCampaign, db, log);
@@ -3009,6 +3207,7 @@ export async function runCampaignLoop(
               (cycleStats.own_account ? `, своих аккаунтов кампании ${cycleStats.own_account}` : '') +
               (cycleStats.service ? `, служебных чатов Telegram ${cycleStats.service}` : '') +
               (cycleStats.flood ? `, паузы из-за Flood ${cycleStats.flood}` : '') +
+              (cycleStats.incoming ? `, ответ уже готовится по входящему ${cycleStats.incoming}` : '') +
               '.',
           );
 
@@ -3336,6 +3535,11 @@ export async function runCampaignLoop(
     }
   } finally {
     forwardsStopped = true;
+    // Ответы по входящему: новых не берём, начатые отменяются на ожидании
+    // (shouldStop у handleChat смотрит на этот флаг) — ждём их до разрыва сокетов.
+    incomingStopped = true;
+    await incomingLoop;
+    await Promise.allSettled([...activeIncoming]);
     if (control) control.deleteMessage = undefined;
     await Promise.allSettled([...activeDeletions]);
     await disconnectAll(clients);
