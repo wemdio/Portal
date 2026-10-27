@@ -99,6 +99,11 @@ export function veTwoGisClaimedByBase(tasks: ReadonlyArray<{ source?: unknown; t
   }, 0);
 }
 
+/** ИП разрешены базе, если хоть один близнец заморозил отметку i (veTwoGisAllow при подборе рубрик). Нет курсора — нет разрешения (п.6). */
+export function veTwoGisIpAllowedByBase(tasks: ReadonlyArray<{ source?: unknown; two_gis?: unknown }> | undefined): boolean {
+  return (tasks ?? []).some((state) => isVeTwoGisTask(state) && readAllow(record(state.two_gis)?.allow)?.i === 1);
+}
+
 export function compactVeTwoGisAllow(allow: VeTwoGisAllow): VeTwoGisAllowMarks | undefined {
   const marks: VeTwoGisAllowMarks = {};
   if (allow.nonCompany) marks.n = 1;

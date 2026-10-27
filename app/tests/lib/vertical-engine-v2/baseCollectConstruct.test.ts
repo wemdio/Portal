@@ -66,7 +66,9 @@ import { isVeTwoGisGovernmentHost, mapTwoGisRow, veTwoGisAddress, veTwoGisCompan
 import { buildVeTwoGisPageQuery, nextVeTwoGisCursor, readVeTwoGisPage, readVeTwoGisPageWith, readVeTwoGisRubricDictionary,
   readVeTwoGisRubricDictionaryWith } from '@/lib/verticalEngineV2/twoGisPage';
 import { resolveVeTwoGisRubrics, veTwoGisMappingFailure, VeTwoGisRubricsUnavailableError } from '@/lib/verticalEngineV2/twoGisRubrics';
-import { claimVeTwoGisRows, releaseVeTwoGisClaims } from '@/lib/verticalEngineV2/twoGisJournal';
+import { claimVeTwoGisRows, markVeTwoGisOutcome, releaseVeTwoGisClaims } from '@/lib/verticalEngineV2/twoGisJournal';
+import { VE_TWO_GIS_OWNER_INN_EXCLUDED_REASON } from '@/lib/verticalEngineV2/twoGisMarker';
+import type { VeRelevanceDecision } from '@/lib/verticalEngineV2/relevanceDecision';
 import { readVeTwoGisTwinState, veTwoGisAllow, VE_TWO_GIS_TWIN_NOTES } from '@/lib/verticalEngineV2/twoGisTwin';
 import { VeLlmRateLimitError } from '@/lib/verticalEngineV2/llmRateLimit';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
@@ -82,9 +84,11 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   applyVeNicheSourceSelection,
   applyVeAudienceSourceRefresh,
+  applyVeTwoGisOwnerInnExclusions,
   baseRowMatchesExclusion,
   buildBaseExclusionKeysFromRows,
   dedupUnifiedRows,
+  holdVeTwoGisConstructRows,
   mapGoogleRow,
   mapHhRow,
   pruneBaseRowAgainstExclusion,
@@ -5068,6 +5072,112 @@ describe('base_collect: план кончился раньше цели', () => 
       expect(nullDb.getRows('ve_twogis_rows')).toHaveLength(3);
       await releaseVeTwoGisClaims(nullDb as unknown as SupabaseClient, 'b1');
       expect(nullDb.getRows('ve_twogis_rows').map((row) => row.id)).toEqual([21]);
+
+      // (н) Окончательный отказ в журнале (часть 3в): только claimed этой базы по перечисленным карточкам; ready, rejected,
+      // неперечисленные и чужие строки не трогаются; пустой список — ни одного запроса.
+      const outcomeDb = createMockSupabase({ tables: { ve_twogis_rows: [journalRow(30, 'a.ru', 'b1', 'c-a'), journalRow(31, 'b.ru', 'b1', 'c-b'),
+        journalRow(32, 'r.ru', 'b1', 'c-ready', 'ready'), journalRow(33, 'j.ru', 'b1', 'c-rej', 'rejected'), journalRow(34, 'n.ru', 'b1', 'c-n'),
+        journalRow(35, 'o.ru', 'b-other', 'c-a')] } });
+      await markVeTwoGisOutcome(outcomeDb as unknown as SupabaseClient, 'b1', [], 'rejected', 'site_unconfirmed');
+      expect(outcomeDb.mutations).toEqual([]);
+      await markVeTwoGisOutcome(outcomeDb as unknown as SupabaseClient, 'b1', ['c-a', 'c-b', ' ', 'c-a', 'c-ready', 'c-rej'], 'rejected', 'site_unconfirmed');
+      expect(Object.fromEntries(outcomeDb.getRows('ve_twogis_rows').map((row) => [row.id, [row.outcome, row.reason ?? null]]))).toEqual({
+        30: ['rejected', 'site_unconfirmed'], 31: ['rejected', 'site_unconfirmed'], 32: ['ready', null], 33: ['rejected', null],
+        34: ['claimed', null], 35: ['claimed', null] });
+      expect(outcomeDb.getRows('ve_twogis_rows').filter((row) => row.reason).every((row) => typeof row.updated_at === 'string')).toBe(true);
+
+      // (о) Ящики строк 2ГИС после конструктора: адрес только из найденных; «нет ящика» — окончательно, только если
+      // конструктор обошёл сайты (crawled), иначе пустой ящик значит «не искали».
+      const boxInput = mapTwoGisRow({ card_id: 'c-box', registrable_domain: 'box-meat.ru', host: 'box-meat.ru', site_scheme: 'https',
+        region_code: '77', name: 'Мясокомбинат Бокс', city_name: 'Москва' }, 7);
+      const boxGrid = { ...boxInput, email: 'hello@webstudio.test' } as Record<string, unknown>;
+      delete boxGrid._ve_two_gis;
+      const boxControl = unifiedRow({ company: 'Колбасный завод Юг', website: 'yug.test', email: 'sales@yug.test' });
+      for (const crawled of [true, false]) {
+        const boxHeld = holdVeTwoGisConstructRows([boxGrid as VeUnifiedRow, boxControl], ['ok', 'ok'], [boxInput], new Set(), crawled);
+        expect([crawled, boxHeld.rows.map((row) => row.company), boxHeld.statuses]).toEqual([crawled, [boxControl.company], ['ok']]);
+        expect([crawled, boxHeld.held.map((row) => [row.email, '_email_status' in row])]).toEqual([crawled, [['', false]]]);
+        expect([crawled, boxHeld.noMailbox]).toEqual([crawled, crawled ? ['c-box'] : []]);
+      }
+      // Запись конструктора от закрытого раунда: «нет ящика» пишется в журнал только при completed.
+      const staleCard = mapTwoGisRow({ card_id: 'c-stale', registrable_domain: 'stale-meat.ru', host: 'stale-meat.ru', site_scheme: 'https',
+        region_code: '77', name: 'Мясокомбинат Старый', city_name: 'Москва' }, 7);
+      for (const bcStatus of ['failed', 'completed']) {
+        // Как «Продолжить подготовку» (relevance_review_requested): раунд закрыт, а запись конструктора висит.
+        const staleInfo = exhaustedInfo(MEAT_TASK, { construct: { bc_job_id: 'bc-stale', status: 'dispatched', dispatched_at: '2026-10-26T10:00:00Z' },
+          relevance_review_requested: true, target_checkpoint: { completed_round: 3, seen_rows: processed, processed_rows: processed.length },
+          search_policy: { version: 1, phase: 'paid', deferred_rows: [], construct_rows: [staleCard] },
+          adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, widenings: 2, active_source: veSourceStrategyKey(MEAT_TASK) } });
+        const staleDb = seed(staleInfo, { ...hypothesis({ ...MEAT, broad: false }), ve_bases: [{ ...makeBase(staleInfo), data: ready, row_count: ready.length,
+          columns: [...VE_AUTO_COLLECT_COLUMNS] }], ve_twogis_rows: [journalRow(40, 'stale-meat.ru', 'b1', 'c-stale')],
+          base_constructor_jobs: [{ id: 'bc-stale', status: bcStatus, error_message: null,
+            selected_steps: ['find_emails', 'enrich_descriptions', 'split_emails', 'dedup_email', 'validate_emails'],
+            data: [['Компания', 'Сайт', 'Email', 'Телефон', 'Вакансия', 'Адрес', 'Категория', 'Сотрудники', 'Выручка', 'ИНН', 'Источник',
+              'Описание', 'Email Статус', 'Email Провайдер'],
+            ['Мясокомбинат Старый', 'stale-meat.ru', 'hello@webstudio.test', '', '', 'Москва', '', '', '', '', 'справочник организаций', '', 'ok', 'other']] }] });
+        const staleLogs: string[] = [];
+        await runBaseCollectStage(makeJob(), { supabase: staleDb as unknown as SupabaseClient, log: (message) => staleLogs.push(message) });
+        expect(staleLogs).toContain(`[base_collect] конструктор bc-stale (${bcStatus}) остался от закрытого раунда: 1 строк перенесено в резерв на проверку, запись снята`);
+        expect([bcStatus, staleDb.getRows('ve_twogis_rows').map((row) => [row.outcome, row.reason ?? null])])
+          .toEqual([bcStatus, [bcStatus === 'completed' ? ['rejected', 'no_published_mailbox'] : ['claimed', null]]]);
+      }
+
+      // Основной путь (раунд открыт): тот же конструктор; «нет ящика» — только при completed и по полному выходу карточки:
+      // свой ящик, снятый правилом проекта, — не отказ.
+      const constructGrid = (emails: string[]) => [['Компания', 'Сайт', 'Email', 'Телефон', 'Вакансия', 'Адрес', 'Категория', 'Сотрудники',
+        'Выручка', 'ИНН', 'Источник', 'Описание', 'Email Статус', 'Email Провайдер'],
+      ...emails.map((email) => ['Мясокомбинат Старый', 'stale-meat.ru', email, '', '', 'Москва', '', '', '', '', 'справочник организаций', '', 'ok', 'other'])];
+      for (const [bcStatus, emails, projectEmails, expected] of [
+        ['failed', ['hello@webstudio.test'], [], ['claimed', null]],
+        ['completed', ['hello@webstudio.test'], [], ['rejected', 'no_published_mailbox']],
+        ['completed', ['info@stale-meat.ru', 'hello@webstudio.test'], ['info@stale-meat.ru'], ['claimed', null]],
+      ] as const) {
+        const mainInfo = exhaustedInfo(MEAT_TASK, { construct: { bc_job_id: 'bc-main', status: 'dispatched', dispatched_at: new Date().toISOString() },
+          search_policy: { version: 1, phase: 'paid', deferred_rows: [], construct_rows: [staleCard] },
+          adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, widenings: 2, active_source: veSourceStrategyKey(MEAT_TASK) } });
+        const mainBcDb = seed(mainInfo, { ...hypothesis({ ...MEAT, broad: false }), ve_bases: [{ ...makeBase(mainInfo), data: ready, row_count: ready.length,
+          columns: [...VE_AUTO_COLLECT_COLUMNS] }], ve_twogis_rows: [journalRow(41, 'stale-meat.ru', 'b1', 'c-stale')],
+          ...(projectEmails.length ? { ve_project_exclusions: [{ project_id: 'p1', revision: 1, inns: [], domains: [], emails: [...projectEmails],
+            updated_at: '2026-10-26T10:00:00Z' }] } : {}),
+          base_constructor_jobs: [{ id: 'bc-main', status: bcStatus, error_message: null,
+            selected_steps: ['find_emails', 'enrich_descriptions', 'split_emails', 'dedup_email', 'validate_emails'], data: constructGrid([...emails]) }] });
+        const mainBcLogs: string[] = [];
+        await runBaseCollectStage(makeJob(), { supabase: mainBcDb as unknown as SupabaseClient, log: (message) => mainBcLogs.push(message) });
+        const label = [bcStatus, emails.join(' ')];
+        expect([label, mainBcLogs.some((line) => line.startsWith(`[base_collect] construct ${bcStatus}:`))]).toEqual([label, true]);
+        expect([label, mainBcDb.getRows('ve_twogis_rows').map((row) => [row.outcome, row.reason ?? null])]).toEqual([label, [expected]]);
+      }
+      // Продолжение: свой ящик карточки уже в готовой базе, в сетке рядом чужой адрес — не отказ.
+      const ownReady = { ...unifiedRow({ company: 'Мясокомбинат Старый', website: 'stale-meat.ru', email: 'info@stale-meat.ru', address: 'Москва',
+        source_detail: 'справочник организаций' }), _email_status: 'ok', _ve_two_gis: { card_id: 'c-stale', snapshot_id: 7 } };
+      const resumeInfo = exhaustedInfo(MEAT_TASK, { validation_retry: true, construct: { bc_job_id: 'bc-r', status: 'done', dispatched_at: '2026-10-26T10:00:00Z' },
+        target_checkpoint: { completed_round: 3, seen_rows: processed, processed_rows: processed.length },
+        search_policy: { version: 1, phase: 'paid', deferred_rows: [], construct_rows: [staleCard] },
+        adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, widenings: 2, active_source: veSourceStrategyKey(MEAT_TASK) } });
+      const resumeDb = seed(resumeInfo, { ...hypothesis({ ...MEAT, broad: false }), ve_bases: [{ ...makeBase(resumeInfo), data: [...ready, ownReady],
+        row_count: ready.length + 1, columns: [...VE_AUTO_COLLECT_COLUMNS] }], ve_twogis_rows: [journalRow(44, 'stale-meat.ru', 'b1', 'c-stale')],
+        base_constructor_jobs: [{ id: 'bc-r', status: 'completed', error_message: null,
+          selected_steps: ['find_emails', 'enrich_descriptions', 'split_emails', 'dedup_email', 'validate_emails'],
+          data: constructGrid(['info@stale-meat.ru', 'hello@webstudio.test']) }] });
+      const resumeLogs: string[] = [];
+      await runBaseCollectStage(makeJob(), { supabase: resumeDb as unknown as SupabaseClient, log: (message) => resumeLogs.push(message) });
+      expect(resumeLogs.some((line) => line.startsWith('[base_collect] продолжаем проверку сохранённых'))).toBe(true);
+      expect(resumeDb.getRows('ve_twogis_rows').map((row) => [row.outcome, row.reason ?? null])).toEqual([['claimed', null]]);
+
+      // (п) ИНН владельца сайта: совпадение с другой базой — окончательный отказ (журнал закроет домен); только правило
+      // проекта — отказ без отметки (правило могут снять; claim освобождается при выходе); без совпадения — как было.
+      const ownerDecision = { version: 2, status: 'relevant', reason: 'Производство по сайту', evidence: [{ field: 'website_text', quote: 'Колбасы' }],
+        context_hash: 'a'.repeat(64), review_attempts: 1, search_deferred: true } as VeRelevanceDecision;
+      const ownerGate = { ownerInns: new Map([[0, '1650000001'], [1, '1650000002'], [2, '1650000003']]),
+        decisions: new Map([0, 1, 2].map((index) => [index, { ...ownerDecision }])), flagged: new Set<number>(), review: new Set([1]),
+        unchecked: new Set([1]), errored: new Set<number>() };
+      applyVeTwoGisOwnerInnExclusions(ownerGate, new Set(['1650000001']), (inn) => inn === '1650000002');
+      expect(ownerGate.decisions.get(0)).toEqual({ ...ownerDecision, status: 'irrelevant', reason: VE_TWO_GIS_OWNER_INN_EXCLUDED_REASON, evidence: [],
+        source_site_final: true, search_deferred: undefined });
+      expect(ownerGate.decisions.get(1)).toMatchObject({ status: 'irrelevant', reason: VE_TWO_GIS_OWNER_INN_EXCLUDED_REASON, evidence: [] });
+      expect(ownerGate.decisions.get(1)).not.toHaveProperty('source_site_final');
+      expect(ownerGate.decisions.get(2)).toEqual(ownerDecision);
+      expect([[...ownerGate.flagged].sort(), [...ownerGate.review], [...ownerGate.unchecked]]).toEqual([[0, 1], [], []]);
     } finally {
       jest.mocked(readVeTwoGisPage).mockReset().mockImplementation(actualPage.readVeTwoGisPage);
       jest.mocked(readVeTwoGisRubricDictionary).mockReset().mockImplementation(async () => { throw new Error('unmocked 2ГИС dictionary read'); });

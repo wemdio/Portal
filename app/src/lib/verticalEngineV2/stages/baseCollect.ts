@@ -124,7 +124,7 @@ import { buildVeSeenCompanies, veSeenCompanyCovers, veUnseenCompanyEmails, type 
 import { getVeDirectoryPlanPopulation, veDirectoryPopulationSlice, veUnsizedSourceLabels } from '../directoryPopulation';
 import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
-import { findIrrelevantRows, type VeRelevanceDecision } from '../relevanceGate';
+import { findIrrelevantRows, type VeRelevanceDecision, type VeRelevanceGateResult } from '../relevanceGate';
 import { veRelevanceGeographySourceRows } from '../relevanceGeography';
 import { isVePaidWebsiteSearchEnabled } from '../paidSearchPolicy';
 import { licenceSnapshotReady } from '@/lib/companiesDirectory/licences';
@@ -148,9 +148,12 @@ import { readVeTwoGisSettings, readVeTwoGisSourceFlag, veTwoGisFlagAllowed, veTw
 // 2ГИС только через twoGisPage: twoGisSource (pg) напрямую из стадии не импортируется.
 import { readVeTwoGisPage, readVeTwoGisRubricDictionary, VeTwoGisUnavailableError, VE_TWO_GIS_PAGE_ROWS } from '../twoGisPage';
 import { resolveVeTwoGisRubrics, veTwoGisMappingFailure, VeTwoGisRubricsUnavailableError, VE_TWO_GIS_MAPPING_REVISION } from '../twoGisRubrics';
-import { claimVeTwoGisRows, releaseVeTwoGisClaims, VeTwoGisJournalError, type VeTwoGisClaim, type VeTwoGisClaimResult } from '../twoGisJournal';
+import { claimVeTwoGisRows, markVeTwoGisOutcome, releaseVeTwoGisClaims, VeTwoGisJournalError, type VeTwoGisClaim, type VeTwoGisClaimResult,
+  type VeTwoGisRejectReason } from '../twoGisJournal';
 import { readVeTwoGisTwinState, fitVeTwoGisCursor, veTwoGisClaimedByBase, veTwoGisAllow, compactVeTwoGisAllow, expandVeTwoGisAllow,
-  VE_TWO_GIS_MAX_ERRORS, VE_TWO_GIS_TWIN_NOTES, type VeTwoGisCursor } from '../twoGisTwin';
+  veTwoGisIpAllowedByBase, VE_TWO_GIS_MAX_ERRORS, VE_TWO_GIS_TWIN_NOTES, type VeTwoGisCursor } from '../twoGisTwin';
+import { VE_TWO_GIS_IP_SITE_REASON, VE_TWO_GIS_OWNER_INN_EXCLUDED_REASON } from '../twoGisMarker';
+import { admitVeTwoGisMailboxes } from '../twoGisMailbox';
 import { mapTwoGisRow, veTwoGisWebsiteHost, veTwoGisSiteKind, veTwoGisSiteDomain, isVeTwoGisGovernmentHost } from '../twoGisRows';
 import { isVeNonOfficialWebsiteHost } from '../relevanceEvidence';
 import { isVeStageDbInterruption } from '../stageDb';
@@ -1097,6 +1100,18 @@ async function releaseTwoGisClaimsOnExit(ctx: VeStageContext, baseId: string, in
     await releaseVeTwoGisClaims(ctx.supabase, baseId, ctx.signal);
   } catch (error) {
     stageLog(ctx, `[base_collect] 2gis release: ${error instanceof VeTwoGisJournalError ? error.code : 'error'}`);
+  }
+}
+
+/** 2ГИС: окончательный отказ карточек в журнале линии. Лучшее усилие: сбой — только код в лог; база не падает. */
+async function markTwoGisOutcomeBestEffort(ctx: VeStageContext, baseId: string, cardIds: readonly string[],
+  reason: VeTwoGisRejectReason): Promise<void> {
+  if (!cardIds.length || ctx.signal?.aborted) return;
+  try {
+    await markVeTwoGisOutcome(ctx.supabase, baseId, cardIds, 'rejected', reason, ctx.signal);
+  } catch (error) {
+    ctx.signal?.throwIfAborted();
+    stageLog(ctx, `[base_collect] 2gis outcome: ${error instanceof VeTwoGisJournalError ? error.code : 'error'}`);
   }
 }
 
@@ -4108,9 +4123,15 @@ async function importConstructRows(ctx: VeStageContext, bcJobId: string): Promis
 
 /** R1 (2ГИС): результат конструктора по строке справочника не идёт в шлюз (там
  * платный поиск по имени), а остаётся в резерве непроверенным, с признаком.
- * Сетка теряет приватные поля — признак берём у строк пачки (inputs). */
-function holdVeTwoGisConstructRows<T extends VeUnifiedRow>(rows: T[], statuses: Array<string | null> | null,
-  inputs: ReadonlyArray<object>, twinKeys: ReadonlySet<string>): { rows: T[]; statuses: Array<string | null> | null; held: Array<Record<string, unknown>> } {
+ * Сетка теряет приватные поля — признак берём у строк пачки (inputs). 3в: ящики — только
+ * опубликованные свои и бесплатные; noMailbox (окончательный отказ) — только при crawled: сайты
+ * обошёл завершившийся конструктор, иначе пустой ящик значит «не искали», а не «нет». На деле это
+ * карточки, все найденные адреса которых чужие, хостинга, технические или артефакты разбора; карточку
+ * без найденного адреса validate_emails отбрасывает до импорта — она в журнал не пишется и остаётся
+ * доступной (у find_emails нет итога обхода по строке, таймаут не отличить от «ящика нет», D3). */
+export function holdVeTwoGisConstructRows<T extends VeUnifiedRow>(rows: T[], statuses: Array<string | null> | null,
+  inputs: ReadonlyArray<object>, twinKeys: ReadonlySet<string>, crawled: boolean): { rows: T[]; statuses: Array<string | null> | null;
+  held: Array<Record<string, unknown>>; noMailbox: string[] } {
   const markers = veTwoGisInputMarkers(inputs, twinKeys);
   const held: Array<Record<string, unknown>> = [];
   const keep = rows.map((row, index) => {
@@ -4119,8 +4140,11 @@ function holdVeTwoGisConstructRows<T extends VeUnifiedRow>(rows: T[], statuses: 
       [VE_TWO_GIS_ROW_FIELD]: marker, _relevance_unchecked: true });
     return !marker;
   });
-  return held.length ? { rows: rows.filter((_, index) => keep[index]),
-    statuses: statuses ? statuses.filter((_, index) => keep[index]) : null, held } : { rows, statuses, held };
+  if (!held.length) return { rows, statuses, held, noMailbox: [] };
+  // 3в: только опубликованные ящики своего домена и бесплатной почты; адрес не составляем (п.5 Сергея, 26.10).
+  const admitted = admitVeTwoGisMailboxes(held);
+  return { rows: rows.filter((_, index) => keep[index]), statuses: statuses ? statuses.filter((_, index) => keep[index]) : null,
+    held: admitted.rows, noMailbox: crawled ? admitted.noMailbox : [] };
 }
 
 /** R1 (2ГИС): партия близнеца вне конвейера, у которой нет отметки конструктора (R3 оборвался
@@ -4177,14 +4201,17 @@ async function settleStaleConstruct(ctx: VeStageContext, base: VeAutoBase, info:
   // R1 (2ГИС): признак — по строкам пачки этой записи (до их удаления ниже).
   const twoGisTwinKeys = veTwoGisTwinKeys(info.tasks);
   const twoGisMarkers = veTwoGisInputMarkers(info.search_policy?.construct_rows ?? [], twoGisTwinKeys);
-  const moved = (imported?.rows ?? []).flatMap((row, index) => {
+  const built = (imported?.rows ?? []).map((row, index) => {
     const status = imported!.emailStatuses[index];
     const twoGis = veTwoGisImportMarker(row, twoGisMarkers, twoGisTwinKeys);
     const saved: Record<string, unknown> = { ...row, ...(status ? { _email_status: status } : {}),
       ...(twoGis ? { [VE_TWO_GIS_ROW_FIELD]: twoGis } : {}), _relevance_unchecked: true };
     if (!cell(row.description)) delete saved.description;
-    return known.has(veRelevanceRowKey(saved)) ? [] : [saved];
+    return saved;
   });
+  // 3в: ящики строк 2ГИС — до ключа known (он включает адрес). Без помеченных строк — тот же массив.
+  const admitted = admitVeTwoGisMailboxes(built);
+  const moved = admitted.rows.filter((saved) => !known.has(veRelevanceRowKey(saved)));
   if (moved.length) {
     info.relevance_reserve = { ...(info.relevance_reserve ?? { version: 1 }), version: 1,
       rows: retainProjectExclusions(ctx, mergeVeRelevanceRows(reserve, moved)) };
@@ -4192,6 +4219,8 @@ async function settleStaleConstruct(ctx: VeStageContext, base: VeAutoBase, info:
   delete info.construct;
   if (info.search_policy) delete info.search_policy.construct_rows;
   await persistCollectInfo(ctx, base.id, info);
+  // Отказ «нет ящика» — только по сетке завершённого конструктора: у failed/cancelled строки могут быть необработаны.
+  if (bc?.status === 'completed') await markTwoGisOutcomeBestEffort(ctx, base.id, admitted.noMailbox, 'no_published_mailbox');
   stageLog(ctx, `[base_collect] конструктор ${construct.bc_job_id} (${bc?.status ?? 'не найден'}) остался от закрытого раунда: `
     + (moved.length ? `${moved.length} строк перенесено в резерв на проверку` : 'переносить нечего') + ', запись снята');
 }
@@ -4313,6 +4342,40 @@ class VeRelevanceRetryScheduled extends Error {
   }
 }
 
+/**
+ * 2ГИС: единственный ИНН владельца сайта — сверка с исключениями проекта и ИНН других баз. Совпадение — отказ на
+ * месте: строку не удаляем (индексы finalEmailStatuses у вызывающих). row.inn не пишем. Окончательный
+ * (source_site_final, журнал rejected) — только по ИНН другой базы: правило проекта могут снять, поэтому по нему
+ * отказ без отметки — claim остаётся claimed и освобождается при выходе базы.
+ */
+export function applyVeTwoGisOwnerInnExclusions(
+  gate: Pick<VeRelevanceGateResult, 'ownerInns' | 'decisions' | 'flagged' | 'review' | 'unchecked' | 'errored'>,
+  otherBaseInns: ReadonlySet<string>, projectExcluded: (inn: string) => boolean,
+): void {
+  for (const [index, inn] of gate.ownerInns ?? []) {
+    const decision = gate.decisions.get(index);
+    const otherBase = otherBaseInns.has(inn);
+    if (!decision || (!otherBase && !projectExcluded(inn))) continue;
+    const next: VeRelevanceDecision = { ...decision, status: 'irrelevant', reason: VE_TWO_GIS_OWNER_INN_EXCLUDED_REASON, evidence: [],
+      ...(otherBase ? { source_site_final: true as const } : {}) };
+    if (!otherBase) delete next.source_site_final;
+    delete next.search_deferred;
+    gate.decisions.set(index, next);
+    gate.flagged.add(index);
+    gate.review.delete(index);
+    gate.unchecked.delete(index);
+    gate.errored.delete(index);
+  }
+}
+
+/** Ключи других баз — от вызывающего; нет — читаются только сейчас, когда шлюз вернул ownerInns. */
+async function excludeVeTwoGisOwnerInns(ctx: VeStageContext, job: VeJob, base: VeAutoBase,
+  gate: Pick<VeRelevanceGateResult, 'ownerInns' | 'decisions' | 'flagged' | 'review' | 'unchecked' | 'errored'>,
+  otherBaseKeys?: VeBaseExclusionKeys): Promise<void> {
+  const keys = otherBaseKeys ?? await loadOtherBaseExclusionKeys(ctx, job.project_id, base.id, base.hypothesis_id);
+  applyVeTwoGisOwnerInnExclusions(gate, keys.inns, (inn) => !allowedByProject(ctx, { inn }));
+}
+
 async function checkCollectedRelevance(args: {
   ctx: VeStageContext; job: VeJob; base: VeAutoBase; info: VeCollectInfo;
   finalRows: VeUnifiedRow[]; finalEmailStatuses: Array<string | null> | null;
@@ -4320,6 +4383,8 @@ async function checkCollectedRelevance(args: {
   previousRelevanceCheckpoint?: unknown;
   /** Company facts only: these rows must never become output recipients. */
   evidenceRows?: Array<Record<string, unknown>>;
+  /** 2ГИС: ключи других баз для сверки ИНН владельца; нет — читаются, только если шлюз вернул ownerInns. */
+  twoGisOtherBaseKeys?: VeBaseExclusionKeys;
 }) {
   const { ctx, job, base, info, finalRows, finalEmailStatuses, market, usage } = args;
   // ─── QUALITY GATE (до refill/финала: пометки нужны обоим путям) ───
@@ -4454,6 +4519,8 @@ async function checkCollectedRelevance(args: {
         && (!info.target_progress || info.target_progress.ready_rows < info.target_progress.ready_target),
       websiteLimit: info.target_progress ? Math.max(0, info.target_progress.ready_target - info.target_progress.ready_rows) : undefined,
       triage: isVeRelevanceTriageEnabled(job.project_id),
+      // 2ГИС: разрешение ИП — только при строке 2ГИС на входе; иначе ключ входа не меняется.
+      ...(storedRows.some((row) => isVeTwoGisRow(row)) ? { twoGisAllowIp: veTwoGisIpAllowedByBase(info.tasks) } : {}),
       checkpoint: [job.result?.relevance_checkpoint, args.previousRelevanceCheckpoint, info.relevance_checkpoint],
       onCheckpoint: async (checkpoint, options) => {
         ctx.signal?.throwIfAborted();
@@ -4524,6 +4591,7 @@ async function checkCollectedRelevance(args: {
         throw new VeRelevanceRetryScheduled(base.id, { ...usage });
       }
     }
+    if (gate.ownerInns?.size) await excludeVeTwoGisOwnerInns(ctx, job, base, gate, args.twoGisOtherBaseKeys);
     lowRelevanceCount = gate.flagged.size;
     relevanceUncheckedCount = gate.unchecked.size;
     relevanceNeedsReviewCount = gate.review.size;
@@ -4570,6 +4638,18 @@ async function checkCollectedRelevance(args: {
     );
   }
   storedRows.forEach((row, index) => { combinedRows[eligibleIndices[index]] = row; });
+  // 2ГИС: окончательные отказы (сайт, ИП, ИНН владельца) закрывают домен для линии гипотезы; не окончательные — нет:
+  // их повторная проверка может стать relevant, а rejected в журнале — навсегда для линии.
+  const twoGisRejects = new Map<VeTwoGisRejectReason, string[]>();
+  for (const row of storedRows) {
+    const decision = row._ve_relevance;
+    const card = ((row as Record<string, unknown>)[VE_TWO_GIS_ROW_FIELD] as { card_id?: unknown } | undefined)?.card_id;
+    if (decision?.source_site_final !== true || !isVeTwoGisRow(row) || typeof card !== 'string' || !card.trim()) continue;
+    const reason: VeTwoGisRejectReason = decision.reason === VE_TWO_GIS_IP_SITE_REASON ? 'ip_site'
+      : decision.reason === VE_TWO_GIS_OWNER_INN_EXCLUDED_REASON ? 'owner_inn_excluded' : 'site_unconfirmed';
+    twoGisRejects.set(reason, [...twoGisRejects.get(reason) ?? [], card]);
+  }
+  for (const [reason, cards] of twoGisRejects) await markTwoGisOutcomeBestEffort(ctx, base.id, cards, reason);
   return { storedRows: combinedRows, lowRelevanceCount, relevanceUncheckedCount, relevanceNeedsReviewCount, relevanceErrorCount,
     relevanceCheckedCompanies, relevanceTotalCompanies, relevanceCoverageComplete, relevanceError };
 }
@@ -4609,6 +4689,10 @@ async function resumeSavedPreviewValidation(
   if (!imported || imported.emailStatuses.some((status) => status === null)) {
     throw new Error('Saved constructor email verdicts are incomplete');
   }
+  // 2ГИС: «нет ящика» — по полному выходу конструктора (продолжение берёт только завершённый, с проверкой почт),
+  // до отсева готовых и исключённых ниже: свой ящик, уже готовый или снятый правилом, — не отказ.
+  const twoGisInputs = [...(info.search_policy?.construct_rows ?? []), ...readVeRelevanceSourceRows(info.relevance_reserve)];
+  const twoGisNoMailbox = holdVeTwoGisConstructRows(imported.rows, imported.emailStatuses, twoGisInputs, veTwoGisTwinKeys(info.tasks), true).noMailbox;
   // Legacy partial previews retained their verified recipients, but not the
   // rejected/unchecked verdicts. Keep those recipients; recheck the remaining BC
   // output for this same immutable hypothesis, including legacy rejected rows.
@@ -4639,11 +4723,11 @@ async function resumeSavedPreviewValidation(
   if (finalEmailStatuses.some((status) => status === null)) throw new Error('Saved preview email verdicts are incomplete');
   // R1 (2ГИС): строки справочника в шлюз не идут, а остаются в резерве непроверенными.
   // У пайплайна строк пачки уже может не быть — признак берём и из source_rows.
-  const twoGis = holdVeTwoGisConstructRows(finalRows, finalEmailStatuses,
-    [...(info.search_policy?.construct_rows ?? []), ...readVeRelevanceSourceRows(info.relevance_reserve)], veTwoGisTwinKeys(info.tasks));
+  const twoGis = holdVeTwoGisConstructRows(finalRows, finalEmailStatuses, twoGisInputs, veTwoGisTwinKeys(info.tasks), false);
+  await markTwoGisOutcomeBestEffort(ctx, base.id, twoGisNoMailbox, 'no_published_mailbox');
   stageLog(ctx, `[base_collect] продолжаем проверку сохранённых ${twoGis.rows.length} строк; источники и конструктор не перезапускаются`);
   const gate = await checkCollectedRelevance({ ctx, job, base, info, finalRows: twoGis.rows, finalEmailStatuses: twoGis.statuses, market, usage,
-    previousRelevanceCheckpoint: previous?.result?.relevance_checkpoint });
+    previousRelevanceCheckpoint: previous?.result?.relevance_checkpoint, twoGisOtherBaseKeys: keys });
   const seenKeys = addAcquisitionReceipts(buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []), info.target_checkpoint?.seen_rows ?? [], info.tasks?.flatMap((task) => task.harvest ?? []) ?? []);
   // Харвест близнеца 2ГИС в карантине: кандидатов не даёт.
   const hasBufferedCandidates = (info.tasks ?? []).some((task) => !isVeTwoGisTask(task) && !veTaskAcquisitionDeferred(info, task) && task.status === 'done'
@@ -6495,6 +6579,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // пометке строк (_email_status) при финальной записи: null, когда
   // конструктор не запускался / вернул пусто.
   let finalEmailStatuses: Array<string | null> | null = null;
+  // 2ГИС: «нет опубликованного ящика» — окончательно, только если конструктор действительно обошёл сайты
+  // (завершился и вернул сетку); сырые или частичные строки уходят в резерв без отказа, как в 3б.
+  let twoGisCrawled = false;
   // Это реальные кандидаты после дедупа, ещё не готовые получатели. row_count
   // остаётся счётчиком финальных строк, а finished_at до финала не публикуем.
   const candidateStats = { ...stats };
@@ -6593,6 +6680,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       // excluded. Old row-level verdicts still cannot identify which sibling
       // email was validated, so discard that legacy result without a new job.
       const imported = legacyWithoutSplit ? null : await importConstructRows(ctx, bcJobId);
+      twoGisCrawled = !!imported && bcStatus === 'completed';
       const failNote =
         bcStatus === 'completed'
           ? null
@@ -6647,6 +6735,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     }
   }
 
+  // 2ГИС: «нет ящика» — по ПОЛНОМУ выходу конструктора по карточке, до исключений и дедупа ниже: свой ящик,
+  // снятый правилом проекта или уже готовый в другой базе, — всё равно опубликованный ящик, не отказ.
+  const twoGisNoMailbox = target && twoGisCrawled
+    ? holdVeTwoGisConstructRows(finalRows, finalEmailStatuses, merged, twoGisTwinKeys, true).noMailbox : [];
   // Пока конструктор валидирует/разносит email, другая база проекта могла уже
   // завершиться. Повторяем дедуп свежим чтением и уже по email тоже: именно
   // здесь ловятся контакты, найденные конструктором под разными названиями
@@ -6685,8 +6777,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
 
   // R1 (2ГИС): шлюз проверил бы строку справочника с платным поиском по имени — держим
   // её в резерве непроверенной. Сетка конструктора теряет приватные поля: признак — у строк пачки (merged).
-  const twoGisHeld = target ? holdVeTwoGisConstructRows(finalRows, finalEmailStatuses, merged, twoGisTwinKeys) : null;
+  // Здесь — только строки и удержание; вердикт «нет ящика» взят выше, по полному выходу.
+  const twoGisHeld = target ? holdVeTwoGisConstructRows(finalRows, finalEmailStatuses, merged, twoGisTwinKeys, false) : null;
   if (twoGisHeld?.held.length) { finalRows = twoGisHeld.rows; finalEmailStatuses = twoGisHeld.statuses; }
+  await markTwoGisOutcomeBestEffort(ctx, baseId, twoGisNoMailbox, 'no_published_mailbox');
 
   if (finalRows.length === 0) {
     if (target) return await completeTargetRound({
@@ -6724,7 +6818,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
 
   const gate = await checkCollectedRelevance({
-    ctx, job, base, info, finalRows, finalEmailStatuses, market, usage,
+    ctx, job, base, info, finalRows, finalEmailStatuses, market, usage, twoGisOtherBaseKeys: freshExistingKeys,
   });
   const { lowRelevanceCount, relevanceUncheckedCount, relevanceNeedsReviewCount, relevanceErrorCount,
     relevanceCheckedCompanies, relevanceTotalCompanies, relevanceCoverageComplete, relevanceError } = gate;

@@ -6,7 +6,8 @@ import { isVeStageDbInterruption } from './stageDb';
  * Журнал строк 2ГИС (ve_twogis_rows, миграция 20261026_0030; план 26.10, R3 часть 3б): один
  * домен сайта — одна строка на линию гипотезы проекта. Сначала claim здесь, потом запись
  * collect_info (одна на диспатч); повтор страницы узнаёт свои claim по base_id и card_id.
- * Никогда не обновляет строки: только вставка без конфликтов, чтение и удаление claimed
+ * Обновляет только claimed-строки своей базы — в rejected при окончательном отказе
+ * (markVeTwoGisOutcome, часть 3в); прочее — вставка без конфликтов, чтение и удаление claimed
  * своей базы при выходе (или чужой — когда её база уже не собирается). id не шлём
  * (identity), hypothesis_id шлём всегда, null тоже. Домены в ошибки и логи не попадают.
  */
@@ -16,7 +17,7 @@ export interface VeTwoGisClaimResult { accepted: Set<string>; inserted: number; 
 
 export class VeTwoGisJournalError extends Error {
   readonly name = 'VeTwoGisJournalError';
-  constructor(readonly step: 'input' | 'insert' | 'read' | 'owners' | 'takeover' | 'release', readonly code: string,
+  constructor(readonly step: 'input' | 'insert' | 'read' | 'owners' | 'takeover' | 'release' | 'outcome', readonly code: string,
     readonly transient: boolean) {
     super(`2ГИС журнал: ${step} ${code}`);
   }
@@ -175,4 +176,23 @@ export async function claimVeTwoGisRows(db: SupabaseClient, line: VeTwoGisLine, 
 /** Выход базы из сбора: её claimed без итога освобождаются. Списка в URL нет. */
 export async function releaseVeTwoGisClaims(db: SupabaseClient, baseId: string, signal?: AbortSignal): Promise<void> {
   await deleteClaimed(db, 'release', baseId, signal);
+}
+
+export type VeTwoGisRejectReason = 'site_unconfirmed' | 'ip_site' | 'owner_inn_excluded' | 'no_published_mailbox';
+
+/**
+ * Окончательный отказ по карточкам своей базы: claimed → rejected с причиной. Только claimed — итог не
+ * переписывается, повтор безвреден. rejected переживает выход базы (удаляются только claimed): домен
+ * закрыт для линии гипотезы. Пустой список — ни одного запроса. updated_at пишет модуль (миграция
+ * 20261026_0030). Ключ — card_id: claim сделан по домену Ш5, а сайт строки мог переписаться.
+ */
+export async function markVeTwoGisOutcome(db: SupabaseClient, baseId: string, cardIds: readonly string[], outcome: 'rejected',
+  reason: VeTwoGisRejectReason, signal?: AbortSignal): Promise<void> {
+  const cards = [...new Set(cardIds.filter((card) => typeof card === 'string' && card.trim() !== ''))];
+  if (!cards.length) return;
+  const updatedAt = new Date().toISOString();
+  for (const chunk of urlChunks(cards)) {
+    await step('outcome', signal, (abort) => db.from(TABLE).update({ outcome, reason, updated_at: updatedAt })
+      .eq('base_id', baseId).eq('outcome', 'claimed').in('card_id', chunk).abortSignal(abort));
+  }
 }

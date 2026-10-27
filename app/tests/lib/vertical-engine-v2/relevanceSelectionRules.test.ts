@@ -14,8 +14,8 @@
  */
 import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
 import type { VeRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
-import { VE_RELEVANCE_RULES_VERSION, isVeRelevanceReady } from '@/lib/verticalEngineV2/relevanceDecision';
-import { buildVeRelevanceReviewBatch, needsVeRelevanceEvidence, veSavedReviewSignature } from '@/lib/verticalEngineV2/relevanceReserve';
+import { VE_RELEVANCE_RULES_VERSION, isVeRelevanceReady, veRelevanceDecisionSchema } from '@/lib/verticalEngineV2/relevanceDecision';
+import { buildVeRelevanceReviewBatch, needsVeRelevanceEvidence, veRelevanceSourceFields, veSavedReviewSignature } from '@/lib/verticalEngineV2/relevanceReserve';
 import { canResumePartialPreview, veSavedRelevanceScope } from '@/lib/verticalEngineV2/collectionRecovery';
 import { createVeCollectionAudienceSnapshot } from '@/lib/verticalEngineV2/sourceAudience';
 import { isVeRelevanceTriageEnabled } from '@/lib/verticalEngineV2/relevanceTriageConfig';
@@ -28,6 +28,13 @@ import savedBeforeRelease from './fixtures/relevanceCheckpointBeforeRulesV2.json
 import { veMedicalScopeNote } from '@/lib/verticalEngineV2/relevanceMedical';
 import { veHasStaffingOnlyRefusal } from '@/lib/verticalEngineV2/staffingCorrection';
 import { deriveVeRetailAudienceScope, veRetailSourceProfileForScope } from '@/lib/verticalEngineV2/legacyRetailAudience';
+import { mapTwoGisRow, type VeTwoGisCardRow } from '@/lib/verticalEngineV2/twoGisRows';
+import { admitVeTwoGisMailboxes, veTwoGisMailboxVerdict } from '@/lib/verticalEngineV2/twoGisMailbox';
+import { VE_TWO_GIS_IP_SITE_REASON, VE_TWO_GIS_SITE_UNCONFIRMED_REASON, VE_TWO_GIS_SOURCE_DETAIL, veTwoGisOwnerInnVerdict } from '@/lib/verticalEngineV2/twoGisMarker';
+import { fetchVeRelevanceEvidence, type VeRelevanceEvidenceOptions } from '@/lib/verticalEngineV2/relevanceEvidence';
+import type { VeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
+import { VeOperationTimeoutError } from '@/lib/verticalEngineV2/operationDeadline';
+import type { SerperOrganicItem } from '@/lib/search/serperClient';
 
 const FOOD = { verticalName: 'Пищевые заводы',
   verticalSummary: 'Производители пищевой и кормовой продукции с рецептурами, партиями, сроками годности, ветсертификацией и поставками в сети; решение обычно у операционного директора, директора по производству или ИТ-директора. Покупают продукт клиента, чтобы управлять рецептурами, прослеживаемостью, сменами, складами сырья и выпуском.' };
@@ -1413,5 +1420,404 @@ describe('VE2 relevance selection rules', () => {
     expect(canResumePartialPreview({ ...unknown, collect_info: { ...unknown.collect_info,
       saved_email_recovery: { version: 1, attempt_id: 'automatic:base',
         checked: { [relevanceHash(row.email)]: 'unknown' } } } })).toBe(false);
+  });
+
+  it('checks a 2GIS row only on its own site: cut name, brand and city, no search, final reject, published mailboxes', async () => {
+    // Карточка 2ГИС → строка: имя до запятой, хост в punycode без www, «город, регион», пустые телефон, почта, рубрика.
+    const card: VeTwoGisCardRow = { card_id: '70000001234567', registrable_domain: 'xn----7sbcgj2aeiugiyg5l.xn--p1ai',
+      host: 'WWW.Колбасный-Двор.РФ', site_scheme: 'https', region_code: '16', name: 'Колбасный двор, мясокомбинат', city_name: 'Казань' };
+    const KOLBASA = 'xn----7sbcgj2aeiugiyg5l.xn--p1ai';
+    expect(mapTwoGisRow(card, 7)).toEqual({ company: 'Колбасный двор', website: KOLBASA, email: '', phone: '', vacancy_title: '',
+      address: 'Казань, Республика Татарстан', category: '', employees: '', revenue: '', inn: '',
+      source_detail: VE_TWO_GIS_SOURCE_DETAIL, _ve_two_gis: { card_id: '70000001234567', snapshot_id: 7 } });
+    expect(mapTwoGisRow({ ...card, name: '«Двор, и Ко», цех', host: 'dvor.tilda.ws', site_scheme: 'http', region_code: '77', city_name: 'Москва' }, 7))
+      .toMatchObject({ company: '«Двор, и Ко»', website: 'http://dvor.tilda.ws', address: 'Москва' });
+
+    // Чтение только своего сайта на офлайн-страницах; поиск и кэш поиска — шпионы.
+    const page = (url: string, title: string, text: string, ownerInns: string[] = []): VeEvidencePage => ({ url, title, text, links: [], inns: ownerInns, ownerInns });
+    const SITE = {
+      kolbasa: 'Мясокомбинат «Колбасный двор» выпускает варёные и копчёные колбасы, сосиски и деликатесы на собственном производстве. Казань, ул. Заводская, 1.',
+      ferma: 'Колбасы и мясные полуфабрикаты собственного производства. Казань, рынок «Северный».',
+      lavka: 'Колбасная лавка: домашние колбасы собственного копчения. Казань, ул. Баумана, 3.',
+      zavod: 'Колбасный завод выпускает варёные колбасы и сосиски для магазинов. Казань, Промышленная ул., 7.',
+    };
+    const pages: Record<string, VeEvidencePage> = {
+      [`https://${KOLBASA}/`]: page(`https://${KOLBASA}/`, 'Колбасный двор — колбасы и деликатесы', SITE.kolbasa),
+      'https://ferma-11.test/': page('https://ferma-11.test/', 'Фермерские продукты', SITE.ferma),
+      'https://lavka-14.test/': page('https://lavka-14.test/', 'Колбасная лавка — колбасы на заказ', SITE.lavka),
+      // Реквизиты без текста деятельности: ИНН владельца есть только здесь.
+      'https://lavka-14.test/contacts': page('https://lavka-14.test/contacts', 'Контакты', '', ['165012345678']),
+      'https://kolbasa-zavod.test/': page('https://kolbasa-zavod.test/', 'Колбасный завод — продукция', SITE.zavod, ['1650123456']),
+      // Курьер-ИП на /contacts, своё ООО — на /privacy: два владельца.
+      'https://courier-dvor.test/': { ...page('https://courier-dvor.test/', 'Колбасный двор — колбасы и деликатесы', SITE.kolbasa),
+        links: [{ url: 'https://courier-dvor.test/contacts', text: 'Контакты' }, { url: 'https://courier-dvor.test/privacy', text: 'Политика конфиденциальности' }] },
+      'https://courier-dvor.test/contacts': page('https://courier-dvor.test/contacts', 'Контакты', 'Доставку выполняет курьерская служба ИП Петров П.П.', ['165500000012']),
+      'https://courier-dvor.test/privacy': page('https://courier-dvor.test/privacy', 'Политика конфиденциальности', 'Оператор персональных данных — ООО «Колбасный двор».', ['1650123456']),
+      // Бренд на главной, города нет, а реквизиты молчат.
+      'https://quiet-dvor.test/': page('https://quiet-dvor.test/', 'Колбасный двор — колбасы', 'Мясокомбинат «Колбасный двор» выпускает колбасы и сосиски.'),
+      'https://down-dvor.test/': page('https://down-dvor.test/', 'Колбасный двор — колбасы и деликатесы', SITE.kolbasa),
+      'https://down-zavod.test/': page('https://down-zavod.test/', 'Колбасный завод — продукция', SITE.zavod),
+      // Строка с ИНН (реестр + 2ГИС): /contacts без ИНН ведёт на /rekvizity со своим ИНН, процессор данных — на /privacy.
+      'https://inn-dvor.test/': { ...page('https://inn-dvor.test/', 'Колбасный двор — колбасы и деликатесы', SITE.kolbasa),
+        links: [{ url: 'https://inn-dvor.test/contacts', text: 'Контакты' }, { url: 'https://inn-dvor.test/privacy', text: 'Политика конфиденциальности' }] },
+      'https://inn-dvor.test/contacts': { ...page('https://inn-dvor.test/contacts', 'Контакты', 'Казань, ул. Заводская, 1.'),
+        links: [{ url: 'https://inn-dvor.test/rekvizity', text: 'Реквизиты' }] },
+      'https://inn-dvor.test/rekvizity': page('https://inn-dvor.test/rekvizity', 'Реквизиты', 'ООО «Колбасный двор», Казань.', ['1650123450']),
+      'https://inn-dvor.test/privacy': page('https://inn-dvor.test/privacy', 'Политика конфиденциальности', 'Сайт использует Яндекс.Метрику (ООО «ЯНДЕКС»).', ['7736207543']),
+      // С ИНН, ссылка только на /privacy: там своё ООО и процессор (Яндекс) на одной странице.
+      'https://privacy-dvor.test/': { ...page('https://privacy-dvor.test/', 'Колбасный двор — колбасы и деликатесы', SITE.kolbasa),
+        links: [{ url: 'https://privacy-dvor.test/privacy', text: 'Политика конфиденциальности' }] },
+      'https://privacy-dvor.test/privacy': page('https://privacy-dvor.test/privacy', 'Политика конфиденциальности',
+        'Оператор — ООО «Колбасный двор». Сайт использует Яндекс.Метрику (ООО «ЯНДЕКС»).', ['1650123450', '7736207543']),
+      // С ИНН, бренда на главной нет: свои реквизиты на /rekvizity подтверждают сайт, процессор на /privacy — за стопом.
+      'https://nobrand-dvor.test/': { ...page('https://nobrand-dvor.test/', 'Мясная продукция', SITE.ferma),
+        links: [{ url: 'https://nobrand-dvor.test/rekvizity', text: 'Реквизиты' }, { url: 'https://nobrand-dvor.test/privacy', text: 'Политика конфиденциальности' }] },
+      'https://nobrand-dvor.test/rekvizity': page('https://nobrand-dvor.test/rekvizity', 'Реквизиты', 'ООО «Колбасный двор», Казань.', ['1650123450']),
+      'https://nobrand-dvor.test/privacy': page('https://nobrand-dvor.test/privacy', 'Политика конфиденциальности', 'Сайт использует Яндекс.Метрику (ООО «ЯНДЕКС»).', ['7736207543']),
+      // С ИНН: /contacts без ИНН, на /privacy — только процессор.
+      'https://processor-dvor.test/': { ...page('https://processor-dvor.test/', 'Колбасный двор — колбасы и деликатесы', SITE.kolbasa),
+        links: [{ url: 'https://processor-dvor.test/contacts', text: 'Контакты' }, { url: 'https://processor-dvor.test/privacy', text: 'Политика конфиденциальности' }] },
+      'https://processor-dvor.test/contacts': page('https://processor-dvor.test/contacts', 'Контакты', 'Казань, ул. Заводская, 1.'),
+      'https://processor-dvor.test/privacy': page('https://processor-dvor.test/privacy', 'Политика конфиденциальности', 'Сайт использует Яндекс.Метрику (ООО «ЯНДЕКС»).', ['7736207543']),
+      // Чужой бренд; главная молчит на первой попытке и отвечает на повторе.
+      'https://retry-ferma.test/': page('https://retry-ferma.test/', 'Шиномонтаж Колесо', 'Шиномонтаж и ремонт дисков. Москва, ул. Ленина, 1.'),
+    };
+    const reads: string[] = [];
+    let downNow = false;
+    let retryHits = 0;
+    const fetchPage = async (url: string) => {
+      reads.push(url);
+      if (url === 'https://retry-ferma.test/' && retryHits++ === 0) throw new VeOperationTimeoutError('relevance evidence page', 5_000);
+      if (url.startsWith('https://slow-ferma.test/') || url === 'https://quiet-dvor.test/contacts') throw new VeOperationTimeoutError('relevance evidence page', 5_000);
+      if (downNow && /^https:\/\/down-(?:dvor|zavod)\.test\//.test(url)) throw new Error('website_http_503');
+      return pages[url] ?? page(url, '', '');
+    };
+    const search = jest.fn(async (_query: string, _signal: AbortSignal): Promise<SerperOrganicItem[]> => []);
+    const searchCache = jest.fn(async (_query: string, _signal?: AbortSignal): Promise<SerperOrganicItem[] | null> => null);
+    const read = (website: string, opts: VeRelevanceEvidenceOptions = {}) => fetchVeRelevanceEvidence(website, { ...opts, fetchPage, search, searchCache });
+    const kazan = { companyAddress: 'Казань, Республика Татарстан', allowPaidSearch: true, sourceSiteOnly: true };
+    expect(await read(KOLBASA, { ...kazan, companyName: 'Колбасный двор' })).toMatchObject({ status: 'ok', owner_inns: [] });
+    for (const opts of [{ companyName: 'Колбасный двор, мясокомбинат' }, { companyName: 'Колбасный двор', companyAddress: 'Тула, Тульская область' },
+      // An INN, even one of the reviewed payment directory (PayMaster), adds no other site.
+      { companyName: 'Колбасный двор, мясокомбинат', companyInn: '7723887394' }]) {
+      expect(await read(KOLBASA, { ...kazan, ...opts })).toMatchObject({ status: 'unavailable', text: '' });
+    }
+    // No other host: no e-mail domain, no search by name, address or INN.
+    expect(await read('', { ...kazan, companyName: 'Колбасный двор', companyInn: '7723887394', companyEmail: 'info@kolbasa-mail.test' }))
+      .toMatchObject({ status: 'unavailable', reason: 'missing_or_unsafe_website' });
+    expect([...new Set(reads.map((url) => new URL(url).hostname))]).toEqual([KOLBASA]);
+    expect(search).not.toHaveBeenCalled();
+    expect(searchCache).not.toHaveBeenCalled();
+    // Without the option the same site and names behave as before: no brand needed, the INN buys a search, no owner_inns.
+    const legacy = await read(KOLBASA, { companyName: 'Колбасный двор, мясокомбинат', companyAddress: 'Казань, Республика Татарстан', allowPaidSearch: true });
+    expect(legacy).toMatchObject({ status: 'ok' });
+    expect(legacy).not.toHaveProperty('owner_inns');
+    await read(KOLBASA, { companyName: 'Колбасный двор, мясокомбинат', companyAddress: 'Казань, Республика Татарстан', companyInn: '1650000001', allowPaidSearch: true });
+    expect(search).toHaveBeenCalledTimes(1);
+    search.mockClear(); reads.length = 0;
+    // Бренд совпал, но владельца ищем во всех трёх попытках: курьер-ИП на /contacts и своё ООО на /privacy — два
+    // владельца, вердикта нет (D4), а не «сайт ИП».
+    const courier = await read('courier-dvor.test', { ...kazan, companyName: 'Колбасный двор' });
+    expect(courier).toMatchObject({ status: 'ok' });
+    expect(reads).toContain('https://courier-dvor.test/privacy');
+    expect([...(courier.owner_inns ?? [])].sort()).toEqual(['1650123456', '165500000012']);
+    expect(veTwoGisOwnerInnVerdict(courier.owner_inns, false)).toEqual({ kind: 'none' });
+    // Личность не подтверждена, а реквизиты не ответили: таймаут (бесплатный повтор), а не окончательное «не подтвердил».
+    expect(await read('quiet-dvor.test', { ...kazan, companyName: 'Колбасный двор' }))
+      .toMatchObject({ status: 'unavailable', reason: 'website_evidence_timeout', timeout: 'page' });
+    // Таймаут, после которого повтор ответил: сайт ответил, чужой бренд — окончательный ответ, а не таймаут.
+    expect(await read('retry-ferma.test', { ...kazan, companyName: 'Северная ферма' }))
+      .toMatchObject({ status: 'unavailable', reason: 'website_identity_unverified' });
+    expect(reads.filter((url) => url === 'https://retry-ferma.test/')).toHaveLength(2);
+    // С ИНН — как до 3в: стоп на совпадении бренда, страницы реквизитов и политики не читаются, процессор или
+    // второе лицо на них не дают конфликта (владельца гейт берёт из ИНН строки). Без бренда — стоп на первом владельце.
+    for (const [host, reason, legal] of [['inn-dvor.test', 'brand_verified_website', []], ['privacy-dvor.test', 'brand_verified_website', []],
+      ['processor-dvor.test', 'brand_verified_website', []], ['nobrand-dvor.test', 'identity_verified_website', ['https://nobrand-dvor.test/rekvizity']]] as const) {
+      const innRead = await read(host, { ...kazan, companyName: 'Колбасный двор', companyInn: '1650123450' });
+      expect([host, innRead.status, innRead.reason]).toEqual([host, 'ok', reason]);
+      expect([host, reads.filter((url) => url.startsWith(`https://${host}/`) && /\/(?:rekvizity|privacy)$/.test(url))]).toEqual([host, legal]);
+    }
+    expect(search).not.toHaveBeenCalled();
+    expect(searchCache).not.toHaveBeenCalled();
+    reads.length = 0;
+
+    // The gate: four 2GIS rows (the constructor gave them descriptions) and two registry controls.
+    const gis = (over: Partial<VeTwoGisCardRow>, extra: Record<string, unknown>) => ({ ...mapTwoGisRow({ ...card, ...over }, 7), ...extra });
+    const gridRow = (row: Record<string, unknown>): Record<string, unknown> => {
+      const imported: Record<string, unknown> = { ...row, source_detail: 'реестр\n' + VE_TWO_GIS_SOURCE_DETAIL };
+      delete imported._ve_two_gis;
+      return imported;
+    };
+    const rows: Array<Record<string, unknown>> = [
+      gis({}, { email: `info@${KOLBASA}`, description: 'Колбасы и деликатесы оптом от производителя.' }),
+      gis({ card_id: '2', host: 'ferma-11.test', name: 'Северная ферма, магазин' }, { email: 'zakaz@ferma-11.test', description: QUOTES.smokehouse }),
+      gis({ card_id: '3', host: 'lavka-14.test', name: 'Колбасная лавка, ИП Петров' }, { email: 'lavka@mail.ru', description: QUOTES.leader }),
+      // After the constructor grid only the source_detail line may survive (twoGisQuarantine.ts contract): still a 2GIS row.
+      gridRow(gis({ card_id: '4', host: 'kolbasa-zavod.test', name: 'Колбасный завод, производство' }, { email: 'info@kolbasa-zavod.test', description: QUOTES.site })),
+      { company: 'Паюта', inn: '6143000009', email: 'info@payuta.test' },
+      { company: 'Элита Юга', inn: '6143000001', email: 'info@elita.test', description: QUOTES.meat },
+    ];
+    // A 2GIS observation of a control is evidence only: it does not make the control a 2GIS entry.
+    // Another spelling of a 2GIS company (registry evidence) must not join the brand phrase.
+    const evidenceRows = [{ company: 'Паюта', inn: '6143000009', source_detail: VE_TWO_GIS_SOURCE_DETAIL, address: 'Казань' },
+      { company: 'ООО «Колбасный двор»', website: KOLBASA }];
+    const fetchEvidence = jest.fn(read);
+    const input = { ...HYPOTHESES.meat, language: 'ru' as const, rows, evidenceRows, fetchEvidence, allowPaidSearch: true };
+    const calls = provider(() => 'direct_match', { status: 'relevant', ids: [1] });
+    const first = await findIrrelevantRows(input);
+    expect(rows.map((_, i) => first.decisions.get(i)?.status)).toEqual(['relevant', 'irrelevant', 'irrelevant', 'relevant', 'needs_review', 'relevant']);
+    expect([first.decisions.get(1)?.reason, first.decisions.get(2)?.reason]).toEqual([VE_TWO_GIS_SITE_UNCONFIRMED_REASON, VE_TWO_GIS_IP_SITE_REASON]);
+    for (const i of [1, 2]) expect(first.decisions.get(i)).toMatchObject({ evidence: [], source_site_final: true, website_review_version: 4 });
+    for (const i of [0, 3, 4, 5]) expect(first.decisions.get(i)).not.toHaveProperty('source_site_final');
+    expect(first.decisions.get(0)?.evidence).toEqual([{ field: 'website_text', quote: expect.stringContaining('Колбасный двор') }]);
+    // Site first: no initial classification or triage of a 2GIS row, even with a description.
+    const classified = calls.requests.filter((request) => request.kind === 'classify');
+    expect(classified.map((request) => request.system.includes('Independent second look'))).toEqual([false, true]);
+    expect(classified[0].user).toContain('Элита Юга');
+    for (const row of rows.slice(0, 4)) expect(classified[0].user).not.toContain(row.description as string);
+    for (const row of rows.slice(1, 3)) expect(calls.requests.some((request) => request.user.includes(row.description as string))).toBe(false);
+    // The control may search; a 2GIS row never does, and never gets the paid-search flag.
+    expect(search.mock.calls.map(([query]) => query)).toEqual([expect.stringContaining('"6143000009"')]);
+    expect(searchCache).not.toHaveBeenCalled();
+    const optsOf = (website: string) => fetchEvidence.mock.calls.find(([site]) => site === website)![1]!;
+    for (const row of rows.slice(0, 4)) expect(optsOf(row.website as string)).toMatchObject({ sourceSiteOnly: true, allowPaidSearch: false });
+    expect(Object.keys(optsOf('')).sort()).toEqual(['allowPaidSearch', 'companyAddress', 'companyEmail', 'companyInn', 'companyName', 'focus', 'signal']);
+    expect([...new Set(reads.map((url) => new URL(url).hostname))].sort()).toEqual([KOLBASA, 'ferma-11.test', 'lavka-14.test', 'kolbasa-zavod.test', 'payuta.test'].sort()); // the control's e-mail domain is today's free candidate
+    // Owner INN: a sole 10-digit owner goes to BC for the exclusion check, a 12-digit owner was rejected above.
+    expect([...(first.ownerInns ?? new Map()).entries()]).toEqual([[3, '1650123456']]);
+    // Control keys and saved evidence are exactly what they were before the change.
+    const controlKey = relevanceHash(['6143000009', veRelevanceSourceFields([rows[4]])]);
+    expect(first.checkpoint.verdicts[controlKey]).toMatchObject({ status: 'needs_review' });
+    expect(first.checkpoint.website_evidence[controlKey]).not.toHaveProperty('owner_inns');
+    provider(() => 'direct_match');
+    const alone = await findIrrelevantRows({ ...input, rows: rows.slice(4) });
+    expect(alone.ownerInns).toBeUndefined();
+    for (const key of Object.keys(alone.checkpoint.verdicts)) {
+      expect(alone.checkpoint.verdicts[key]).toEqual(first.checkpoint.verdicts[key]);
+      expect(alone.checkpoint.website_evidence[key]).toEqual(first.checkpoint.website_evidence[key]);
+    }
+    // The final rejects land in the 10% rejection sample: without source_site_final the resume would
+    // stage a semantic review of empty evidence and quarantine them back into needs_review.
+    const sampled = (key: string) => parseInt(relevanceHash(['rejection-review-sample-v1', key]).slice(0, 8), 16) / 0xffffffff < 0.1;
+    const finalKeys = Object.keys(first.checkpoint.verdicts).filter((key) => first.checkpoint.verdicts[key].source_site_final);
+    expect(finalKeys).toHaveLength(2);
+    expect(finalKeys.map(sampled)).toEqual([true, true]);
+    expect(veRelevanceDecisionSchema.parse(first.decisions.get(1)).source_site_final).toBe(true);
+
+    // Resume (jsonb round trip) and a manual reserve review buy nothing for 2GIS rows.
+    const saved = JSON.parse(JSON.stringify(first.checkpoint)) as VeRelevanceCheckpoint;
+    const GIS_HOSTS = rows.slice(0, 4).map((row) => row.website as string);
+    const reserve = rows.map((row, i) => ({ ...row, _email_status: 'ok', _ve_relevance: first.decisions.get(i) }));
+    for (const reviewAttempt of [undefined, 'manual:2gis-test']) {
+      const replay = provider(() => 'direct_match');
+      reads.length = 0; search.mockClear();
+      const again = await findIrrelevantRows({ ...input, rows: reserve, checkpoint: structuredClone(saved), reviewAttempt });
+      expect([reviewAttempt, rows.map((_, i) => again.decisions.get(i)?.status)])
+        .toEqual([reviewAttempt, ['relevant', 'irrelevant', 'irrelevant', 'relevant', 'needs_review', 'relevant']]);
+      expect([reviewAttempt, replay]).toMatchObject([reviewAttempt, { classify: 0, rubric: 0, jev: 0, deepseek: 0, confirm: 0 }]);
+      expect([reviewAttempt, reads.filter((url) => GIS_HOSTS.includes(new URL(url).hostname))]).toEqual([reviewAttempt, []]);
+      expect(again.checkpoint.semantic_reviews).toEqual(saved.semantic_reviews);
+      expect([...(again.ownerInns ?? new Map()).entries()]).toEqual([[3, '1650123456']]);
+      // Only the control repeats its search, and only on the new manual attempt.
+      expect([reviewAttempt, search.mock.calls.length]).toEqual([reviewAttempt, reviewAttempt ? 1 : 0]);
+    }
+    for (const automatic of [true, false]) {
+      const batch = buildVeRelevanceReviewBatch({ reserve, ready: [], source: [], automatic, allowPaidSearch: false });
+      expect([automatic, batch.rows.map((row) => row.company)]).toEqual([automatic, automatic ? [] : ['Паюта']]);
+    }
+    // Одно плохое значение новых полей не обнуляет чекпойнт: поле снимается, платные вердикты остаются.
+    const bad = structuredClone(saved);
+    const ownerKey = Object.keys(bad.website_evidence).find((key) => bad.website_evidence[key].owner_inns)!;
+    Object.assign(bad.website_evidence[ownerKey], { owner_inns: ['12345'], site_verified: 'yes' });
+    const [finalKey] = finalKeys;
+    Object.assign(bad.verdicts[finalKey], { source_site_final: 'yes', source_site_verified: 'yes' });
+    const back = readRelevanceCheckpoint(bad, bad.context_hash);
+    expect(Object.keys(back.verdicts)).toEqual(Object.keys(saved.verdicts));
+    expect([back.website_evidence[ownerKey].owner_inns, back.website_evidence[ownerKey].site_verified]).toEqual([undefined, undefined]);
+    expect([back.verdicts[finalKey].source_site_final, back.verdicts[finalKey].source_site_verified]).toEqual([undefined, undefined]);
+    // An unmarked row carrying the 2GIS flags (row verdict and checkpoint verdict, no finished review): the independent
+    // re-check still runs, as at HEAD, and the recorded decision carries neither flag.
+    const flaggedKey = keyOf(saved, QUOTES.meat);
+    const flagged = structuredClone(saved);
+    Object.assign(flagged.verdicts[flaggedKey], { source_site_final: true, source_site_verified: true });
+    flagged.website_evidence[flaggedKey] = { ...Object.values(saved.website_evidence)[0], owner_inns: ['1650123456'], site_verified: true };
+    // The finished review is detached (no ref) and carries the flags too: it stays stored, and its proposal loses them.
+    const staleReview = flagged.semantic_reviews[flagged.semantic_review_refs[flaggedKey]];
+    Object.assign(staleReview.proposal, { source_site_final: true, source_site_verified: true });
+    delete flagged.semantic_review_refs[flaggedKey];
+    const flaggedCalls = provider(() => 'direct_match');
+    const rechecked = await findIrrelevantRows({ ...input, checkpoint: flagged,
+      rows: [{ ...rows[5], _ve_relevance: { ...first.decisions.get(5)!, source_site_final: true, source_site_verified: true } }] });
+    expect([rechecked.decisions.get(0)?.status, flaggedCalls.deepseek > 0]).toEqual(['relevant', true]);
+    for (const decision of [rechecked.decisions.get(0)!, rechecked.checkpoint.verdicts[flaggedKey]]) {
+      expect(['source_site_final' in decision, 'source_site_verified' in decision]).toEqual([false, false]);
+    }
+    expect(['owner_inns' in rechecked.checkpoint.website_evidence[flaggedKey], 'site_verified' in rechecked.checkpoint.website_evidence[flaggedKey]])
+      .toEqual([false, false]);
+    const flaggedProposals = Object.values(rechecked.checkpoint.semantic_reviews).filter((review) => review.company_key === flaggedKey)
+      .map((review) => ['source_site_final' in review.proposal, 'source_site_verified' in review.proposal]);
+    expect(flaggedProposals.length).toBeGreaterThan(0);
+    expect(flaggedProposals.flat()).not.toContain(true);
+    // The same flags on the row's saved activity-guard verdict (no checkpoint): the guard keeps it in review, without them.
+    const guardCalls = provider(() => 'direct_match');
+    const guarded = await findIrrelevantRows({ ...input, rows: [{ ...rows[5], _ve_relevance: { ...first.decisions.get(5)!, status: 'needs_review',
+      activity_evidence_guard: 'payment_point_category', source_site_final: true, source_site_verified: true } }] });
+    expect(guarded.decisions.get(0)).toMatchObject({ status: 'needs_review', activity_evidence_guard: 'payment_point_category' });
+    expect(['source_site_final' in guarded.decisions.get(0)!, 'source_site_verified' in guarded.decisions.get(0)!, guardCalls.classify])
+      .toEqual([false, false, 0]);
+
+    // A verdict saved under the pre-site-first key (admitted from the description) is neither reused nor re-reviewed.
+    const legacyKey = relevanceHash(['', veRelevanceSourceFields([rows[1]])]);
+    const legacySaved = { ...structuredClone(saved), verdicts: { [legacyKey]: { ...first.decisions.get(5)!,
+      evidence: [{ field: 'description', quote: rows[1].description as string }] } }, website_evidence: {}, semantic_reviews: {}, semantic_review_refs: {} };
+    const legacyCalls = provider(() => 'direct_match');
+    const relabelled = await findIrrelevantRows({ ...input, rows: [rows[1]], checkpoint: legacySaved });
+    expect(relabelled.decisions.get(0)).toMatchObject({ status: 'irrelevant', source_site_final: true });
+    expect(legacyCalls).toMatchObject({ classify: 0, deepseek: 0, confirm: 0 });
+    // A site that timed out is not a final answer: the company waits for its bounded re-read.
+    const slow = gis({ card_id: '5', host: 'slow-ferma.test', name: 'Медленная ферма' }, { email: 'info@slow-ferma.test' });
+    const slowCalls = provider(() => 'direct_match');
+    const waiting = await findIrrelevantRows({ ...input, rows: [slow] });
+    expect(waiting.decisions.get(0)).toMatchObject({ status: 'needs_review' });
+    expect(waiting.decisions.get(0)).not.toHaveProperty('source_site_final');
+    expect(Object.values(waiting.checkpoint.website_evidence)).toEqual([expect.objectContaining({ reason: 'website_evidence_timeout', read_error_attempts: 1 })]);
+    expect(slowCalls).toMatchObject({ classify: 0, deepseek: 0, confirm: 0 });
+    // D3: later timeouts are never final either; the exhausted retry costs nothing; manual review re-reads for free.
+    let cp = waiting.checkpoint;
+    for (const [reviewAttempt, slowReads] of [[undefined, 2], [undefined, 0], ['manual:2gis-timeout', 2]] as const) {
+      reads.length = 0; search.mockClear(); searchCache.mockClear();
+      const passCalls = provider(() => 'direct_match');
+      const pass = await findIrrelevantRows({ ...input, rows: [slow], checkpoint: cp, reviewAttempt });
+      expect([reviewAttempt, pass.decisions.get(0)?.status, pass.decisions.get(0)?.source_site_final]).toEqual([reviewAttempt, 'needs_review', undefined]);
+      expect([reviewAttempt, reads.filter((url) => new URL(url).hostname === 'slow-ferma.test').length]).toEqual([reviewAttempt, slowReads]);
+      expect(search).not.toHaveBeenCalled(); expect(searchCache).not.toHaveBeenCalled();
+      expect(passCalls).toMatchObject({ classify: 0, deepseek: 0, confirm: 0, jev: 0 });
+      cp = pass.checkpoint;
+    }
+    // A site that once confirmed the company is never a final reject on a failed re-read (manual review): free needs_review.
+    // Рядом обычная строка (не 2ГИС) с тем же сбоем: у неё след подтверждения не пишется — запись как раньше.
+    const down = gis({ card_id: '6', host: 'down-dvor.test' }, { email: 'info@down-dvor.test' });
+    const downControl = { company: 'Колбасный завод', website: 'down-zavod.test', email: 'info@down-zavod.test', address: 'Казань, Республика Татарстан' };
+    provider(() => 'direct_match', { status: 'needs_review', ids: [0] });
+    const verifiedOnce = await findIrrelevantRows({ ...input, rows: [down, downControl] });
+    expect(verifiedOnce.decisions.get(0)).toMatchObject({ status: 'needs_review' });
+    const evidenceByHost = (checkpoint: VeRelevanceCheckpoint) => Object.fromEntries(Object.values(checkpoint.website_evidence)
+      .map((evidence) => [new URL(evidence.url).hostname, [evidence.status, evidence.site_verified]]));
+    expect(evidenceByHost(verifiedOnce.checkpoint)).toEqual({ 'down-dvor.test': ['ok', undefined], 'down-zavod.test': ['ok', undefined] });
+    // Any number of failed re-reads: the verified trace (site_verified) is carried forward; the second re-read runs
+    // without the row decision, so the checkpoint trace alone holds.
+    downNow = true;
+    let downCheckpoint = verifiedOnce.checkpoint;
+    let downDecision = verifiedOnce.decisions.get(0);
+    let controlDecision = verifiedOnce.decisions.get(1);
+    for (const reviewAttempt of ['manual:2gis-down', 'manual:2gis-down-2']) {
+      provider(() => 'direct_match', { status: 'needs_review', ids: [0] });
+      const reread = await findIrrelevantRows({ ...input, rows: [reviewAttempt === 'manual:2gis-down' ? { ...down, _ve_relevance: downDecision } : down,
+        { ...downControl, _ve_relevance: controlDecision }],
+        checkpoint: JSON.parse(JSON.stringify(downCheckpoint)), reviewAttempt });
+      expect([reviewAttempt, reread.decisions.get(0)?.status, reread.decisions.get(0)?.source_site_final]).toEqual([reviewAttempt, 'needs_review', undefined]);
+      expect([reviewAttempt, evidenceByHost(reread.checkpoint)]).toEqual([reviewAttempt,
+        { 'down-dvor.test': ['unavailable', true], 'down-zavod.test': ['unavailable', undefined] }]);
+      downCheckpoint = reread.checkpoint;
+      downDecision = reread.decisions.get(0);
+      controlDecision = reread.decisions.get(1);
+    }
+    // The trace is on the row decision too: a changed vertical summary resets the checkpoint, the 503 is still not final.
+    // An unmarked row never gets the field.
+    expect([downDecision?.source_site_verified, controlDecision && 'source_site_verified' in controlDecision]).toEqual([true, false]);
+    provider(() => 'direct_match', { status: 'needs_review', ids: [0] });
+    const changedContext = await findIrrelevantRows({ ...input, verticalSummary: 'изменено', rows: [{ ...down, _ve_relevance: downDecision }],
+      checkpoint: JSON.parse(JSON.stringify(downCheckpoint)) });
+    expect(changedContext.decisions.get(0)).toMatchObject({ status: 'needs_review', source_site_verified: true });
+    expect(changedContext.decisions.get(0)).not.toHaveProperty('source_site_final');
+    expect(Object.values(changedContext.checkpoint.website_evidence)).toEqual([expect.objectContaining({ status: 'unavailable', site_verified: true })]);
+    downNow = false;
+    // With triage on, a 2GIS row is not shown to the fast check before its site either.
+    // Saved site-first uncertainty (no website slot in that pass) is not sent to the triage backlog either.
+    const unreadCalls = provider(() => 'direct_match');
+    const unread = await findIrrelevantRows({ ...input, rows: [rows[1], rows[2]], websiteLimit: 0 });
+    expect([0, 1].map((i) => unread.decisions.get(i)?.status)).toEqual(['needs_review', 'needs_review']);
+    expect(unreadCalls).toMatchObject({ classify: 0, jev: 0 });
+    // A fresh run with triage on: unread 2GIS rows never reach the initial fast check either.
+    const freshCalls = provider(() => 'direct_match');
+    const fresh = await findIrrelevantRows({ ...input, rows: [rows[1], rows[2]], websiteLimit: 0, triage: true });
+    expect([0, 1].map((i) => fresh.decisions.get(i)?.status)).toEqual(['needs_review', 'needs_review']);
+    expect(freshCalls).toMatchObject({ classify: 0, rubric: 0, jev: 0 });
+    const triaged = provider(() => 'direct_match', { status: 'relevant', ids: [1] });
+    await findIrrelevantRows({ ...input, rows: [rows[1], rows[2], rows[5]], triage: true, checkpoint: unread.checkpoint });
+    expect(triaged.jev).toBeGreaterThan(0);
+    for (const row of [rows[1], rows[2]]) {
+      expect(JSON.stringify(triaged.jevStates)).not.toContain(row.company as string);
+      expect(triaged.requests.some((request) => request.user.includes(row.description as string))).toBe(false);
+    }
+    // ИП allowed by the plan: the same 12-digit owner goes to the normal website classification.
+    provider(() => 'direct_match', { status: 'relevant', ids: [1] });
+    const ipAllowed = await findIrrelevantRows({ ...input, rows: [rows[2]], twoGisAllowIp: true });
+    expect(ipAllowed.decisions.get(0)).toMatchObject({ status: 'relevant' });
+    expect(ipAllowed.decisions.get(0)).not.toHaveProperty('source_site_final');
+    // An allowed ИП owner still goes to BC for the exclusion check.
+    expect([...(ipAllowed.ownerInns ?? new Map()).entries()]).toEqual([[0, '165012345678']]);
+    // A group led by another source's deep URL still reads the 2GIS card's own site (brand and city from the card too).
+    const deepFirst = await findIrrelevantRows({ ...input, rows: [{ company: 'Колбасный двор', website: `https://${KOLBASA}/catalog`,
+      email: `sales@${KOLBASA}`, description: 'Каталог колбас.' }, rows[0]] });
+    expect(fetchEvidence.mock.calls.at(-1)?.[0]).toBe(KOLBASA);
+    expect(deepFirst.decisions.get(1)?.status).not.toBe('error');
+    // INN-bearing merged 2GIS rows: a processor or second entity on /privacy is no conflict and no final reject;
+    // the owner sent to BC is the row's own INN.
+    for (const [cardId, host] of [['7', 'inn-dvor.test'], ['8', 'privacy-dvor.test'], ['9', 'processor-dvor.test']]) {
+      const innRow = gis({ card_id: cardId, host }, { email: `info@${host}`, inn: '1650123450', source_detail: 'реестр\n' + VE_TWO_GIS_SOURCE_DETAIL });
+      provider(() => 'direct_match', { status: 'relevant', ids: [0] });
+      const innGate = await findIrrelevantRows({ ...input, rows: [innRow] });
+      expect([host, innGate.decisions.get(0)?.status, innGate.decisions.get(0)?.source_site_final, innGate.decisions.get(0)?.source_site_verified])
+        .toEqual([host, 'relevant', undefined, true]);
+      expect([host, [...(innGate.ownerInns ?? new Map()).entries()]]).toEqual([host, [[0, '1650123450']]]);
+    }
+    // The same site under an ИП row INN: the row's owner is an ИП — final reject unless the plan allows ИП.
+    provider(() => 'direct_match', { status: 'relevant', ids: [0] });
+    const ipRow = gis({ card_id: '10', host: 'inn-dvor.test' }, { email: 'info@inn-dvor.test', inn: '165012345678', source_detail: 'реестр\n' + VE_TWO_GIS_SOURCE_DETAIL });
+    expect((await findIrrelevantRows({ ...input, rows: [ipRow] })).decisions.get(0))
+      .toMatchObject({ status: 'irrelevant', reason: VE_TWO_GIS_IP_SITE_REASON, source_site_final: true });
+    // Every mailbox row of one company carries its owner INN to BC.
+    provider(() => 'direct_match', { status: 'relevant', ids: [1] });
+    const twoBoxes = await findIrrelevantRows({ ...input, rows: [rows[3], { ...rows[3], email: 'zakaz@mail.ru' }] });
+    expect([0, 1].map((i) => twoBoxes.decisions.get(i)?.status)).toEqual(['relevant', 'relevant']);
+    expect([...(twoBoxes.ownerInns ?? new Map()).entries()]).toEqual([[0, '1650123456'], [1, '1650123456']]);
+    // The rules recheck of a site-verified 2GIS rejection does not send it to the triage backlog (second guard).
+    const recheckRow = { company: 'Паюта', website: 'https://payuta.test', description: QUOTES.smokehouse, address: 'Казань, Республика Татарстан',
+      source_detail: VE_TWO_GIS_SOURCE_DETAIL, _ve_two_gis: { card_id: '1', snapshot_id: 7 } };
+    const recheckEvidence = jest.fn().mockResolvedValue({ status: 'ok', text: QUOTES.leaderSite, url: 'https://payuta.test/', reason: 'ok', pages: 1 });
+    provider(() => 'insufficient', { status: 'relevant', ids: [1] });
+    const recheckSaved = beforeRelease((await findIrrelevantRows({ ...HYPOTHESES.meat, language: 'ru', rows: [recheckRow], triage: false,
+      fetchEvidence: recheckEvidence })).checkpoint);
+    const recheckCalls = provider(() => 'insufficient');
+    await findIrrelevantRows({ ...HYPOTHESES.meat, language: 'ru', rows: [recheckRow], triage: true, checkpoint: recheckSaved, fetchEvidence: recheckEvidence });
+    expect(recheckCalls.deepseek).toBeGreaterThan(0);
+    expect(recheckCalls.jev).toBe(0);
+    expect(JSON.stringify(recheckCalls.jevStates)).not.toContain('Паюта');
+
+    // Owner INN and mailbox verdicts.
+    expect(veTwoGisOwnerInnVerdict(['165012345678'], false)).toEqual({ kind: 'ip_rejected', inn: '165012345678' });
+    expect(veTwoGisOwnerInnVerdict(['165012345678'], true)).toEqual({ kind: 'ip_allowed', inn: '165012345678' });
+    expect(veTwoGisOwnerInnVerdict(['1650123456', '1650123456'], false)).toEqual({ kind: 'company', inn: '1650123456' });
+    for (const owners of [[], ['1650123456', '165012345678'], ['16501234']]) expect(veTwoGisOwnerInnVerdict(owners, false)).toEqual({ kind: 'none' });
+    const site = 'https://www.kolbasa-zavod.test/';
+    for (const [email, website, verdict] of [
+      ['info@kolbasa-zavod.test', site, 'own'], [' Sales@MSK.Kolbasa-Zavod.test', site, 'own'], [`zakaz@${KOLBASA}`, KOLBASA, 'own'],
+      ['info@dvor.tilda.ws', 'http://dvor.tilda.ws', 'own'], ['info@other.tilda.ws', 'http://dvor.tilda.ws', 'foreign'],
+      ['zakaz@mail.ru', site, 'free'], ['dvor@yandex.kz', site, 'free'], ['dvor@narod.ru', 'dvor.narod.ru', 'free'], ['dvor@tut.by', site, 'free'],
+      ['hello@webstudio.test', site, 'foreign'], ['support@timeweb.ru', site, 'hosting'], ['info@timeweb.ru', 'timeweb.ru', 'hosting'],
+      ['robot@diadoc.ru', site, 'technical'], ['zakaz@колбасный-двор.рф', KOLBASA, 'own'], ['84951234567info@kolbasa-zavod.test', site, 'artifact'], ['%20info@kolbasa-zavod.test', site, 'artifact'],
+      ['info@', site, 'invalid'], ['kolbasa-zavod.test', site, 'invalid'],
+    ] as const) expect([email, veTwoGisMailboxVerdict(email, website)]).toEqual([email, verdict]);
+    // Published addresses only: a subset of the input, never a built one; no box → one row without e-mail.
+    const noBox = mapTwoGisRow({ ...card, card_id: '9', host: 'tihaya-ferma.test', name: 'Тихая ферма' }, 7);
+    const boxes: Array<Record<string, unknown>> = [noBox, { ...rows[3], email: 'info@kolbasa-zavod.test', _email_status: 'ok' }, { ...rows[3], email: 'hello@webstudio.test', _email_status: 'ok' },
+      { ...rows[3], email: 'zakaz@mail.ru', _email_status: 'catch_all' }, { ...rows[1], email: 'support@timeweb.ru', _email_status: 'ok' }];
+    const admitted = admitVeTwoGisMailboxes(boxes);
+    expect(admitted.rows.map((row) => [row.website, row.email])).toEqual([['tihaya-ferma.test', ''],
+      ['kolbasa-zavod.test', 'info@kolbasa-zavod.test'], ['kolbasa-zavod.test', 'zakaz@mail.ru'], ['ferma-11.test', '']]);
+    expect(admitted.rows.every((row) => boxes.some((box) => box.email === row.email))).toBe(true);
+    for (const row of admitted.rows.filter((item) => !item.email)) expect(row).not.toHaveProperty('_email_status');
+    expect(admitted.noMailbox).toEqual(['9', '2']);
   });
 });
