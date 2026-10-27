@@ -34,12 +34,17 @@ export function TopNav() {
 
   return (
     <header className="sticky top-0 z-40 w-full shrink-0 border-b border-zinc-200/80 bg-white/90 backdrop-blur-md">
+      {/* Меню по центру шапки: левая и правая части растут поровну (basis-0),
+          поэтому меню между ними стоит посередине. Не влезает — само меню
+          прокручивается от начала, а не обрезается слева. */}
       <div className="flex items-center gap-4 px-4 h-11">
-        <Link prefetch={false} href={'/' as Route} className="text-sm font-bold text-zinc-900 tracking-tight flex-shrink-0 mr-2">
-          {dict(commonDictionary.portal, locale)}
-        </Link>
+        <div className="flex flex-1 basis-0 items-center">
+          <Link prefetch={false} href={'/' as Route} className="text-sm font-bold text-zinc-900 tracking-tight flex-shrink-0">
+            {dict(commonDictionary.portal, locale)}
+          </Link>
+        </div>
 
-        <nav className="flex-1 flex items-center gap-0.5 overflow-x-auto scrollbar-none pb-1">
+        <nav className="flex min-w-0 items-center gap-0.5 overflow-x-auto scrollbar-none pb-1">
           {visibleEntries.map((entry) => {
             if (isNavGroup(entry)) {
               return (
@@ -85,7 +90,7 @@ export function TopNav() {
           })}
         </nav>
 
-        <div className="flex items-center gap-2 flex-shrink-0">
+        <div className="flex flex-1 basis-0 items-center justify-end gap-2">
           <ThemeToggle />
           <Link
             href={'/notifications' as Route}
