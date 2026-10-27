@@ -23,17 +23,11 @@ import { formatRub } from '@/lib/expenses/client';
 import type { GroupBy } from '@/lib/expenses/period';
 
 /**
- * Доход и расход рядом, под ними — разница.
+ * Доход и расход по периодам — парами столбцов на одной шкале.
  *
- * Обе панели в рублях и на разных шкалах: доход с расходом меряются десятками
- * тысяч, а разница может быть около нуля, и на общей шкале она превратилась бы
- * в прямую линию по оси. Это НЕ вторая ось на одном графике — там нельзя
- * сравнивать высоты между рядами, потому что масштаб выбран произвольно. Здесь
- * панели разделены, у каждой своя подпись, и сравниваются формы, а не высоты.
- *
- * Разница красится теми же двумя цветами, что и столбцы сверху: плюс — цветом
- * дохода, минус — цветом расхода. Значение подхватывается без легенды, потому
- * что цвет уже объяснён строкой выше.
+ * До 27.10.2026 под ними была вторая панель с разницей; её убрали по просьбе
+ * владельца: два графика читались хуже одного, а разницу видно и по паре
+ * столбцов. Точная прибыль или убыток периода — в подсказке при наведении.
  */
 
 export interface ProfitPoint {
@@ -46,13 +40,15 @@ export interface ProfitPoint {
 
 const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
 
-/** Поля панелей — числами и одинаковые у обеих: иначе один и тот же период
- *  встанет на разной вертикали сверху и снизу. Слева заложено под «1,5 млн». */
+/** Слева заложено место под подпись «1,5 млн». */
 const GRID_LEFT = 68;
 const GRID_RIGHT = 16;
 
-/** Ширина столбца верхней панели. Их там два на категорию, поэтому узкие. */
-const BAR_WIDTH = 16;
+/** Ширина столбца. Их два на категорию, поэтому не шире этого. */
+const BAR_WIDTH = 20;
+
+/** Высота графика вместе с легендой и подписями дат. */
+const CHART_HEIGHT = 320;
 
 function splitKey(key: string): [string, string, string] | null {
   const [y, m, d] = key.split('-');
@@ -122,10 +118,7 @@ function buildOption(
     animation: animate,
     animationDuration: 500,
     textStyle: { fontFamily: CHART_FONT },
-    grid: [
-      { left: GRID_LEFT, right: GRID_RIGHT, top: 32, height: 150 },
-      { left: GRID_LEFT, right: GRID_RIGHT, top: 226, height: 110 },
-    ],
+    grid: { left: GRID_LEFT, right: GRID_RIGHT, top: 32, bottom: 28 },
     legend: {
       top: 0,
       left: 0,
@@ -166,53 +159,25 @@ function buildOption(
         );
       },
     },
-    axisPointer: { link: [{ xAxisIndex: 'all' }] },
-    xAxis: [
-      {
-        type: 'category',
-        gridIndex: 0,
-        data: labels,
-        axisLine: { lineStyle: { color: AXIS_LINE } },
-        axisTick: { show: false },
-        axisLabel: { show: false },
-      },
-      {
-        type: 'category',
-        gridIndex: 1,
-        data: labels,
-        axisLine: { lineStyle: { color: AXIS_LINE } },
-        axisTick: { show: false },
-        axisLabel: axis,
-      },
-    ],
-    yAxis: [
-      {
-        type: 'value',
-        gridIndex: 0,
-        splitLine: { lineStyle: { color: GRID_LINE } },
-        axisLabel: { ...axis, formatter: (value: number) => axisAmount(value) },
-      },
-      {
-        type: 'value',
-        gridIndex: 1,
-        // Делений мало намеренно: панель низкая, и на автоматических семи
-        // подписи налезали друг на друга. Точные числа всё равно в подсказке.
-        splitNumber: 3,
-        splitLine: { lineStyle: { color: GRID_LINE } },
-        axisLabel: { ...axis, formatter: (value: number) => axisAmount(value) },
-      },
-    ],
+    xAxis: {
+      type: 'category',
+      data: labels,
+      axisLine: { lineStyle: { color: AXIS_LINE } },
+      axisTick: { show: false },
+      axisLabel: axis,
+    },
+    yAxis: {
+      type: 'value',
+      splitLine: { lineStyle: { color: GRID_LINE } },
+      axisLabel: { ...axis, formatter: (value: number) => axisAmount(value) },
+    },
     series: [
       {
         name: 'Доход',
         type: 'bar',
-        xAxisIndex: 0,
-        yAxisIndex: 0,
         barMaxWidth: BAR_WIDTH,
-        // Пара столбцов стоит вплотную: чем она уже, тем ближе каждый из них к
-        // центру категории — а по этому центру выровнен столбец разницы снизу.
-        // При широком зазоре день, у которого одна из сторон нулевая, выглядел
-        // съехавшим относительно нижней панели и подписи под ней.
+        // Пара столбцов стоит вплотную: так ясно, что они про один период, и
+        // день с одной нулевой стороной не выглядит съехавшим от подписи.
         barGap: '0%',
         barCategoryGap: '45%',
         data: bar(points.map((p) => p.income), incomeColor),
@@ -225,39 +190,12 @@ function buildOption(
       {
         name: 'Расход',
         type: 'bar',
-        xAxisIndex: 0,
-        yAxisIndex: 0,
         barMaxWidth: BAR_WIDTH,
         barGap: '0%',
         barCategoryGap: '45%',
         data: bar(points.map((p) => p.expense), expenseColor),
         color: expenseColor,
         itemStyle: { borderRadius: [4, 4, 0, 0] as [number, number, number, number] },
-      },
-      {
-        name: 'Разница',
-        type: 'bar',
-        xAxisIndex: 1,
-        yAxisIndex: 1,
-        // Вдвое шире столбцов сверху: там их два на категорию, здесь один, и
-        // при равной ширине нижняя панель выглядела бы вдвое реже верхней.
-        barMaxWidth: BAR_WIDTH * 2,
-        barCategoryGap: '45%',
-        // В легенду не выносим: цвета уже объяснены рядами выше, а третий
-        // пункт «Разница» с двумя цветами сразу только запутал бы.
-        data: points.map((point) => {
-          const profit = point.income - point.expense;
-          const color = profit < 0 ? expenseColor : incomeColor;
-          return {
-            value: profit,
-            itemStyle: {
-              color: verticalGradient(color),
-              opacity: point.partial ? 0.45 : 1,
-              // Столбец убытка растёт вниз, поэтому скругляем нижний конец.
-              borderRadius: (profit < 0 ? [0, 0, 4, 4] : [4, 4, 0, 0]) as [number, number, number, number],
-            },
-          };
-        }),
       },
     ],
   };
@@ -279,9 +217,9 @@ export default function ProfitChart({ points, groupBy }: { points: ProfitPoint[]
       {points.length === 0 ? (
         <div className="px-3 py-10 text-center text-sm text-zinc-400">За выбранный период движения нет.</div>
       ) : option ? (
-        <EChart option={option} height={370} ariaLabel="Доход, расход и разница по периодам" />
+        <EChart option={option} height={CHART_HEIGHT} ariaLabel="Доход и расход по периодам" />
       ) : (
-        <div style={{ height: 370 }} />
+        <div style={{ height: CHART_HEIGHT }} />
       )}
     </div>
   );
