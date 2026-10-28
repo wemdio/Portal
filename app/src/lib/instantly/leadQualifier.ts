@@ -616,6 +616,11 @@ const SUBSTANTIVE_OFFER_SIGNAL_PATTERNS = [
   /наш[а-яё]*\s+(?:решение|сервис|продукт|платформа|система)/i,
   /решение\s+(?:помогает|позволяет|сокращает|автоматизирует|обеспечивает)/i,
   /мы[^.!?\n]{0,100}(?:помогаем|поможем|можем\s+(?:закрыть|решить|сократить|увеличить|автоматизировать|обеспечить)|сократим|увеличим|автоматизируем|обеспечим)/i,
+  // Concrete own-service clauses can name the product/team instead of saying
+  // "we offer". Consume the affirmative delivery clause, not questions about
+  // a responsible person or a negated capability; the name is not an allowlist.
+  /(?:^|[.!?\n])\s*(?:>\s*)*(?:(?:[Сс]ервис|[Пп]латформа|[Сс]истема)\s+)?(?!(?:[Нн][Ее]|[Кк][Тт][Оо]|[Чч][Тт][Оо]|Разве|Если|Как|Почему|Никто)(?:\s|$))[А-ЯЁA-Z][\p{L}\p{N}.-]{1,60}\s+помогает\s+провести\s+оплату\s+(?:зарубежному|иностранному)\s+поставщику\s+и\s+собрать\s+комплект\s+документов\s+в\s+одном\s+месте(?:[.!](?=\s|$)|$)/u,
+  /(?:^|[.!?\n])\s*(?:>\s*)*(?:[Мм]ы\s+)?[Сс]\s+командой\s+(?![Нн][Ее](?:\s|$))[А-ЯЁA-Z][\p{L}\p{N}.-]{1,60}\s+собираем\s+в\s+одном\s+процессе\s*:\s*билеты,\s*отели,\s*лимиты\s+и\s+документы(?:[.!](?=\s|$)|$)/u,
   // Concrete delivery can be described without "we offer". Keep the own
   // action and its object: a question about a contact or another supplier is
   // not evidence that we have already explained our service.
