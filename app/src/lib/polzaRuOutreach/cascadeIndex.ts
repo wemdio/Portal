@@ -24,9 +24,11 @@ import { CHAIN_TYPES, type ChainType, type Signal } from './types';
  *
  * Компания — это домен и ИНН: строки с общим доменом или общим ИНН склеиваются
  * в одну (одна компания в нескольких запусках, тот же ИНН при другом домене).
- * В индекс попадают только компании, которым что-то уходило: строка `ready`,
- * которая в «Рассылку» так и не ушла, — не написанная (спека, решение 11), такая
- * компания для раннера новая.
+ * В индекс попадают компании, которым что-то уходило: строка `ready`, которая в
+ * «Рассылку» так и не ушла, — не написанная (спека, решение 11), в `offered` не
+ * считается. Единственное исключение — свежая такая строка (моложе RESERVE_DAYS):
+ * запуск ждёт кнопки заливки, и компания за ним закреплена — `wait`, чтобы
+ * другой запуск не взял её же и заливка не отправила две цепочки.
  */
 
 export interface CascadeCompany {
@@ -79,17 +81,21 @@ export interface RecipientRecord {
 }
 
 export interface MessageRecord {
+  id: string;
   recipient_id: string;
   sent_at: string | null;
+  scheduled_at: string | null;
 }
 
 export interface ConversationRecord {
   recipient_id: string;
   state: string | null;
   close_reason: string | null;
+  handoff_reply_id: string | null;
 }
 
 export interface ReplyRecord {
+  id: string;
   recipient_id: string;
   body: string | null;
   received_at: string | null;
@@ -97,11 +103,11 @@ export interface ReplyRecord {
 }
 
 export interface CascadeRecords {
-  /** Строки `ready` прошлых запусков (любые: ушедшие отбираются здесь). */
+  /** Строки `ready` прошлых запусков (любые: ушедшие и закреплённые отбираются здесь). */
   rows: RowRecord[];
   /** Получатели «Рассылки» только из рассылок `polza_ru`. */
   recipients: RecipientRecord[];
-  /** Ушедшие письма (`status = 'sent'`) этих получателей. */
+  /** Письма этих получателей, которые могли уйти (`sent`, `sending`, `unknown`). */
   messages: MessageRecord[];
   conversations: ConversationRecord[];
   /** Ответы людей (`kind = 'human'`) этих получателей. */
@@ -113,16 +119,25 @@ export interface CascadeRecords {
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Цепочка из четырёх писем идёт около недели. Когда самих писем в базе нет
- * (рассылку удалили после отправки), конец цепочки — заливка + неделя: сразу
- * снова писать нельзя.
+ * Цепочка из четырёх писем идёт до двух недель (на проде от заливки до последнего
+ * письма: медиана 10 дней, 90-й процентиль 13, максимум 19). Когда самих писем в
+ * базе нет (рассылку удалили после отправки), конец цепочки — заливка + 14 дней:
+ * сразу снова писать нельзя.
  */
-const CHAIN_DAYS = 7;
+const CHAIN_DAYS = 14;
+
+/**
+ * Сколько дней строка `ready`, которую ещё не залили в «Рассылку», держит за собой
+ * компанию. Запуск ждёт кнопки заливки; более старые такие строки брошены.
+ */
+const RESERVE_DAYS = 30;
 
 /** «Рассылка» заработала 26.09.2026: строки старше без отметок заливки выгружались в Excel/Instantly. */
 const SENDER_LAUNCH_MS = Date.UTC(2026, 8, 26);
 
 const PAGE = 1000;
+/** Письма, которые могли уйти (тот же набор, что MAYBE_DELIVERED в outreachSender/deletion.ts). */
+const MAYBE_DELIVERED = ['sent', 'sending', 'unknown'];
 /** Запросов к базе одновременно: индекс собирается на старте запуска, базу не душим. */
 const POOL = 4;
 
@@ -155,6 +170,18 @@ function wentOut(row: RowRecord): boolean {
   if (row.sender_uploaded_at || row.sender_campaign_id) return true;
   const created = toDate(row.created_at);
   return created !== null && created.getTime() < SENDER_LAUNCH_MS;
+}
+
+/**
+ * До какого дня строка, не залитая в «Рассылку», держит за собой компанию: свежая
+ * (моложе RESERVE_DAYS) ждёт кнопки заливки; без даты создания или старая — брошена.
+ */
+function reservedUntilOf(row: RowRecord, now: Date): Date | null {
+  if (wentOut(row)) return null;
+  const created = toDate(row.created_at);
+  if (!created) return null;
+  const until = addDays(created, RESERVE_DAYS);
+  return until.getTime() > now.getTime() ? until : null;
 }
 
 /** Какой шаг круга предложила строка: по продукту, у старых строк — по типу цепочки. */
@@ -196,7 +223,10 @@ interface RowFacts {
   row: RowRecord;
   domain: string | null;
   inn: string | null;
-  step: CascadeStep;
+  /** Предложенный шаг; null — строка не ушла, а только закрепляет компанию. */
+  step: CascadeStep | null;
+  /** До какого дня строка закрепляет компанию (не залитая свежая строка). */
+  reservedUntil: Date | null;
   lastSentAt: Date | null;
   chainRunning: boolean;
   lead: boolean;
@@ -219,6 +249,20 @@ function compareRows(a: RowFacts, b: RowFacts): number {
 }
 
 /**
+ * Решение по компании. Закреплённая строка (запуск ждёт заливки) не даёт писать до
+ * `reservedUntil`: «пора» превращается в `wait`, срок ожидания — больший из двух.
+ * Закрытая компания остаётся закрытой. Компания только с закреплёнными строками
+ * (`offered` пуст) ждёт без вызова `cascadeDecision`: ей ничего не предлагали.
+ */
+function decisionFor(facts: CascadeFacts, reservedUntil: Date | null, now: Date, pauseDays: number): CascadeDecision {
+  if (facts.offered.length === 0) return { kind: 'wait', until: reservedUntil ?? now };
+  const decision = cascadeDecision(facts, now, pauseDays);
+  if (!reservedUntil || decision.kind === 'closed') return decision;
+  const until = decision.kind === 'wait' ? maxDate(decision.until, reservedUntil) : reservedUntil;
+  return { kind: 'wait', until: until ?? reservedUntil };
+}
+
+/**
  * Индекс из записей таблиц — чистая функция, без обращений к базе.
  *
  * Лид, отказ, отписка и «напишите позже» берутся из ответов и меток, а не из
@@ -232,7 +276,9 @@ export function assembleCascadeIndex(records: CascadeRecords, now: Date, pauseDa
   }
   const sentAtByRecipient = new Map<string, Date>();
   for (const message of records.messages) {
-    const newest = maxDate(sentAtByRecipient.get(message.recipient_id) ?? null, toDate(message.sent_at));
+    // Письмо в отправке или с неясным исходом: sent_at ещё нет, берём плановое время.
+    const at = toDate(message.sent_at) ?? toDate(message.scheduled_at);
+    const newest = maxDate(sentAtByRecipient.get(message.recipient_id) ?? null, at);
     if (newest) sentAtByRecipient.set(message.recipient_id, newest);
   }
   const conversationByRecipient = new Map<string, ConversationRecord>();
@@ -242,11 +288,30 @@ export function assembleCascadeIndex(records: CascadeRecords, now: Date, pauseDa
 
   const items: RowFacts[] = [];
   for (const row of records.rows) {
-    if (!wentOut(row)) continue;
     const domain = row.normalized_domain || null;
     const inn = row.inn || null;
     // Без домена и ИНН компанию по индексу не найти.
     if (!domain && !inn) continue;
+    if (!wentOut(row)) {
+      // Не ушла: в предложенные не идёт, но свежая строка закрепляет компанию.
+      const reservedUntil = reservedUntilOf(row, now);
+      if (reservedUntil) {
+        items.push({
+          row,
+          domain,
+          inn,
+          step: null,
+          reservedUntil,
+          lastSentAt: null,
+          chainRunning: false,
+          lead: false,
+          closed: false,
+          suppressed: false,
+          laterAt: null,
+        });
+      }
+      continue;
+    }
 
     const recipients = recipientsByRow.get(row.id) ?? [];
     let sentAt: Date | null = null;
@@ -260,11 +325,16 @@ export function assembleCascadeIndex(records: CascadeRecords, now: Date, pauseDa
       if (recipient.status === 'active') chainRunning = true;
       if (recipient.status === 'unsubscribed') suppressed = true;
       if (recipient.email && records.suppressedEmails.has(recipient.email.trim().toLowerCase())) suppressed = true;
-      if (recipient.lead_verdict === 'lead') lead = true;
       if (recipient.lead_verdict === 'not_lead' && recipient.lead_verdict_source === 'manual') closed = true;
 
+      // Лид — передача менеджеру (разговор ИИ дошёл до передачи), ручная метка «лид» или
+      // метка ИИ без разговора (ИИ-квалификатор выключен, лид ушёл сразу менеджерам).
+      // Разговор, который закончился молчанием без передачи, лидом не считается.
       const conversation = conversationByRecipient.get(recipient.id);
-      if (conversation?.state === 'handed_off') lead = true;
+      if (conversation?.state === 'handed_off' || conversation?.handoff_reply_id) lead = true;
+      if (recipient.lead_verdict === 'lead' && (recipient.lead_verdict_source === 'manual' || !conversation)) lead = true;
+      // ИИ ещё ведёт разговор с ответившим: новую цепочку не начинаем.
+      if (conversation?.state === 'active') chainRunning = true;
       if (conversation?.close_reason === 'decline' || conversation?.close_reason === 'counter_offer') closed = true;
       if (conversation?.close_reason === 'stop') suppressed = true;
 
@@ -279,6 +349,7 @@ export function assembleCascadeIndex(records: CascadeRecords, now: Date, pauseDa
       domain,
       inn,
       step: stepOfRow(row),
+      reservedUntil: null,
       lastSentAt: lastSentOfRow(row, sentAt),
       chainRunning,
       lead,
@@ -314,8 +385,13 @@ export function assembleCascadeIndex(records: CascadeRecords, now: Date, pauseDa
   const index: CascadeIndex = { byDomain: new Map(), byInn: new Map(), due: [] };
   for (const group of groups.values()) {
     group.sort(compareRows);
-    const last = group[group.length - 1];
+    // «Последняя» строка — ушедшая; закрепляющие (не ушли) только дополняют.
+    const gone = group.filter((item) => item.step);
+    const holding = group.filter((item) => !item.step);
+    const last = gone.length > 0 ? gone[gone.length - 1] : holding[holding.length - 1];
+    const newestFirst = [...[...gone].reverse(), ...[...holding].reverse()];
     const offered: CascadeStep[] = [];
+    let reservedUntil: Date | null = null;
     const facts: CascadeFacts = {
       offered,
       lastSentAt: null,
@@ -326,7 +402,8 @@ export function assembleCascadeIndex(records: CascadeRecords, now: Date, pauseDa
       laterAt: null,
     };
     for (const item of group) {
-      if (!offered.includes(item.step)) offered.push(item.step);
+      if (item.step && !offered.includes(item.step)) offered.push(item.step);
+      reservedUntil = maxDate(reservedUntil, item.reservedUntil);
       facts.lastSentAt = maxDate(facts.lastSentAt, item.lastSentAt);
       facts.laterAt = maxDate(facts.laterAt, item.laterAt);
       facts.chainRunning ||= item.chainRunning;
@@ -335,7 +412,6 @@ export function assembleCascadeIndex(records: CascadeRecords, now: Date, pauseDa
       facts.suppressed ||= item.suppressed;
     }
     // Свежие значения — у последней строки, недостающее берём у предыдущих.
-    const newestFirst = [...group].reverse();
     const company: CascadeCompany = {
       domain: newestFirst.find((item) => item.domain)?.domain ?? null,
       inn: newestFirst.find((item) => item.inn)?.inn ?? null,
@@ -343,7 +419,7 @@ export function assembleCascadeIndex(records: CascadeRecords, now: Date, pauseDa
       companyName: newestFirst.find((item) => item.row.company_name)?.row.company_name ?? null,
       signals: [],
       facts,
-      decision: cascadeDecision(facts, now, pauseDays),
+      decision: decisionFor(facts, reservedUntil, now, pauseDays),
     };
     for (const item of group) {
       if (item.domain) index.byDomain.set(item.domain, company);
@@ -381,29 +457,47 @@ interface PageResult<T> {
 }
 
 /**
- * Все страницы запроса. Запрос обязан быть упорядочен по уникальному полю:
- * без порядка Postgres отдаёт строки как придётся, и соседние страницы могли бы
- * пропустить или повторить строки.
+ * Все страницы запроса по ключу: следующая страница — строки после последнего
+ * прочитанного ключа (`gt` до порядка и лимита в самом запросе). Со смещением
+ * (offset) строка, добавленная или удалённая между страницами, сдвигала бы соседние,
+ * и пропущенная строка выглядела бы как новая компания. `key` — уникальное поле,
+ * по которому запрос упорядочен; оно должно быть в выбранных столбцах.
  */
-async function pagedAll<T>(what: string, page: (from: number, to: number) => PromiseLike<PageResult<T>>): Promise<T[]> {
+async function pagedAll<T extends object>(
+  what: string,
+  key: keyof T & string,
+  page: (after: string | null) => PromiseLike<PageResult<T>>,
+): Promise<T[]> {
   const out: T[] = [];
-  for (let from = 0; ; from += PAGE) {
-    const { data, error } = await page(from, from + PAGE - 1);
+  let after: string | null = null;
+  for (;;) {
+    const { data, error } = await page(after);
     if (error) throw new Error(`cascade index: ${what}: ${error.message}`);
-    out.push(...(data ?? []));
-    if (!data || data.length < PAGE) break;
+    const batch = data ?? [];
+    out.push(...batch);
+    if (batch.length < PAGE) break;
+    const lastKey: unknown = batch[batch.length - 1][key];
+    if (typeof lastKey !== 'string') throw new Error(`cascade index: ${what}: у строки нет ключа ${key}`);
+    after = lastKey;
   }
   return out;
 }
 
+/** Задачи по POOL штук одновременно; после первой ошибки новые запросы не начинаются. */
 async function runPool<T, R>(items: T[], task: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let next = 0;
+  let failed = false;
   const worker = async () => {
-    while (next < items.length) {
+    while (!failed && next < items.length) {
       const i = next;
       next += 1;
-      results[i] = await task(items[i]);
+      try {
+        results[i] = await task(items[i]);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
     }
   };
   await Promise.all(Array.from({ length: Math.min(POOL, items.length) }, worker));
@@ -411,12 +505,13 @@ async function runPool<T, R>(items: T[], task: (item: T) => Promise<R>): Promise
 }
 
 /** Запрос с `in`-фильтром по пачкам: длинный список в адресе запроса шлюз режет. */
-async function selectByIn<T>(
+async function selectByIn<T extends object>(
   what: string,
+  key: keyof T & string,
   values: string[],
-  query: (chunk: string[], from: number, to: number) => PromiseLike<PageResult<T>>,
+  query: (chunk: string[], after: string | null) => PromiseLike<PageResult<T>>,
 ): Promise<T[]> {
-  const parts = await runPool(chunkForInFilter(values), (chunk) => pagedAll(what, (from, to) => query(chunk, from, to)));
+  const parts = await runPool(chunkForInFilter(values), (chunk) => pagedAll(what, key, (after) => query(chunk, after)));
   return parts.flat();
 }
 
@@ -434,22 +529,23 @@ export async function loadCascadeIndex(
   now: Date,
   pauseDays: number,
 ): Promise<CascadeIndex> {
-  const rows = await pagedAll<RowRecord>('rows', (from, to) =>
-    db
+  const rows = await pagedAll<RowRecord>('rows', 'id', (after) => {
+    const query = db
       .from('polza_ru_outreach_companies')
       .select(ROW_COLUMNS)
       .eq('row_status', 'ready')
-      .neq('job_id', excludeJobId)
-      .order('id', { ascending: true })
-      .range(from, to),
-  );
+      .neq('job_id', excludeJobId);
+    return (after === null ? query : query.gt('id', after)).order('id', { ascending: true }).limit(PAGE);
+  });
+  // Не залитые свежие строки в «Рассылку» не ходили, но решение по ним принимает assembleCascadeIndex.
   const sent = rows.filter(wentOut);
 
   // Получатели — только из рассылок аутрича: у `ve2` group_key значит другое.
   const campaignIds = [...new Set(sent.map((row) => row.sender_campaign_id).filter((id): id is string => Boolean(id)))];
-  const campaigns = await selectByIn<{ id: string; source_kind: string | null }>('campaigns', campaignIds, (chunk, from, to) =>
-    db.from('sender_campaigns').select('id,source_kind').in('id', chunk).order('id', { ascending: true }).range(from, to),
-  );
+  const campaigns = await selectByIn<{ id: string; source_kind: string | null }>('campaigns', 'id', campaignIds, (chunk, after) => {
+    const query = db.from('sender_campaigns').select('id,source_kind').in('id', chunk);
+    return (after === null ? query : query.gt('id', after)).order('id', { ascending: true }).limit(PAGE);
+  });
   const polzaRuCampaigns = new Set(campaigns.filter((c) => c.source_kind === 'polza_ru').map((c) => c.id));
   const rowIdsByCampaign = new Map<string, string[]>();
   for (const row of sent) {
@@ -463,45 +559,41 @@ export async function loadCascadeIndex(
   );
   const recipients = (
     await runPool(recipientTasks, ({ campaignId, chunk }) =>
-      pagedAll<RecipientRecord>('recipients', (from, to) =>
-        db
+      pagedAll<RecipientRecord>('recipients', 'id', (after) => {
+        const query = db
           .from('sender_recipients')
           .select('id,email,status,lead_verdict,lead_verdict_source,group_key')
           .eq('campaign_id', campaignId)
-          .in('group_key', chunk)
-          .order('id', { ascending: true })
-          .range(from, to),
-      ),
+          .in('group_key', chunk);
+        return (after === null ? query : query.gt('id', after)).order('id', { ascending: true }).limit(PAGE);
+      }),
     )
   ).flat();
 
   const recipientIds = recipients.map((recipient) => recipient.id);
-  const messages = await selectByIn<MessageRecord>('messages', recipientIds, (chunk, from, to) =>
-    db
+  const messages = await selectByIn<MessageRecord>('messages', 'id', recipientIds, (chunk, after) => {
+    const query = db
       .from('sender_messages')
-      .select('recipient_id,sent_at')
+      .select('id,recipient_id,sent_at,scheduled_at')
       .in('recipient_id', chunk)
-      .eq('status', 'sent')
-      .order('id', { ascending: true })
-      .range(from, to),
-  );
-  const conversations = await selectByIn<ConversationRecord>('conversations', recipientIds, (chunk, from, to) =>
-    db
+      .in('status', MAYBE_DELIVERED);
+    return (after === null ? query : query.gt('id', after)).order('id', { ascending: true }).limit(PAGE);
+  });
+  const conversations = await selectByIn<ConversationRecord>('conversations', 'recipient_id', recipientIds, (chunk, after) => {
+    const query = db
       .from('sender_ai_conversations')
-      .select('recipient_id,state,close_reason')
-      .in('recipient_id', chunk)
-      .order('recipient_id', { ascending: true })
-      .range(from, to),
-  );
-  const replies = await selectByIn<ReplyRecord>('replies', recipientIds, (chunk, from, to) =>
-    db
+      .select('recipient_id,state,close_reason,handoff_reply_id')
+      .in('recipient_id', chunk);
+    return (after === null ? query : query.gt('recipient_id', after)).order('recipient_id', { ascending: true }).limit(PAGE);
+  });
+  const replies = await selectByIn<ReplyRecord>('replies', 'id', recipientIds, (chunk, after) => {
+    const query = db
       .from('sender_replies')
-      .select('recipient_id,body,received_at,created_at')
+      .select('id,recipient_id,body,received_at,created_at')
       .in('recipient_id', chunk)
-      .eq('kind', 'human')
-      .order('id', { ascending: true })
-      .range(from, to),
-  );
+      .eq('kind', 'human');
+    return (after === null ? query : query.gt('id', after)).order('id', { ascending: true }).limit(PAGE);
+  });
 
   // Общий стоп-лист «Рассылки». Адрес с жёстким отбоем (hard_bounce) закрывает
   // только себя: компанию он не убирает, раннер сам не возьмёт такой адрес и
@@ -510,29 +602,22 @@ export async function loadCascadeIndex(
   const addresses = new Set<string>();
   for (const row of sent) for (const email of rowAddresses(row)) addresses.add(email);
   for (const recipient of recipients) if (recipient.email) addresses.add(recipient.email.trim().toLowerCase());
-  const suppressions = await selectByIn<{ email: string; reason: string | null }>('suppressions', [...addresses], (chunk, from, to) =>
-    db.from('sender_suppressions').select('email,reason').in('email', chunk).order('email', { ascending: true }).range(from, to),
-  );
+  const suppressions = await selectByIn<{ email: string; reason: string | null }>('suppressions', 'email', [...addresses], (chunk, after) => {
+    const query = db.from('sender_suppressions').select('email,reason').in('email', chunk);
+    return (after === null ? query : query.gt('email', after)).order('email', { ascending: true }).limit(PAGE);
+  });
   const suppressedEmails = new Set(
     suppressions.filter((s) => s.reason !== 'hard_bounce').map((s) => String(s.email).trim().toLowerCase()),
   );
 
-  const index = assembleCascadeIndex(
-    { rows: sent, recipients, messages, conversations, replies, suppressedEmails },
-    now,
-    pauseDays,
-  );
+  const index = assembleCascadeIndex({ rows, recipients, messages, conversations, replies, suppressedEmails }, now, pauseDays);
 
   // Сигналы нужны только вернувшимся (решение `due`) — подгружаем у них одних.
   const dueByRow = new Map(index.due.map((company) => [company.lastRowId, company] as const));
-  const signalRows = await selectByIn<{ id: string; signals: unknown }>('signals', [...dueByRow.keys()], (chunk, from, to) =>
-    db
-      .from('polza_ru_outreach_companies')
-      .select('id,signals')
-      .in('id', chunk)
-      .order('id', { ascending: true })
-      .range(from, to),
-  );
+  const signalRows = await selectByIn<{ id: string; signals: unknown }>('signals', 'id', [...dueByRow.keys()], (chunk, after) => {
+    const query = db.from('polza_ru_outreach_companies').select('id,signals').in('id', chunk);
+    return (after === null ? query : query.gt('id', after)).order('id', { ascending: true }).limit(PAGE);
+  });
   for (const signalRow of signalRows) {
     const company = dueByRow.get(String(signalRow.id));
     if (company && Array.isArray(signalRow.signals)) company.signals = signalRow.signals as Signal[];
