@@ -75,6 +75,15 @@ export function nextStep(offered: CascadeStep[]): CascadeStep | null {
   return null;
 }
 
+/**
+ * Вернувшаяся компания: какой шаг круга предложить теперь и что уже предлагали
+ * (по времени). У новой компании этого нет — первый шаг даёт повод.
+ */
+export interface CascadeReturn {
+  next: CascadeStep;
+  offered: CascadeStep[];
+}
+
 /** Признаки выхода за рубеж: на шаге «классика» вместо РФ/СНГ идёт «за рубеж». */
 export function isAbroad(signals: Signal[]): boolean {
   return signals.some((s) => s.type === 'export_launch');

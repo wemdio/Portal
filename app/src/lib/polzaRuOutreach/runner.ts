@@ -3,7 +3,8 @@
  *
  * Поток — дорогое в конце (docs/superpowers/specs/2026-09-26-outreach-to-sender-design.md §2 RU):
  *  1. бесплатно: AMO по ИНН → домен (в т.ч. сайт работодателя hh) → AMO по
- *     домену, повторы в запуске, «уже выгружалась»;
+ *     домену, повторы в запуске, каскад (кому уже писали — следующий продукт
+ *     после паузы, cascadeIndex.ts);
  *  2. почта, тоже бесплатно: поиск на сайте, SMTP-проверка, стоп-лист. Нет
  *     рабочей почты — отсев до ИИ: разбор компании, которой некуда писать, —
  *     выброшенные деньги. Почта не проверена — строка сразу очень спорная,
@@ -79,7 +80,9 @@ import {
   withLettersDoubt,
   type Doubts,
 } from './doubts';
-import { companyBrand, isSuppressed, loadPreviouslyExported, normalizeDomain, siteUrl, type ExportedIndex } from './company';
+import type { CascadeDecision } from './cascade';
+import { loadCascadeIndex, lookupCascade, type CascadeIndex } from './cascadeIndex';
+import { companyBrand, isSuppressed, normalizeDomain, siteUrl } from './company';
 import { findRuCompanyEmail } from './findEmail';
 import { journalCounts } from './funnel';
 import { buildBridge, type BridgeRequest } from './letters/bridge';
@@ -197,6 +200,14 @@ const DRIVER_TICK_MS = 2_000;
 // Шаблон пишется один раз на оффер: компании оффера, дошедшие до писем
 // одновременно, ждут одного писателя.
 const LETTERS_CONCURRENCY = 4;
+/** Пояснение к «Каскад закрыт»: почему компании больше не пишем. */
+const CASCADE_CLOSED_DETAIL: Record<Extract<CascadeDecision, { kind: 'closed' }>['reason'], string> = {
+  lead: 'ответ — лид, им занимается менеджер',
+  declined: 'отказ или «не лид»',
+  suppressed: 'отписка, жалоба или стоп-лист',
+  all_offered: 'предложены все три продукта',
+};
+
 /** Карточек вакансий на компанию: у неё может быть и РОП, и SDR. */
 const MAX_VACANCY_CARDS = 2;
 const MIN_WAVE = 20;
@@ -777,9 +788,11 @@ async function runJob(
     });
     templatesRef = templates;
     const amo: AmoIndex = await loadAmoIndex(db);
-    const exported: ExportedIndex = config.include_previously_exported
-      ? { domains: new Set(), inns: new Set() }
-      : await loadPreviouslyExported(db, jobId);
+    // Кому уже писали: каскад решает, пора ли предложить следующий продукт, ждать
+    // паузу или больше не писать. «Брать уже выгруженные» — без каскада, как раньше.
+    const cascade: CascadeIndex | null = config.include_previously_exported
+      ? null
+      : await loadCascadeIndex(db, jobId, new Date(), config.cascade_pause_days);
     const collected = await collectCandidates(db, config, amo, maxScan, (message) => log('info', `job ${jobId}: ${message}`));
     const { sourceErrors, skippedRecent } = collected;
     const doneSources = new Set(resumedJournal.map((r) => r.source_record_id).filter((v): v is string => Boolean(v)));
@@ -1097,9 +1110,22 @@ async function runJob(
         innOwner.set(c.inn, id);
         tally.inn = c.inn;
       }
-      if (exported.domains.has(domain) || (c.inn && exported.inns.has(c.inn))) {
-        await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'PREVIOUSLY_EXPORTED' });
-        return null;
+      // Компания, которой уже писали (по домену или ИНН): пауза прошла — идёт
+      // дальше со следующим продуктом каскада, иначе ждёт или каскад закрыт.
+      const known = cascade ? lookupCascade(cascade, domain, c.inn) : null;
+      if (known) {
+        const decision = known.decision;
+        if (decision.kind === 'wait') {
+          const until = decision.until.toISOString().slice(0, 10);
+          const detail = known.facts.offered.length ? `пауза до ${until}` : `закреплена за другим запуском до ${until}`;
+          await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'CASCADE_WAIT', detail });
+          return null;
+        }
+        if (decision.kind === 'closed') {
+          await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'CASCADE_CLOSED', detail: CASCADE_CLOSED_DETAIL[decision.reason] });
+          return null;
+        }
+        c.cascade = { next: decision.next, offered: [...known.facts.offered] };
       }
       reach(tally, 'deduplicated');
 

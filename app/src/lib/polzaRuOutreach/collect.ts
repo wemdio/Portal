@@ -7,6 +7,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import type { CascadeReturn } from './cascade';
 import { companyKey, normalizeDomain } from './company';
 import { loadDirectoryCandidates } from './sources/directory';
 import { loadDirectHits } from './sources/direct';
@@ -36,6 +37,11 @@ export interface Candidate {
   employees: number | null;
   /** Почты из загруженной базы: поиск почты проверяет их наравне с сайтом. */
   knownEmails: string[];
+  /**
+   * Компания, которой уже писали и у которой прошла пауза каскада: следующий
+   * продукт и что уже предлагали. Ставит раннер по индексу каскада.
+   */
+  cascade?: CascadeReturn;
 }
 
 function base(partial: Partial<Candidate> & Pick<Candidate, 'key' | 'companyName'> & { source: SourceCode }): Candidate {

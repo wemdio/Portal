@@ -330,9 +330,10 @@ export function assembleCascadeIndex(records: CascadeRecords, now: Date, pauseDa
       // Лид — передача менеджеру (разговор ИИ дошёл до передачи), ручная метка «лид» или
       // метка ИИ без разговора (ИИ-квалификатор выключен) либо с разговором, который упал:
       // при сбое лид уходит менеджерам, как раньше. Разговор, который закончился молчанием
-      // без передачи (`no_reply`), лидом не считается.
+      // без передачи (`no_reply`), лидом не считается. Остановленный разговор (`stopped`:
+      // вмешался менеджер, sender/manualWorker.ts) — тоже лид: компанией занимается человек.
       const conversation = conversationByRecipient.get(recipient.id);
-      if (conversation?.state === 'handed_off' || conversation?.handoff_reply_id) lead = true;
+      if (conversation?.state === 'handed_off' || conversation?.state === 'stopped' || conversation?.handoff_reply_id) lead = true;
       if (
         recipient.lead_verdict === 'lead' &&
         (recipient.lead_verdict_source === 'manual' || !conversation || conversation.state === 'failed')

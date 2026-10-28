@@ -1,5 +1,5 @@
 /**
- * Нормализация компании и общий дедуп трёх офферов.
+ * Нормализация компании и стоп-лист. Кому уже писали — индекс каскада (cascadeIndex.ts).
  *
  * company_brand идёт в тему и текст писем: убираем только юридическую форму и
  * технический мусор, бренд не переводим и не сокращаем по догадке (правила RU §3).
@@ -71,38 +71,6 @@ export function isFreeMailDomain(domain: string): boolean {
 export function normalizeInn(raw: unknown): string | null {
   const digits = String(raw ?? '').replace(/\D/g, '');
   return digits.length === 10 || digits.length === 12 ? digits : null;
-}
-
-export interface ExportedIndex {
-  domains: Set<string>;
-  inns: Set<string>;
-}
-
-/**
- * Компании, уже попадавшие в готовую выгрузку любого оффера. Страницы — в
- * порядке id: без порядка Postgres отдаёт строки как придётся, и соседние
- * страницы могли бы пропустить или повторить строки.
- */
-export async function loadPreviouslyExported(db: SupabaseClient, excludeJobId: string): Promise<ExportedIndex> {
-  const domains = new Set<string>();
-  const inns = new Set<string>();
-  const PAGE = 1000;
-  for (let from = 0; ; from += PAGE) {
-    const { data, error } = await db
-      .from('polza_ru_outreach_companies')
-      .select('normalized_domain,inn')
-      .eq('row_status', 'ready')
-      .neq('job_id', excludeJobId)
-      .order('id', { ascending: true })
-      .range(from, from + PAGE - 1);
-    if (error) throw new Error(`previously exported lookup failed: ${error.message}`);
-    for (const row of data ?? []) {
-      if (row.normalized_domain) domains.add(String(row.normalized_domain));
-      if (row.inn) inns.add(String(row.inn));
-    }
-    if (!data || data.length < PAGE) break;
-  }
-  return { domains, inns };
 }
 
 /**
