@@ -1,13 +1,13 @@
 /**
  * Bot Manager: list of bots connected to the portal.
- * - Container bots: health-check, atmos-bot (controlled via Docker when socket available).
+ * - Container bots: health-check, instantly-sync-bot (controlled via Docker when socket available).
  * - In-app bot: tg-agent (runs inside portal; no start/stop, logs from application_logs).
  */
 
 /** Reserved prefix for potential bot auto-discovery by container name. */
 export const CONTAINER_BOT_PREFIX = 'portal-';
 
-export const BOT_IDS = ['health-check', 'atmos-bot', 'tg-agent'] as const;
+export const BOT_IDS = ['health-check', 'tg-agent'] as const;
 export type BotId = (typeof BOT_IDS)[number];
 
 export type BotKind = 'container' | 'in-app';
@@ -30,13 +30,6 @@ export const BOTS: BotConfig[] = [
     description: 'Проверка доступности портала, БД, прокси, S3; алерты в Telegram',
     kind: 'container',
     containerName: 'portal-health-check',
-  },
-  {
-    id: 'atmos-bot',
-    name: 'Atmos-bot',
-    description: 'Анализ атмосферы чатов Telegram, алерты и отчёты',
-    kind: 'container',
-    containerName: 'portal-atmos-bot',
   },
   {
     id: 'instantly-sync-bot',

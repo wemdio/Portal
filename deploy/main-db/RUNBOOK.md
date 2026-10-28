@@ -264,7 +264,7 @@ grep -nE '^(NEXT_PUBLIC_SUPABASE_URL|NEXT_PUBLIC_SUPABASE_ANON_KEY|SUPABASE_SERV
 
 ```bash
 docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate \
-  portal yandexmaps transcribe-worker telegram-bot-api health-check atmos-bot \
+  portal yandexmaps transcribe-worker telegram-bot-api health-check \
   instantly-sync-bot
 
 docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate \

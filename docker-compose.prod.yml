@@ -1731,38 +1731,6 @@ services:
     networks:
       - portal-network
 
-  atmos-bot:
-    image: ${DOCKER_USERNAME}/portal-atmos-bot:prod
-    container_name: portal-atmos-bot
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    env_file:
-      - .env
-    environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
-      - TELEGRAM_ATMOS_BOT_TOKEN=${TELEGRAM_ATMOS_BOT_TOKEN}
-      - TELEGRAM_ATMOS_TEAM_CHAT_ID=${TELEGRAM_ATMOS_TEAM_CHAT_ID}
-      - ATMOS_ALLOWED_TG_USER_IDS=${ATMOS_ALLOWED_TG_USER_IDS}
-      - OPENROUTER_ATMOS_API_KEY=${OPENROUTER_ATMOS_API_KEY}
-      - ATMOS_WEBHOOK_PORT=${ATMOS_WEBHOOK_PORT:-8090}
-      - ATMOS_WEBHOOK_URL=${ATMOS_WEBHOOK_URL}
-    ports:
-      - "8090:8090"
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.3'
-          pids: 512
-    restart: unless-stopped
-    networks:
-      - portal-network
-
   changelog-bot:
     image: ${DOCKER_USERNAME}/portal-changelog-bot:prod
     container_name: portal-changelog-bot
