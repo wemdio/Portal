@@ -7,7 +7,8 @@ and ENG contact-first email crawl now support this order:
 
 1. Existing HTTP reader.
 2. Own isolated Chromium service, for successful empty/JavaScript-shell HTML.
-3. Optional TinyFish Fetch when that browser attempt is empty or unavailable.
+3. Optional TinyFish Fetch when that browser attempt is empty, the service
+   explicitly reports busy/not-ready, or a confirmed upstream 5xx was observed.
 
 The optional readers are disabled by default. Set `ENG_BROWSER_ENABLED=1`,
 `ENG_BROWSER_URL=http://eng-browser-broker:4100` and a matching
@@ -33,20 +34,25 @@ their existing behavior.
 When the ENG browser feature is enabled, the ENG readers also stop their old
 proxy retry on HTTP 403/429; the contact crawl stops on an initial access wall.
 A foreign-domain redirect is checked against the original requested company
-boundary before either fallback is called. Unknown/lost service replies are
-terminal rather than an excuse to escalate to the external provider.
+boundary before either fallback is called. Unknown/lost service replies,
+timeouts and unfinished browser requests are terminal rather than an excuse
+to escalate to the external provider.
 
 HTTP 403/429, recognizable challenges, unsafe destinations and invalid service
 responses do not progress to another fallback reader. The service has one
 session at a time across workers; excess requests fail immediately, preserving
 the original HTTP result. Service-side limits bound each resource to 1 MiB,
 each session to 20 resources / 5 MiB and 12 seconds by default.
+The runner waits for started requests to finish before returning DOM; unfinished
+requests are a terminal refusal. If context cleanup stalls for two seconds, the
+runner exits so the container can restart instead of remaining busy forever.
 
 ## Optional TinyFish Fetch
 
 TinyFish Fetch is disabled by default. It is attempted only after an HTTPS page
 returned a successful but empty/JS-shell response and a browser attempt either
-returned another empty page or was unavailable. HTTP 403/429, challenges,
+returned another empty page or explicitly reported a safe availability failure
+(busy/not-ready or an observed upstream 5xx). HTTP 403/429, challenges,
 unsafe/ambiguous addresses and login walls must never be reclassified as empty.
 It is not a retry or bypass for a blocked site.
 

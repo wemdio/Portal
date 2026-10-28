@@ -7,7 +7,7 @@ import { fetchFollowingGuarded } from '@/lib/enrich/websiteParser';
 import { BrowserError, DEFAULT_TIMEOUT, MAX_RESOURCES, MAX_TIMEOUT, RESOURCE_BYTES, SESSION_BYTES, readJson, reply, socketJson } from './protocol';
 
 type Page = { url: string; contentType: string; body: string; headers: Record<string, string> };
-type Session = { token: string; controller: AbortController; resources: number; bytes: number; initial: Page | null; initialServed: boolean; refusal: string | null };
+type Session = { token: string; controller: AbortController; resources: number; bytes: number; pending: number; initial: Page | null; initialServed: boolean; refusal: string | null };
 const guard = createUsWebsiteFetchGuard();
 
 function urlAllowed(raw: string): string {
@@ -26,7 +26,7 @@ function errorCode(error: unknown): string {
   return 'unavailable';
 }
 function errorStatus(code: string): number {
-  if (code === 'busy' || code === 'unavailable') return 503;
+  if (code === 'busy' || code === 'unavailable' || code === 'not_ready' || code === 'upstream_unavailable') return 503;
   if (code === 'timeout' || code === 'cancelled') return 504;
   if (code === 'unauthorized') return 401;
   return 422;
@@ -36,7 +36,7 @@ function secureEqual(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-async function fetchPage(session: Session, raw: string): Promise<Page> {
+async function fetchPage(session: Session, raw: string, initial = false): Promise<Page> {
   const url = urlAllowed(raw);
   if (session.resources >= MAX_RESOURCES || session.bytes >= SESSION_BYTES) throw new BrowserError('resource_limit');
   session.resources++;
@@ -49,7 +49,7 @@ async function fetchPage(session: Session, raw: string): Promise<Page> {
     headers: { 'user-agent': 'Mozilla/5.0 (compatible; PortalWebsiteReader/1.0)', accept: 'text/html,application/xhtml+xml,text/css,application/javascript,text/javascript;q=0.9,*/*;q=0.1', 'accept-language': 'en-US,en;q=0.9' },
   } as RequestInit, guard, signal);
   if ([401, 403, 407, 429, 451].includes(res.status)) { await res.body?.cancel().catch(() => {}); throw new BrowserError('blocked'); }
-  if (!res.ok) { await res.body?.cancel().catch(() => {}); throw new BrowserError(res.status >= 500 ? 'unavailable' : 'http_error'); }
+  if (!res.ok) { await res.body?.cancel().catch(() => {}); throw new BrowserError(res.status >= 500 ? (initial ? 'upstream_unavailable' : 'unavailable') : 'http_error'); }
   const contentType = (res.headers.get('content-type') || '').toLowerCase();
   if (!/^(?:text\/html|application\/xhtml\+xml|text\/css|(?:application|text)\/(?:javascript|x-javascript)|application\/json)\b/.test(contentType)) {
     await res.body?.cancel().catch(() => {}); throw new BrowserError('content_type');
@@ -95,15 +95,16 @@ export function createBroker(options: { token: string; runnerSocket: string }) {
       if (sessions.size >= capacity) throw new BrowserError('busy');
       const timeout = typeof body.timeoutMs === 'number' && Number.isFinite(body.timeoutMs) ? Math.max(1, Math.min(MAX_TIMEOUT, Math.floor(body.timeoutMs))) : DEFAULT_TIMEOUT;
       const controller = new AbortController();
-      session = { token: randomBytes(32).toString('hex'), controller, resources: 0, bytes: 0, initial: null, initialServed: false, refusal: null };
+      session = { token: randomBytes(32).toString('hex'), controller, resources: 0, bytes: 0, pending: 0, initial: null, initialServed: false, refusal: null };
       sessions.set(session.token, session);
       timer = setTimeout(() => controller.abort(), timeout);
       res.once('close', () => { if (!res.writableEnded) controller.abort(); });
-      if (!(await ready())) throw new BrowserError('unavailable');
-      session.initial = await fetchPage(session, url);
+      if (!(await ready())) throw new BrowserError('not_ready');
+      session.initial = await fetchPage(session, url, true);
       if (!/^(?:text\/html|application\/xhtml\+xml)\b/.test(session.initial.contentType)) throw new BrowserError('content_type');
       const output = await socketJson(options.runnerSocket, '/render', { session: session.token, url: session.initial.url }, controller.signal);
       if (controller.signal.aborted) throw new BrowserError('cancelled');
+      if (session.pending !== 0) throw new BrowserError('incomplete');
       if (output.url !== session.initial.url || typeof output.html !== 'string' || Buffer.byteLength(output.html) > RESOURCE_BYTES) throw new BrowserError('invalid_result');
       if (isEngHtmlBlocked(output.html)) throw new BrowserError('blocked');
       reply(res, 200, { url: output.url, html: output.html, source: 'browser' });
@@ -126,13 +127,15 @@ export function createBroker(options: { token: string; runnerSocket: string }) {
       const url = urlAllowed(body.url);
       // Initial response is retrieved exactly once by the runner, without another request.
       if (url === session.initial.url && !session.initialServed) { session.initialServed = true; reply(res, 200, session.initial); return; }
-      const page = await fetchPage(session, url);
+      session.pending += 1;
+      let page: Page;
+      try { page = await fetchPage(session, url); } finally { session.pending -= 1; }
       // Do not give a response from a redirected resource a false origin.
       if (page.url !== url) throw new BrowserError('redirect');
       reply(res, 200, page);
     } catch (error) {
       const code = errorCode(error);
-      if (session && ['refused', 'blocked', 'bad_url', 'resource_limit', 'invalid_result', 'redirect', 'content_type', 'http_error'].includes(code)) { session.refusal = code === 'bad_url' ? 'refused' : code; session.controller.abort(); }
+      if (session && !session.controller.signal.aborted) { session.refusal = code === 'bad_url' ? 'refused' : code; session.controller.abort(); }
       reply(res, errorStatus(code), { error: code });
     }
   });

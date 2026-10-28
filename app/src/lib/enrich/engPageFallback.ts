@@ -57,9 +57,9 @@ async function browserRead(url: string, signal: AbortSignal): Promise<BrowserRea
     const body = data as Record<string, unknown>;
     if (!response.ok) {
       if (body.error === 'blocked') return { kind: 'blocked' };
-      // Only transport/capacity failures are eligible for the optional next reader.
-      // Unknown service replies and policy/size/redirect rejections are terminal.
-      return ['busy', 'unavailable', 'timeout', 'cancelled'].includes(String(body.error))
+      // Only confirmed admission failures or an observed upstream 5xx can escalate.
+      // A timeout/transport loss can hide an access refusal still in flight.
+      return ['busy', 'not_ready', 'upstream_unavailable'].includes(String(body.error))
         ? { kind: 'unavailable' } : { kind: 'refused' };
     }
     if (typeof body.url !== 'string' || typeof body.html !== 'string' || Buffer.byteLength(body.html) > MAX_BYTES) return { kind: 'refused' };

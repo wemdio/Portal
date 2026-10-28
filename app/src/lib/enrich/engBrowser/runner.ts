@@ -28,6 +28,7 @@ export async function createRunner(brokerSocket: string) {
     }
     if (req.method !== 'POST' || req.url !== '/render') { reply(res, 404, { error: 'not_found' }); return; }
     let context: BrowserContext | undefined; let acquired = false; let fatal: string | undefined;
+    let pending = 0; let lastChange = Date.now();
     const controller = new AbortController();
     let hardStop: NodeJS.Timeout | undefined;
     controller.signal.addEventListener('abort', () => { hardStop = setTimeout(() => process.exit(1), 2000); hardStop.unref(); }, { once: true });
@@ -47,6 +48,7 @@ export async function createRunner(brokerSocket: string) {
       controller.signal.addEventListener('abort', closeOnAbort, { once: true });
       await context.routeWebSocket(/.*/, ws => ws.close());
       await context.route('**/*', async route => {
+        pending += 1; lastChange = Date.now();
         try {
           const request = route.request();
           if (request.method() !== 'GET' || ['image', 'media', 'font'].includes(request.resourceType())) { await route.abort(); return; }
@@ -63,24 +65,49 @@ export async function createRunner(brokerSocket: string) {
           }
           await route.fulfill({ status: 200, contentType: resource.contentType, headers, body });
         } catch (error) {
-          if (error instanceof BrowserError && ['refused', 'blocked', 'resource_limit', 'invalid_result', 'redirect', 'content_type', 'http_error'].includes(error.code)) fatal = error.code;
+          fatal ??= error instanceof BrowserError ? error.code : 'unavailable';
           await route.abort().catch(() => {});
-        }
+        } finally { pending -= 1; lastChange = Date.now(); }
       });
       const page = await context.newPage();
       const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15_000 });
       if (fatal) throw new BrowserError(fatal);
       if (!response?.ok() || page.url() !== url) throw new BrowserError('unavailable');
-      await page.waitForTimeout(900);
-      if (fatal) throw new BrowserError(fatal);
-      if (controller.signal.aborted || page.url() !== url) throw new BrowserError('cancelled');
-      const html = await page.content();
+      // A fixed sleep can return partial HTML while a slow resource later fails
+      // or populates the DOM. Require a quiet network window, bounded separately
+      // from the caller deadline. Unknown or still-running requests are terminal.
+      const settleDeadline = Date.now() + 8_000;
+      let html: string;
+      for (;;) {
+        if (fatal) throw new BrowserError(fatal);
+        if (controller.signal.aborted || page.url() !== url) throw new BrowserError('cancelled');
+        if (Date.now() >= settleDeadline) throw new BrowserError('incomplete');
+        if (pending === 0 && Date.now() - lastChange >= 1_000) {
+          const stableSince = lastChange;
+          html = await page.content();
+          // A request may start while page.content is in flight.
+          if (fatal) throw new BrowserError(fatal);
+          if (controller.signal.aborted || page.url() !== url) throw new BrowserError('incomplete');
+          if (pending === 0 && lastChange === stableSince) break;
+        }
+        await page.waitForTimeout(50);
+      }
       if (Buffer.byteLength(html) > RESOURCE_BYTES) throw new BrowserError('resource_limit');
       if (isEngHtmlBlocked(html)) throw new BrowserError('blocked');
       reply(res, 200, { url, html });
     } catch (error) {
       reply(res, 503, { error: fatal ?? (error instanceof BrowserError ? error.code : 'unavailable') });
-    } finally { clearTimeout(timer); await context?.close().catch(() => {}); if (hardStop) clearTimeout(hardStop); if (acquired) active = false; }
+    } finally {
+      clearTimeout(timer);
+      if (context) {
+        // Closing a hung Chromium context must not leave the runner permanently busy.
+        const cleanupDeadline = setTimeout(() => process.exit(1), 2000);
+        cleanupDeadline.unref();
+        try { await context.close().catch(() => {}); } finally { clearTimeout(cleanupDeadline); }
+      }
+      if (hardStop) clearTimeout(hardStop);
+      if (acquired) active = false;
+    }
   });
   return { server, close: () => browser.close() };
 }
