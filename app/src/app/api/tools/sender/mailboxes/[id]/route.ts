@@ -15,6 +15,8 @@ interface Body {
   displayName?: string;
   imapHost?: string | null;
   imapPort?: number;
+  /** «Проверять доставку»: ежедневные пробы на контрольные ящики вне рассылок. */
+  seedWatch?: boolean;
 }
 
 /** PATCH — выключить, вернуть в работу, отправить на повторную проверку, поправить лимит или IMAP-хост. */
@@ -57,6 +59,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (typeof body.imapPort === 'number' && body.imapPort > 0 && body.imapPort < 65536) {
       patch.imap_port = Math.floor(body.imapPort);
     }
+    if (typeof body.seedWatch === 'boolean') patch.seed_watch = body.seedWatch;
 
     const { error } = await supabaseAdmin.from('sender_mailboxes').update(patch).eq('id', id);
     if (error) return jsonError(error.message, 500);

@@ -213,6 +213,35 @@ const DEFAULT_CAMPAIGN_FORM = {
   timezone_offset: 3,
 };
 
+// Пояс кампании хранится числом часов от UTC; в списке — города, чтобы не
+// считать в уме. Сдвиг летнего времени не учитывается: пояс фиксированный.
+const TIMEZONE_CITIES: Record<number, string> = {
+  [-10]: 'Гонолулу',
+  [-8]: 'Лос-Анджелес, Ванкувер',
+  [-7]: 'Денвер, Финикс',
+  [-6]: 'Мехико, Чикаго',
+  [-5]: 'Нью-Йорк, Торонто',
+  [-3]: 'Сан-Паулу, Буэнос-Айрес',
+  0: 'Лондон, Лиссабон',
+  1: 'Берлин, Париж, Варшава',
+  2: 'Киев, Рига, Калининград',
+  3: 'Москва, Минск, Стамбул',
+  4: 'Дубай, Баку, Самара',
+  5: 'Ташкент, Екатеринбург',
+  6: 'Алматы, Омск',
+  7: 'Новосибирск, Бангкок',
+  8: 'Иркутск, Сингапур, Пекин',
+  9: 'Якутск, Токио, Сеул',
+  10: 'Владивосток, Сидней',
+  11: 'Магадан',
+  12: 'Камчатка, Окленд',
+};
+const TIMEZONE_OFFSETS = Array.from({ length: 27 }, (_, i) => i - 12);
+const timezoneLabel = (offset: number) => {
+  const utc = `UTC${offset < 0 ? '−' : '+'}${Math.abs(offset)}`;
+  return TIMEZONE_CITIES[offset] ? `${utc} — ${TIMEZONE_CITIES[offset]}` : utc;
+};
+
 // ---- Helpers ----------------------------------------------------------------
 
 async function api<T = unknown>(path: string, opts?: RequestInit & { json?: unknown }): Promise<T> {
@@ -1321,7 +1350,9 @@ export default function LiOutreachPage() {
                 <div className="flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">1</span><h3 className="text-sm font-semibold text-gray-900">Название кампании *</h3></div>
                   <input type="text" placeholder="Моя кампания" value={cf.name} onChange={(e) => setCf({ ...cf, name: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
               </section>
-              <section className="space-y-2 rounded-xl border border-gray-200 bg-white p-4">
+              {/* relative z-30: карточки со стеклом — каждая свой слой, и без этого
+                  раскрытый список аккаунтов уходил под карточку «Рассылаемая база». */}
+              <section className="relative z-30 space-y-2 rounded-xl border border-gray-200 bg-white p-4">
                 <div className="flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">2</span><h3 className="text-sm font-semibold text-gray-900">Аккаунты * <span className="font-normal text-gray-400">({cf.account_ids.length})</span></h3></div>
                   <details className="group relative">
                     <summary className="flex w-full cursor-pointer list-none items-center justify-between gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm">
@@ -1398,15 +1429,16 @@ export default function LiOutreachPage() {
                   />
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <label className="text-xs text-gray-600" title="Часовой пояс кампании в часах от UTC. Например, 3 для MSK.">Часовой пояс (UTC)</label>
-                  <input
-                    type="number"
-                    min={-12}
-                    max={14}
-                    value={cf.timezone_offset}
-                    onChange={(e) => setCf({ ...cf, timezone_offset: Number(e.target.value) || 0 })}
-                    className="w-20 rounded border border-gray-200 px-2 py-1 text-xs"
-                  />
+                  <label className="text-xs text-gray-600" title="Рабочие часы считаются по этому поясу">Часовой пояс</label>
+                  <select
+                    value={cf.timezone_offset ?? 3}
+                    onChange={(e) => setCf({ ...cf, timezone_offset: Number(e.target.value) })}
+                    className="w-64 rounded border border-gray-200 px-2 py-1 text-xs"
+                  >
+                    {TIMEZONE_OFFSETS.map((offset) => (
+                      <option key={offset} value={offset}>{timezoneLabel(offset)}</option>
+                    ))}
+                  </select>
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <label className="text-xs text-gray-600">Пауза между людьми, сек</label>

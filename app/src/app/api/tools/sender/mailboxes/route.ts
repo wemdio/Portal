@@ -12,7 +12,7 @@ import { withToolTrace } from '@/lib/toolTrace';
 export const dynamic = 'force-dynamic';
 
 const LIST_COLS =
-  'id, provider, auth_type, enabled, google_state, google_account, email, display_name, username, smtp_host, smtp_port, smtp_tls_mode, imap_host, imap_port, status, daily_campaign_limit, daily_total_limit, last_verified_at, last_error, last_send_at, failed_at, next_recheck_at, imap_checked_at, directory_synced_at, created_at, tag_id, egress_ip, sender_mailbox_tags(id, name)';
+  'id, provider, auth_type, enabled, google_state, google_account, email, display_name, username, smtp_host, smtp_port, smtp_tls_mode, imap_host, imap_port, status, daily_campaign_limit, daily_total_limit, last_verified_at, last_error, last_send_at, failed_at, next_recheck_at, imap_checked_at, directory_synced_at, created_at, tag_id, egress_ip, seed_watch, sender_mailbox_tags(id, name)';
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
@@ -191,6 +191,25 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // Последняя контрольная проба по каждому сервису за неделю: строка ящика
+    // показывает, куда легло письмо — во «Входящие» или в спам.
+    const seedByMailbox = new Map<string, Record<string, { status: string; day: string }>>();
+    if (pageIds.length) {
+      const weekAgo = new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10);
+      const { data: seedRows } = await supabaseAdmin
+        .from('sender_seed_probes')
+        .select('mailbox_id, provider, status, day')
+        .in('mailbox_id', pageIds)
+        .gte('day', weekAgo)
+        .order('day', { ascending: false })
+        .limit(pageIds.length * 30);
+      for (const row of (seedRows ?? []) as { mailbox_id: string; provider: string; status: string; day: string }[]) {
+        const acc = seedByMailbox.get(row.mailbox_id) ?? {};
+        if (!acc[row.provider]) acc[row.provider] = { status: row.status, day: row.day };
+        seedByMailbox.set(row.mailbox_id, acc);
+      }
+    }
+
     // Здоровье ящиков страницы: отправлено / отбои / ошибки за 14 дней. Сбой
     // расчёта не роняет список — просто без оценки.
     const healthByMailbox = new Map<string, { sent: number; bounced: number; failed: number }>();
@@ -240,6 +259,7 @@ export async function GET(req: NextRequest) {
           ...mailbox,
           sent_today: sentToday.get(id) ?? { total: 0, first: 0 },
           probe: probeByMailbox.get(id) ?? null,
+          seed: seedByMailbox.get(id) ?? null,
           health: counts
             ? mailboxHealth({ ...counts, status: String((mailbox as { status?: string }).status ?? '') })
             : null,

@@ -13,6 +13,7 @@ import {
   moveMailboxes,
   patchMailbox,
   startMailboxProbe,
+  startSeedCheck,
   syncMailboxNames,
   type BulkMailboxAction,
   type EgressIpDto,
@@ -214,6 +215,24 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
       setError(err instanceof Error ? err.message : 'Не удалось запустить проверку');
     } finally {
       setProbeBusy(null);
+    }
+  };
+
+  // «Проверить доставку сейчас»: пробы на контрольные ящики уходят с ближайшим
+  // тактом sender-воркера, куда легли — видно в строке ящика минут через 5–10.
+  const [seedBusy, setSeedBusy] = useState<string | null>(null);
+  const runSeedCheck = async (mailbox: MailboxDto) => {
+    setSeedBusy(mailbox.id);
+    setError(null);
+    setNotice(null);
+    try {
+      await startSeedCheck(mailbox.id);
+      setNotice(`Пробные письма с ${mailbox.email} уходят на контрольные ящики — результат появится в строке ящика минут через 5–10.`);
+      await load(page);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось запустить проверку доставки');
+    } finally {
+      setSeedBusy(null);
     }
   };
 
@@ -655,6 +674,10 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                         {mailbox.status === 'failed' && mailbox.enabled ? (
                           <div className="mt-0.5 text-xs text-zinc-500">{recheckNote(mailbox.next_recheck_at)}</div>
                         ) : null}
+                        {mailbox.seed_watch ? (
+                          <div className="mt-0.5 text-xs text-zinc-500">Доставка проверяется каждый день</div>
+                        ) : null}
+                        <SeedLine seed={mailbox.seed ?? null} />
                         <SenderNameField
                           value={mailbox.display_name ?? ''}
                           onSave={(next) => act(mailbox.id, { displayName: next })}
@@ -790,6 +813,15 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                               disabled: probeBusy === mailbox.id,
                               onClick: () => void runProbe(mailbox),
                             },
+                            {
+                              label: seedBusy === mailbox.id ? 'Проверка доставки…' : 'Проверить доставку сейчас',
+                              title: 'Пробные письма на контрольные ящики Gmail и Яндекса: во «Входящих» или в спаме',
+                              disabled: seedBusy === mailbox.id || mailbox.status !== 'verified',
+                              onClick: () => void runSeedCheck(mailbox),
+                            },
+                            mailbox.seed_watch
+                              ? { label: 'Не проверять доставку', title: 'Снять ежедневные пробы на контрольные ящики', onClick: () => void act(mailbox.id, { seedWatch: false }) }
+                              : { label: 'Проверять доставку', title: 'Каждый день пробное письмо на контрольные ящики Gmail и Яндекса — без участия в рассылках', onClick: () => void act(mailbox.id, { seedWatch: true }) },
                             mailbox.enabled
                               ? { label: 'Не использовать', title: 'Снять ящик с рассылки', onClick: () => void act(mailbox.id, { action: 'disable' }) }
                               : { label: 'Использовать', title: 'Вернуть ящик в рассылку', onClick: () => void act(mailbox.id, { action: 'enable' }) },
@@ -905,6 +937,38 @@ function recheckNote(nextRecheckAt: string | null | undefined): string {
   if (at.getTime() <= Date.now()) return 'Перепроверка — в ближайшую минуту';
   const time = at.toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' });
   return `Перепроверится сам ${time} (МСК)`;
+}
+
+const SEED_PROVIDER_LABEL: Record<string, string> = { gmail: 'Gmail', yandex: 'Яндекс', mailru: 'Mail.ru' };
+const SEED_STATUS: Record<string, { text: string; tone: string }> = {
+  inbox: { text: 'входящие', tone: 'text-emerald-600' },
+  spam: { text: 'спам', tone: 'text-red-600' },
+  missing: { text: 'не дошло', tone: 'text-red-600' },
+  planned: { text: 'проверяется…', tone: 'text-zinc-500' },
+  sent: { text: 'проверяется…', tone: 'text-zinc-500' },
+  send_failed: { text: 'не отправилось', tone: 'text-amber-600' },
+  check_failed: { text: 'не проверилось', tone: 'text-amber-600' },
+};
+
+/** Куда легла последняя контрольная проба по каждому сервису. */
+function SeedLine({ seed }: { seed: Record<string, { status: string; day: string }> | null }) {
+  const providers = ['gmail', 'yandex', 'mailru'].filter((p) => seed?.[p]);
+  if (!seed || !providers.length) return null;
+  return (
+    <div className="mt-0.5 text-xs text-zinc-500">
+      Доставка:{' '}
+      {providers.map((p, i) => {
+        const probe = seed[p];
+        const status = SEED_STATUS[probe.status] ?? { text: probe.status, tone: 'text-zinc-500' };
+        return (
+          <span key={p} title={`Проба за ${probe.day}`}>
+            {i ? ' · ' : ''}
+            {SEED_PROVIDER_LABEL[p] ?? p} — <span className={status.tone}>{status.text}</span>
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 function HealthBadge({ health }: { health: { score: number | null; sent: number; bounced: number; failed: number } | null }) {
