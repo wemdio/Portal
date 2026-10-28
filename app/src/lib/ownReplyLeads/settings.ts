@@ -20,6 +20,7 @@ export interface OwnReplySettings {
   enabledAt: string | null;
   cursorAt: string | null;
   cursorId: string | null;
+  criteria: OwnLeadCriteria;
 }
 
 interface SettingsRow {
@@ -27,9 +28,16 @@ interface SettingsRow {
   enabled_at: string | null;
   inbox_cursor_at: string | null;
   inbox_cursor_id: string | null;
+  lead_criteria_ru: string | null;
+  lead_criteria_en: string | null;
 }
 
-const COLUMNS = 'enabled, enabled_at, inbox_cursor_at, inbox_cursor_id';
+const COLUMNS = 'enabled, enabled_at, inbox_cursor_at, inbox_cursor_id, lead_criteria_ru, lead_criteria_en';
+
+function cleanCriteria(value: string | null | undefined): string | null {
+  const text = value?.trim() ?? '';
+  return text ? text.slice(0, LEAD_CRITERIA_MAX) : null;
+}
 
 export async function loadOwnReplySettings(db: Pick<SupabaseClient, 'from'>): Promise<OwnReplySettings> {
   const { data, error } = await db.from('own_reply_lead_settings').select(COLUMNS).eq('id', 1).maybeSingle();
@@ -40,6 +48,7 @@ export async function loadOwnReplySettings(db: Pick<SupabaseClient, 'from'>): Pr
     enabledAt: row?.enabled_at ?? null,
     cursorAt: row?.inbox_cursor_at ?? null,
     cursorId: row?.inbox_cursor_id ?? null,
+    criteria: { ru: cleanCriteria(row?.lead_criteria_ru), en: cleanCriteria(row?.lead_criteria_en) },
   };
 }
 
@@ -52,9 +61,10 @@ export async function saveInboxCursor(db: Pick<SupabaseClient, 'from'>, at: stri
 }
 
 /**
- * «Что считать лидом» для наших кампаний — правило автоаутрича того же языка
- * (решение пользователя 27.10.2026): «N. Polza_…» — папки auto_ru, «ENagency …» —
- * auto_en. Правится в одном месте, на вкладке «Квалификация» автоаутрича.
+ * «Что считать лидом» для наших кампаний — своё на язык: «N. Polza_…» — RU,
+ * «ENagency …» — EN (own_reply_lead_settings.lead_criteria_ru/en). Решение
+ * пользователя 28.10.2026: отдельно от правил автоаутрича («Рассылка»), которые
+ * лежат в sender_folders. Пусто — общие правила квалификатора.
  */
 export interface OwnLeadCriteria {
   ru: string | null;
@@ -62,14 +72,7 @@ export interface OwnLeadCriteria {
 }
 
 export async function loadOwnLeadCriteria(db: Pick<SupabaseClient, 'from'>): Promise<OwnLeadCriteria> {
-  const { data, error } = await db.from('sender_folders').select('key, lead_criteria').in('key', ['auto_ru', 'auto_en']);
-  if (error) throw new Error(`sender_folders: ${error.message}`);
-  const out: OwnLeadCriteria = { ru: null, en: null };
-  for (const row of (data ?? []) as Array<{ key: string; lead_criteria: string | null }>) {
-    const text = row.lead_criteria?.trim() ?? '';
-    out[row.key === 'auto_en' ? 'en' : 'ru'] = text ? text.slice(0, LEAD_CRITERIA_MAX) : null;
-  }
-  return out;
+  return (await loadOwnReplySettings(db)).criteria;
 }
 
 export function criteriaForCampaign(criteria: OwnLeadCriteria, campaignName: string | null | undefined): string | null {
@@ -79,19 +82,35 @@ export function criteriaForCampaign(criteria: OwnLeadCriteria, campaignName: str
 export interface OwnReplySettingsDto {
   enabled: boolean;
   enabledAt: string | null;
+  criteriaRu: string;
+  criteriaEn: string;
 }
 
 export function ownReplySettingsDto(s: OwnReplySettings): OwnReplySettingsDto {
-  return { enabled: s.enabled, enabledAt: s.enabledAt };
+  return { enabled: s.enabled, enabledAt: s.enabledAt, criteriaRu: s.criteria.ru ?? '', criteriaEn: s.criteria.en ?? '' };
+}
+
+export interface OwnReplySettingsInput {
+  enabled: boolean;
+  /** undefined — не менять; '' — очистить (общие правила квалификатора). */
+  criteriaRu?: string;
+  criteriaEn?: string;
 }
 
 export function parseOwnReplySettingsInput(body: unknown):
-  | { ok: true; value: { enabled: boolean } }
+  | { ok: true; value: OwnReplySettingsInput }
   | { ok: false; error: string } {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: 'Невалидный JSON' };
-  const { enabled } = body as Record<string, unknown>;
+  const { enabled, criteriaRu, criteriaEn } = body as Record<string, unknown>;
   if (typeof enabled !== 'boolean') return { ok: false, error: 'enabled — да/нет' };
-  return { ok: true, value: { enabled } };
+  const value: OwnReplySettingsInput = { enabled };
+  for (const [key, raw] of [['criteriaRu', criteriaRu], ['criteriaEn', criteriaEn]] as const) {
+    if (raw === undefined) continue;
+    if (typeof raw !== 'string') return { ok: false, error: 'Что считать лидом — текст' };
+    if (raw.trim().length > LEAD_CRITERIA_MAX) return { ok: false, error: `Что считать лидом — не длиннее ${LEAD_CRITERIA_MAX} символов` };
+    value[key] = raw.trim();
+  }
+  return { ok: true, value };
 }
 
 /**
@@ -100,7 +119,7 @@ export function parseOwnReplySettingsInput(body: unknown):
  */
 export function ownReplySettingsPatch(
   prev: OwnReplySettings,
-  input: { enabled: boolean },
+  input: OwnReplySettingsInput,
   nowIso: string,
   userId: string | null,
 ): Record<string, unknown> {
@@ -109,6 +128,8 @@ export function ownReplySettingsPatch(
     updated_at: nowIso,
     updated_by: userId,
   };
+  if (input.criteriaRu !== undefined) patch.lead_criteria_ru = input.criteriaRu || null;
+  if (input.criteriaEn !== undefined) patch.lead_criteria_en = input.criteriaEn || null;
   if (input.enabled && !prev.enabled) {
     patch.enabled_at = nowIso;
     patch.inbox_cursor_at = nowIso;

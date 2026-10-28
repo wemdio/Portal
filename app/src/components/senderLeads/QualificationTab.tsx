@@ -124,6 +124,10 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
 
   const [ownLoaded, setOwnLoaded] = useState<OwnReplySettingsDto | null>(null);
   const [ownEnabled, setOwnEnabled] = useState(false);
+  // Правило наших кампаний Instantly того же языка, что и папка: auto_en → ENagency, иначе N. Polza.
+  const ownIsEn = folderKey === 'auto_en';
+  const ownCampaignLabel = ownIsEn ? 'ENagency' : 'N. Polza';
+  const [ownCriteria, setOwnCriteria] = useState('');
 
   const apply = (settings: LeadSettingsDto) => {
     setLoaded(settings);
@@ -134,9 +138,10 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
     setAiOfferText(settings.aiOfferText);
   };
 
-  const applyOwn = (settings: OwnReplySettingsDto) => {
+  const applyOwn = (settings: OwnReplySettingsDto, isEn: boolean) => {
     setOwnLoaded(settings);
     setOwnEnabled(settings.enabled);
+    setOwnCriteria(isEn ? settings.criteriaEn : settings.criteriaRu);
   };
 
   useEffect(() => {
@@ -150,7 +155,7 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
       });
     fetchOwnSettings()
       .then((settings) => {
-        if (!cancelled) applyOwn(settings);
+        if (!cancelled) applyOwn(settings, folderKey === 'auto_en');
       })
       .catch((err: unknown) => {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Не удалось загрузить настройки наших кампаний');
@@ -163,11 +168,13 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
   const folderDirty = loaded !== null
     && (enabled !== loaded.enabled || telegram !== loaded.telegram || criteria.trim() !== loaded.criteria.trim()
       || aiEnabled !== loaded.aiEnabled || aiOfferText.trim() !== loaded.aiOfferText.trim());
+  const ownLoadedCriteria = ownLoaded ? (ownIsEn ? ownLoaded.criteriaEn : ownLoaded.criteriaRu) : '';
   const ownDirty = ownLoaded !== null
-    && ownEnabled !== ownLoaded.enabled;
+    && (ownEnabled !== ownLoaded.enabled || ownCriteria.trim() !== ownLoadedCriteria.trim());
   const dirty = folderDirty || ownDirty;
   const tooLong = criteria.trim().length > LEAD_CRITERIA_MAX
-    || aiOfferText.trim().length > AI_OFFER_TEXT_MAX;
+    || aiOfferText.trim().length > AI_OFFER_TEXT_MAX
+    || ownCriteria.trim().length > LEAD_CRITERIA_MAX;
 
   const save = async () => {
     setSaving(true);
@@ -179,10 +186,14 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
         folderDirty
           ? saveLeadSettings(folderKey, { enabled, telegram, criteria: criteria.trim(), aiEnabled, aiOfferText: aiOfferText.trim() })
           : null,
-        ownDirty ? saveOwnSettings({ enabled: ownEnabled }) : null,
+        ownDirty
+          ? saveOwnSettings(ownIsEn
+            ? { enabled: ownEnabled, criteriaEn: ownCriteria.trim() }
+            : { enabled: ownEnabled, criteriaRu: ownCriteria.trim() })
+          : null,
       ]);
       if (folderRes) apply(folderRes);
-      if (ownRes) applyOwn(ownRes);
+      if (ownRes) applyOwn(ownRes, ownIsEn);
       setSaved(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сохранить');
@@ -268,7 +279,7 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
               className="mt-1.5 w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
             />
             <p className="mt-1 text-xs text-zinc-500">
-              Действует и на наши кампании Instantly этого языка. Пусто — общие правила квалификатора.
+              Только для ответов автоаутрича («Рассылка»). Пусто — общие правила квалификатора.
             </p>
           </div>
 
@@ -336,7 +347,28 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
                 </span>
               </span>
             </label>
-            <p className="text-xs text-zinc-500">Что считать лидом — как у автоаутрича: N. Polza — правило RU, ENagency — EN.</p>
+            <div>
+              <div className="flex items-baseline justify-between gap-3">
+                <label htmlFor={`own-lead-criteria-${folderKey}`} className="text-sm font-medium text-zinc-900">
+                  Что считать лидом в {ownCampaignLabel}
+                </label>
+                <span className={`text-xs ${ownCriteria.trim().length > LEAD_CRITERIA_MAX ? 'text-red-600' : 'text-zinc-400'}`}>
+                  {ownCriteria.trim().length} / {LEAD_CRITERIA_MAX}
+                </span>
+              </div>
+              <textarea
+                id={`own-lead-criteria-${folderKey}`}
+                value={ownCriteria}
+                onChange={(e) => {
+                  setOwnCriteria(e.target.value);
+                  touch();
+                }}
+                rows={4}
+                placeholder="Пусто — общие правила квалификатора"
+                className="mt-1.5 w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
+              />
+              <p className="mt-1 text-xs text-zinc-500">Только для кампаний Instantly {ownCampaignLabel}, отдельно от автоаутрича.</p>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">

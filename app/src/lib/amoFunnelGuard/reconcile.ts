@@ -13,6 +13,24 @@ type AmoEvent = {
 };
 
 /**
+ * Только последний переход каждой сделки, по времени. Более ранние уже перекрыты
+ * следующими ходами: запрещённый перенос, который вебхук сразу откатил, иначе
+ * перечитывался бы из журнала всё окно (180 минут) и откатывал сделку всякий раз,
+ * когда её законно, по этапам, доводили до того же этапа — проверка «сделка уже
+ * не там» смотрит только на текущий этап (сделка 35419479, 28.10.2026).
+ * Журнал AMO отдаёт события от новых к старым, поэтому при равном времени
+ * остаётся первое встреченное — более новое.
+ */
+export function latestChangePerLead(changes: StatusChange[]): StatusChange[] {
+  const latest = new Map<number, StatusChange>();
+  for (const change of changes) {
+    const prev = latest.get(change.leadId);
+    if (!prev || change.occurredAt!.getTime() > prev.occurredAt!.getTime()) latest.set(change.leadId, change);
+  }
+  return [...latest.values()].sort((a, b) => a.occurredAt!.getTime() - b.occurredAt!.getTime());
+}
+
+/**
  * Страховка от потерянных вебхуков: берёт переходы этапов из журнала AMO за
  * последние `sinceMinutes` минут и прогоняет их через ту же проверку, что и
  * вебхук. Повторный прогон безопасен: сделка, уже вернувшаяся или ушедшая
@@ -60,8 +78,7 @@ export async function reconcileRecentTransitions(
     if (events.length < PAGE_LIMIT) break;
   }
 
-  changes.sort((a, b) => a.occurredAt!.getTime() - b.occurredAt!.getTime());
-  for (const change of changes) {
+  for (const change of latestChangePerLead(changes)) {
     try {
       counts[await enforceTransition(change)] += 1;
     } catch (err) {
