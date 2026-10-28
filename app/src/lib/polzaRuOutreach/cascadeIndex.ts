@@ -328,13 +328,21 @@ export function assembleCascadeIndex(records: CascadeRecords, now: Date, pauseDa
       if (recipient.lead_verdict === 'not_lead' && recipient.lead_verdict_source === 'manual') closed = true;
 
       // Лид — передача менеджеру (разговор ИИ дошёл до передачи), ручная метка «лид» или
-      // метка ИИ без разговора (ИИ-квалификатор выключен, лид ушёл сразу менеджерам).
-      // Разговор, который закончился молчанием без передачи, лидом не считается.
+      // метка ИИ без разговора (ИИ-квалификатор выключен) либо с разговором, который упал:
+      // при сбое лид уходит менеджерам, как раньше. Разговор, который закончился молчанием
+      // без передачи (`no_reply`), лидом не считается.
       const conversation = conversationByRecipient.get(recipient.id);
       if (conversation?.state === 'handed_off' || conversation?.handoff_reply_id) lead = true;
-      if (recipient.lead_verdict === 'lead' && (recipient.lead_verdict_source === 'manual' || !conversation)) lead = true;
+      if (
+        recipient.lead_verdict === 'lead' &&
+        (recipient.lead_verdict_source === 'manual' || !conversation || conversation.state === 'failed')
+      ) {
+        lead = true;
+      }
       // ИИ ещё ведёт разговор с ответившим: новую цепочку не начинаем.
       if (conversation?.state === 'active') chainRunning = true;
+      // Разговор закрыт — отказ (и у закрытых до появления close_reason, где причины нет).
+      if (conversation?.state === 'closed') closed = true;
       if (conversation?.close_reason === 'decline' || conversation?.close_reason === 'counter_offer') closed = true;
       if (conversation?.close_reason === 'stop') suppressed = true;
 
