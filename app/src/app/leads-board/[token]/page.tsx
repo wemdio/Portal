@@ -146,6 +146,8 @@ function TextCell({
       defaultValue={value}
       disabled={disabled}
       placeholder={placeholder}
+      aria-label={placeholder}
+      title={value || undefined}
       onBlur={(e) => {
         const v = e.target.value.trim();
         if (v !== value) onSave(v || null);
@@ -259,7 +261,11 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
   }, [toast]);
 
   async function patchRow(rowId: string, patch: Record<string, unknown>) {
-    setRows((cur) => cur.map((r) => (r.id === rowId ? { ...r, ...patch } : r)));
+    // Updating one JSON-backed contact must not blank its neighbouring cells
+    // in the optimistic UI or in a copy immediately after saving.
+    setRows((cur) => cur.map((r) => (r.id === rowId ? { ...r, ...patch,
+      ...(patch.custom ? { custom: { ...r.custom, ...patch.custom as Record<string, string> } } : {}),
+    } : r)));
     setSavingId(rowId);
     try {
       const res = await fetch(apiBase, {
@@ -283,7 +289,8 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
   }
 
   function saveCustomCell(row: BoardRow, key: string, v: string | null) {
-    // Сервер мержит custom по ключам: null = удалить ключ.
+    // Server merges only these keys; clearing an automatic contact is retained
+    // as an explicit empty value so a later reply cannot refill it.
     patchRow(row.id, { custom: { [key]: v } });
   }
 
@@ -746,6 +753,45 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                       >
                         {visibleColumns.map((c) => {
                           switch (c.key) {
+                            case 'telegram':
+                            case 'whatsapp':
+                              return (
+                                <td key={c.key} className="px-2.5 py-2 min-w-[12rem]">
+                                  <TextCell
+                                    key={`${row.id}:${c.key}:${row.custom?.[c.key] ?? ''}`}
+                                    value={row.custom?.[c.key] ?? ''}
+                                    disabled={saving}
+                                    placeholder={columnLabel(c)}
+                                    className={CELL_INPUT_MONO}
+                                    onSave={(v) => saveCustomCell(row, c.key, v)}
+                                  />
+                                </td>
+                              );
+                            case 'address':
+                              return (
+                                <td key={c.key} className="px-2.5 py-2 min-w-[16rem]">
+                                  <textarea
+                                    key={`${row.id}:address:${row.custom?.address ?? ''}`}
+                                    defaultValue={row.custom?.address ?? ''}
+                                    disabled={saving}
+                                    rows={3}
+                                    maxLength={500}
+                                    aria-label={columnLabel(c)}
+                                    placeholder={columnLabel(c)}
+                                    className={`${CELL_INPUT} resize-y`}
+                                    onBlur={(e) => {
+                                      const value = e.target.value.trim();
+                                      if (value !== (row.custom?.address ?? '')) saveCustomCell(row, c.key, value || null);
+                                    }}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter' && !e.shiftKey) {
+                                        e.preventDefault();
+                                        e.currentTarget.blur();
+                                      }
+                                    }}
+                                  />
+                                </td>
+                              );
                             case 'phone':
                               return (
                                 <td key={c.key} className="px-2.5 py-2">

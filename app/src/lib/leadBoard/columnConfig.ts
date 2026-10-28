@@ -2,7 +2,7 @@ import { BOARD_COLUMN_LABELS } from './boardColumns';
 import { DEFAULT_COLUMN_CONFIG, type BoardColumnConfigEntry } from '@/lib/instantly/leadBoardWriter';
 
 /**
- * Модель колонок гостевой таблицы: 12 builtin-ключей (из BOARD_COLUMN_LABELS) +
+ * Модель колонок гостевой таблицы: builtin-ключи (из BOARD_COLUMN_LABELS) +
  * кастомные колонки {key: 'c_<slug>', label, visible, custom: true}. Кастомные
  * значения лидов хранятся в project_lead_board_rows.custom (jsonb по ключу).
  * Нормализация едина для staff manage API и гостевого config API.

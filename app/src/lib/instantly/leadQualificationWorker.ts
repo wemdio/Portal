@@ -2225,6 +2225,7 @@ export async function qualifyOneReply(
         companyName: companyName ?? null,
         phone: leadPhone ?? null,
         website: leadWebsite ?? null,
+        additionalContacts: contactMetadata.additionalContacts,
         requestText: leadBoardRequestText((result.threadContext?.replyEmail ?? effectiveReply).body),
         stepNumber,
         replyTimestamp: effectiveReply.timestamp_email ?? null,

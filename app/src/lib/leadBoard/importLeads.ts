@@ -1,6 +1,7 @@
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import { LEAD_QUALITY_OPTIONS } from './leadQuality';
+import { ADDITIONAL_CONTACT_COLUMN_KEYS } from './boardColumns';
 
 /**
  * Парсинг файлов импорта лидов (CSV / XLSX) для гостевой таблицы.
@@ -24,6 +25,8 @@ export interface BoardImportRow {
   quality: string | null;
   comment: string | null;
   taken: boolean;
+  /** Builtin contact columns backed by the existing JSONB storage. */
+  custom?: Record<string, string>;
   /** Номер строки данных в файле (1-based) — для отчёта о пропусках; в БД не пишется. */
   sourceIndex?: number;
 }
@@ -40,9 +43,21 @@ export interface ParseResult {
   ignoredColumns: string[];
 }
 
-const HEADER_MAP: Record<string, keyof BoardImportRow | 'date'> = {
+type ImportColumnKey = keyof BoardImportRow | 'date' | typeof ADDITIONAL_CONTACT_COLUMN_KEYS[number];
+
+const HEADER_MAP: Record<string, ImportColumnKey> = {
   'контакт': 'phone',
   'телефон': 'phone',
+  'telegram': 'telegram',
+  'телеграм': 'telegram',
+  'тг': 'telegram',
+  'whatsapp': 'whatsapp',
+  'whats app': 'whatsapp',
+  'ватсап': 'whatsapp',
+  'вацап': 'whatsapp',
+  'адрес': 'address',
+  'address': 'address',
+  'физический адрес': 'address',
   'email': 'lead_email',
   'e-mail': 'lead_email',
   'почта': 'lead_email',
@@ -114,17 +129,22 @@ export function parseImportDate(raw: string | null): string | null {
 
 function mapDataRow(
   cells: string[],
-  colKeys: (keyof BoardImportRow | 'date' | null)[],
+  colKeys: (ImportColumnKey | null)[],
   index: number,
   warnings: string[],
 ): BoardImportRow | null {
   const get = (key: string): string | null => {
-    const i = colKeys.indexOf(key as keyof BoardImportRow | 'date');
+    const i = colKeys.indexOf(key as ImportColumnKey);
     return i >= 0 ? clean(cells[i]) : null;
   };
   const email = get('lead_email');
   const phone = get('phone');
   if (!email && !phone) return null; // мусорная строка — нет ни email, ни контакта
+  const custom: Record<string, string> = {};
+  for (const key of ADDITIONAL_CONTACT_COLUMN_KEYS) {
+    // A supplied empty cell is a manual choice, not permission to auto-refill.
+    if (colKeys.includes(key)) custom[key] = (get(key) ?? '').slice(0, 500);
+  }
   return {
     lead_email: email,
     lead_name: get('lead_name'),
@@ -138,6 +158,7 @@ function mapDataRow(
     quality: parseQuality(get('quality'), warnings, index),
     comment: get('comment'),
     taken: parseTaken(get('taken')),
+    ...(Object.keys(custom).length ? { custom } : {}),
   };
 }
 

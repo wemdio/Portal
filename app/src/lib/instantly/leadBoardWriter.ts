@@ -3,6 +3,8 @@ import type { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { createBoardToken, boardTokenSecret, boardUrl } from '@/lib/leadBoard/boardToken';
 import { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
 import { joinLeadPhones } from './leadContactValues';
+import type { AdditionalLeadContacts } from './leadAdditionalContacts';
+import { ADDITIONAL_CONTACT_COLUMN_KEYS } from '@/lib/leadBoard/boardColumns';
 
 export { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
 export type { CampaignProjectOwnerResolution } from './campaignProjectOwnerResolver';
@@ -42,10 +44,13 @@ export interface BoardColumnConfigEntry {
   custom?: boolean;
 }
 
-/** Базовый набор (скриншот Asti Group) — зеркало DEFAULT в миграции 20260726_0001. */
+/** Базовые колонки; новые JSONB-контакты добавляются и к старым конфигам при чтении. */
 export const DEFAULT_COLUMN_CONFIG: BoardColumnConfigEntry[] = [
   { key: 'phone', visible: true },
   { key: 'email', visible: true },
+  { key: 'telegram', visible: true },
+  { key: 'whatsapp', visible: true },
+  { key: 'address', visible: true },
   { key: 'name', visible: true },
   { key: 'company', visible: true },
   { key: 'website', visible: true },
@@ -79,7 +84,13 @@ export function parseColumnConfig(raw: unknown): BoardColumnConfigEntry[] {
       out.push(entry);
     }
   }
-  return out.length > 0 ? out : DEFAULT_COLUMN_CONFIG;
+  if (!out.length) return DEFAULT_COLUMN_CONFIG;
+  // Do not rewrite stored order/visibility or resurrect other legacy columns.
+  // These builtin keys live in rows.custom and need no DB/config backfill.
+  const seen = new Set(out.map((column) => column.key));
+  out.push(...ADDITIONAL_CONTACT_COLUMN_KEYS.filter((key) => !seen.has(key))
+    .map((key) => ({ key, visible: true })));
+  return out;
 }
 
 /** Кампания → доказанный единственный проект; ambiguity/none → null. */
@@ -174,6 +185,7 @@ export interface BoardRowInput {
   companyName: string | null;
   phone: string | null;
   website: string | null;
+  additionalContacts?: AdditionalLeadContacts;
   requestText: string | null;
   stepNumber: number | null;
   replyTimestamp: string | null;
@@ -186,10 +198,16 @@ export interface BoardRowInput {
  * qualificationId is the elected project/thread winner, not each new reply's
  * qualification. The unique key arbitrates concurrent first inserts. Subsequent
  * replies only fill gaps, union phones and append new authored answers; existing
- * text/manual values remain intact. Quality/comment/taken/custom are never sent.
+ * text/manual values remain intact. Quality/comment/taken are never sent;
+ * only absent reserved contact keys may be filled in custom (even '' is owned).
  */
 export async function upsertBoardRow(db: InstantlyDb, input: BoardRowInput): Promise<void> {
   const sourceId = input.sourceQualificationId ?? input.qualificationId;
+  const additionalContacts: Record<string, string> = {};
+  for (const key of ADDITIONAL_CONTACT_COLUMN_KEYS) {
+    const value = input.additionalContacts?.[key];
+    if (typeof value === 'string' && value.trim()) additionalContacts[key] = value.trim().slice(0, 500);
+  }
   const payload = {
       project_id: input.projectId,
       qualification_id: input.qualificationId,
@@ -200,6 +218,7 @@ export async function upsertBoardRow(db: InstantlyDb, input: BoardRowInput): Pro
       company_name: input.companyName,
       phone: input.phone,
       website: input.website,
+      ...(Object.keys(additionalContacts).length ? { custom: additionalContacts } : {}),
       request_text: input.requestText,
       step_number: input.stepNumber,
       reply_timestamp: input.replyTimestamp,
@@ -227,14 +246,14 @@ export async function upsertBoardRow(db: InstantlyDb, input: BoardRowInput): Pro
   }
   for (let attempt = 0; attempt < 3; attempt++) {
     const { data: row, error: readError } = await db.from('project_lead_board_rows')
-      .select('id, project_id, lead_name, company_name, phone, website, request_text, auto_reply_ids, updated_at')
+      .select('id, project_id, lead_name, company_name, phone, website, request_text, auto_reply_ids, updated_at, custom')
       .eq('qualification_id', input.qualificationId).maybeSingle();
     if (readError || !row) throw new Error(`lead board merge read failed: ${readError?.message ?? 'missing row'}`);
     if (row.project_id !== input.projectId) throw new Error('lead board merge refused: different project');
     const seen: string[] = Array.isArray(row.auto_reply_ids) && row.auto_reply_ids.length
       ? row.auto_reply_ids : [input.qualificationId];
     if (seen.includes(sourceId)) return;
-    const patch: Record<string, string | string[]> = { auto_reply_ids: [...seen, sourceId] };
+    const patch: Record<string, unknown> = { auto_reply_ids: [...seen, sourceId] };
     for (const [key, value] of [['lead_name', input.leadName], ['company_name', input.companyName], ['website', input.website]] as const) {
       if (!row[key]?.trim() && value) patch[key] = value;
     }
@@ -242,6 +261,11 @@ export async function upsertBoardRow(db: InstantlyDb, input: BoardRowInput): Pro
     // fields. New automatic values must never truncate an existing field.
     const phone = joinLeadPhones([row.phone, input.phone], Math.max(200, row.phone?.length ?? 0));
     if (phone && phone !== row.phone && (!row.phone || phone.startsWith(row.phone))) patch.phone = phone;
+    const custom = row.custom && typeof row.custom === 'object' && !Array.isArray(row.custom)
+      ? row.custom as Record<string, unknown> : {};
+    const missingContacts = Object.entries(additionalContacts)
+      .filter(([key]) => !Object.prototype.hasOwnProperty.call(custom, key));
+    if (missingContacts.length) patch.custom = { ...custom, ...Object.fromEntries(missingContacts) };
     const request = appendBoardReply(row.request_text, input.requestText, input.replyTimestamp);
     if (request && request !== row.request_text) patch.request_text = request;
     if (!row.updated_at) throw new Error('lead board merge refused: missing row version');
