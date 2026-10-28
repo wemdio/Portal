@@ -345,6 +345,7 @@ async function deliverLeads(db: SupabaseClient, tg: LeadTelegramConfig, log: Log
         replyBody: thread?.replyBody ?? '',
         aiReason: row.ai_reason,
         threadUrl: threadUrl(row.recipient_id),
+        copyEmails: thread?.replyCopy ?? [],
       });
       const messageId = await sendLeadMessage(tg, text);
       await markRow(db, row.reply_id, {

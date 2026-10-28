@@ -28,6 +28,8 @@ interface ReplyRow {
   kind: string;
   received_at: string | null;
   created_at: string;
+  to_emails: string[] | null;
+  cc_emails: string[] | null;
 }
 
 export interface SenderThread {
@@ -36,6 +38,24 @@ export interface SenderThread {
   replySubject: string | null;
   replyBody: string;
   replyFrom: string | null;
+  /**
+   * Кто ещё был в ответе («Кому» и «Копия»), кроме нашего ящика и самого
+   * отправителя. Почта AMO при «Ответить» их теряет, а у клиента это часто те,
+   * кто решает (Люксап, 28.10.2026), — менеджер должен видеть, кого вернуть в копию.
+   */
+  replyCopy: string[];
+}
+
+function otherParticipants(reply: ReplyRow, ourAddress: string | undefined): string[] {
+  const skip = new Set([ourAddress, reply.from_email].filter(Boolean).map((e) => e!.trim().toLowerCase()));
+  const out: string[] = [];
+  for (const raw of [...(reply.to_emails ?? []), ...(reply.cc_emails ?? [])]) {
+    const email = raw?.trim();
+    if (!email || skip.has(email.toLowerCase())) continue;
+    skip.add(email.toLowerCase());
+    out.push(email);
+  }
+  return out;
 }
 
 function replyTime(row: ReplyRow): string {
@@ -56,7 +76,7 @@ export async function loadSenderThread(
     await Promise.all([
       db
         .from('sender_replies')
-        .select('id, from_email, subject, body, kind, received_at, created_at')
+        .select('id, from_email, subject, body, kind, received_at, created_at, to_emails, cc_emails')
         .eq('recipient_id', recipientId)
         .order('created_at')
         .limit(200),
@@ -126,5 +146,6 @@ export async function loadSenderThread(
     replySubject: reply.subject,
     replyBody: reply.body ?? '',
     replyFrom: reply.from_email,
+    replyCopy: otherParticipants(reply, ourAddress),
   };
 }
