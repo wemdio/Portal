@@ -86,22 +86,29 @@ export function productFor(step: CascadeStep, abroad: boolean): Product {
 
 export type ReplyOutcome = 'decline' | 'later' | 'other';
 
-const DECLINE_RE = /не\s+актуальн|не\s+интересн|нам\s+не\s+нужн|нет\s+потребност|не\s+рассматрива/;
+// «Не» — только в начале слова (lookbehind): «вне интересно» отказом не считается.
+const DECLINE_RE = /(?<![а-яё])(?:не\s*актуальн|не\s*интересн|не\s*интересу|не\s*заинтерес(?:ов|у)|не\s+нужн|не\s+рассматрива)|нет\s+потребност/;
 const LATER_RE = /через\s+квартал|через\s+полгода|через\s+\d+\s+месяц|в\s+следующем\s+(?:квартале|году)|после\s+нового\s+года|напишите\s+позже/;
 
-/** Сколько символов ответа читаем: хвост — цитата нашего письма и подписи. */
+/** Сколько символов ответа читаем: дальше обычно подписи и хвосты. */
 const REPLY_HEAD_CHARS = 2000;
 
 /**
  * Что значит ответ, не признанный лидом: отказ закрывает каскад целиком, «через
  * квартал» — пауза 90 дней, остальное («не тот человек», «переслал коллеге») —
- * дальше по каскаду, как молчание. Отказ проверяется первым: «не актуально» по
- * спеке закрывает компанию, даже если рядом назван срок.
+ * дальше по каскаду, как молчание. Просьба вернуться позже проверяется первой:
+ * «сейчас не актуально, напишите через квартал» — это «позже», а не отказ
+ * (решение владельца 28.10.2026).
+ *
+ * `body` — ответ БЕЗ процитированной переписки: функция структуры письма не видит,
+ * а наше четвёртое письмо в цитате может содержать «не актуально». Вызывающий
+ * очищает текст сам (`stripQuoted` из senderLeads/telegram.ts); здесь режется
+ * только длина.
  */
 export function classifyCascadeReply(body: string | null): ReplyOutcome {
   const text = (body ?? '').slice(0, REPLY_HEAD_CHARS).toLowerCase();
-  if (DECLINE_RE.test(text)) return 'decline';
   if (LATER_RE.test(text)) return 'later';
+  if (DECLINE_RE.test(text)) return 'decline';
   return 'other';
 }
 
@@ -134,10 +141,17 @@ function addDays(d: Date, days: number): Date {
   return new Date(d.getTime() + days * DAY_MS);
 }
 
+/** Битая дата из БД (Invalid Date) не должна давать «пора писать» из-за NaN. */
+function isValidDate(d: Date | null): d is Date {
+  return d !== null && Number.isFinite(d.getTime());
+}
+
 /**
  * Решение по компании: лид, стоп-лист, отказ и «все три предложены» закрывают
  * каскад. Идущая цепочка или отсутствие даты письма — ждём (до окончания цепочки
- * срок неизвестен, потому now + пауза как ориентир). Иначе срок — позднейший из
+ * срок неизвестен, потому now + пауза как ориентир). Битая дата письма — как её
+ * отсутствие (ждём, лучше не написать, чем написать рано), битая дата ответа
+ * «позже» игнорируется. Иначе срок — позднейший из
  * «последнее письмо + пауза» и «ответ „позже“ + 90 дней»: пришёл он до конца
  * паузы или позже, раньше срока не пишем.
  */
@@ -147,10 +161,10 @@ export function cascadeDecision(f: CascadeFacts, now: Date, pauseDays = 14, late
   if (f.closed) return { kind: 'closed', reason: 'declined' };
   const next = nextStep(f.offered);
   if (next === null) return { kind: 'closed', reason: 'all_offered' };
-  if (f.chainRunning || !f.lastSentAt) return { kind: 'wait', until: addDays(now, pauseDays) };
+  if (f.chainRunning || !isValidDate(f.lastSentAt)) return { kind: 'wait', until: addDays(now, pauseDays) };
 
   let until = addDays(f.lastSentAt, pauseDays);
-  if (f.laterAt) {
+  if (isValidDate(f.laterAt)) {
     const laterUntil = addDays(f.laterAt, laterDays);
     if (laterUntil.getTime() > until.getTime()) until = laterUntil;
   }
