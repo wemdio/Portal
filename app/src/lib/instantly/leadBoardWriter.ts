@@ -4,7 +4,7 @@ import { createBoardToken, boardTokenSecret, boardUrl } from '@/lib/leadBoard/bo
 import { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
 import { joinLeadPhones } from './leadContactValues';
 import type { AdditionalLeadContacts } from './leadAdditionalContacts';
-import { ADDITIONAL_CONTACT_COLUMN_KEYS } from '@/lib/leadBoard/boardColumns';
+import { ADDITIONAL_CONTACT_COLUMN_KEYS, isAdditionalContactColumnKey } from '@/lib/leadBoard/boardColumns';
 
 export { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
 export type { CampaignProjectOwnerResolution } from './campaignProjectOwnerResolver';
@@ -44,13 +44,10 @@ export interface BoardColumnConfigEntry {
   custom?: boolean;
 }
 
-/** Базовые колонки; новые JSONB-контакты добавляются и к старым конфигам при чтении. */
+/** Все контактные каналы показываются в phone; их отдельные значения остаются в JSONB. */
 export const DEFAULT_COLUMN_CONFIG: BoardColumnConfigEntry[] = [
   { key: 'phone', visible: true },
   { key: 'email', visible: true },
-  { key: 'telegram', visible: true },
-  { key: 'whatsapp', visible: true },
-  { key: 'address', visible: true },
   { key: 'name', visible: true },
   { key: 'company', visible: true },
   { key: 'website', visible: true },
@@ -62,6 +59,26 @@ export const DEFAULT_COLUMN_CONFIG: BoardColumnConfigEntry[] = [
   { key: 'date', visible: true },
   { key: 'taken', visible: true },
 ];
+
+/** Collapse former contact columns without changing unrelated preferences. */
+export function collapseLegacyContactColumns(columns: BoardColumnConfigEntry[]): BoardColumnConfigEntry[] {
+  const firstLegacyIndex = columns.findIndex((column) => isAdditionalContactColumnKey(column.key));
+  const legacyVisible = columns.some((column) => isAdditionalContactColumnKey(column.key) && column.visible);
+  const out = columns.filter((column) => !isAdditionalContactColumnKey(column.key));
+  if (!legacyVisible) return out;
+  const phoneIndex = out.findIndex((column) => column.key === 'phone');
+  if (phoneIndex < 0) {
+    // A legacy subset may only have TG/WA/address, with no phone column at all.
+    const insertionIndex = columns.slice(0, firstLegacyIndex)
+      .filter((column) => !isAdditionalContactColumnKey(column.key)).length;
+    out.splice(insertionIndex, 0, { key: 'phone', visible: true });
+  } else if (!out.some((column) => column.visible)) {
+    // Only a removed contact used to be visible. Keep the board usable rather
+    // than rendering zero columns; already-invalid all-hidden configs stay so.
+    out[phoneIndex] = { ...out[phoneIndex], visible: true };
+  }
+  return out;
+}
 
 export function parseColumnConfig(raw: unknown): BoardColumnConfigEntry[] {
   if (!Array.isArray(raw)) return DEFAULT_COLUMN_CONFIG;
@@ -84,13 +101,7 @@ export function parseColumnConfig(raw: unknown): BoardColumnConfigEntry[] {
       out.push(entry);
     }
   }
-  if (!out.length) return DEFAULT_COLUMN_CONFIG;
-  // Do not rewrite stored order/visibility or resurrect other legacy columns.
-  // These builtin keys live in rows.custom and need no DB/config backfill.
-  const seen = new Set(out.map((column) => column.key));
-  out.push(...ADDITIONAL_CONTACT_COLUMN_KEYS.filter((key) => !seen.has(key))
-    .map((key) => ({ key, visible: true })));
-  return out;
+  return out.length ? collapseLegacyContactColumns(out) : DEFAULT_COLUMN_CONFIG;
 }
 
 /** Кампания → доказанный единственный проект; ambiguity/none → null. */

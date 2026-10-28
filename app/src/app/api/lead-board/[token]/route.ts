@@ -5,7 +5,7 @@ import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { isLeadQuality, LEAD_QUALITY_OPTIONS } from '@/lib/leadBoard/leadQuality';
 import { resolveBoard } from '@/lib/leadBoard/boardResolver';
 import { parseImportDate } from '@/lib/leadBoard/importLeads';
-import { isAdditionalContactColumnKey } from '@/lib/leadBoard/boardColumns';
+import { ADDITIONAL_CONTACT_COLUMN_KEYS, isAdditionalContactColumnKey } from '@/lib/leadBoard/boardColumns';
 
 export const dynamic = 'force-dynamic';
 
@@ -196,8 +196,12 @@ export async function PATCH(
     if (!body.custom || typeof body.custom !== 'object' || Array.isArray(body.custom)) {
       return jsonError('custom must be an object {columnKey: value}', 400);
     }
-    const customKeys = new Set(columnConfig
-      .filter((c) => c.custom || isAdditionalContactColumnKey(c.key)).map((c) => c.key));
+    // Reserved contacts are editable inside the single Контакты column even
+    // though they no longer have individual column_config entries.
+    const customKeys = new Set([
+      ...columnConfig.filter((c) => c.custom).map((c) => c.key),
+      ...ADDITIONAL_CONTACT_COLUMN_KEYS,
+    ]);
     customUpdates = {};
     for (const [k, v] of Object.entries(body.custom as Record<string, unknown>)) {
       if (!customKeys.has(k)) return jsonError(`unknown custom column: ${k}`, 400);

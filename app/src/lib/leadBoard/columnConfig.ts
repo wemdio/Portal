@@ -1,5 +1,5 @@
-import { BOARD_COLUMN_LABELS } from './boardColumns';
-import { DEFAULT_COLUMN_CONFIG, type BoardColumnConfigEntry } from '@/lib/instantly/leadBoardWriter';
+import { BOARD_COLUMN_LABELS, isAdditionalContactColumnKey } from './boardColumns';
+import { collapseLegacyContactColumns, DEFAULT_COLUMN_CONFIG, type BoardColumnConfigEntry } from '@/lib/instantly/leadBoardWriter';
 
 /**
  * Модель колонок гостевой таблицы: builtin-ключи (из BOARD_COLUMN_LABELS) +
@@ -24,6 +24,7 @@ export function columnLabel(c: BoardColumn): string {
  * Нормализация присланного конфига:
  * - присланный порядок builtin и кастомных ключей сохраняется;
  * - отсутствующие builtin дополняются в конце с дефолтной видимостью;
+ * - прежние telegram/whatsapp/address входят в phone и отдельно не показываются;
  * - кастомные — строгий формат ключа c_<slug>, обязательный label ≤60 симв.,
  *   без дублей;
  * - неизвестные ключи / битые записи / все скрытые → error.
@@ -38,7 +39,13 @@ export function normalizeColumnConfig(raw: unknown): { config?: BoardColumn[]; e
     if (typeof key !== 'string' || !key) return { error: 'columnConfig entry without key' };
     if (seen.has(key)) return { error: `duplicate column key: ${key}` };
     seen.add(key);
+    // Accept config submitted by an older tab, without reintroducing the three
+    // separate columns or deleting their JSONB data. c_* columns are unrelated.
     const visible = (item as { visible?: unknown }).visible !== false;
+    if (isAdditionalContactColumnKey(key)) {
+      config.push({ key, visible });
+      continue;
+    }
     if (isBuiltinColumnKey(key)) {
       config.push({ key, visible });
       continue;
@@ -51,9 +58,11 @@ export function normalizeColumnConfig(raw: unknown): { config?: BoardColumn[]; e
     if (label.trim().length > 60) return { error: 'label too long (max 60 chars)' };
     config.push({ key, label: label.trim(), visible, custom: true });
   }
-  config.push(...DEFAULT_COLUMN_CONFIG.filter((c) => !seen.has(c.key)).map((c) => ({ ...c })));
-  if (!config.some((c) => c.visible)) return { error: 'at least one column must stay visible' };
-  return { config };
+  const collapsed = collapseLegacyContactColumns(config);
+  const remainingKeys = new Set(collapsed.map((column) => column.key));
+  collapsed.push(...DEFAULT_COLUMN_CONFIG.filter((c) => !remainingKeys.has(c.key)).map((c) => ({ ...c })));
+  if (!collapsed.some((c) => c.visible)) return { error: 'at least one column must stay visible' };
+  return { config: collapsed };
 }
 
 /** Change positions only: stable keys keep cell values and visibility attached. */

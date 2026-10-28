@@ -5,6 +5,8 @@ import { ArrowUp, ArrowDown, GripVertical } from 'lucide-react';
 import {
   columnLabel, isBuiltinColumnKey, makeCustomColumnKey, moveBoardColumn, type BoardColumn,
 } from '@/lib/leadBoard/columnConfig';
+import { ContactCell } from '@/components/leadBoard/ContactCell';
+import { formatBoardContactText } from '@/lib/leadBoard/boardContacts';
 
 type BoardRow = {
   id: string;
@@ -78,7 +80,7 @@ function formatDate(iso: string | null): string {
 /** Текстовое значение ячейки для копирования (зеркалит switch рендера). */
 function cellText(row: BoardRow, key: string): string {
   switch (key) {
-    case 'phone': return row.phone ?? '';
+    case 'phone': return formatBoardContactText(row);
     case 'email': return row.lead_email ?? '';
     case 'name': return row.lead_name ?? '';
     case 'company': return row.company_name ?? '';
@@ -260,12 +262,13 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
     return () => clearTimeout(t);
   }, [toast]);
 
-  async function patchRow(rowId: string, patch: Record<string, unknown>) {
+  async function patchRow(rowId: string, patch: Record<string, unknown>, optimistic = true): Promise<boolean> {
     // Updating one JSON-backed contact must not blank its neighbouring cells
     // in the optimistic UI or in a copy immediately after saving.
-    setRows((cur) => cur.map((r) => (r.id === rowId ? { ...r, ...patch,
-      ...(patch.custom ? { custom: { ...r.custom, ...patch.custom as Record<string, string> } } : {}),
+    const applyLocal = (next: Record<string, unknown>, replaceCustom = false) => setRows((cur) => cur.map((r) => (r.id === rowId ? { ...r, ...next,
+      ...(next.custom ? { custom: replaceCustom ? next.custom as Record<string, string> : { ...r.custom, ...next.custom as Record<string, string> } } : {}),
     } : r)));
+    if (optimistic) applyLocal(patch);
     setSavingId(rowId);
     try {
       const res = await fetch(apiBase, {
@@ -273,16 +276,23 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rowId, ...patch }),
       });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        throw new Error(d.error || `Ошибка ${res.status}`);
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.error || `Ошибка ${res.status}`);
+      // The contact form retains its draft until the complete patch succeeds.
+      // Its saved custom object also includes unrelated concurrent server edits.
+      if (!optimistic) {
+        const hasServerCustom = d.row && Object.prototype.hasOwnProperty.call(d.row, 'custom') &&
+          (d.row.custom === null || typeof d.row.custom === 'object' && !Array.isArray(d.row.custom));
+        applyLocal({ ...patch, ...(hasServerCustom ? { custom: d.row.custom ?? {} } : {}) }, Boolean(hasServerCustom));
       }
       setToast('Сохранено');
+      return true;
     } catch (err) {
       // Откат через refetch, а не снапшот state: при параллельных патчах разных
       // строк снапшотный откат затирал бы чужое успешное изменение.
-      await fetchData();
+      if (optimistic) await fetchData();
       setToast(err instanceof Error ? err.message : 'Ошибка сохранения');
+      return false;
     } finally {
       setSavingId(null);
     }
@@ -458,6 +468,11 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
     setToast(ok ? 'Таблица скопирована' : 'Не удалось скопировать');
   }
 
+  async function copyContacts(text: string) {
+    const ok = await copyText(tsvEscape(text));
+    setToast(ok ? 'Контакты скопированы' : 'Не удалось скопировать');
+  }
+
   return (
     <div className="min-h-screen">
       <header className="border-b border-[var(--cp-divider)] px-4 md:px-6 py-5">
@@ -469,7 +484,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
             {projectTitle}
           </h1>
           <p className="mt-1 text-[13px] text-[var(--cp-paper-mute)]">
-            Новые лиды появляются автоматически, правки сохраняются сразу.
+            Новые лиды появляются автоматически. В редакторе контактов нажмите «Сохранить»; остальные поля сохраняются сразу.
           </p>
           <div className="mt-4 flex flex-wrap items-center gap-2">
             <input
@@ -688,6 +703,9 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                 @media (max-width: 640px) {
                   .lb-scroll { max-height: 55vh; }
                   .lb-table td:first-child, .lb-table th:first-child { min-width: 96px; }
+                  /* A full contact block must not cover the rest of a phone screen. */
+                  .lb-table td[data-column="phone"]:first-child { position: static; }
+                  .lb-table th[data-column="phone"]:first-child { left: auto; }
                 }
               `}</style>
             <div className="lb-scroll rounded-lg bg-[var(--cp-surface-rest)]">
@@ -697,6 +715,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                     {visibleColumns.map((c, index) => (
                       <th
                         key={c.key}
+                        data-column={c.key}
                         scope="col"
                         onDragOver={(e) => {
                           if (configSavingRef.current || !draggedColumnRef.current) return;
@@ -753,55 +772,13 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                       >
                         {visibleColumns.map((c) => {
                           switch (c.key) {
-                            case 'telegram':
-                            case 'whatsapp':
-                              return (
-                                <td key={c.key} className="px-2.5 py-2 min-w-[12rem]">
-                                  <TextCell
-                                    key={`${row.id}:${c.key}:${row.custom?.[c.key] ?? ''}`}
-                                    value={row.custom?.[c.key] ?? ''}
-                                    disabled={saving}
-                                    placeholder={columnLabel(c)}
-                                    className={CELL_INPUT_MONO}
-                                    onSave={(v) => saveCustomCell(row, c.key, v)}
-                                  />
-                                </td>
-                              );
-                            case 'address':
-                              return (
-                                <td key={c.key} className="px-2.5 py-2 min-w-[16rem]">
-                                  <textarea
-                                    key={`${row.id}:address:${row.custom?.address ?? ''}`}
-                                    defaultValue={row.custom?.address ?? ''}
-                                    disabled={saving}
-                                    rows={3}
-                                    maxLength={500}
-                                    aria-label={columnLabel(c)}
-                                    placeholder={columnLabel(c)}
-                                    className={`${CELL_INPUT} resize-y`}
-                                    onBlur={(e) => {
-                                      const value = e.target.value.trim();
-                                      if (value !== (row.custom?.address ?? '')) saveCustomCell(row, c.key, value || null);
-                                    }}
-                                    onKeyDown={(e) => {
-                                      if (e.key === 'Enter' && !e.shiftKey) {
-                                        e.preventDefault();
-                                        e.currentTarget.blur();
-                                      }
-                                    }}
-                                  />
-                                </td>
-                              );
                             case 'phone':
                               return (
-                                <td key={c.key} className="px-2.5 py-2">
-                                  <TextCell
-                                    key={`${row.id}:${row.phone ?? ''}`}
-                                    value={row.phone ?? ''}
-                                    disabled={saving}
-                                    placeholder="Телефон"
-                                    className={CELL_INPUT_MONO}
-                                    onSave={(v) => void patchRow(row.id, { phone: v })}
+                                <td key={c.key} data-column="phone" className="px-2.5 py-2 align-top">
+                                  <ContactCell
+                                    value={row} disabled={saving}
+                                    onSave={(patch) => patchRow(row.id, patch, false)}
+                                    onCopy={(text) => void copyContacts(text)}
                                   />
                                 </td>
                               );
