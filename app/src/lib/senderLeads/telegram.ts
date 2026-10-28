@@ -66,6 +66,8 @@ export interface LeadMessageInput {
   replyBody: string;
   aiReason: string | null;
   threadUrl: string | null;
+  /** Кто ещё был в ответе клиента: при ответе из AMO их надо вернуть в «Копию» вручную. */
+  copyEmails?: string[];
 }
 
 export function buildLeadMessage(input: LeadMessageInput): string {
@@ -76,6 +78,9 @@ export function buildLeadMessage(input: LeadMessageInput): string {
     ? `${input.replyFrom} (писали на ${input.recipientEmail})`
     : input.recipientEmail;
   lines.push(`<b>Контакт:</b> ${escapeHtml(clip(contact, 320))}`);
+  if (input.copyEmails?.length) {
+    lines.push(`<b>В копии у клиента:</b> ${escapeHtml(clip(input.copyEmails.join(', '), 400))} — из AMO добавляйте в «Копию» вручную`);
+  }
   if (input.recipientName) lines.push(`<b>Компания:</b> ${escapeHtml(clip(input.recipientName, 200))}`);
   if (input.replySubject) lines.push(`<b>Тема:</b> ${escapeHtml(clip(input.replySubject, 300))}`);
 
