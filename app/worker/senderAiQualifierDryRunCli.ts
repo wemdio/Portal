@@ -18,9 +18,9 @@ async function main(): Promise<void> {
   if (!cfg) throw new Error('Ключ ИИ не настроен (SENDER_AI_QUALIFIER_API_KEY / SENDER_LEADS_AI_API_KEY)');
 
   const { data: folders, error: folderError } = await db.from('sender_folders')
-    .select('id, key, ai_offer_text, ai_offer_texts').in('key', ['auto_ru', 'auto_en']);
+    .select('id, key, ai_offer_text').in('key', ['auto_ru', 'auto_en']);
   if (folderError) throw new Error(folderError.message);
-  const folderById = new Map((folders ?? []).map((f) => [f.id as string, f as { id: string; key: string; ai_offer_text: string | null; ai_offer_texts: unknown }]));
+  const folderById = new Map((folders ?? []).map((f) => [f.id as string, f as { id: string; key: string; ai_offer_text: string | null }]));
   const { data: campaigns, error: campaignError } = await db.from('sender_campaigns')
     .select('id, folder_id').in('folder_id', [...folderById.keys()]);
   if (campaignError) throw new Error(campaignError.message);
@@ -48,7 +48,7 @@ async function main(): Promise<void> {
     try {
       const step = await requestAiStep(cfg, {
         language, mode: 'reply', aiMessages: 0, history, ccEmail: 'manager@example.com',
-        ...await offerContextFor(db, folder, row.recipient_id as string),
+        ...await offerContextFor(db, folder, row.recipient_id as string, log),
       });
       const decision = decideStep(step, { aiMessages: 0, stopRequested: false });
       const lead = history.filter((m) => m.from === 'lead').at(-1)?.text.slice(0, 300) ?? '';

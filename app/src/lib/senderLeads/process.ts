@@ -5,7 +5,7 @@ import { loadRecipientProduct } from '@/lib/polzaRuOutreach/rowProduct';
 import { loadSenderThread } from './context';
 import { loadCampaignSettings, type LeadSettings } from './settings';
 import { isClientPartyReply, withProjectLeadSettings } from './projectScope';
-import { buildLeadMessage, leadTelegramConfig, sendLeadMessage, threadUrl, type LeadTelegramConfig } from './telegram';
+import { buildLeadMessage, leadTelegramConfig, sendLeadMessage, threadUrl, type LeadMessageInput, type LeadTelegramConfig } from './telegram';
 import { processSenderAutoLeadCrm } from './crm';
 import { runSenderAiQualifier, type AiPassResult } from '@/lib/senderAiQualifier/engine';
 
@@ -284,11 +284,25 @@ async function qualifyOne(
   }
 }
 
-/** Ссылка на КП продукта из `sender_folders.kp_links`: только https, без пробелов и кавычек. */
+/** Длиннее в href Telegram не принимает: такую ссылку в сообщение не кладём. */
+const KP_URL_MAX = 1500;
+
+/**
+ * Ссылка на КП продукта из `sender_folders.kp_links`: только https, без пробелов,
+ * кавычек и логина. Разбирается `new URL()` и кладётся в нормализованном виде —
+ * странный href не должен заставить Telegram отклонить всё сообщение о лиде.
+ */
 export function kpUrlOf(links: unknown, product: Product): string | null {
   const value = links && typeof links === 'object' && !Array.isArray(links) ? (links as Record<string, unknown>)[product] : null;
-  const url = typeof value === 'string' ? value.trim() : '';
-  return /^https:\/\/[^\s"<>]+$/i.test(url) ? url : null;
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw || /[\s"<>]/.test(raw)) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) return null;
+    return url.href.length <= KP_URL_MAX ? url.href : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Ссылки на КП папки; один запрос на папку за круг доставки. */
@@ -300,6 +314,32 @@ async function loadKpLinks(db: SupabaseClient, folderId: string | null, cache: M
     cache.set(folderId, (data as { kp_links?: unknown } | null)?.kp_links ?? null);
   }
   return cache.get(folderId);
+}
+
+/**
+ * Продукт лида для сообщения. Это справка менеджеру, а не условие доставки: любой
+ * сбой чтения (сеть, миграция каскада ещё не применена) — предупреждение в лог и
+ * сообщение без блока; сбой одних ссылок на КП оставляет строку «Продукт» без «КП».
+ * Иначе лид сгорал бы за пять повторов и не доходил ни до чата, ни до AMO.
+ */
+async function leadProduct(
+  db: SupabaseClient, row: { reply_id: string; recipient_id: string }, folderId: string | null,
+  kpLinks: Map<string, unknown>, log: Log,
+): Promise<LeadMessageInput['product']> {
+  try {
+    const offered = await loadRecipientProduct(db, row.recipient_id);
+    if (!offered) return undefined;
+    let kpUrl: string | null = null;
+    try {
+      kpUrl = kpUrlOf(await loadKpLinks(db, folderId, kpLinks), offered.product);
+    } catch (err) {
+      log('warn', `ТГ: ссылки на КП лида ${row.reply_id} не прочитаны: ${errorText(err)}`);
+    }
+    return { label: PRODUCT_LABELS[offered.product], step: offered.cascadeNo, kpUrl };
+  } catch (err) {
+    log('warn', `ТГ: продукт лида ${row.reply_id} не прочитан: ${errorText(err)}`);
+    return undefined;
+  }
 }
 
 /** Лиды, ещё не доставленные в чат, у переписок, по которым в чат ещё не писали. */
@@ -357,12 +397,7 @@ async function deliverLeads(db: SupabaseClient, tg: LeadTelegramConfig, log: Log
     try {
       const thread = await loadSenderThread(db, row.reply_id, row.recipient_id);
       // Русский автоаутрич: какой продукт предлагали и КП к нему; строки до каскада — без блока.
-      const offered = await loadRecipientProduct(db, row.recipient_id);
-      const product = offered ? {
-        label: PRODUCT_LABELS[offered.product],
-        step: offered.cascadeNo,
-        kpUrl: kpUrlOf(await loadKpLinks(db, campaign.settings.folderId, kpLinks), offered.product),
-      } : undefined;
+      const product = await leadProduct(db, row, campaign.settings.folderId, kpLinks, log);
       const text = buildLeadMessage({
         folderName: campaign.settings.folderName,
         campaignName: campaign.campaignName,

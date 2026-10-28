@@ -37,8 +37,6 @@ interface FolderRow {
   ai_enabled: boolean;
   ai_enabled_at: string | null;
   ai_offer_text: string | null;
-  /** Короткие КП по продуктам (ключ — продукт); у auto_en пусто. */
-  ai_offer_texts: unknown;
   leads_enabled: boolean;
   leads_telegram: boolean;
 }
@@ -72,7 +70,7 @@ export interface AiPassResult {
   closed: number;
 }
 
-const FOLDER_SELECT = 'id, key, timezone, send_hour_from, send_hour_to, send_weekdays, ai_enabled, ai_enabled_at, ai_offer_text, ai_offer_texts, leads_enabled, leads_telegram';
+const FOLDER_SELECT = 'id, key, timezone, send_hour_from, send_hour_to, send_weekdays, ai_enabled, ai_enabled_at, ai_offer_text, leads_enabled, leads_telegram';
 const REPLY_SELECT = 'id, recipient_id, from_email, subject, body, message_id, received_at, created_at';
 const RECIPIENT_SELECT = 'id, email, status, mailbox_id, lead_verdict, lead_verdict_source, reply_language, sender_mailboxes(email)';
 /** Письмо ИИ в «sending» дольше этого — считаем, что отправка оборвалась. */
@@ -115,23 +113,41 @@ async function loadAiFolders(db: SupabaseClient): Promise<{ folders: Map<string,
 }
 
 /**
+ * Короткие КП по продуктам папки (`sender_folders.ai_offer_texts`). Читаются отдельно
+ * от общего запроса папок: до миграции каскада колонки нет, и общий запрос уронил бы
+ * весь круг ИИ, в том числе английский автоаутрич. Любой сбой — пусто и предупреждение:
+ * ход идёт с общим «Коротким КП» папки.
+ */
+async function loadProductOfferTexts(db: SupabaseClient, folderId: string, log: Log): Promise<Record<string, unknown>> {
+  try {
+    const { data, error } = await db.from('sender_folders').select('ai_offer_texts').eq('id', folderId).maybeSingle();
+    if (error) throw new Error(error.message);
+    const texts = (data as { ai_offer_texts?: unknown } | null)?.ai_offer_texts;
+    return texts && typeof texts === 'object' && !Array.isArray(texts) ? texts as Record<string, unknown> : {};
+  } catch (err) {
+    log('warn', `ИИ-квалификатор: короткие КП по продуктам папки ${folderId} не прочитаны, берём общее: ${errorText(err)}`);
+    return {};
+  }
+}
+
+/**
  * «Короткое КП» и описание предложения для промпта. Русский автоаутрич (auto_ru):
  * текст того продукта, который предлагали этому получателю, а если его нет —
  * общее «Короткое КП» папки; прогрев к встрече — и для строк до каскада (продукта
- * нет). Английский автоаутрич — как раньше. Сбой чтения продукта — исключение:
- * ход повторится, а не уйдёт с КП не того продукта.
+ * нет). Английский автоаутрич — как раньше, без обращения к продуктам. Сбой чтения
+ * продукта получателя — исключение: ход повторится, а не уйдёт с КП не того продукта.
  */
 export async function offerContextFor(
   db: SupabaseClient,
-  folder: { key: string; ai_offer_text: string | null; ai_offer_texts: unknown },
+  folder: { id: string; key: string; ai_offer_text: string | null },
   recipientId: string,
+  log: Log,
 ): Promise<Pick<AiPromptInput, 'offerText' | 'cascade' | 'productPitch'>> {
   const general = folder.ai_offer_text ?? '';
   if (folder.key !== 'auto_ru') return { offerText: general, cascade: false, productPitch: null };
   const offered = await loadRecipientProduct(db, recipientId);
   if (!offered) return { offerText: general, cascade: true, productPitch: null };
-  const texts = folder.ai_offer_texts;
-  const own = texts && typeof texts === 'object' && !Array.isArray(texts) ? (texts as Record<string, unknown>)[offered.product] : null;
+  const own = (await loadProductOfferTexts(db, folder.id, log))[offered.product];
   const text = typeof own === 'string' ? own.trim() : '';
   return { offerText: text || general, cascade: true, productPitch: productPitchOf(offered.product) };
 }
@@ -296,11 +312,12 @@ interface StepContext {
   ccEmails: string[];
   newest: ReplyRow | null;
   result: AiPassResult;
+  log: Log;
 }
 
 /** Один ход разговора; если делать пока нечего — только переносит срок. */
 async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx: StepContext): Promise<void> {
-  const { folder, newest, recipient } = ctx;
+  const { folder, newest, recipient, log } = ctx;
   const now = new Date();
   const planNext = async (due: Date) => {
     if (!conv.next_action_at || Date.parse(conv.next_action_at) !== due.getTime()) {
@@ -359,7 +376,7 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
 
   const step = await requestAiStep(cfg, {
     language, mode, history, aiMessages: conv.ai_messages,
-    ...await offerContextFor(db, folder, conv.recipient_id), ccEmail: cc[0] ?? null,
+    ...await offerContextFor(db, folder, conv.recipient_id, log), ccEmail: cc[0] ?? null,
   });
   const decision = decideStep(step, { aiMessages: conv.ai_messages, stopRequested: step.stopRequested });
   const processed = { last_reply_id: newest.id, attempts: 0 };
@@ -530,7 +547,7 @@ export async function runSenderAiQualifier(db: SupabaseClient, log: Log): Promis
       // Пауза после сбоя: следующий ход не раньше назначенного времени.
       if (conv.attempts > 0 && conv.next_action_at && Date.parse(conv.next_action_at) > now) continue;
       const ccEmails = handoff.find((s) => s.scope === conv.folder_key)?.cc_emails ?? [];
-      await stepConversation(db, conv, { folder, recipient, ccEmails, newest: newest.get(conv.recipient_id) ?? null, result });
+      await stepConversation(db, conv, { folder, recipient, ccEmails, newest: newest.get(conv.recipient_id) ?? null, result, log });
     } catch (err) {
       await recordFailure(db, conv, err, log);
     }
