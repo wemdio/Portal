@@ -15,6 +15,7 @@ import {
   yandexIdFromCardUrl,
 } from '@/lib/parsers/yandexMapsCatalog';
 import { startTrace } from '@/lib/tracer';
+import { startYandexMapsParseLease, YandexMapsJobStoppedError } from './yandexMapsParseLease';
 
 type ProxyCreds = { username: string; password: string };
 
@@ -624,10 +625,20 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
   const job = await getJob(jobId);
   if (!job) return;
 
-  if (job.status === 'completed') return;
-
-  const isCancelled = job.status === 'failed';
-  if (isCancelled) return;
+  // Claims assign a fresh started_at. Fence all progress/final writes with it
+  // so an old request cannot overwrite a manual retry or graceful requeue.
+  if (job.status !== 'running' || !job.started_at) return;
+  const runStartedAt = job.started_at;
+  const patchRunning = async (patch: Record<string, unknown>): Promise<boolean> => {
+    const { data, error } = await supabaseAdmin!.from('yandex_maps_jobs')
+      .update(patch).eq('id', jobId).eq('status', 'running').eq('started_at', runStartedAt)
+      .select('id').abortSignal(AbortSignal.timeout(10_000)).maybeSingle();
+    if (error) throw new Error(`YandexMaps job update failed: ${error.message}`);
+    return !!data;
+  };
+  const patchOwned = async (patch: Record<string, unknown>) => {
+    if (!await patchRunning(patch)) throw new YandexMapsJobStoppedError();
+  };
 
   const requestId = crypto.randomUUID();
   const logMeta = { userId: job.user_id, requestId, route: 'yandex_maps_parse_orgs' };
@@ -638,8 +649,10 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
     message: 'Яндекс.Карты: парсинг организаций',
     userId: job.user_id,
   });
+  const lease = startYandexMapsParseLease(() => patchRunning({ updated_at: new Date().toISOString() }));
 
   try {
+    await lease.check();
     const cfg = job.config ?? {};
     const headless = (cfg as { headless?: unknown }).headless !== false;
     const maxResultsRaw = (cfg as { max_results?: unknown }).max_results;
@@ -652,14 +665,15 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
     const { data: linkRows, error: linksError } = await supabaseAdmin
       .from('yandex_maps_links')
       .select('link')
-      .eq('job_id', jobId);
+      .eq('job_id', jobId)
+      .abortSignal(AbortSignal.timeout(15_000));
 
     if (linksError) throw new Error(linksError.message);
 
     const normalizedLinks = normalizeYandexOrgUrls((linkRows ?? []).map((r) => String((r as { link?: unknown }).link ?? '')).filter(Boolean));
     const links = strictMaxResults ? normalizedLinks.slice(0, maxResultsLimit) : normalizedLinks;
     if (!links.length) {
-      await setJobPatch(jobId, { status: 'failed', error_message: 'Нет ссылок организаций (сначала соберите ссылки)' });
+      await patchOwned({ status: 'failed', error_message: 'Нет ссылок организаций (сначала соберите ссылки)' });
       await trace?.fail(new Error('Missing links'));
       return;
     }
@@ -667,7 +681,8 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
     const { data: existingOrgRows, error: existingOrgError } = await supabaseAdmin
       .from('yandex_maps_organizations')
       .select('card_url')
-      .eq('job_id', jobId);
+      .eq('job_id', jobId)
+      .abortSignal(AbortSignal.timeout(15_000));
     if (existingOrgError) throw new Error(existingOrgError.message);
 
     const parsedCardUrls = new Set(
@@ -677,10 +692,10 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
     );
     const remainingLinks = links.filter((link) => !parsedCardUrls.has(link));
 
-    await setJobPatch(jobId, {
+    await patchOwned({
       status: 'running',
       progress_stage: 'parsing_organizations',
-      started_at: job.started_at ?? new Date().toISOString(),
+      started_at: runStartedAt,
       processed_organizations: parsedCardUrls.size,
       total_organizations: links.length,
       error_message: null,
@@ -689,21 +704,16 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
     const serviceHealthy = await waitForYandexMapsHealth();
     if (!serviceHealthy) {
       const msg = 'Сервис yandexmaps недоступен (не поднялся за минуту). Проверьте, что контейнер yandexmaps запущен.';
-      await setJobPatch(jobId, { status: 'failed', error_message: msg });
+      await patchOwned({ status: 'failed', error_message: msg });
       await trace?.fail(new Error(msg));
       void logError('parser.yandexmaps.parse.health_failed', new Error(msg), { jobId }, logMeta);
       return;
     }
 
-    // Chunk size 15 → 5 (28.07.2026): при медленных прокси (US→RU, 60-90с
-    // на карточку) чанк из 15 карт занимал 15+ мин и упирался в
-    // PARSE_TIMEOUT_SEC=900 в python-сервисе. Одновременно watchdog
-    // (тоже 15 мин по updated_at, обновляется только МЕЖДУ чанками) фейлил
-    // задачу как «зомби». Race: PARSE_TIMEOUT == WATCHDOG_THRESHOLD.
-    // Chunk size 5 → максимум 5×90с = 7.5 мин на чанк, updated_at
-    // обновляется в 3× чаще, watchdog никогда не догоняет. Env-override для
-    // быстрого регулирования без rebuild.
-    const chunkSize = Number(process.env.YANDEXMAPS_PARSE_CHUNK_SIZE ?? '5');
+    // Keep the existing five-card batches. Liveness is now independent of
+    // a batch finishing; the service also bounds queue + browser startup time.
+    const rawChunkSize = Number(process.env.YANDEXMAPS_PARSE_CHUNK_SIZE ?? '5');
+    const chunkSize = Number.isInteger(rawChunkSize) && rawChunkSize > 0 ? rawChunkSize : 5;
     const chunks = chunk(remainingLinks, chunkSize);
 
     // Тот же фильтр по скорости, что и на сборе ссылок: карточки организаций
@@ -713,7 +723,7 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
       const probe = await probeProxyPool(jobId, logMeta);
       if (probe.checked && probe.filtered.length === 0) {
         const msg = slowProxyMessage(probe.report);
-        await setJobPatch(jobId, {
+        await patchOwned({
           status: 'failed',
           error_message: msg,
           progress_stage: 'proxy_too_slow',
@@ -740,17 +750,11 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
     // но следующие уже норм. Максимум N попыток на чанк = пул + 1 запас.
     const maxProxyRetries = Math.max(1, parseProxyPoolSize) + 1;
 
-    // Параллелизм чанков (16.07.2026). Раньше 15-карточные чанки шли строго
-    // один за другим — при 8-16 сек на карточку × 15 = 2-4 мин на чанк, а
-    // всего чанков сотни. Основной пожиратель времени (25 ч на 15к орг).
-    // Теперь до N чанков одновременно, каждый через свой прокси. Дефолт 5 =
-    // размер текущего пула прокси; больше = два потока полезут через один IP
-    // и Яндекс забанит. Если пул подрастёт до 8-10 — поднимаем через env.
-    // Верхняя граница гейтится python-семафором PARSE_CONCURRENCY (тоже 5).
-    // Если у job СВОЙ прокси (не пул) — тот же ограничитель, что в collect:
-    // N параллельных сессий через один IP → мгновенный бан. Ставим 1.
-    const chunkConcurrencyEnv = Number(process.env.YANDEXMAPS_PARSE_CHUNK_CONCURRENCY ?? '5');
-    const chunkConcurrency = job.proxy_enabled ? 1 : chunkConcurrencyEnv;
+    // Per-job producers are bounded too; the client has ONE shared FIFO
+    // aligned with /health's real service capacity, not N slots per base.
+    const chunkConcurrencyEnv = Number(process.env.YANDEXMAPS_PARSE_CHUNK_CONCURRENCY ?? '2');
+    const configuredConcurrency = Number.isInteger(chunkConcurrencyEnv) && chunkConcurrencyEnv > 0 ? chunkConcurrencyEnv : 2;
+    const chunkConcurrency = job.proxy_enabled ? 1 : Math.min(configuredConcurrency, Math.max(1, parseProxyPoolSize), 2);
     void logInfo(
       'parser.yandexmaps.parse.concurrency',
       'YandexMaps parse chunk concurrency',
@@ -785,8 +789,12 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
       let lastBlockedError: YandexMapsBlockedError | null = null;
       for (let attempt = 0; attempt < maxProxyRetries; attempt++) {
         if (parseCancelled) break;
+        let responseReceived = false;
         try {
-          const res = await yandexMapsParseOrgs({ links: part, headless, proxy: pickProxy(job, chunkIdx + attempt, activePool) });
+          await lease.check();
+          const res = await yandexMapsParseOrgs({ links: part, headless, proxy: pickProxy(job, chunkIdx + attempt, activePool) }, lease.signal);
+          responseReceived = true;
+          await lease.check();
           const orgs = res.organizations ?? [];
           const rows = orgs.map((o) => ({
             job_id: jobId,
@@ -809,7 +817,9 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
           }));
 
           if (rows.length) {
-            await supabaseAdmin!.from('yandex_maps_organizations').upsert(rows, { onConflict: 'job_id,card_url' });
+            const { error } = await supabaseAdmin!.from('yandex_maps_organizations')
+              .upsert(rows, { onConflict: 'job_id,card_url' }).abortSignal(AbortSignal.timeout(15_000));
+            if (error) throw new Error(`Не удалось сохранить организации: ${error.message}`);
           }
 
           if (orgs.length) {
@@ -826,7 +836,7 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
           processed += rows.length;
           // Прогресс теперь по числу ЗАВЕРШЁННЫХ чанков — с параллелизмом
           // «i-й в порядке индекса» уже не отражает реальный прогресс.
-          await setJobPatch(jobId, {
+          await patchOwned({
             processed_organizations: processed,
             progress_stage: `parsing_organizations:${recentOutcomes.length + 1}/${chunks.length}`,
           });
@@ -835,6 +845,10 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
           success = true;
           break;
         } catch (e) {
+          if (lease.signal.aborted || e instanceof YandexMapsJobStoppedError) throw lease.signal.reason ?? e;
+          // Persistence errors are not proxy failures. Preserve the previous
+          // checkpoint and stop; do not fetch and count this batch twice.
+          if (responseReceived) throw e;
           if (e instanceof YandexMapsBlockedError) {
             lastBlockedError = e;
             void logWarn(
@@ -864,31 +878,30 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
         if (isBlockedSpree() && !parseCancelled) {
           parseCancelled = true;
           blockedStopError = lastBlockedError;
+          lease.abort(lastBlockedError);
         }
       } else {
         recentOutcomes.push('failed');
-        // Не-блокировочная ошибка через все прокси — грустно, но
-        // продолжаем: другие чанки могут пройти.
+        throw new Error(`Не удалось обработать пачку карточек после ${maxProxyRetries} попыток. Сохранённые организации не потеряны — продолжите парсинг позже.`);
       }
     };
 
     const runChunkWorker = async () => {
-      while (!parseCancelled) {
-        const my = chunkQueueIdx++;
-        if (my >= chunks.length) return;
-        // Проверяем cancel из БД раз в 3 чанка (юзер мог нажать «Остановить»).
-        if (my % 3 === 0) {
-          const current = await getJob(jobId);
-          if (current?.status === 'failed') {
-            parseCancelled = true;
-            return;
-          }
+      try {
+        while (!parseCancelled) {
+          const my = chunkQueueIdx++;
+          if (my >= chunks.length) return;
+          await processChunk(my);
         }
-        await processChunk(my);
+      } catch (error) {
+        lease.abort(error instanceof Error ? error : new Error(String(error)));
+        throw error;
       }
     };
 
-    await Promise.all(
+    // Drain cancelled siblings before returning/finalizing. They must not
+    // keep writing while this run is already marked failed or resumed.
+    const outcomes = await Promise.allSettled(
       Array.from({ length: Math.min(chunkConcurrency, chunks.length) }, () => runChunkWorker()),
     );
 
@@ -898,7 +911,7 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
         `Яндекс временно заблокировал наши прокси. ` +
         `Уже сохранено ${processed} из ${totalOrgs} организаций — они никуда не денутся. ` +
         `Подождите 15–20 минут (IP прокси меняются каждые 2 минуты) и нажмите «Продолжить парсинг» — работа возобновится с того же места.`;
-      await setJobPatch(jobId, {
+      await patchOwned({
         status: 'failed',
         error_message: msg,
         progress_stage: 'yandex_blocked',
@@ -915,13 +928,14 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
       return;
     }
 
-    if (parseCancelled) {
-      // Юзер отменил задачу (status уже 'failed' в БД). Не перезаписываем.
-      await trace?.cancel('Cancelled');
-      return;
+    const rejected = outcomes.find((outcome) => outcome.status === 'rejected');
+    if (rejected?.status === 'rejected') throw rejected.reason;
+    await lease.check();
+    if (recentOutcomes.some((outcome) => outcome !== 'ok')) {
+      throw new Error(`Не все карточки удалось обработать. Сохранено ${processed} из ${links.length} организаций. Продолжите парсинг с сохранённого места.`);
     }
 
-    await setJobPatch(jobId, {
+    await patchOwned({
       status: 'completed',
       progress_stage: 'completed',
       completed_at: new Date().toISOString(),
@@ -930,9 +944,20 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
     await trace?.end({ processed_links: processed });
     void logInfo('parser.yandexmaps.parse.complete', 'YandexMaps parse-orgs completed', { jobId }, logMeta);
   } catch (e) {
-    await setJobPatch(jobId, { status: 'failed', error_message: e instanceof Error ? e.message : 'Ошибка' });
+    if (e instanceof YandexMapsJobStoppedError) {
+      await trace?.cancel('Stopped or superseded');
+      return;
+    }
+    try {
+      await patchRunning({ status: 'failed', error_message: e instanceof Error ? e.message : 'Ошибка', completed_at: new Date().toISOString() });
+    } catch (saveError) {
+      // Do not escape into collect's unguarded catch and overwrite a new run.
+      void logError('parser.yandexmaps.parse.failure_save_failed', saveError, { jobId }, logMeta);
+    }
     await trace?.fail(e);
     void logError('parser.yandexmaps.parse.failed', e, { jobId }, logMeta);
+  } finally {
+    lease.stop();
   }
 }
 

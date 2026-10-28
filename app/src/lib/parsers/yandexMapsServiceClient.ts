@@ -1,4 +1,5 @@
 import { Agent as UndiciAgent } from 'undici';
+import { yandexMapsParseQueue } from './yandexMapsParseQueue';
 
 export type YandexMapsProxy = {
   enabled?: boolean;
@@ -137,22 +138,30 @@ async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs: num
   }
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const url = `${getServiceUrl()}${path}`;
   const timeoutMs = getTimeoutMs();
-  const maxRetries = getMaxRetries();
+  // Parse retries belong to the job's proxy loop. Nested retries used to hold
+  // a slot for 3 × 990s before that loop could notice a cancelled/failed job.
+  const maxRetries = path === '/parse-orgs' ? 0 : getMaxRetries();
   let lastErr: unknown;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    signal?.throwIfAborted();
+    const controller = new AbortController();
+    const abort = () => controller.abort(signal?.reason);
+    signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetchWithTimeout(
+      const res = await fetch(
         url,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
-        },
-        timeoutMs,
+          dispatcher: getLongPollDispatcher(),
+          signal: controller.signal,
+        } as RequestInit,
       );
 
       if (!res.ok) {
@@ -169,11 +178,16 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 
       return (await res.json()) as T;
     } catch (err) {
+      signal?.throwIfAborted();
       if (err instanceof YandexMapsServiceHttpError) throw err;
       if (err instanceof YandexMapsBlockedError) throw err;
       lastErr = err;
       if (attempt >= maxRetries) break;
       await sleep(250 * Math.pow(2, attempt));
+    } finally {
+      // Include reading the response body, not only receiving its headers.
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
     }
   }
 
@@ -184,11 +198,19 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 
 export async function yandexMapsHealth(): Promise<boolean> {
   const url = `${getServiceUrl()}/health`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.min(getTimeoutMs(), 15000));
   try {
-    const res = await fetchWithTimeout(url, { method: 'GET' }, Math.min(getTimeoutMs(), 15000));
+    const res = await fetch(url, { method: 'GET', signal: controller.signal });
+    if (res.ok) {
+      const health = await res.json() as { parse_concurrency?: unknown };
+      yandexMapsParseQueue.setCapacity(health.parse_concurrency);
+    }
     return res.ok;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -334,7 +356,9 @@ export async function yandexMapsCollectLinksStream(
   return { links: allLinks, total, intlRedirect };
 }
 
-export async function yandexMapsParseOrgs(req: ParseOrgsRequest): Promise<ParseOrgsResponse> {
-  return await postJson<ParseOrgsResponse>('/parse-orgs', req);
+export async function yandexMapsParseOrgs(req: ParseOrgsRequest, signal?: AbortSignal): Promise<ParseOrgsResponse> {
+  // Waiting here does not consume HTTP/browser slots. /health reports the
+  // actual server capacity, including its legacy environment override.
+  return yandexMapsParseQueue.run(() => postJson<ParseOrgsResponse>('/parse-orgs', req, signal), signal);
 }
 

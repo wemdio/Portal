@@ -3,7 +3,7 @@ import json
 import os
 from typing import Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from playwright.async_api import async_playwright
 from pydantic import BaseModel, Field
@@ -142,7 +142,8 @@ def _org_to_model(org: Organization) -> OrganizationModel:
 
 @app.get("/health")
 async def health():
-  return {"ok": True}
+  # The worker must use the effective capacity, including the legacy override.
+  return {"ok": True, "parse_concurrency": PARSE_CONCURRENCY}
 
 
 class ProxyCheckRequest(BaseModel):
@@ -318,30 +319,62 @@ async def collect_links_stream(req: CollectLinksRequest):
   return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
-@app.post("/parse-orgs", response_model=ParseOrgsResponse)
-async def parse_orgs(req: ParseOrgsRequest):
+# Strong references keep cancelled requests alive until bounded cleanup has
+# closed their browser and released the slot (also after client disconnect).
+_PARSE_TASKS: set[asyncio.Task] = set()
+
+
+async def _parse_with_capacity(req: ParseOrgsRequest):
   async with _PARSE_SEMAPHORE:
     parser = YandexMapsParser(proxy_settings=_to_proxy_settings(req.proxy), headless=req.headless)
     try:
       await parser.start()
-      orgs = await asyncio.wait_for(
-        parser.parse_organizations_from_links(req.links),
-        timeout=PARSE_TIMEOUT_SEC,
-      )
+      orgs = await parser.parse_organizations_from_links(req.links)
       return ParseOrgsResponse(organizations=[_org_to_model(o) for o in orgs])
-    except asyncio.TimeoutError:
-      parser.stop()
-      raise HTTPException(status_code=504, detail=f"parse-orgs timed out after {PARSE_TIMEOUT_SEC}s")
-    except YandexBlockedError as e:
-      raise HTTPException(status_code=429, detail=f"yandex_blocked: {e}")
-    except ProxyNetworkError as e:
-      # Прокси сдох (ERR_TUNNEL_CONNECTION_FAILED и т.п.) — быстрый сигнал
-      # JS-воркеру, чтобы он ретрайнул чанк через следующий прокси из пула,
-      # а не ждал 12 пустых карточек подряд (~13 мин). 502 Bad Gateway — по
-      # смыслу «промежуточный шлюз (прокси) не отвечает». Воркер уже ловит
-      # любой не-blocked HTTP-код как generic error → следующий прокси.
-      raise HTTPException(status_code=502, detail=f"proxy_broken: {e}")
-    except Exception as e:
-      raise HTTPException(status_code=500, detail=str(e))
     finally:
-      await parser.close()
+      parser.stop()
+      try:
+        await asyncio.wait_for(parser.close(), timeout=10)
+      except Exception:
+        # Even a broken browser.close() must not leak the semaphore forever.
+        pass
+
+
+async def _wait_for_disconnect(request: Request):
+  while not await request.is_disconnected():
+    await asyncio.sleep(0.5)
+
+
+def _parse_task_finished(task: asyncio.Task):
+  _PARSE_TASKS.discard(task)
+  if not task.cancelled():
+    task.exception()  # Consume a failure even when the client already left.
+
+
+@app.post("/parse-orgs", response_model=ParseOrgsResponse)
+async def parse_orgs(req: ParseOrgsRequest, request: Request):
+  # One deadline covers semaphore wait AND browser startup AND parsing.
+  # Previously only parsing was timed, so abandoned requests queued forever.
+  operation = asyncio.create_task(asyncio.wait_for(_parse_with_capacity(req), timeout=PARSE_TIMEOUT_SEC))
+  _PARSE_TASKS.add(operation)
+  operation.add_done_callback(_parse_task_finished)
+  disconnected = asyncio.create_task(_wait_for_disconnect(request))
+  try:
+    done, _ = await asyncio.wait({operation, disconnected}, return_when=asyncio.FIRST_COMPLETED)
+    if operation not in done:
+      raise HTTPException(status_code=499, detail="parse-orgs client disconnected")
+    return await operation
+  except asyncio.TimeoutError:
+    raise HTTPException(status_code=504, detail=f"parse-orgs timed out after {PARSE_TIMEOUT_SEC}s (including queue/startup)")
+  except YandexBlockedError as e:
+    raise HTTPException(status_code=429, detail=f"yandex_blocked: {e}")
+  except ProxyNetworkError as e:
+    raise HTTPException(status_code=502, detail=f"proxy_broken: {e}")
+  except HTTPException:
+    raise
+  except Exception as e:
+    raise HTTPException(status_code=500, detail=str(e))
+  finally:
+    disconnected.cancel()
+    if not operation.done():
+      operation.cancel()

@@ -11,11 +11,8 @@ import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdo
 const HEARTBEAT_PATH = process.env.YANDEXMAPS_WORKER_HEARTBEAT_PATH ?? '/tmp/yandexmaps-worker-heartbeat';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
-// MAX_CONCURRENCY поднят 2 → 4 (16.07.2026): каждая yandex-задача внутри себя
-// параллелит до 6 чанков парсинга (см. yandexMapsWorker.ts), а глобальный
-// python-семафор PARSE_CONCURRENCY (6-8) не даст переполнить сервис. Итого
-// на app-сервер держим ≤ 8 одновременных chromium-контекстов, ~2 ГБ RAM.
-// Если сервер слабее — снизить через env WORKER_YANDEXMAPS_CONCURRENCY.
+// Job capacity is separate from browser capacity. All parse jobs share the
+// client's FIFO, limited by the actual capacity advertised by the service.
 const MAX_CONCURRENCY = Number(process.env.WORKER_YANDEXMAPS_CONCURRENCY ?? '4');
 const WORKER_ID = `yandexmaps-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
@@ -134,7 +131,9 @@ async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'p
     .limit(1)
     .maybeSingle();
 
-  if (!pending) return null;
+  // A manual retry can appear while the old run is still aborting its HTTP
+  // request. Let that run drain before claiming the same id again.
+  if (!pending || runningJobs.has(String(pending.id))) return null;
 
   const { data: claimed } = await db
     .from('yandex_maps_jobs')
@@ -206,7 +205,9 @@ async function pollOnce(): Promise<boolean> {
     }
   })();
   runningJobs.set(job.id, task);
-  void task.finally(() => runningJobs.delete(job.id));
+  void task.finally(() => {
+    if (runningJobs.get(job.id) === task) runningJobs.delete(job.id);
+  });
   return true;
 }
 
