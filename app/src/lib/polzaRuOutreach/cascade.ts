@@ -23,6 +23,14 @@ export const PRODUCT_LABELS: Record<Product, string> = {
   auto: 'Автоаутрич',
 };
 
+/** Короткие названия для таблицы результатов и блоков настроек папки. */
+export const PRODUCT_SHORT_LABELS: Record<Product, string> = {
+  sdr: 'СДР',
+  classic: 'Классика РФ/СНГ',
+  classic_abroad: 'Классика за рубеж',
+  auto: 'Автоаутрич',
+};
+
 /**
  * Что предлагает продукт и к чему ведёт разговор о нём — одно описание на связку
  * письма 1 (letters/bridge.ts) и на ИИ-собеседника (senderAiQualifier/ai.ts):
