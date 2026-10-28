@@ -634,6 +634,9 @@ const SUBSTANTIVE_OFFER_SIGNAL_PATTERNS = [
   // is still just a contact opener, regardless of its length or signature.
   /\bwe(?:['’]ll|\s+(?:will|can))\s+(?:bring|deliver|generate|book|secure)\b[^.!?\n]{0,80}\b(?:leads|meetings|appointments|sales\s+opportunities|customers|clients)\b/i,
 ];
+// This short functional description supports an explicit request for materials,
+// not a generic address confirmation. A line wrap cannot detach "Не\nмогу".
+const SELF_SERVICE_CONTENT_EXAMPLE_PATTERN = /(?:^|[.!?])\s*(?:>\s*)*(?:[Хх]очу|[Мм]огу|[Мм]ожем)\s+(?:направить|прислать|показать)\s+(?:(?:вам|ему|коллеге)\s+)?пример\s+системы,\s*в\s+которой\s+сотрудники\s+сами\s+(?:меняют|обновляют)\s+(?:контент|материалы)\s+без\s+обращения\s+к\s+разработчику(?:[.!](?=\s|$)|$)/u;
 const ROUTING_VERB_SOURCE = String.raw`(?:обратитесь|обращайтесь|позвоните|звоните|наберите|напишите|пишите|свяжитесь)`;
 // Только известные названия подразделений. Произвольное слово после «отдел»
 // опасно: «напишите в отдел заявку/КП» — уже отдельный CTA, а не название отдела.
@@ -1702,6 +1705,30 @@ function getPreReplyOutboundTexts(ctx: ThreadContext): string[] {
     .filter(Boolean);
 }
 
+/** SOC is a container type in a disclosed container-rental conversation, not
+ * a general keyword for interest. Match the whole authored product question
+ * and a concrete affirmative rental offer, never a signature or contact opener. */
+function isContainerRentalProductQuestion(ctx: ThreadContext, replyText: string): boolean {
+  const authoredReply = extractAuthoredReplyText(replyText);
+  // Read the punctuation before normalization removes it.
+  if (!/\?\s*$/u.test(authoredReply)) return false;
+  const offerTexts = [...getPreReplyOutboundTexts(ctx), extractQuotedText(replyText) ?? '']
+    .map(text => text.replace(/^\s*(?:>\s*)+/gm, ''));
+  let statement = normalizeDiscussionReadiness(authoredReply);
+  // Names outside the shared dictionary are framing only when the visible
+  // outbound signature independently identifies that name as our sender.
+  const addressed = /^([А-ЯЁ][а-яё-]{1,40}),\s+(.+)$/u.exec(statement);
+  if (addressed) {
+    const senderSignature = new RegExp(String.raw`(?:^|\n)\s*с\s+уважением[,.]?\s*\n+\s*${addressed[1]}(?=[\s,]|$)`, 'iu');
+    if (offerTexts.some(text => senderSignature.test(text))) statement = addressed[2];
+  }
+  if (!/^(?:вы\s+)?(?:предлагаете|сда[её]те)\s+(?:soc(?:[- ]?(?:контейнеры|и))?|соки)\s+(?:под|в)\s+аренду$/iu.test(statement)) return false;
+  const rentalOffer = /(?:^|[.!?])\s*(?:мы\s+(?:в\s+[\p{L}\p{N}.-]+\s+)?)?(?:быстро\s+)?(?:подбираем|предлагаем|предоставляем|сда[её]м)\s+контейнеры\s+(?:в\s+аренду|для\s+аренды)(?:\s+под\s+(?:конкретный|ваш)\s+маршрут)?(?::[^.!?]{1,200})?[.!](?=\s|$)/iu;
+  return offerTexts
+    // MIME line wrapping must not detach "не" from the following action.
+    .some(text => rentalOffer.test(text.replace(/\s+/gu, ' ').trim()));
+}
+
 function isReplyOnlySignature(replyText: string): boolean {
   const lines = replyText.replace(/\r\n?/g, '\n').split('\n').map(line => line.trim()).filter(Boolean);
   if (!lines.length || !SIGNATURE_BOUNDARY_PATTERN.test(lines[0])) return false;
@@ -2556,8 +2583,13 @@ function normalizeDefaultLeadSignals(
   const outboundTexts = getPreReplyOutboundTexts(ctx);
   const substantiveOutboundTexts = outboundTexts.filter(isSubstantiveOfferText);
   const quotedText = extractQuotedText(replyText) ?? '';
+  // Only the buyer's explicit material request gets this short CMS evidence.
+  // "You can send it to this address" remains with its existing routing rules.
+  const explicitCmsMaterialRequest = hasRequestedFollowupMaterials(authoredReply) &&
+    /(?:прислать|пришлите|присылайте|направить|направьте|отправить|отправьте)\s+материалы(?:[\s,.!;]|$)/iu.test(authoredReply) &&
+    [...outboundTexts, quotedText].some((text) => SELF_SERVICE_CONTENT_EXAMPLE_PATTERN.test(text));
   const confirmedProposal =
-    substantiveOutboundTexts.length > 0 || isSubstantiveOfferText(quotedText);
+    substantiveOutboundTexts.length > 0 || isSubstantiveOfferText(quotedText) || explicitCmsMaterialRequest;
   // The >=200-character positive heuristic is not a minimum offer length.
   // For a visible short offer candidate, retain AI's explicit interpretation;
   // a bare proposalSeen flag, the brief or a contact-only opener is not proof.
@@ -2737,6 +2769,8 @@ function buildSystemPrompt(
 - Оффер может быть коротким: важен понятный продукт/услуга и предложение для клиента, а не длина письма.
 - Названный продукт с конкретными функциями (например, система учёта заявок, ремонтов и запчастей) уже объясняет, что предлагается; обещание прислать информацию о таком продукте не превращает письмо в пустой поиск контакта. Ответ «направьте эту информацию мне» является запросом материалов; одно «я ответственный» без такого запроса — по-прежнему маршрутизация.
 - «Хочу обсудить привлечение прямых заказчиков / поиск корпоративных клиентов» вместе с вопросом «кто отвечает за продажи?» обозначает тему обращения, но само по себе НЕ объясняет нашу услугу. Не достраивай из брифа или подписи, что мы предлагаем платный лидогенерационный сервис. Для proposal_seen=true в полученном тексте должно быть понятно, что именно мы предлагаем сделать для адресата. Первое письмо может содержать полноценный оффер; номер шага рассылки не является критерием.
+- Краткое описание конкретной функции тоже раскрывает оффер: «хочу направить пример системы, в которой сотрудники сами меняют контент без обращения к разработчику» объясняет решение для управления мультимедийным контентом. Ответ «сейчас нет вопросов по мультимедийной части, но можете прислать материалы, посмотрим на будущее» после такого описания — лид с отложенным интересом, а не пустое первичное ознакомление. Не распространяй это на одно «свяжемся при необходимости», отказ получать материалы или неизвестную услугу.
+- Различай соседний случай: если в том же письме о примере системы мы ищем ответственного за мультимедиа и просим его почту или пересылку, одно «на эту почту можете направить» — только указание адреса (non_lead_kind="contact_routing", is_lead=false), а не собственный запрос материалов на будущее. Это не запрет для всех ответов «сюда»: согласие получить конкретно предложенную ассортиментную подборку или иной предметный результат оценивай по его контексту, а не как простую маршрутизацию.
 
 КОНКРЕТНЫЙ КОММЕРЧЕСКИЙ ЗАПРОС — ЭТО ЛИД:
 - Искренний запрос КП или коммерческого предложения, кроме общего ознакомительного запроса после известного пустого письма-знакомства (intro_request).
@@ -2775,6 +2809,7 @@ function buildSystemPrompt(
 - «расскажите подробнее» без конкретного следующего шага — ставь is_lead=false, needs_review=true.
 - Без подтверждённого оффера одиночное «интересно» остаётся неоднозначным: ставь is_lead=false, needs_review=true.
 - Запрос только первичного РАЗЪЯСНЕНИЯ («что вы предлагаете?», «о чём речь?», «что это за решение?», «в чём суть?»), в том числе через звонок, означает, что человек ещё не понял оффер: ставь non_lead_kind="intro_request", is_lead=false, needs_review=false. Не применяй это к предметному вопросу об описанном решении, согласованию конкретной деловой встречи или отдельному личному приглашению профильного ответственного «позвоните мне, обсудим» по правилу выше.
+- Учитывай отраслевой смысл терминов в уже раскрытом оффере: после предложения аренды контейнеров вопрос «вы предлагаете SOC / соки под аренду?» означает уточнение типа контейнеров и является лидом, non_lead_kind=null. Не трактуй его как вопрос о напитках или непонимание темы. Само слово SOC/«соки» без оффера аренды контейнеров, его пересказ, сарказм, отказ или встречная продажа не доказывают покупательского интереса.
 - Отличай общее разъяснение от ПРЕДМЕТНОГО вопроса о реализации описанного решения. «В какой системе?» после предложения настроить электронные транспортные документы, «С какой 1С работает?», «Есть интеграция с нашей CRM?» уточняют технические условия уже описанной услуги и являются интересом к ней: is_lead=true, needs_review=false. Название продукта, цена и длинная презентация для этого не обязательны. Но один поиск «кто отвечает за документы/IT?» без описания того, что мы предлагаем сделать, такого контекста не создаёт: не домысливай оффер из брифа или названия кампании.
 - Простое описание текущего порядка работы НЕ является таким вопросом: «Оплата только через банк ВТБ» после предложения платежного сервиса — is_lead=false, needs_review=false. Нельзя додумывать «готов купить, если работаете через ВТБ». Но «Сможете провести через наш банк?», «Готовы попробовать, если оплата через наш банк» или отдельный запрос цены — уже другие ответы: оцени их собственный интерес, не запрещай все упоминания банков/действующего подрядчика.
 - То же относится к факту «У нас 1С комплексная автоматизация»: это описание текущей системы, а не согласие на демо и не вопрос о совместимости. Не выдумывай ни интереса, ни несовместимости. «Ваше решение работает с нашей 1С?» — уже самостоятельный вопрос о предложенном решении. Фактический ответ внутри уже согласованного коммерческого обсуждения оценивай с его контекстом, а не как новый отказ по типу бизнеса.
@@ -3675,6 +3710,25 @@ function applyQualificationGuards(
     leadCriteria,
     replyText,
   );
+  // Correct only this unambiguous industry/product question. An introductory
+  // semantic label may have mistaken SOC for a different product; stronger
+  // machine/nonliteral/seller/service/routing exclusions and custom rules stay.
+  if (!leadCriteria?.trim() &&
+    (!criteriaAwareResult.nonLeadKind || criteriaAwareResult.nonLeadKind === 'intro_request') &&
+    isContainerRentalProductQuestion(ctx, replyText)) {
+    return {
+      ...criteriaAwareResult,
+      isLead: true,
+      nonLeadKind: null,
+      proposalSeen: true,
+      interestSignals: [...new Set([...criteriaAwareResult.interestSignals, 'вопрос о типе контейнеров в аренду'])],
+      reason: 'После предложения аренды контейнеров получатель задал предметный вопрос о SOC-контейнерах.',
+      confidence: Math.max(criteriaAwareResult.confidence, 0.95),
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+    };
+  }
   if (isProtectedSemanticIntent(criteriaAwareResult.nonLeadKind) && !criteriaAwareResult.customCriteriaMatched) {
     return semanticNonLead(criteriaAwareResult, criteriaAwareResult.nonLeadKind);
   }
