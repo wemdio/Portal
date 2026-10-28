@@ -608,6 +608,9 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                         {mailbox.status === 'failed' && mailbox.enabled ? (
                           <div className="mt-0.5 text-xs text-zinc-500">{recheckNote(mailbox.next_recheck_at)}</div>
                         ) : null}
+                        {mailbox.seed_watch ? (
+                          <div className="mt-0.5 text-xs text-zinc-500">Доставка проверяется каждый день</div>
+                        ) : null}
                         <SenderNameField
                           value={mailbox.display_name ?? ''}
                           onSave={(next) => act(mailbox.id, { displayName: next })}
@@ -743,6 +746,9 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                               disabled: probeBusy === mailbox.id,
                               onClick: () => void runProbe(mailbox),
                             },
+                            mailbox.seed_watch
+                              ? { label: 'Не проверять доставку', title: 'Снять ежедневные пробы на контрольные ящики', onClick: () => void act(mailbox.id, { seedWatch: false }) }
+                              : { label: 'Проверять доставку', title: 'Каждый день пробное письмо на контрольные ящики Gmail и Яндекса — без участия в рассылках', onClick: () => void act(mailbox.id, { seedWatch: true }) },
                             mailbox.enabled
                               ? { label: 'Не использовать', title: 'Снять ящик с рассылки', onClick: () => void act(mailbox.id, { action: 'disable' }) }
                               : { label: 'Использовать', title: 'Вернуть ящик в рассылку', onClick: () => void act(mailbox.id, { action: 'enable' }) },

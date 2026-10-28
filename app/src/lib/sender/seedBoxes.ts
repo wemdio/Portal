@@ -181,7 +181,8 @@ export async function readSeedProbesSince<T>(fromDay: string, columns: string): 
 let plannedDay: string | null = null;
 
 /**
- * План на день (ведущий воркер): каждому ящику идущих рассылок — по пробе на
+ * План на день (ведущий воркер): каждому ящику идущих рассылок и каждому
+ * ящику с отметкой «Проверять доставку» (`seed_watch`) — по пробе на
  * каждый сервис с рабочими контрольными ящиками. Контрольный ящик — по
  * очереди (меньше всего проб за 7 дней, не вчерашний). Время — случайно в
  * окне 10:00–17:00 МСК. Повторный запуск дублей не даёт: (day, mailbox, provider).
@@ -196,12 +197,8 @@ export async function planSeedProbes(opts: { log: Log; now?: Date }): Promise<vo
 
   const { data: campaigns } = await db.from('sender_campaigns').select('id').eq('status', 'running');
   const campaignIds = (campaigns ?? []).map((c) => String(c.id));
-  if (!campaignIds.length) {
-    plannedDay = day;
-    return;
-  }
   const linked = new Set<string>();
-  for (let from = 0; ; from += 1000) {
+  for (let from = 0; campaignIds.length; from += 1000) {
     const { data: links, error } = await db.from('sender_campaign_mailboxes').select('mailbox_id')
       .in('campaign_id', campaignIds).order('mailbox_id').order('campaign_id').range(from, from + 999);
     if (error) throw new Error(`ящики кампаний не прочитались: ${error.message}`);
@@ -209,16 +206,22 @@ export async function planSeedProbes(opts: { log: Log; now?: Date }): Promise<vo
     if (!links || links.length < 1000) break;
   }
   const linkedIds = [...linked];
-  const mailboxIds: string[] = [];
+  const mailboxIds = new Set<string>();
   for (let i = 0; i < linkedIds.length; i += 200) {
     const { data: rows } = await db.from('sender_mailboxes').select('id')
       .in('id', linkedIds.slice(i, i + 200)).eq('status', 'verified').eq('enabled', true);
-    mailboxIds.push(...(rows ?? []).map((r) => String(r.id)));
+    for (const row of rows ?? []) mailboxIds.add(String(row.id));
   }
+  // Почты продаж и другие ящики вне рассылок — по отметке «Проверять доставку».
+  // Галочка «использовать» им не нужна: выключенный ящик не попадает ни в
+  // рассылки, ни в опрос входящих, а пробы с него уходят.
+  const { data: watched } = await db.from('sender_mailboxes').select('id')
+    .eq('seed_watch', true).eq('status', 'verified');
+  for (const row of watched ?? []) mailboxIds.add(String(row.id));
 
   const { data: boxRows } = await db.from('sender_seed_boxes').select('id, provider').eq('status', 'ok').eq('enabled', true);
   const boxes = (boxRows ?? []) as { id: string; provider: SeedProvider }[];
-  if (!mailboxIds.length || !boxes.length) {
+  if (!mailboxIds.size || !boxes.length) {
     plannedDay = day;
     return;
   }
@@ -264,7 +267,7 @@ export async function planSeedProbes(opts: { log: Log; now?: Date }): Promise<vo
     if (error) throw new Error(`план проб не записался: ${error.message}`);
   }
   plannedDay = day;
-  opts.log('info', `Контрольные ящики: на ${day} запланировано проб ${rows.length} (ящиков ${mailboxIds.length})`);
+  opts.log('info', `Контрольные ящики: на ${day} запланировано проб ${rows.length} (ящиков ${mailboxIds.size})`);
 }
 
 /**
@@ -301,7 +304,7 @@ export async function sendDueSeedProbes(opts: { egressIp: string; log: Log }): P
       await fail('Контрольный ящик выключен или без входа');
       continue;
     }
-    if (!mailbox.enabled || mailbox.status !== 'verified') {
+    if ((!mailbox.enabled && !mailbox.seed_watch) || mailbox.status !== 'verified') {
       await fail('Ящик рассылки выключен или не прошёл проверку');
       continue;
     }

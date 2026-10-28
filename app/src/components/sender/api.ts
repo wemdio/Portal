@@ -15,6 +15,8 @@ export interface MailboxDto {
   google_account: string | null;
   /** Адрес отправки, за которым закреплён ящик; null — выдаётся автоматически. */
   egress_ip: string | null;
+  /** «Проверять доставку»: ежедневные пробы на контрольные ящики вне рассылок. */
+  seed_watch?: boolean;
   email: string;
   display_name: string | null;
   username: string;
