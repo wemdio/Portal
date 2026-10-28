@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { buildMessageId } from '@/lib/mail/message';
+import { loadRecipientProduct } from '@/lib/polzaRuOutreach/rowProduct';
 import { withHistory } from '@/lib/agencyLeadHandoff/process';
 import { loadHandoffSettings } from '@/lib/agencyLeadHandoff/settings';
 import { isWithinWindow, nextWindowSlot, type SendWindow } from '@/lib/sender/sendWindow';
 import { cancelPendingMessages, markUnsubscribed, suppressEmails } from '@/lib/sender/unsubscribe';
 import { stripQuoted } from '@/lib/senderLeads/telegram';
 import type { Log } from '@/lib/senderLeads/process';
-import { aiQualifierConfig, requestAiStep, type AiPromptInput } from './ai';
+import { aiQualifierConfig, productPitchOf, requestAiStep, type AiPromptInput } from './ai';
 import { hasOpenAmoDeal } from './amo';
 import { closeReasonOf, decideStep, reminderDueAt, replyDueAt } from './decide';
 import { AI_LETTER_CANCELLED, MAX_AI_ATTEMPTS, MAX_AI_LETTERS, type AiConversationRow, type AiFolderKey, type AiState } from './types';
@@ -36,6 +37,8 @@ interface FolderRow {
   ai_enabled: boolean;
   ai_enabled_at: string | null;
   ai_offer_text: string | null;
+  /** Короткие КП по продуктам (ключ — продукт); у auto_en пусто. */
+  ai_offer_texts: unknown;
   leads_enabled: boolean;
   leads_telegram: boolean;
 }
@@ -69,7 +72,7 @@ export interface AiPassResult {
   closed: number;
 }
 
-const FOLDER_SELECT = 'id, key, timezone, send_hour_from, send_hour_to, send_weekdays, ai_enabled, ai_enabled_at, ai_offer_text, leads_enabled, leads_telegram';
+const FOLDER_SELECT = 'id, key, timezone, send_hour_from, send_hour_to, send_weekdays, ai_enabled, ai_enabled_at, ai_offer_text, ai_offer_texts, leads_enabled, leads_telegram';
 const REPLY_SELECT = 'id, recipient_id, from_email, subject, body, message_id, received_at, created_at';
 const RECIPIENT_SELECT = 'id, email, status, mailbox_id, lead_verdict, lead_verdict_source, reply_language, sender_mailboxes(email)';
 /** Письмо ИИ в «sending» дольше этого — считаем, что отправка оборвалась. */
@@ -109,6 +112,28 @@ async function loadAiFolders(db: SupabaseClient): Promise<{ folders: Map<string,
   if (campaignError) throw new Error(`sender_campaigns: ${campaignError.message}`);
   for (const c of (campaigns ?? []) as Array<{ id: string; folder_id: string }>) campaignFolder.set(c.id, c.folder_id);
   return { folders, campaignFolder };
+}
+
+/**
+ * «Короткое КП» и описание предложения для промпта. Русский автоаутрич (auto_ru):
+ * текст того продукта, который предлагали этому получателю, а если его нет —
+ * общее «Короткое КП» папки; прогрев к встрече — и для строк до каскада (продукта
+ * нет). Английский автоаутрич — как раньше. Сбой чтения продукта — исключение:
+ * ход повторится, а не уйдёт с КП не того продукта.
+ */
+export async function offerContextFor(
+  db: SupabaseClient,
+  folder: { key: string; ai_offer_text: string | null; ai_offer_texts: unknown },
+  recipientId: string,
+): Promise<Pick<AiPromptInput, 'offerText' | 'cascade' | 'productPitch'>> {
+  const general = folder.ai_offer_text ?? '';
+  if (folder.key !== 'auto_ru') return { offerText: general, cascade: false, productPitch: null };
+  const offered = await loadRecipientProduct(db, recipientId);
+  if (!offered) return { offerText: general, cascade: true, productPitch: null };
+  const texts = folder.ai_offer_texts;
+  const own = texts && typeof texts === 'object' && !Array.isArray(texts) ? (texts as Record<string, unknown>)[offered.product] : null;
+  const text = typeof own === 'string' ? own.trim() : '';
+  return { offerText: text || general, cascade: true, productPitch: productPitchOf(offered.product) };
 }
 
 /** Ответил ли оператор с портала: ручное письмо, не автопередача, не передача клиенту и не ИИ. */
@@ -334,7 +359,7 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
 
   const step = await requestAiStep(cfg, {
     language, mode, history, aiMessages: conv.ai_messages,
-    offerText: folder.ai_offer_text ?? '', ccEmail: cc[0] ?? null,
+    ...await offerContextFor(db, folder, conv.recipient_id), ccEmail: cc[0] ?? null,
   });
   const decision = decideStep(step, { aiMessages: conv.ai_messages, stopRequested: step.stopRequested });
   const processed = { last_reply_id: newest.id, attempts: 0 };
