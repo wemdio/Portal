@@ -4,7 +4,7 @@ import { buildMessageId } from '@/lib/mail/message';
 import { withHistory } from '@/lib/agencyLeadHandoff/process';
 import { loadHandoffSettings } from '@/lib/agencyLeadHandoff/settings';
 import { isWithinWindow, nextWindowSlot, type SendWindow } from '@/lib/sender/sendWindow';
-import { unsubscribeRecipient } from '@/lib/sender/unsubscribe';
+import { cancelPendingMessages, markUnsubscribed, suppressEmails } from '@/lib/sender/unsubscribe';
 import { stripQuoted } from '@/lib/senderLeads/telegram';
 import type { Log } from '@/lib/senderLeads/process';
 import { aiQualifierConfig, requestAiStep, type AiPromptInput } from './ai';
@@ -351,14 +351,14 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
       ctx.result.letters += 1;
     }
     // Просьба не писать, которую понял ИИ, — тот же отказ, что стоп-слово в repliesWorker:
-    // адрес в общий стоп-лист, получатель отписан, письма в очереди отменены. До закрытия:
-    // не записалось — ход считается сбойным и повторится, разговор остаётся открытым.
+    // адрес в общий стоп-лист, письма в очереди отменены, получатель отписан. До закрытия
+    // разговора и по шагам: любой сбой — ход сбойный и повторится, разговор остаётся открытым.
+    // Статус получателя ставится последним: по нему повтор (CLOSED_RECIPIENT) считает дело
+    // сделанным, значит, стоп-лист и очередь к этому моменту уже записаны.
     if (step.stopRequested) {
-      const failed = await unsubscribeRecipient(db, {
-        recipientId: conv.recipient_id,
-        emails: [leadAddress, recipient.email],
-        note: 'ИИ: просьба не писать',
-      });
+      const failed = await suppressEmails(db, [leadAddress, recipient.email], 'ИИ: просьба не писать')
+        ?? await cancelPendingMessages(db, conv.recipient_id)
+        ?? await markUnsubscribed(db, conv.recipient_id);
       if (failed) throw new Error(`стоп-лист: ${failed}`);
     }
     await patchConversation(db, conv.recipient_id, {

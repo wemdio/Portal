@@ -14,7 +14,7 @@ import {
   isStopRequest,
 } from './replyClassify';
 import type { MailboxRow, ReplyKind } from './types';
-import { cancelPendingMessages as cancelScheduledMessages, unsubscribeRecipient } from './unsubscribe';
+import { cancelPendingMessages, unsubscribeRecipient } from './unsubscribe';
 
 /**
  * Опрос входящих по подключённым ящикам: складываем ответы, связываем их с
@@ -164,12 +164,6 @@ async function wasEverContacted(email: string | null): Promise<boolean> {
   return Boolean(sameCompany?.length);
 }
 
-/** Отменяет ещё не отправленные письма лида: после ответа дожимать нельзя. */
-async function cancelPendingMessages(recipientId: string): Promise<void> {
-  if (!supabaseAdmin) return;
-  await cancelScheduledMessages(supabaseAdmin, recipientId);
-}
-
 async function applyReply(params: {
   kind: ReplyKind;
   recipientId: string | null;
@@ -204,7 +198,7 @@ async function applyReply(params: {
       .from('sender_recipients')
       .update({ status: 'replied', replied_at: nowIso, next_step_at: null, updated_at: nowIso })
       .eq('id', params.recipientId);
-    await cancelPendingMessages(params.recipientId);
+    await cancelPendingMessages(db, params.recipientId);
     return;
   }
 
@@ -230,7 +224,7 @@ async function applyReply(params: {
         .from('sender_recipients')
         .update({ status: 'bounced', next_step_at: null, updated_at: nowIso })
         .eq('id', recipientId);
-      await cancelPendingMessages(recipientId);
+      await cancelPendingMessages(db, recipientId);
     }
   }
 }
