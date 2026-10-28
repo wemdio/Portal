@@ -20,7 +20,8 @@
  * 2026-09-26-outreach-to-sender-design.md §4). Цепочки отсюда — образец тона и
  * структуры для писателя: он получает их собранными на плейсхолдерах. Под
  * компанию по-прежнему считаются здесь фраза-повод (openingSentence) и
- * гипотеза сегментов (buildSegmentsHypothesis).
+ * гипотеза сегментов (buildSegmentsHypothesis). С 29.10.2026 шаблон пишется на
+ * продукт каскада, и образец писателя — тексты продуктов (fixedTemplates.ts).
  */
 
 import { wordCount } from '../evidence';
@@ -76,7 +77,8 @@ export function openingSentence(input: ChainInput, brand: string): string | null
   const s = input.signal;
   switch (input.chain) {
     case 'reactivation':
-      return input.priorContact ? 'Мы с вами уже общались по поводу email-аутрича.' : null;
+      // Без «аутрича»: получатель этого слова не знает (CEO), а фраза открывает каждое письмо возврата.
+      return input.priorContact ? 'Мы с вами уже общались по поводу поиска новых клиентов через письма.' : null;
     case 'hiring': {
       if (!s) return null;
       const quote = s.quote && s.level === 'A' && wordCount(s.quote) <= 20 ? ` В вакансии указано: «${s.quote}».` : '';
@@ -247,7 +249,6 @@ function closingLetter(s: LetterContext['sender']): Letter {
     body: signed(
       paragraphs(
         'Добрый день!',
-        'Это последнее письмо, дальше не побеспокою.',
         'Если этим занимается коллега, подскажите, кому переслать. Если тема не ко времени, так и напишите — вернусь позже.',
         'Тема сейчас актуальна?',
       ),

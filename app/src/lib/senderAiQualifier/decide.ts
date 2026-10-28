@@ -1,7 +1,7 @@
 import { nextWindowSlot, zonedParts, type SendWindow } from '@/lib/sender/sendWindow';
 import {
   MAX_AI_LETTERS, REMINDER_BUSINESS_DAYS, REPLY_DELAY_MS,
-  type AiDecision, type AiStep,
+  type AiCloseReason, type AiDecision, type AiStep,
 } from './types';
 
 /**
@@ -73,6 +73,17 @@ export function decideStep(step: AiStep, ctx: { aiMessages: number; stopRequeste
   if (ctx.aiMessages >= MAX_AI_LETTERS) return { kind: 'no_reply' };
   if (!step.reply) throw new Error('Модель не написала письмо');
   return { kind: 'reply', letter: step.reply };
+}
+
+/**
+ * Причина закрытия разговора. Просьба не писать сильнее всего (как в decideStep),
+ * затем встречное предложение, затем отказ; прочие закрытия причины не имеют.
+ */
+export function closeReasonOf(step: AiStep): AiCloseReason | null {
+  if (step.stopRequested) return 'stop';
+  if (step.outcome === 'counter_offer') return 'counter_offer';
+  if (step.relevant === 'no') return 'decline';
+  return null;
 }
 
 /** Через `days` рабочих дней (пн–пт в поясе папки) в то же время суток. */

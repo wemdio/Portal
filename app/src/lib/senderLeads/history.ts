@@ -1,5 +1,15 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { AI_OFFER_TEXT_MAX, DEFAULT_LEAD_CRITERIA, LEAD_CRITERIA_MAX, isDefaultLeadCriteria } from './settings';
+import { PRODUCTS, PRODUCT_SHORT_LABELS } from '@/lib/polzaRuOutreach/cascade';
+import {
+  AI_OFFER_TEXT_MAX,
+  DEFAULT_LEAD_CRITERIA,
+  LEAD_CRITERIA_MAX,
+  PRODUCT_OFFER_FOLDER,
+  isDefaultLeadCriteria,
+  parseKpLink,
+  readProductTexts,
+  type ProductTexts,
+} from './settings';
 
 /**
  * Вкладка «Квалификация» автоаутрича: история оценок ответов папки и её
@@ -69,6 +79,10 @@ export interface LeadSettingsDto {
   aiEnabled: boolean;
   /** «Короткое КП» — единственный источник цен и кейсов для писем ИИ. */
   aiOfferText: string;
+  /** Короткие КП по продуктам каскада (auto_ru); продукта нет — ИИ берёт общее «Короткое КП». */
+  aiOfferTexts: ProductTexts;
+  /** Ссылки на КП по продуктам (auto_ru): https, уходят менеджеру в сообщении о лиде. */
+  kpLinks: ProductTexts;
 }
 
 export interface LeadSettingsInput {
@@ -77,6 +91,10 @@ export interface LeadSettingsInput {
   criteria: string;
   aiEnabled?: boolean;
   aiOfferText?: string;
+  /** Нет в запросе — тексты по продуктам не трогаем; только для auto_ru. */
+  aiOfferTexts?: ProductTexts;
+  /** Нет в запросе — ссылки не трогаем; только для auto_ru. */
+  kpLinks?: ProductTexts;
 }
 
 /** Метка переписки и последняя оценка ИИ — для окна переписки в «Рассылке». */
@@ -116,9 +134,12 @@ interface FolderLeadRow {
   leads_telegram: boolean;
   ai_enabled: boolean;
   ai_offer_text: string | null;
+  ai_offer_texts: unknown;
+  kp_links: unknown;
 }
 
-export const FOLDER_LEAD_SELECT = 'id, name, lead_criteria, leads_enabled, leads_telegram, ai_enabled, ai_offer_text';
+export const FOLDER_LEAD_SELECT =
+  'id, name, lead_criteria, leads_enabled, leads_telegram, ai_enabled, ai_offer_text, ai_offer_texts, kp_links';
 
 export async function findFolderByKey(db: SupabaseClient, key: string): Promise<FolderLeadRow | null> {
   const { data, error } = await db
@@ -133,7 +154,10 @@ export async function findFolderByKey(db: SupabaseClient, key: string): Promise<
 export function settingsDto(folder: FolderLeadRow | null): LeadSettingsDto {
   // Своего правила нет — показываем пересказ общих правил, а не пустое поле.
   if (!folder) {
-    return { folderExists: false, folderName: null, enabled: true, telegram: true, criteria: DEFAULT_LEAD_CRITERIA, aiEnabled: false, aiOfferText: '' };
+    return {
+      folderExists: false, folderName: null, enabled: true, telegram: true, criteria: DEFAULT_LEAD_CRITERIA,
+      aiEnabled: false, aiOfferText: '', aiOfferTexts: {}, kpLinks: {},
+    };
   }
   return {
     folderExists: true,
@@ -143,6 +167,8 @@ export function settingsDto(folder: FolderLeadRow | null): LeadSettingsDto {
     criteria: folder.lead_criteria ?? DEFAULT_LEAD_CRITERIA,
     aiEnabled: folder.ai_enabled,
     aiOfferText: folder.ai_offer_text ?? '',
+    aiOfferTexts: readProductTexts(folder.ai_offer_texts),
+    kpLinks: readProductTexts(folder.kp_links),
   };
 }
 
@@ -153,15 +179,50 @@ export interface LeadSettingsUpdate {
   /** Нет в запросе — настройки ИИ не трогаем (старые клиенты экрана). */
   ai_enabled?: boolean;
   ai_offer_text?: string | null;
+  /** Целиком заменяет карту продуктов папки; нет в запросе или папка не auto_ru — не трогаем. */
+  ai_offer_texts?: ProductTexts;
+  kp_links?: ProductTexts;
+}
+
+type ProductMapResult = { ok: true; value: ProductTexts } | { ok: false; error: string };
+
+/**
+ * Карта «продукт → строка» из тела запроса. Ключи вне PRODUCTS отбрасываются,
+ * пустые значения не хранятся; `check` возвращает текст ошибки для непустого значения,
+ * `normalize` (если есть) приводит принятое значение к виду, в котором оно хранится.
+ */
+function parseProductMap(
+  raw: unknown,
+  field: string,
+  check: (text: string, label: string) => string | null,
+  normalize?: (text: string) => string,
+): ProductMapResult {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: `${field} — набор «продукт → текст»` };
+  const value: ProductTexts = {};
+  for (const product of PRODUCTS) {
+    const item = (raw as Record<string, unknown>)[product];
+    if (item == null) continue;
+    const label = PRODUCT_SHORT_LABELS[product];
+    if (typeof item !== 'string') return { ok: false, error: `${field} (${label}) — текст` };
+    const text = item.trim();
+    if (!text) continue;
+    const error = check(text, label);
+    if (error) return { ok: false, error };
+    value[product] = normalize ? normalize(text) : text;
+  }
+  return { ok: true, value };
 }
 
 /**
  * Проверка тела PUT настроек. criteria обрезается по краям; пусто — общие
  * правила квалификатора (в базе null).
  */
-export function parseSettingsInput(body: unknown): { ok: true; value: LeadSettingsUpdate } | { ok: false; error: string } {
+export function parseSettingsInput(
+  body: unknown,
+  folderKey: string,
+): { ok: true; value: LeadSettingsUpdate } | { ok: false; error: string } {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: 'Невалидный JSON' };
-  const { enabled, telegram, criteria, aiEnabled, aiOfferText } = body as Record<string, unknown>;
+  const { enabled, telegram, criteria, aiEnabled, aiOfferText, aiOfferTexts, kpLinks } = body as Record<string, unknown>;
   if (typeof enabled !== 'boolean' || typeof telegram !== 'boolean') {
     return { ok: false, error: 'enabled и telegram — да/нет' };
   }
@@ -182,6 +243,26 @@ export function parseSettingsInput(body: unknown): { ok: true; value: LeadSettin
     if (aiEnabled && !offer) return { ok: false, error: 'Заполните «Короткое КП» — без него ИИ не включается' };
     value.ai_enabled = aiEnabled;
     value.ai_offer_text = offer || null;
+  }
+  // Тексты и ссылки по продуктам есть только у русского автоаутрича: у остальных папок их молча не берём.
+  if (folderKey === PRODUCT_OFFER_FOLDER) {
+    if (aiOfferTexts != null) {
+      const texts = parseProductMap(aiOfferTexts, '«Короткое КП» по продуктам', (text, label) =>
+        text.length > AI_OFFER_TEXT_MAX ? `«Короткое КП» (${label}) — не длиннее ${AI_OFFER_TEXT_MAX} символов` : null);
+      if (!texts.ok) return texts;
+      value.ai_offer_texts = texts.value;
+    }
+    if (kpLinks != null) {
+      // Хранится нормализованный href — тот же, что потом кладёт в сообщение доставка лида (kpUrlOf).
+      const links = parseProductMap(
+        kpLinks,
+        'Ссылки на КП',
+        (text, label) => (parseKpLink(text) ? null : `Ссылка на КП (${label}) — адрес вида https://… без пробелов`),
+        (text) => parseKpLink(text) ?? text,
+      );
+      if (!links.ok) return links;
+      value.kp_links = links.value;
+    }
   }
   return { ok: true, value };
 }

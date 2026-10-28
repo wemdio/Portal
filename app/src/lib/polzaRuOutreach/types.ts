@@ -5,13 +5,15 @@
  * (RU_OUTREACH_HANDOFF CEO, 23.09.2026): reactivation → hiring → ad_budget →
  * event → growth_event → icp_only. Во всех цепочках четыре письма:
  * повод → боль и что делает Polza → доказательство → мягкое закрытие.
- * Половина подходящих компаний (кроме SDR) вместо своей цепочки получает
- * оффер «Автоматизированный аутрич» — сплит 50/50 по домену (25.09.2026).
+ * Что предлагаем, с 29.10.2026 решает каскад продуктов (cascade.ts); сплит
+ * 50/50 на «Автоматизированный аутрич» (25.09.2026) убран, цепочка
+ * `automation` осталась у старых строк.
  *
  * Дизайн: docs/superpowers/specs/2026-09-23-polza-ru-outreach-chain-router-design.md.
  */
 
 import { sanitizeLlmBudgetUsd } from '@/lib/outreachLlm/types';
+import { PRODUCT_LABELS, isProduct, type Product } from './cascade';
 
 export const RU_OUTREACH_PARSER_TYPE = 'polza_ru_outreach' as const;
 
@@ -28,6 +30,22 @@ export const CHAIN_LABELS: Record<ChainType, string> = {
   automation: 'Автоматизированный аутрич (50/50)',
 };
 
+/**
+ * Ключ шаблона цепочки (polza_chain_templates.offer_key). С 29.10.2026 — продукт
+ * каскада (cascade.ts): шаблон один на продукт, повод подставляет код. У запусков
+ * до каскада ключ — тип цепочки (повод).
+ */
+export type TemplateKey = Product | ChainType;
+
+export function isTemplateKey(key: string): key is TemplateKey {
+  return isProduct(key) || (CHAIN_TYPES as readonly string[]).includes(key);
+}
+
+/** Название оффера для экрана: продукт или, у старых запусков, цепочка. */
+export function templateKeyLabel(key: string): string {
+  return isProduct(key) ? PRODUCT_LABELS[key] : CHAIN_LABELS[key as ChainType] ?? key;
+}
+
 export const LETTER_COUNT = 4;
 /**
  * Версия писем строки (template_version). С 26.09.2026 письма — шаблон цепочки
@@ -35,8 +53,10 @@ export const LETTER_COUNT = 4;
  * компании; прежние детерминированные цепочки (chains_v4) — только его образец.
  * v2 (02.10.2026): связка повода с предложением вместо строки о компании,
  * выгода и модель оплаты в письме 1.
+ * v4 (29.10.2026): шаблон на продукт каскада (СДР, классика РФ/СНГ и за рубеж,
+ * автоаутрич), повод — подстановкой.
  */
-export const TEMPLATE_VERSION = 'offer_templates_v3@2026-10-09';
+export const TEMPLATE_VERSION = 'offer_templates_v4@2026-10-29';
 
 /** Писем в цепочке: во всех цепочках четыре, как у CEO (решение 26.09.2026). */
 export function letterCountFor(_chain: ChainType): number {
@@ -106,7 +126,7 @@ export interface ChainTemplateLetters {
  * Кейс по отрасли подбирается всем цепочкам (router.routeCase). До 09.10.2026
  * у SDR-цепочки кейса не было; в утверждённых текстах он есть и у неё.
  */
-export function chainUsesCase(_chain: ChainType): boolean {
+export function chainUsesCase(_key: TemplateKey): boolean {
   return true;
 }
 
@@ -114,22 +134,26 @@ export function chainUsesCase(_chain: ChainType): boolean {
  * Гипотеза сегментов — наблюдение по сайту в письме 2 у всех цепочек
  * (утверждённые тексты 09.10.2026). До этого её не было у SDR и «Автоматизации».
  */
-export function chainUsesHypothesis(_chain: ChainType): boolean {
+export function chainUsesHypothesis(_key: TemplateKey): boolean {
   return true;
 }
 
-/** Плейсхолдеры, которые может использовать шаблон оффера. */
-export function templatePlaceholdersFor(chain: ChainType): TemplatePlaceholder[] {
+/**
+ * Плейсхолдеры, которые может использовать шаблон оффера. Должность — только у
+ * шаблона цепочки «найм» старых запусков: шаблон продукта идёт компаниям с любым
+ * поводом, а вакансию называет {{повод}}.
+ */
+export function templatePlaceholdersFor(key: TemplateKey): TemplatePlaceholder[] {
   const p = TEMPLATE_PLACEHOLDERS;
   return [
     p.brand,
     p.opening,
     p.bridge,
-    ...(chainUsesCase(chain) ? [p.case] : []),
-    ...(chainUsesHypothesis(chain) ? [p.hypothesis] : []),
+    ...(chainUsesCase(key) ? [p.case] : []),
+    ...(chainUsesHypothesis(key) ? [p.hypothesis] : []),
     // Предмет и должность — из утверждённых текстов (образец писателя с 14.10.2026).
     p.topic,
-    ...(chain === 'hiring' ? [p.position] : []),
+    ...(key === 'hiring' ? [p.position] : []),
     p.signature,
   ];
 }
@@ -202,6 +226,11 @@ export interface RuOutreachConfig {
    */
   okved_prefixes: string[];
   include_previously_exported: boolean;
+  /**
+   * Пауза каскада, дней: столько ждём после последнего письма цепочки, прежде
+   * чем предложить компании следующий продукт (cascade.ts).
+   */
+  cascade_pause_days: number;
   sender_id: string | null;
   /**
    * Лимит расхода на ИИ за запуск, $. Дошли до него — запуск завершается
@@ -225,6 +254,10 @@ export const MAX_LIMIT = 1000;
 /** 60, а не 70 (07.10.2026): при 70 «только профиль» с ЦА 7 не проходил ни разу (≈63 балла). */
 export const DEFAULT_WRITE_THRESHOLD = 60;
 export const DEFAULT_MIN_TA_SCORE = 4;
+/** Пауза между цепочками каскада, дней (решение владельца 28.10.2026), и её рамки. */
+export const DEFAULT_CASCADE_PAUSE_DAYS = 14;
+export const MIN_CASCADE_PAUSE_DAYS = 7;
+export const MAX_CASCADE_PAUSE_DAYS = 60;
 
 function clampInt(value: unknown, fallback: number, min: number, max: number): number {
   const n = Number(value);
@@ -256,6 +289,7 @@ export function sanitizeRuOutreachConfig(raw: Partial<RuOutreachConfig>): RuOutr
       ? Array.from(new Set(raw.okved_prefixes.map((s) => String(s).trim()).filter((s) => /^\d{2}(\.\d{1,2}){0,2}$/.test(s)))).slice(0, 100)
       : [...DEFAULT_OKVED_PREFIXES],
     include_previously_exported: raw.include_previously_exported === true,
+    cascade_pause_days: clampInt(raw.cascade_pause_days, DEFAULT_CASCADE_PAUSE_DAYS, MIN_CASCADE_PAUSE_DAYS, MAX_CASCADE_PAUSE_DAYS),
     sender_id: senderId,
     llm_budget_usd: sanitizeLlmBudgetUsd(raw.llm_budget_usd),
   };
@@ -305,6 +339,9 @@ export const REASON_LABELS: Record<string, string> = {
   COMPANY_AMBIGUOUS: 'Не удалось подтвердить название компании',
   DUPLICATE_COMPANY: 'Повтор компании в запуске',
   PREVIOUSLY_EXPORTED: 'Уже выгружалась раньше',
+  CASCADE_WAIT: 'Ждёт паузу каскада',
+  CASCADE_CLOSED: 'Каскад закрыт',
+  CASCADE_CAP: 'Половина запуска уже за вернувшимися',
   DOMAIN_NOT_FOUND: 'Не найден сайт компании',
   SITE_UNREACHABLE: 'Сайт компании не открылся',
   LLM_FAILED: 'ИИ не ответил (сбой модели или ключа)',

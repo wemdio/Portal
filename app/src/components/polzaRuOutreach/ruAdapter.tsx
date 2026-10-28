@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { ExternalLink } from 'lucide-react';
 import { companyEmailCell, extraCompanyEmails } from '@/lib/outreachEmail/companyEmails';
+import { CASCADE_STEPS, PRODUCT_LABELS, PRODUCT_SHORT_LABELS, isProduct } from '@/lib/polzaRuOutreach/cascade';
 import { CHAIN_LABELS, DOUBT_LABELS, REASON_LABELS, SOURCE_LABELS, STAGES, type ChainType, type DoubtCode, type RuOutreachConfig, type SourceCode, type Stage } from '@/lib/polzaRuOutreach/types';
 import { Chip, EvidenceCard, ScoreCard } from '@/components/outreach/run/parts';
 import type { OutreachRowTone, OutreachRunAdapter, OutreachStageEntry } from '@/components/outreach/run/types';
@@ -63,8 +64,12 @@ const EMAIL_VERIFICATION_LABELS: Record<string, string> = {
   unverified: 'проверить не удалось',
 };
 
-/** Короткие имена источников для таблицы и окна шага; полные — SOURCE_LABELS в панели запуска. */
-const SOURCE_SHORT: Record<SourceCode, string> = {
+/**
+ * Короткие имена источников для таблицы и окна шага; полные — SOURCE_LABELS в панели запуска.
+ * 'cascade' — вернувшаяся компания каскада, своего источника у неё нет.
+ */
+const SOURCE_SHORT: Record<SourceCode | 'cascade', string> = {
+  cascade: 'Каскад',
   hh: 'hh.ru',
   direct: 'Директ',
   crm: 'AMO',
@@ -85,12 +90,15 @@ const SOURCE_SHORT: Record<SourceCode, string> = {
 /** Откуда пришла компания: source_type — все её источники через «+» (одна компания — одна карточка). */
 function sourcesOf(row: RuRow): string | null {
   const codes = (row.source_type ?? '').split('+').filter(Boolean);
-  return codes.length ? codes.map((c) => SOURCE_SHORT[c as SourceCode] ?? c).join(' + ') : null;
+  return codes.length ? codes.map((c) => SOURCE_SHORT[c as keyof typeof SOURCE_SHORT] ?? c).join(' + ') : null;
 }
 
 const reasonLabel = (code: string) => REASON_LABELS[code] ?? code;
 const signalLabel = (type: string | null | undefined) => (type ? SIGNAL_LABELS[type] ?? type : null);
 const chainLabel = (chain: string | null | undefined) => (chain ? CHAIN_LABELS[chain as ChainType] ?? chain : null);
+/** Продукт каскада: короткое имя; у строк до каскада продукта нет. */
+const productLabel = (product: string | null | undefined) => (product ? (isProduct(product) ? PRODUCT_SHORT_LABELS[product] : product) : null);
+const productFullLabel = (product: string | null | undefined) => (product ? (isProduct(product) ? PRODUCT_LABELS[product] : product) : null);
 
 function toneOf(row: RuRow): OutreachRowTone {
   switch (row.row_status) {
@@ -154,6 +162,8 @@ function ScoreBlock({ row }: { row: RuRow }) {
     row.ta_score != null ? `ЦА: ${row.ta_score}/10` : null,
     row.signal_score != null ? `повод: ${row.signal_score}` : null,
     chainLabel(row.chain_type),
+    row.product ? `продукт: ${productLabel(row.product)}` : null,
+    row.cascade_no ? `шаг ${row.cascade_no} из ${CASCADE_STEPS.length}` : null,
     row.amo_status && row.amo_status !== 'none' ? `AMO: ${row.amo_status}` : null,
     row.prior_contact ? 'уже общались' : null,
     row.inn ? `ИНН ${row.inn}` : null,
@@ -381,6 +391,17 @@ export const ruOutreachAdapter: OutreachRunAdapter<RuRow, Partial<RuOutreachConf
       },
     },
     {
+      header: 'Продукт',
+      cell: (row) => {
+        const label = productLabel(row.product);
+        return label ? <div className="max-w-[150px] truncate" title={productFullLabel(row.product) ?? ''}>{label}</div> : <span className="text-gray-400">—</span>;
+      },
+    },
+    {
+      header: 'Шаг',
+      cell: (row) => (row.cascade_no ? <span title={`Шаг ${row.cascade_no} из ${CASCADE_STEPS.length}`}>{row.cascade_no}</span> : <span className="text-gray-400">—</span>),
+    },
+    {
       header: 'Цепочка',
       cell: (row) => <div className="max-w-[180px] truncate" title={chainLabel(row.chain_type) ?? ''}>{chainLabel(row.chain_type) ?? '—'}</div>,
     },
@@ -440,7 +461,7 @@ export const ruOutreachAdapter: OutreachRunAdapter<RuRow, Partial<RuOutreachConf
   },
 
   csv: {
-    readyHeader: ['company_name', 'email', 'email_2', 'email_3', 'domain', 'signal', 'signal_title', 'source_url', 'chain', ...LETTER_HEADERS],
+    readyHeader: ['company_name', 'email', 'email_2', 'email_3', 'domain', 'signal', 'signal_title', 'source_url', 'chain', 'product', 'cascade_no', ...LETTER_HEADERS],
     readyRow: (row) => [
       companyOf(row),
       row.recipient_email ?? '',
@@ -450,10 +471,12 @@ export const ruOutreachAdapter: OutreachRunAdapter<RuRow, Partial<RuOutreachConf
       row.signal_title ?? '',
       row.source_url ?? '',
       chainLabel(row.chain_type) ?? '',
+      productLabel(row.product) ?? '',
+      row.cascade_no ?? '',
       ...letterCells(row),
     ],
     fullHeader: [
-      'company_name', 'inn', 'domain', 'website', 'signal', 'signal_title', 'source_url', 'signal_date', 'chain',
+      'company_name', 'inn', 'domain', 'website', 'signal', 'signal_title', 'source_url', 'signal_date', 'chain', 'product', 'cascade_no',
       'priority_score', 'ta_score', 'target_market', 'market_evidence', 'evidence_level', 'evidence', 'email', 'email_type',
       'email_verification', 'email_2', 'email_3', 'status', 'stage', 'reason', 'reason_detail', 'doubts',
       ...LETTER_HEADERS,
@@ -468,6 +491,8 @@ export const ruOutreachAdapter: OutreachRunAdapter<RuRow, Partial<RuOutreachConf
       row.source_url ?? '',
       row.signal_date ?? '',
       chainLabel(row.chain_type) ?? '',
+      productLabel(row.product) ?? '',
+      row.cascade_no ?? '',
       row.priority_score ?? '',
       row.ta_score ?? '',
       row.target_market ?? '',

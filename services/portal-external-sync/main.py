@@ -46,7 +46,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from alerts import send_worker_alert
 from bank_income import (
-    IncomeConfig, income_config, prepare_income, dispatch_income,
+    IncomeBotVerificationError, IncomeConfig, income_config, prepare_income, dispatch_income,
     recent_bank_periods, LOCK_NAMESPACE,
 )
 from db import log_run_start, log_run_finish
@@ -158,8 +158,11 @@ async def prepare_bank_income(conn: asyncpg.Connection) -> IncomeConfig | None:
             await prepare_income(conn, config)
         return config
     except Exception as e:
-        await send_worker_alert("bank-income", "уведомления не подготовлены", type(e).__name__)
-        print(f"[bank-income] prepare failed ({type(e).__name__})", flush=True)
+        # Only our verification error has a controlled, token-free message.
+        # Other exceptions may contain connection strings or HTTP request URLs.
+        reason = str(e) if isinstance(e, IncomeBotVerificationError) else type(e).__name__
+        await send_worker_alert("bank-income", "уведомления не подготовлены", reason)
+        print(f"[bank-income] prepare failed ({reason})", flush=True)
         return None
 
 

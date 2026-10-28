@@ -1,9 +1,11 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { qualifyReply } from '@/lib/instantly/leadQualifier';
+import { PRODUCT_LABELS, type Product } from '@/lib/polzaRuOutreach/cascade';
+import { loadRecipientProduct } from '@/lib/polzaRuOutreach/rowProduct';
 import { loadSenderThread } from './context';
-import { loadCampaignSettings, type LeadSettings } from './settings';
+import { loadCampaignSettings, parseKpLink, type LeadSettings } from './settings';
 import { isClientPartyReply, withProjectLeadSettings } from './projectScope';
-import { buildLeadMessage, leadTelegramConfig, sendLeadMessage, threadUrl, type LeadTelegramConfig } from './telegram';
+import { buildLeadMessage, leadTelegramConfig, sendLeadMessage, threadUrl, type LeadMessageInput, type LeadTelegramConfig } from './telegram';
 import { processSenderAutoLeadCrm } from './crm';
 import { runSenderAiQualifier, type AiPassResult } from '@/lib/senderAiQualifier/engine';
 
@@ -282,6 +284,52 @@ async function qualifyOne(
   }
 }
 
+/**
+ * Ссылка на КП продукта из `sender_folders.kp_links` — в нормализованном виде, по тем
+ * же правилам, что при сохранении настроек (parseKpLink в settings.ts).
+ */
+export function kpUrlOf(links: unknown, product: Product): string | null {
+  const value = links && typeof links === 'object' && !Array.isArray(links) ? (links as Record<string, unknown>)[product] : null;
+  return parseKpLink(value);
+}
+
+/** Ссылки на КП папки; один запрос на папку за круг доставки. */
+async function loadKpLinks(db: SupabaseClient, folderId: string | null, cache: Map<string, unknown>): Promise<unknown> {
+  if (!folderId) return null;
+  if (!cache.has(folderId)) {
+    const { data, error } = await db.from('sender_folders').select('kp_links').eq('id', folderId).maybeSingle();
+    if (error) throw new Error(`sender_folders: ${error.message}`);
+    cache.set(folderId, (data as { kp_links?: unknown } | null)?.kp_links ?? null);
+  }
+  return cache.get(folderId);
+}
+
+/**
+ * Продукт лида для сообщения. Это справка менеджеру, а не условие доставки: любой
+ * сбой чтения (сеть, миграция каскада ещё не применена) — предупреждение в лог и
+ * сообщение без блока; сбой одних ссылок на КП оставляет строку «Продукт» без «КП».
+ * Иначе лид сгорал бы за пять повторов и не доходил ни до чата, ни до AMO.
+ */
+async function leadProduct(
+  db: SupabaseClient, row: { reply_id: string; recipient_id: string }, folderId: string | null,
+  kpLinks: Map<string, unknown>, log: Log,
+): Promise<LeadMessageInput['product']> {
+  try {
+    const offered = await loadRecipientProduct(db, row.recipient_id);
+    if (!offered) return undefined;
+    let kpUrl: string | null = null;
+    try {
+      kpUrl = kpUrlOf(await loadKpLinks(db, folderId, kpLinks), offered.product);
+    } catch (err) {
+      log('warn', `ТГ: ссылки на КП лида ${row.reply_id} не прочитаны: ${errorText(err)}`);
+    }
+    return { label: PRODUCT_LABELS[offered.product], step: offered.cascadeNo, kpUrl };
+  } catch (err) {
+    log('warn', `ТГ: продукт лида ${row.reply_id} не прочитан: ${errorText(err)}`);
+    return undefined;
+  }
+}
+
 /** Лиды, ещё не доставленные в чат, у переписок, по которым в чат ещё не писали. */
 async function deliverLeads(db: SupabaseClient, tg: LeadTelegramConfig, log: Log): Promise<number> {
   const { data, error } = await db
@@ -300,6 +348,7 @@ async function deliverLeads(db: SupabaseClient, tg: LeadTelegramConfig, log: Log
 
   const settings = await loadCampaignSettings(db, rows.map((r) => r.campaign_id));
   let sent = 0;
+  const kpLinks = new Map<string, unknown>();
   for (const row of rows) {
     // Пауза после сбоя доставки: та же лесенка, что у оценки.
     if (row.tg_attempts > 0 && Date.parse(row.updated_at) > Date.now() - (RETRY_DELAYS_MIN[Math.min(row.tg_attempts - 1, 3)] * 60_000)) continue;
@@ -335,6 +384,8 @@ async function deliverLeads(db: SupabaseClient, tg: LeadTelegramConfig, log: Log
 
     try {
       const thread = await loadSenderThread(db, row.reply_id, row.recipient_id);
+      // Русский автоаутрич: какой продукт предлагали и КП к нему; строки до каскада — без блока.
+      const product = await leadProduct(db, row, campaign.settings.folderId, kpLinks, log);
       const text = buildLeadMessage({
         folderName: campaign.settings.folderName,
         campaignName: campaign.campaignName,
@@ -346,6 +397,7 @@ async function deliverLeads(db: SupabaseClient, tg: LeadTelegramConfig, log: Log
         aiReason: row.ai_reason,
         threadUrl: threadUrl(row.recipient_id),
         copyEmails: thread?.replyCopy ?? [],
+        ...(product ? { product } : {}),
       });
       const messageId = await sendLeadMessage(tg, text);
       await markRow(db, row.reply_id, {

@@ -5,14 +5,17 @@ import { ChevronDown, ChevronRight, Loader2, Play, Save } from 'lucide-react';
 import {
   CHAIN_LABELS,
   CHAIN_TYPES,
+  DEFAULT_CASCADE_PAUSE_DAYS,
   DEFAULT_FRESHNESS_DAYS,
   DEFAULT_LIMIT,
   DEFAULT_LLM_BUDGET_USD,
   DEFAULT_MIN_TA_SCORE,
   DEFAULT_WRITE_THRESHOLD,
+  MAX_CASCADE_PAUSE_DAYS,
   MAX_FRESHNESS_DAYS,
   MAX_LIMIT,
   MAX_LLM_BUDGET_USD,
+  MIN_CASCADE_PAUSE_DAYS,
   MIN_LLM_BUDGET_USD,
   SOURCE_CODES,
   SOURCE_LABELS,
@@ -108,6 +111,8 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart, mo
   const [minEmployees, setMinEmployees] = useState(initial?.min_employees ?? 10);
   const [okvedText, setOkvedText] = useState((initial?.okved_prefixes ?? [...DEFAULT_OKVED_PREFIXES]).join(', '));
   const [includeExported, setIncludeExported] = useState(initial?.include_previously_exported ?? false);
+  // У запусков до каскада поля в настройках нет — тогда обычные 14 дней.
+  const [cascadePause, setCascadePause] = useState(initial?.cascade_pause_days ?? DEFAULT_CASCADE_PAUSE_DAYS);
   const [senderId, setSenderId] = useState(initial?.sender_id ?? '');
   const [budgetUsd, setBudgetUsd] = useState(initial?.llm_budget_usd ?? DEFAULT_LLM_BUDGET_USD);
   const [advanced, setAdvanced] = useState(false);
@@ -116,6 +121,8 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart, mo
   const toggle = (s: SourceCode) => setSources((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
   // Пустое поле или 0 сервер молча поднял бы до минимума — лучше не пускать запуск.
   const budgetValid = Number.isFinite(budgetUsd) && budgetUsd >= MIN_LLM_BUDGET_USD && budgetUsd <= MAX_LLM_BUDGET_USD;
+  // Пауза тоже: сервер зажал бы 3 дня до 7 молча, и в настройках осталось бы не то, что набрали.
+  const pauseValid = Number.isInteger(cascadePause) && cascadePause >= MIN_CASCADE_PAUSE_DAYS && cascadePause <= MAX_CASCADE_PAUSE_DAYS;
 
   const submit = () => {
     onStart({
@@ -130,6 +137,7 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart, mo
       min_employees: minEmployees,
       okved_prefixes: okvedText.split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean),
       include_previously_exported: includeExported,
+      cascade_pause_days: cascadePause,
       sender_id: senderId || null,
       llm_budget_usd: budgetUsd,
     });
@@ -153,7 +161,9 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart, mo
               ? 'Выберите хотя бы один источник'
               : !budgetValid
                 ? `Лимит на ИИ — от $${MIN_LLM_BUDGET_USD} до $${MAX_LLM_BUDGET_USD}`
-                : `Источников: ${sources.length}`}
+                : !pauseValid
+                  ? `Пауза между продуктами — от ${MIN_CASCADE_PAUSE_DAYS} до ${MAX_CASCADE_PAUSE_DAYS} дней`
+                  : `Источников: ${sources.length}`}
           </span>
           <span className="flex gap-2">
             <button type="button" onClick={onClose} className="rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100">
@@ -161,7 +171,7 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart, mo
             </button>
             <button
               type="button"
-              disabled={busy || sources.length === 0 || !budgetValid}
+              disabled={busy || sources.length === 0 || !budgetValid || !pauseValid}
               onClick={submit}
               className="inline-flex items-center rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
             >
@@ -287,7 +297,7 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart, mo
           Тонкая настройка
         </button>
         {!advanced && (
-          <p className="mt-1 text-xs text-gray-500">{autofill ? 'Сумма госконтракта.' : 'Сумма госконтракта и повторные выгрузки.'}</p>
+          <p className="mt-1 text-xs text-gray-500">{autofill ? 'Пауза между продуктами и сумма госконтракта.' : 'Пауза между продуктами, госконтракт, без учёта каскада.'}</p>
         )}
 
         {advanced && (
@@ -297,10 +307,29 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart, mo
               <input className={input} type="number" min={0} step={100000} value={minContract} onChange={(e) => setMinContract(Number(e.target.value))} />
             </div>
 
+            <div className="sm:max-w-xs">
+              <label className={label}>Пауза между продуктами, дней</label>
+              <input
+                className={input}
+                type="number"
+                min={MIN_CASCADE_PAUSE_DAYS}
+                max={MAX_CASCADE_PAUSE_DAYS}
+                step={1}
+                value={Number.isFinite(cascadePause) ? cascadePause : ''}
+                onChange={(e) => setCascadePause(e.target.value === '' ? NaN : Number(e.target.value))}
+              />
+              <p className="mt-1 text-xs text-gray-500">
+                От {MIN_CASCADE_PAUSE_DAYS} до {MAX_CASCADE_PAUSE_DAYS}: ждём после последнего письма цепочки.
+              </p>
+            </div>
+
             {!autofill && (
-              <label className="flex items-center gap-2 text-sm text-gray-700">
+              <label
+                className="flex items-center gap-2 text-sm text-gray-700"
+                title="Компании, которым уже писали в прошлых запусках, берутся снова: без паузы и очереди продуктов, с первого продукта по поводу."
+              >
                 <input type="checkbox" checked={includeExported} onChange={(e) => setIncludeExported(e.target.checked)} />
-                Брать компании, которые уже выгружались раньше
+                Писать без учёта каскада
               </label>
             )}
           </div>
