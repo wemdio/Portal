@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { X } from 'lucide-react';
+import { AlertCircle, ArrowRight, Check, CheckCircle2, Database, FileSpreadsheet, LoaderCircle, Search, Upload, X } from 'lucide-react';
 
 import { call, errorText, upload } from './liApi';
+import styles from './NewBaseModal.module.css';
 
 /**
  * Окно «Создать базу» кампании LinkedIn: база собирается скрапером (параметры
@@ -31,10 +32,6 @@ type Phase = 'form' | 'running' | 'done' | 'failed';
 
 const POLL_MS = 3000;
 const SHOWN = 100;
-
-const field = 'w-full rounded-lg border border-gray-200 px-3 py-2 text-sm';
-const primary = 'cursor-pointer rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50';
-const secondary = 'cursor-pointer rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-50';
 
 export default function NewBaseModal({
   campaignId,
@@ -69,6 +66,10 @@ export default function NewBaseModal({
   const [file, setFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const dialog = useRef<HTMLDivElement>(null);
+  const nameInput = useRef<HTMLInputElement>(null);
+  const id = useId();
 
   const stopPolling = () => {
     if (timer.current) window.clearTimeout(timer.current);
@@ -91,15 +92,43 @@ export default function NewBaseModal({
   useEffect(() => () => stopPolling(), []);
 
   const close = async () => {
+    if (saving) return;
     if (draft.current.listId) await dropDraft();
     onClose();
   };
 
   useEffect(() => {
-    const esc = (event: KeyboardEvent) => { if (event.key === 'Escape') void close(); };
+    const esc = (event: KeyboardEvent) => { if (event.key === 'Escape' && !saving) void close(); };
     document.addEventListener('keydown', esc);
     return () => document.removeEventListener('keydown', esc);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saving]);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    nameInput.current?.focus();
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return;
+      const controls = dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href]');
+      if (!controls?.length) return;
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !dialog.current?.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !dialog.current?.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', trapFocus);
+    return () => {
+      document.removeEventListener('keydown', trapFocus);
+      document.body.style.overflow = previousOverflow;
+      previousFocus?.focus();
+    };
   }, []);
 
   const poll = (taskId: string, listId: string) => {
@@ -219,162 +248,239 @@ export default function NewBaseModal({
   };
 
   const busy = phase === 'running';
+  const locked = busy || saving || phase === 'done';
+  const editScrape = async () => {
+    setSaving(true);
+    await dropDraft();
+    setError(null);
+    setPhase('form');
+    setSaving(false);
+  };
+  const selectFile = (selected: File | null) => {
+    if (selected && !selected.name.toLowerCase().endsWith('.csv')) {
+      setError('Выберите файл в формате CSV');
+      return;
+    }
+    setFile(selected);
+    setError(null);
+  };
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onMouseDown={() => { if (!busy && !saving) void close(); }}>
+    <div className={styles.overlay} onMouseDown={() => { if (!busy && !saving) void close(); }}>
       <div
+        ref={dialog}
         role="dialog"
         aria-modal="true"
-        aria-label="Создать базу"
+        aria-labelledby={`${id}-title`}
+        aria-describedby={`${id}-description`}
         onMouseDown={(e) => e.stopPropagation()}
-        className="li-hover-card flex max-h-[88vh] w-full max-w-2xl flex-col rounded-2xl border shadow-2xl"
+        className={styles.modal}
       >
-        <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-5 py-3">
-          <h3 className="text-base font-semibold">Создать базу</h3>
-          <button type="button" onClick={() => void close()} aria-label="Закрыть" className="cursor-pointer rounded-lg p-1.5 text-zinc-500 hover:bg-black/10">
-            <X className="h-5 w-5" />
+        <header className={styles.header}>
+          <span className={styles.headerIcon}><Database size={22} aria-hidden="true" /></span>
+          <div className={styles.heading}>
+            <h3 id={`${id}-title`}>Создать базу</h3>
+            <p id={`${id}-description`}>Соберите контакты LinkedIn или загрузите готовый список.</p>
+          </div>
+          <button type="button" onClick={() => void close()} disabled={saving} aria-label="Закрыть" className={styles.close}>
+            <X size={20} />
           </button>
-        </div>
+        </header>
 
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
+        <div className={styles.body}>
           {summary ? (
-            <div className="space-y-3">
-              <p className="whitespace-pre-line text-sm">{summary}</p>
-              <p className="text-xs text-zinc-500">База появилась на вкладке «Базы» и встала в конец очереди кампании.</p>
-              <button type="button" onClick={onClose} className={primary}>Готово</button>
+            <div className={styles.success} role="status">
+              <CheckCircle2 size={36} aria-hidden="true" />
+              <h4>База загружена</h4>
+              <p className={styles.summary}>{summary}</p>
+              <p className={styles.hint}>База появилась на вкладке «Базы» и встала в конец очереди кампании.</p>
             </div>
           ) : (
             <>
-              <input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                disabled={busy || phase === 'done'}
-                placeholder="Название базы"
-                className={field}
-              />
+              <label className={styles.label}>
+                Название базы
+                <input
+                  ref={nameInput}
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  disabled={locked}
+                  placeholder="Например, Италия · IT-компании"
+                  className={styles.field}
+                />
+              </label>
 
-              <div className="flex gap-2">
-                {(['scraper', 'csv'] as const).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    disabled={busy || phase === 'done'}
-                    onClick={() => { setMethod(m); setError(null); }}
-                    className={`cursor-pointer rounded-lg px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed ${method === m ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}
-                  >
-                    {m === 'scraper' ? 'Собрать скрапером' : 'Загрузить CSV'}
-                  </button>
-                ))}
-              </div>
+              <fieldset className={styles.section}>
+                <legend className={styles.legend}>Как добавить контакты</legend>
+                <div className={styles.methods}>
+                  {(['scraper', 'csv'] as const).map((m) => {
+                    const Icon = m === 'scraper' ? Search : Upload;
+                    return (
+                      <button
+                        key={m}
+                        type="button"
+                        aria-pressed={method === m}
+                        disabled={locked}
+                        onClick={() => { setMethod(m); setError(null); }}
+                        className={styles.method}
+                      >
+                        <span className={styles.methodIcon}><Icon size={20} aria-hidden="true" /></span>
+                        <span className={styles.methodCopy}>
+                          <strong>{m === 'scraper' ? 'Собрать скрапером' : 'Загрузить CSV'}</strong>
+                          <span>{m === 'scraper' ? 'Из поиска или реакций на пост' : 'Из файла с контактами'}</span>
+                        </span>
+                        <span className={styles.indicator}>{method === m && <Check size={12} strokeWidth={3} aria-hidden="true" />}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </fieldset>
 
               {method === 'scraper' ? (
                 phase === 'form' || phase === 'failed' ? (
-                  <div className="space-y-3">
-                    <div className="flex gap-2">
-                      <button type="button" onClick={() => setScrapeType('search')} className={`cursor-pointer rounded-lg px-3 py-1.5 text-xs ${scrapeType === 'search' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>Поиск по URL</button>
-                      <button type="button" onClick={() => setScrapeType('reactions')} className={`cursor-pointer rounded-lg px-3 py-1.5 text-xs ${scrapeType === 'reactions' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>Реакции на пост</button>
-                    </div>
-                    <input
-                      value={url}
-                      onChange={(e) => setUrl(e.target.value)}
-                      placeholder={scrapeType === 'search' ? 'URL поиска LinkedIn People' : 'URL поста LinkedIn'}
-                      className={field}
-                    />
-                    <div className="flex flex-wrap gap-3">
-                      <select value={accountId} onChange={(e) => setAccountId(e.target.value)} className="min-w-[200px] flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm">
-                        <option value="">Аккаунт…</option>
-                        {accounts.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
-                      </select>
-                      <label className="flex items-center gap-2 text-xs text-zinc-500">
-                        Сколько собрать
-                        <input type="number" min={1} value={max} onChange={(e) => setMax(Math.max(1, Number(e.target.value) || 1))} className="w-24 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+                  <div className={styles.section}>
+                    <fieldset className={styles.section}>
+                      <legend className={styles.legend}>Источник контактов</legend>
+                      <div className={styles.segments}>
+                        <button type="button" aria-pressed={scrapeType === 'search'} onClick={() => setScrapeType('search')} className={styles.segment}>Поиск по URL</button>
+                        <button type="button" aria-pressed={scrapeType === 'reactions'} onClick={() => setScrapeType('reactions')} className={styles.segment}>Реакции на пост</button>
+                      </div>
+                    </fieldset>
+                    <label className={styles.label}>
+                      {scrapeType === 'search' ? 'Ссылка на поиск LinkedIn People' : 'Ссылка на пост LinkedIn'}
+                      <input
+                        type="url"
+                        value={url}
+                        onChange={(e) => setUrl(e.target.value)}
+                        placeholder={scrapeType === 'search' ? 'https://www.linkedin.com/search/results/people/…' : 'https://www.linkedin.com/posts/…'}
+                        className={styles.field}
+                        aria-describedby={`${id}-url-hint`}
+                      />
+                    </label>
+                    <p id={`${id}-url-hint`} className={styles.hint}>
+                      {scrapeType === 'search' ? 'Откройте поиск людей, настройте фильтры и скопируйте ссылку.' : 'Соберём людей, которые поставили реакцию на этот пост.'}
+                    </p>
+                    <div className={styles.row}>
+                      <label className={styles.label}>
+                        LinkedIn-аккаунт
+                        <select value={accountId} onChange={(e) => setAccountId(e.target.value)} className={styles.field}>
+                          <option value="">Выберите аккаунт</option>
+                          {accounts.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+                        </select>
+                      </label>
+                      <label className={styles.label}>
+                        Количество контактов
+                        <input type="number" min={1} value={max} onChange={(e) => setMax(Math.max(1, Number(e.target.value) || 1))} className={styles.field} />
                       </label>
                     </div>
+                    {accounts.length === 0 && <p className={styles.hint}>Для сбора подключите LinkedIn-аккаунт на вкладке «Аккаунты».</p>}
                   </div>
                 ) : (
-                  <div className="space-y-3">
-                    <p className="text-xs text-zinc-500">
-                      {phase === 'running'
-                        ? `Собираю… ${progress.total > 0 ? `${progress.done} из ${progress.total}` : 'запускаю задачу'}`
-                        : leadsTotal > leads.length ? `Собрано ${leadsTotal}, показаны первые ${leads.length}` : `Собрано: ${leadsTotal}`}
-                    </p>
+                  <div className={styles.section}>
                     {phase === 'running' ? (
-                      <div className="flex justify-center py-6"><div className="h-7 w-7 animate-spin rounded-full border-2 border-zinc-300 border-t-blue-600" /></div>
-                    ) : leads.length === 0 ? (
-                      <p className="py-4 text-center text-sm text-zinc-500">Скрапер никого не нашёл. Измените параметры и пересоберите.</p>
-                    ) : (
-                      <div className="max-h-72 overflow-y-auto">
-                        <table className="w-full table-fixed text-sm">
-                          <thead>
-                            <tr className="border-b border-zinc-200 text-xs text-zinc-500">
-                              <th className="px-2 py-1.5 text-left font-medium">Имя</th>
-                              <th className="w-[32%] px-2 py-1.5 text-left font-medium">Должность</th>
-                              <th className="w-[24%] px-2 py-1.5 text-left font-medium">Компания</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {leads.slice(0, SHOWN).map((lead) => (
-                              <tr key={lead.id} className="border-b border-zinc-100">
-                                <td className="truncate px-2 py-1.5 font-medium">
-                                  {lead.profile_url ? <a href={lead.profile_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">{lead.name}</a> : lead.name}
-                                </td>
-                                <td className="truncate px-2 py-1.5 text-zinc-600" title={lead.position ?? ''}>{lead.position ?? '—'}</td>
-                                <td className="truncate px-2 py-1.5 text-zinc-600" title={lead.company ?? ''}>{lead.company ?? '—'}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                      <div className={styles.progress} role="status">
+                        <LoaderCircle size={28} className={styles.spinner} aria-hidden="true" />
+                        <strong>Собираем контакты</strong>
+                        <p className={styles.hint}>{progress.total > 0 ? `${progress.done} из ${progress.total}` : 'Запускаем задачу…'}</p>
+                        {progress.total > 0 && <progress aria-label="Сбор контактов" max={progress.total} value={progress.done} />}
                       </div>
+                    ) : (
+                      <>
+                        <p className={styles.result} role="status"><CheckCircle2 size={18} aria-hidden="true" />
+                          {leadsTotal > leads.length ? `Собрано ${leadsTotal}, показаны первые ${leads.length}` : `Собрано контактов: ${leadsTotal}`}
+                        </p>
+                        {leads.length === 0 ? <p className={styles.hint}>Скрапер никого не нашёл. Измените параметры и пересоберите.</p> : (
+                          <div className={styles.tableWrap}>
+                            <table className={styles.table}>
+                              <thead>
+                                <tr>
+                                  <th>Имя</th>
+                                  <th>Должность</th>
+                                  <th>Компания</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {leads.slice(0, SHOWN).map((lead) => (
+                                  <tr key={lead.id}>
+                                    <td>
+                                      {lead.profile_url ? <a href={lead.profile_url} target="_blank" rel="noopener noreferrer">{lead.name}</a> : lead.name}
+                                    </td>
+                                    <td title={lead.position ?? ''}>{lead.position ?? '—'}</td>
+                                    <td title={lead.company ?? ''}>{lead.company ?? '—'}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 )
               ) : (
-                <div className="space-y-3">
-                  <div className="flex gap-2">
-                    <button type="button" onClick={() => setCsvKind('plain')} className={`cursor-pointer rounded-lg px-3 py-1.5 text-xs ${csvKind === 'plain' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>Простой</button>
-                    <button type="button" onClick={() => setCsvKind('invites')} className={`cursor-pointer rounded-lg px-3 py-1.5 text-xs ${csvKind === 'invites' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>С персональными инвайтами</button>
+                <div className={styles.section}>
+                  <fieldset className={styles.section} disabled={saving}>
+                    <legend className={styles.legend}>Формат базы</legend>
+                    <div className={styles.segments}>
+                      <button type="button" aria-pressed={csvKind === 'plain'} onClick={() => setCsvKind('plain')} className={styles.segment}>Обычный список</button>
+                      <button type="button" aria-pressed={csvKind === 'invites'} onClick={() => setCsvKind('invites')} className={styles.segment}>С персональными инвайтами</button>
+                    </div>
+                  </fieldset>
+                  <div className={styles.csvHelp} id={`${id}-csv-hint`}>
+                    <span className={styles.legend}>Колонки в CSV</span>
+                    <p>{csvKind === 'plain'
+                      ? <><code>name</code> или <code>first_name</code> + <code>last_name</code> и <code>profile_url</code> — ссылка на профиль LinkedIn.</>
+                      : <><code>LinkedIn ID</code> — имя контакта, <code>Invite</code> — персональный текст инвайта.</>}</p>
+                    <p className={styles.hint}>Необязательно: {csvKind === 'plain' ? 'position, company' : 'position, company, profile_url'}.</p>
                   </div>
-                  <p className="text-xs text-zinc-500">
-                    {csvKind === 'plain'
-                      ? 'Колонки: name (или first_name и last_name) и profile_url — ссылка на профиль LinkedIn. По желанию: position, company.'
-                      : 'Колонки: «LinkedIn ID» — имя лида и «Invite» — текст инвайта для него. По желанию: position, company, profile_url.'}
-                  </p>
-                  <input
-                    type="file"
-                    accept=".csv,text/csv"
-                    onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-                    className="block w-full text-sm"
-                  />
+                  <label
+                    className={styles.filePicker}
+                    data-dragging={dragging}
+                    data-selected={Boolean(file)}
+                    data-disabled={saving}
+                    onDragOver={(e) => { e.preventDefault(); if (!saving) setDragging(true); }}
+                    onDragLeave={() => setDragging(false)}
+                    onDrop={(e) => { e.preventDefault(); setDragging(false); if (!saving) selectFile(e.dataTransfer.files[0] ?? null); }}
+                  >
+                    <input type="file" accept=".csv,text/csv" disabled={saving} aria-label="CSV-файл" aria-describedby={`${id}-csv-hint`} onChange={(e) => selectFile(e.target.files?.[0] ?? null)} />
+                    {file ? <FileSpreadsheet size={26} aria-hidden="true" /> : <Upload size={26} aria-hidden="true" />}
+                    <strong title={file?.name}>{file ? file.name : 'Выбрать CSV-файл'}</strong>
+                    <span>{file ? `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 }).format(file.size / 1024)} КБ · Нажмите, чтобы заменить` : 'или перетащите его сюда'}</span>
+                  </label>
                 </div>
               )}
-
-              {error && <p className="text-sm text-red-600">{error}</p>}
             </>
           )}
+          {error && <div className={styles.error} role="alert"><AlertCircle size={18} aria-hidden="true" /><p>{error}</p></div>}
         </div>
 
-        {!summary && (
-          <div className="flex flex-wrap justify-end gap-2 border-t border-zinc-200 px-5 py-3">
-            {method === 'scraper' ? (
-              phase === 'form' || phase === 'failed' ? (
-                <button type="button" onClick={() => void startScrape()} className={primary}>Собрать</button>
-              ) : phase === 'done' ? (
-                <>
-                  <button type="button" onClick={() => void startScrape()} disabled={saving} className={secondary}>Пересобрать</button>
-                  <button type="button" onClick={() => void applyScraped()} disabled={saving || leads.length === 0} className={primary}>
-                    {saving ? 'Сохраняю…' : 'Использовать эту'}
+        <footer className={styles.footer}>
+          <p className={styles.footerHint}>{summary ? 'Контакты готовы к работе' : 'База добавится в очередь кампании'}</p>
+          <div className={styles.actions}>
+            {summary ? <button type="button" onClick={onClose} className={styles.primary}>Готово<Check size={16} aria-hidden="true" /></button> : (
+              <>
+                {!busy && <button type="button" onClick={() => void close()} disabled={saving} className={styles.secondary}>Отмена</button>}
+                {method === 'scraper' ? (
+                  phase === 'form' || phase === 'failed' ? (
+                    <button type="button" onClick={() => void startScrape()} className={styles.primary}>Собрать контакты<ArrowRight size={16} aria-hidden="true" /></button>
+                  ) : phase === 'done' ? (
+                    <>
+                      <button type="button" onClick={() => void editScrape()} disabled={saving} className={styles.secondary}>Изменить параметры</button>
+                      <button type="button" onClick={() => void applyScraped()} disabled={saving || leads.length === 0} className={styles.primary}>
+                        {saving && <LoaderCircle size={16} className={styles.spinner} aria-hidden="true" />}{saving ? 'Сохраняем…' : 'Добавить базу'}
+                      </button>
+                    </>
+                  ) : (
+                    <button type="button" onClick={() => void close()} className={styles.secondary}>Отменить сбор</button>
+                  )
+                ) : (
+                  <button type="button" onClick={() => void saveCsv()} disabled={saving} className={styles.primary}>
+                    {saving ? <LoaderCircle size={16} className={styles.spinner} aria-hidden="true" /> : <Upload size={16} aria-hidden="true" />}{saving ? 'Загружаем…' : 'Загрузить базу'}
                   </button>
-                </>
-              ) : (
-                <button type="button" onClick={() => void close()} className={secondary}>Отменить сбор</button>
-              )
-            ) : (
-              <button type="button" onClick={() => void saveCsv()} disabled={saving} className={primary}>
-                {saving ? 'Загружаю…' : 'Сохранить'}
-              </button>
+                )}
+              </>
             )}
           </div>
-        )}
+        </footer>
       </div>
     </div>,
     document.body,
