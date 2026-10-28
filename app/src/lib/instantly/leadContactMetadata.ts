@@ -2,6 +2,7 @@ import { extractLeadReplyContacts, senderDisplayLeadName, type LeadReplyContacts
 import { isPersonName } from '../enrich/extractors/nameQuality';
 import { joinLeadPhones, normalizeLeadPhone, normalizeLeadWebsite } from './leadContactValues';
 import type { Email, Lead } from './types';
+import { normalizeLeadAddress, normalizeLeadTelegram, normalizeLeadWhatsapp, type AdditionalLeadContacts } from './leadAdditionalContacts';
 
 export { normalizeLeadWebsite } from './leadContactValues';
 
@@ -10,6 +11,7 @@ export interface LeadContactMetadata {
   companyName: string | null;
   phone: string | null;
   website: string | null;
+  additionalContacts?: AdditionalLeadContacts;
 }
 
 /** Only supply after proving the original recipient against an actual send. */
@@ -33,6 +35,10 @@ const WEBSITE_KEYS = ['website', 'company_website', 'website_url', 'company_url'
   'site', 'url', 'web_site', 'web', 'www', 'homepage', 'сайт',
   'сайт компании', 'ссылка на сайт', 'веб-сайт', 'интернет-сайт'];
 const DOMAIN_KEYS = ['company_domain', 'domain', 'домен', 'домен компании'];
+const TELEGRAM_KEYS = ['telegram', 'telegram_url', 'telegram_link', 'telegram_username', 'telegram_contact', 'tg', 'телеграм', 'телеграмм', 'тг'];
+const WHATSAPP_KEYS = ['whatsapp', 'whats_app', 'whatsapp_url', 'whatsapp_link', 'whatsapp_phone', 'whatsapp_number', 'wa', 'ватсап', 'вотсап'];
+const ADDRESS_KEYS = ['address', 'company_address', 'business_address', 'postal_address', 'office_address',
+  'адрес', 'адрес компании', 'юридический адрес', 'фактический адрес', 'почтовый адрес'];
 
 const normalizeKey = (value: string) => value.replace(/№/g, '').normalize('NFKC').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]/g, '').replace(/\d+$/, '');
 const normalizeEmail = (value: unknown) => typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -166,7 +172,17 @@ export function resolveLeadContactMetadata(input: {
   // A bare imported domain is a fallback label, not stronger than an explicit
   // legal name in the current reply. Real uploaded company names keep priority.
   const replyCompany = companyValue(reply.companyName);
+  // Only exact-sender structured fields. Ticket wrappers and flattened quote
+  // chains can contain OUR messenger/address; do not mine free-form replies.
+  const additionalContacts: AdditionalLeadContacts = {};
+  const telegram = firstField(sources, TELEGRAM_KEYS, normalizeLeadTelegram);
+  const whatsapp = firstField(sources, WHATSAPP_KEYS, normalizeLeadWhatsapp);
+  const address = firstField(sources, ADDRESS_KEYS, normalizeLeadAddress);
+  if (telegram) additionalContacts.telegram = telegram;
+  if (whatsapp) additionalContacts.whatsapp = whatsapp;
+  if (address) additionalContacts.address = address;
   const metadata: LeadContactMetadata = {
+    ...(Object.keys(additionalContacts).length ? { additionalContacts } : {}),
     leadName: replacesUploaded ? reply.leadName : uploadedName || reply.leadName,
     companyName: uploadedCompany && normalizeLeadWebsite(uploadedCompany) && replyCompany
       ? replyCompany : uploadedCompany || replyCompany,

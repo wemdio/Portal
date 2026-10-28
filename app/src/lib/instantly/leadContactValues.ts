@@ -76,6 +76,18 @@ export function leadPhoneCandidates(line: string): LeadPhoneCandidate[] {
     let base = match[0].trim().replace(/[.]+$/, '');
     let extension: string | undefined;
     let end = match.index + match[0].length;
+    // A closing prose parenthesis can follow a labelled Russian phone, e.g.
+    // "(тел. для связи со мной 8...)". Require an explicit label: a balanced
+    // prose reference such as "(РД 89123456789)" must not become a phone.
+    const prefix = line.slice(0, match.index);
+    if (base.endsWith(')') &&
+      /^[78]\d{10}$/.test(base.replace(/\D/g, '')) &&
+      /(?:^|[^\p{L}])(?:тел(?:ефон)?\.?|моб(?:ильный)?\.?|phone|mobile|tel\.?|для\s+связи)(?:\s+для\s+связи)?(?:\s+(?:со\s+мной|с\s+нами))?\s*[:.]?\s*$/iu.test(prefix) &&
+      !/[()]/.test(base.slice(0, -1).replace(/\([^()]*\)/g, '')) &&
+      (prefix.match(/\(/g)?.length ?? 0) > (prefix.match(/\)/g)?.length ?? 0)) {
+      base = base.slice(0, -1).trimEnd();
+      end -= 1;
+    }
     // A parenthesized local number is not an extension or one 17-digit phone:
     // "+7... (26-49-30)". Keep the complete number; don't guess its local area.
     const localAlias = /^(.*\d)\s+\((\d{2,3}(?:-\d{2,3}){1,2})\)$/.exec(base);

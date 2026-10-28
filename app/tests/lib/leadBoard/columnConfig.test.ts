@@ -87,7 +87,7 @@ describe('makeCustomColumnKey', () => {
 
 describe('columnLabel / isBuiltinColumnKey', () => {
   it('builtin берёт лейбл из словаря, custom — свой', () => {
-    expect(columnLabel({ key: 'phone', visible: true })).toBe('Контакт');
+    expect(columnLabel({ key: 'phone', visible: true })).toBe('Контакты');
     expect(columnLabel({ key: 'c_inn', label: 'ИНН', visible: true, custom: true })).toBe('ИНН');
     expect(isBuiltinColumnKey('phone')).toBe(true);
     expect(isBuiltinColumnKey('c_inn')).toBe(false);
