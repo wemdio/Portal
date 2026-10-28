@@ -213,7 +213,7 @@ blocks:
   - name: Build portal
     dependencies: []
     run:
-      when: "branch = 'main' AND change_in(['/app/', '/Dockerfile', '/entrypoint.sh', '/supabase/migrations/', '/supabase/instantly-migrations/'], {default_branch: 'main'})"
+      when: "branch = 'main' AND change_in(['/app/', '/Dockerfile', '/entrypoint.sh', '/supabase/migrations/', '/supabase/instantly-migrations/', '/deploy/eng-browser/', '/docker-compose.prod.yml', '/.semaphore/semaphore.yml', '/.semaphore/scheduled-deploy.yml', '/.semaphore/select-deploy-targets.sh'], {default_branch: 'main'})"
     task:
       secrets:
         - name: portal_secrets
@@ -225,12 +225,12 @@ blocks:
       jobs:
         - name: portal
           commands:
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --cache-from type=registry,ref=${DOCKER_USERNAME}/portal:buildcache --cache-to type=registry,ref=${DOCKER_USERNAME}/portal:buildcache,mode=max --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --build-arg NEXT_PUBLIC_SIGNUP_HOSTS=${NEXT_PUBLIC_SIGNUP_HOSTS} --platform linux/amd64 -f Dockerfile .'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --tag ${DOCKER_USERNAME}/portal:${SEMAPHORE_GIT_SHA} --label org.opencontainers.image.revision=${SEMAPHORE_GIT_SHA} --cache-from type=registry,ref=${DOCKER_USERNAME}/portal:buildcache --cache-to type=registry,ref=${DOCKER_USERNAME}/portal:buildcache,mode=max --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --build-arg NEXT_PUBLIC_SIGNUP_HOSTS=${NEXT_PUBLIC_SIGNUP_HOSTS} --platform linux/amd64 -f Dockerfile .'
 
   - name: Build worker
     dependencies: []
     run:
-      when: "branch = 'main' AND change_in(['/app/', '/Dockerfile.worker'], {default_branch: 'main'})"
+      when: "branch = 'main' AND change_in(['/app/', '/Dockerfile.worker', '/deploy/eng-browser/', '/docker-compose.prod.yml', '/.semaphore/semaphore.yml', '/.semaphore/scheduled-deploy.yml', '/.semaphore/select-deploy-targets.sh'], {default_branch: 'main'})"
     task:
       secrets:
         - name: portal_secrets
@@ -242,7 +242,27 @@ blocks:
       jobs:
         - name: worker
           commands:
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-worker:prod --cache-from type=registry,ref=${DOCKER_USERNAME}/portal-worker:buildcache --cache-to type=registry,ref=${DOCKER_USERNAME}/portal-worker:buildcache,mode=max --platform linux/amd64 -f Dockerfile.worker .'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-worker:prod --tag ${DOCKER_USERNAME}/portal-worker:${SEMAPHORE_GIT_SHA} --label org.opencontainers.image.revision=${SEMAPHORE_GIT_SHA} --cache-from type=registry,ref=${DOCKER_USERNAME}/portal-worker:buildcache --cache-to type=registry,ref=${DOCKER_USERNAME}/portal-worker:buildcache,mode=max --platform linux/amd64 -f Dockerfile.worker .'
+
+  - name: Build ENG browser
+    dependencies: []
+    run:
+      when: "branch = 'main' AND change_in(['/app/', '/deploy/eng-browser/', '/docker-compose.prod.yml', '/.semaphore/semaphore.yml', '/.semaphore/scheduled-deploy.yml', '/.semaphore/select-deploy-targets.sh'], {default_branch: 'main'})"
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+          - docker buildx create --use
+      jobs:
+        - name: broker
+          commands:
+            - 'docker buildx build --push --target broker --tag ${DOCKER_USERNAME}/portal-eng-browser-broker:prod --tag ${DOCKER_USERNAME}/portal-eng-browser-broker:${SEMAPHORE_GIT_SHA} --label org.opencontainers.image.revision=${SEMAPHORE_GIT_SHA} --cache-from type=registry,ref=${DOCKER_USERNAME}/portal-eng-browser-broker:buildcache --cache-to type=registry,ref=${DOCKER_USERNAME}/portal-eng-browser-broker:buildcache,mode=max --platform linux/amd64 -f deploy/eng-browser/Dockerfile .'
+        - name: runner
+          commands:
+            - 'docker buildx build --push --target runner --tag ${DOCKER_USERNAME}/portal-eng-browser-runner:prod --tag ${DOCKER_USERNAME}/portal-eng-browser-runner:${SEMAPHORE_GIT_SHA} --label org.opencontainers.image.revision=${SEMAPHORE_GIT_SHA} --cache-from type=registry,ref=${DOCKER_USERNAME}/portal-eng-browser-runner:buildcache --cache-to type=registry,ref=${DOCKER_USERNAME}/portal-eng-browser-runner:buildcache,mode=max --platform linux/amd64 -f deploy/eng-browser/Dockerfile .'
 
   - name: Build yandexmaps
     dependencies: []

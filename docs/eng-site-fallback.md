@@ -11,11 +11,14 @@ and ENG contact-first email crawl now support this order:
    explicitly reports busy/not-ready, or a confirmed upstream 5xx was observed.
 
 The optional readers are disabled by default. Set `ENG_BROWSER_ENABLED=1`,
-`ENG_BROWSER_URL=http://eng-browser-broker:4100` and a matching
-`ENG_BROWSER_TOKEN` only after the service is independently released and
-verified. The isolated browser service, build commands and Linux acceptance
+the release-specific `ENG_BROWSER_URL` and a matching `ENG_BROWSER_TOKEN`
+only after the service is independently released and verified. The production
+release script writes `http://portal-eng-browser-<12-SHA>-broker:4100` after
+checking the candidate service, before consumers are recreated. The isolated
+browser service, build commands and Linux acceptance
 requirements are in [deploy/eng-browser/README.md](../deploy/eng-browser/README.md).
-The existing production compose is not modified.
+The separate browser compose is deployed by Scheduled Deploy; the runner stays
+outside the normal worker pool and has no direct network access.
 
 Browser fallback adds at most 20 seconds to an enabled company-evidence page
 read. The contact crawler keeps its original 30-second company deadline and
@@ -56,20 +59,20 @@ returned another empty page or explicitly reported a safe availability failure
 unsafe/ambiguous addresses and login walls must never be reclassified as empty.
 It is not a retry or bypass for a blocked site.
 
-Enabling it requires `ENG_TINYFISH_ENABLED=1`, `TINYFISH_API_KEY`, a stable
-`ENG_TINYFISH_ACCOUNT_ID` used by every Portal worker for that account, and
-all three explicit operator attestations:
+Enabling it requires `ENG_TINYFISH_ENABLED=1`, `TINYFISH_API_KEY`, and a
+stable `ENG_TINYFISH_ACCOUNT_ID` shared by all Portal workers using the account.
+Before every Fetch, the reader makes two bounded, read-only API calls: the
+wallet must report exactly one USD per-URL Fetch meter at a zero rate, with a
+rate timestamp at most five minutes old; the current UTC day's Fetch usage
+must be below 800 operations. Unknown, stale, duplicate, nonzero or unavailable
+metadata closes the fallback without a Fetch. The observed rate is not a
+contractual guarantee that the provider cannot change pricing between calls.
 
-- `ENG_TINYFISH_DEDICATED_ACCOUNT_ATTESTED=1`: the account is dedicated to this
-  gate, with no Playground, other keys, or external clients consuming its quota.
-- `ENG_TINYFISH_NO_ANTIBOT_ATTESTED=1`: the provider has confirmed that the
-  selected Fetch service does not bypass access controls or use prohibited
-  stealth/proxy handling. The current public Fetch documentation does not
-  establish that guarantee; do not enable before it is confirmed.
-- `ENG_TINYFISH_NO_PAID_USAGE_ATTESTED=1`: the operator has confirmed that the
-  configured account cannot incur paid Fetch overage. TinyFish's pricing page
-  and Fetch documentation disagree on the behavior beyond the free allowance;
-  do not enable on the basis of the application counter alone.
+The service is never called for an observed access block or challenge, and the
+returned content is screened again. TinyFish does not document a switch to
+control its internal proxy or anti-bot behavior; the client does not claim to
+verify those internals. Public docs differ on Fetch overage pricing, making the
+live rate check and usage cap meaningful safeguards rather than a guarantee.
 
 Deploy the matching `eng_tinyfish_budget` migration through the normal release
 process before enabling. Its transactional Postgres gate reserves one URL per
@@ -77,8 +80,9 @@ attempt and limits this Portal account identifier to 800 URLs per rolling 24h
 and 120 per rolling minute, below published limits. Reservations are not
 refunded on failures or unknown outcomes. Missing credentials, migration, DB,
 invalid account configuration, budget exhaustion or timeouts all fail closed.
-These counters cannot enforce an account-wide limit against clients outside the
-gate or prevent the provider from changing its billing rules.
+The provider usage count is an additional conservative check, not an atomic
+account-wide cap: other clients can consume the account concurrently, and
+provider usage may lag. Prefer reserving this account for Portal use.
 
 Fetch receives the public site URL. It returns provider-extracted HTML with
 `include_selectors: ["body"]`; the provider documents selected content as

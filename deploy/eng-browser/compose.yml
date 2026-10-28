@@ -23,7 +23,10 @@ services:
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 128
-    networks: [portal]
+    networks:
+      portal:
+        aliases:
+          - ${ENG_BROWSER_BROKER_HOST:-eng-browser-broker}
     restart: unless-stopped
   eng-browser-runner:
     image: ${ENG_BROWSER_RUNNER_IMAGE:?Set ENG_BROWSER_RUNNER_IMAGE}

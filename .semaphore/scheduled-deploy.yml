@@ -49,6 +49,13 @@ blocks:
               # Ретраи: «Connection closed by … port 22» часто при шторме брутфорса / MaxStartups — второй заход через паузу проходит.
               SSH_BASE="-o StrictHostKeyChecking=no -o ConnectTimeout=60 -o ConnectionAttempts=2 -o TCPKeepAlive=yes"
               SSH_LONG="${SSH_BASE} -o ServerAliveInterval=30 -o ServerAliveCountMax=8"
+              # Portal uses the independently verified key from docs/ssh-access.md.
+              # Keep unrelated legacy sender/IDB SSH options separate.
+              [ "$HOST" = '139.60.162.24' ] || { echo '[scheduled] Portal HOST differs from the verified target' >&2; exit 1; }
+              PORTAL_KNOWN_HOSTS="$(pwd)/.semaphore/portal-known-hosts"
+              [ "$(ssh-keygen -lf "$PORTAL_KNOWN_HOSTS" -E sha256 | awk '{print $2}')" = 'SHA256:dl0Kdm8qTiwQlu1DpBC3w77WIxjSPG0BhQJs2D/RW0o' ] || { echo '[scheduled] Portal host-key pin is invalid' >&2; exit 1; }
+              SSH_PORTAL_BASE="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=${PORTAL_KNOWN_HOSTS} -o ConnectTimeout=60 -o ConnectionAttempts=2 -o TCPKeepAlive=yes"
+              SSH_PORTAL_LONG="${SSH_PORTAL_BASE} -o ServerAliveInterval=30 -o ServerAliveCountMax=8"
               SSH_RETRIES=4
               SSH_RETRY_PAUSE=25
 
@@ -57,7 +64,7 @@ blocks:
                 remote="$2"
                 n=1
                 while [ "$n" -le "$SSH_RETRIES" ]; do
-                  if sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_BASE} ${USER}@${HOST} "$remote"; then
+                  if sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_PORTAL_BASE} ${USER}@${HOST} "$remote"; then
                     return 0
                   fi
                   echo "[scheduled] ${desc}: SSH не удалась (попытка ${n}/${SSH_RETRIES})" >&2
@@ -72,7 +79,7 @@ blocks:
                 shift
                 n=1
                 while [ "$n" -le "$SSH_RETRIES" ]; do
-                  if sshpass -p "${SERVER_PASSWORD}" scp ${SSH_BASE} "$@"; then
+                  if sshpass -p "${SERVER_PASSWORD}" scp ${SSH_PORTAL_BASE} "$@"; then
                     return 0
                   fi
                   echo "[scheduled] ${desc}: scp не удалась (попытка ${n}/${SSH_RETRIES})" >&2
@@ -82,11 +89,21 @@ blocks:
                 return 1
               }
 
+              # Hold one owner-checked lock across all SSH sessions, migration,
+              # consumer drain and browser finalization. A stale lock fails safe.
+              DEPLOY_LOCK_ID="${SEMAPHORE_WORKFLOW_ID:-manual}-$$-${RANDOM}"
+              case "$DEPLOY_LOCK_ID" in *[!a-zA-Z0-9_-]*) echo '[scheduled] Invalid lock owner' >&2; exit 1;; esac
+              release_deploy_lock() {
+                run_ssh "release workflow lock" "if [ \"\$(cat /home/Portal/prod/.scheduled-deploy-lock/owner 2>/dev/null)\" = '$DEPLOY_LOCK_ID' ]; then rm -f /home/Portal/prod/.scheduled-deploy-lock/owner && rmdir /home/Portal/prod/.scheduled-deploy-lock; fi" || echo '[scheduled] Workflow lock cleanup needs attention' >&2
+              }
+              trap release_deploy_lock EXIT
+              run_ssh "acquire workflow lock" "mkdir -p /home/Portal/prod; if mkdir /home/Portal/prod/.scheduled-deploy-lock 2>/dev/null; then printf '%s' '$DEPLOY_LOCK_ID' > /home/Portal/prod/.scheduled-deploy-lock/owner; elif [ \"\$(cat /home/Portal/prod/.scheduled-deploy-lock/owner 2>/dev/null)\" != '$DEPLOY_LOCK_ID' ]; then echo '[scheduled] Another deploy owns the workflow lock' >&2; exit 75; fi"
+
               LAST=""
               ok_last=0
               n=1
               while [ "$n" -le "$SSH_RETRIES" ]; do
-                if t=$(sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_BASE} ${USER}@${HOST} \
+                if t=$(sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_PORTAL_BASE} ${USER}@${HOST} \
                   "cat /home/Portal/prod/last_deploy_sha 2>/dev/null || true"); then
                   LAST="$t"
                   ok_last=1
@@ -498,12 +515,20 @@ blocks:
                 run_scp "copy compose files" \
                   docker-compose.prod.yml drain-worker.sh deploy/nginx/50x.html ${USER}@${HOST}:/home/Portal/prod/
 
-                printf '%s\n' "${DOCKER_PASSWORD}" | sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_LONG} ${USER}@${HOST} \
+                if [ "$DEPLOY_ENG_BROWSER" = 1 ]; then
+                  run_ssh "prepare browser release directory" "mkdir -p /home/Portal/prod/eng-browser"
+                  run_scp "copy reviewed browser release files" \
+                    deploy/eng-browser/compose.yml deploy/eng-browser/seccomp_profile.json deploy/eng-browser/release.sh \
+                    "${USER}@${HOST}:/home/Portal/prod/eng-browser/"
+                fi
+
+                printf '%s\n' "${DOCKER_PASSWORD}" | sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_PORTAL_LONG} ${USER}@${HOST} \
                   "set -e;
                 cd /home/Portal/prod;
                 CORE_TARGETS='${CORE_SERVICES}';
                 WORKER_TARGETS='${WORKER_SERVICES}';
                 PORTAL_CHANGED='${DEPLOY_PORTAL}';
+                BROWSER_CHANGED='${DEPLOY_ENG_BROWSER}';
                 chmod +x drain-worker.sh;
                 upsert_env() {
                   key=\"\$1\";
@@ -559,7 +584,7 @@ blocks:
                   sudo -n env DOCKER_GID=\"\${SAFE_DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal || true;
                   maintenance_enabled=0;
                 };
-                trap 'rc=$?; disable_maintenance; exit $rc' EXIT;
+                trap 'rc=\$?; disable_maintenance; exit \$rc' EXIT;
                 echo '--- Step 0: ensure deps (skip if already present) ---';
                 if ! command -v apt-get >/dev/null 2>&1; then echo 'apt-get not found' && exit 1; fi;
                 if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
@@ -600,10 +625,27 @@ blocks:
                       echo \"[scheduled] docker compose pull failed after \${pull_max} attempts\" >&2;
                       exit 1;
                     fi;
-                    sleep_for=$((15 * pull_attempt));
+                    sleep_for=\$((15 * pull_attempt));
                     echo \"[scheduled] docker compose pull failed; sleeping \${sleep_for}s before retry\" >&2;
                     sleep \"\${sleep_for}\";
-                    pull_attempt=$((pull_attempt + 1));
+                    pull_attempt=\$((pull_attempt + 1));
+                  done;
+                fi;
+                if [ \"\${BROWSER_CHANGED}\" = 1 ]; then
+                  echo '--- Step 1.0: verify every required immutable image before migrations ---';
+                  release_images='portal-worker portal-eng-browser-broker portal-eng-browser-runner';
+                  if [ \"\${PORTAL_CHANGED}\" = 1 ]; then release_images=\"portal \${release_images}\"; fi;
+                  for release_image in \${release_images}; do
+                    exact_image=\"${DOCKER_USERNAME}/\${release_image}:${COMMIT_SHA}\";
+                    sudo -n docker pull \"\${exact_image}\";
+                    exact_revision=\$(sudo -n docker image inspect \"\${exact_image}\" --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}');
+                    [ \"\${exact_revision}\" = '${COMMIT_SHA}' ] || { echo '[scheduled] Image revision mismatch' >&2; exit 1; };
+                    case \"\${release_image}\" in
+                      portal|portal-worker)
+                        exact_id=\$(sudo -n docker image inspect \"\${exact_image}\" --format '{{.Id}}');
+                        prod_id=\$(sudo -n docker image inspect \"${DOCKER_USERNAME}/\${release_image}:prod\" --format '{{.Id}}');
+                        [ \"\${exact_id}\" = \"\${prod_id}\" ] || { echo '[scheduled] Mutable image tag differs from reviewed SHA' >&2; exit 1; };;
+                    esac;
                   done;
                 fi;
                 if [ \"\${PORTAL_CHANGED}\" = 1 ]; then
@@ -620,6 +662,10 @@ blocks:
                   fi;
                   echo '--- Step 1.2: cleanup expired tool statuses (new -> active after 7 days) ---';
                   sudo -n docker run --rm --network host --env-file .env ${DOCKER_USERNAME}/portal:prod node scripts/db/cleanupExpiredToolStatuses.js 2>&1 || echo \"[scheduled] tool-status cleanup failed, continuing\";
+                fi;
+                if [ \"\${BROWSER_CHANGED}\" = 1 ]; then
+                  echo '--- Step 1.3: verify and activate isolated browser before consumers ---';
+                  sudo -n bash eng-browser/release.sh '${COMMIT_SHA}' /home/Portal/prod;
                 fi;
                 wait_port_free() {
                   local port=\"\$1\" max_wait=\"\${2:-30}\";
@@ -824,6 +870,11 @@ blocks:
                 curl -fsS --connect-timeout 5 --max-time 15 -X POST \"https://api.telegram.org/bot\${bot_token}/sendMessage\" \
                   --data-urlencode \"chat_id=\${chat_id}\" \
                   --data-urlencode \"text=⚠️ Scheduled deploy ${COMMIT_SHA}: портал задеплоен, но обновление воркеров «Рассылки» НЕ подтверждено — ${SENDER_DEPLOY_SKIPPED}. Незавершённые хосты будут повторно проверены и обновлены при следующем запуске Scheduled deploy, даже без новых коммитов.\" >/dev/null || true" || true
+              fi
+
+              if [ "$DEPLOY_ENG_BROWSER" = 1 ]; then
+                run_ssh "finalize verified browser release" \
+                  "sudo -n bash /home/Portal/prod/eng-browser/release.sh finalize '${COMMIT_SHA}' /home/Portal/prod"
               fi
 
               run_ssh "write last_deploy_sha" \

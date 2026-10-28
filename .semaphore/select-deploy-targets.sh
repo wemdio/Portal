@@ -43,6 +43,7 @@ select_deploy_targets_from_files() {
   DEPLOY_BACKUP=0
   DEPLOY_DATASET_SYNC=0
   DEPLOY_SENDER=0
+  DEPLOY_ENG_BROWSER=0
   CORE_SERVICES=""
   WORKER_SERVICES=""
 
@@ -51,6 +52,11 @@ select_deploy_targets_from_files() {
     case "$changed_path" in
       docker-compose.prod.yml)
         DEPLOY_ALL=1
+        DEPLOY_ENG_BROWSER=1
+        ;;
+      .semaphore/semaphore.yml|.semaphore/scheduled-deploy.yml|.semaphore/select-deploy-targets.sh)
+        # Release pipeline changes build the complete same-SHA browser stack.
+        DEPLOY_ENG_BROWSER=1
         ;;
       app/scripts/instantly-dataset/wiki/*)
         # Доки agent_wiki грузятся в БД вручную (load-agent-wiki.mjs), CI-шаг синка
@@ -107,6 +113,10 @@ select_deploy_targets_from_files() {
       deploy/sender/*)
         DEPLOY_SENDER=1
         ;;
+      deploy/eng-browser/*)
+        # Deployed by its own release step, before shared worker drain.
+        DEPLOY_ENG_BROWSER=1
+        ;;
       app/src/lib/tools/baseConstructor*.ts)
         # Shared Base Constructor runtime is also imported by its API routes.
         DEPLOY_PORTAL=1
@@ -128,6 +138,7 @@ select_deploy_targets_from_files() {
         # worker bundle. Unknown/shared app paths therefore keep the fail-safe
         # behaviour and deploy the monolithic worker image as a unit.
         DEPLOY_PORTAL=1
+        DEPLOY_ENG_BROWSER=1
         select_all_workers
         ;;
       Dockerfile.worker)
@@ -198,6 +209,12 @@ EOF
     fi
   fi
 
+  # Browser rollout and updated worker configuration must move together. The
+  # drain implementation can stop the whole shared pool, so recreate it all.
+  if [ "$DEPLOY_ENG_BROWSER" = 1 ]; then
+    select_all_workers
+  fi
+
   if [ -n "$CORE_SERVICES" ] || [ -n "$WORKER_SERVICES" ]; then
     DEPLOY_PORTAL_HOST=1
   else
@@ -226,7 +243,7 @@ print_deploy_plan() {
   else
     echo "  - <none>"
   fi
-  echo "[deploy-plan] full=${DEPLOY_ALL} portal=${DEPLOY_PORTAL} workers=${DEPLOY_WORKERS} idb=${DEPLOY_IDB_STACK} backup=${DEPLOY_BACKUP} dataset_sync=${DEPLOY_DATASET_SYNC} sender=${DEPLOY_SENDER}"
+  echo "[deploy-plan] full=${DEPLOY_ALL} portal=${DEPLOY_PORTAL} workers=${DEPLOY_WORKERS} eng_browser=${DEPLOY_ENG_BROWSER} idb=${DEPLOY_IDB_STACK} backup=${DEPLOY_BACKUP} dataset_sync=${DEPLOY_DATASET_SYNC} sender=${DEPLOY_SENDER}"
   echo "[deploy-plan] core services: ${CORE_SERVICES:-<none>}"
   echo "[deploy-plan] worker services: ${WORKER_SERVICES:-<none>}"
 }

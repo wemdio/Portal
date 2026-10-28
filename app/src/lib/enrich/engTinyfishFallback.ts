@@ -7,9 +7,14 @@ import { reserveEngTinyfishUrl } from './engTinyfishBudget';
 import { isEngHtmlBlocked } from './engPageFallbackPolicy';
 
 const ENDPOINT = 'https://api.fetch.tinyfish.ai';
+const WALLET_ENDPOINT = 'https://agent.tinyfish.ai/v1/wallet';
+const USAGE_ENDPOINT = 'https://api.fetch.tinyfish.ai/usage';
 const MAX_RESPONSE_BYTES = 1024 * 1024;
+const MAX_METADATA_BYTES = 128 * 1024;
 const MAX_HTML_CHARS = 500_000;
 const TIMEOUT_MS = 15_000;
+const METADATA_TIMEOUT_MS = 4_000;
+const DAILY_REMOTE_LIMIT = 800;
 const CHALLENGE = /(?:captcha|access denied|checking your browser|verify (?:that )?you are human|just a moment|security challenge|cloudflare ray id|automated (?:access|requests)|bot detection|login required)/i;
 
 export interface EngTinyfishFallbackInput {
@@ -28,13 +33,9 @@ export interface EngTinyfishFallbackResult {
   source: 'tinyfish';
 }
 
-/** These attestations must reflect provider/account guarantees. Flags do not
- * themselves guarantee no proxy/antibot bypass or free pricing. */
+/** Optional, disabled by default; live price and quota checks happen separately. */
 function config(): { key: string; accountId: string } | null {
-  if (process.env.ENG_TINYFISH_ENABLED !== '1' ||
-      process.env.ENG_TINYFISH_DEDICATED_ACCOUNT_ATTESTED !== '1' ||
-      process.env.ENG_TINYFISH_NO_ANTIBOT_ATTESTED !== '1' ||
-      process.env.ENG_TINYFISH_NO_PAID_USAGE_ATTESTED !== '1') return null;
+  if (process.env.ENG_TINYFISH_ENABLED !== '1') return null;
   const key = process.env.TINYFISH_API_KEY?.trim() ?? '';
   const accountId = process.env.ENG_TINYFISH_ACCOUNT_ID?.trim() ?? '';
   return key && /^[a-zA-Z0-9._-]{1,80}$/.test(accountId) ? { key, accountId } : null;
@@ -77,9 +78,9 @@ async function publicUrl(url: URL, signal: AbortSignal): Promise<boolean> {
   } catch { signal.throwIfAborted(); return false; }
 }
 
-async function readBounded(response: Response, signal: AbortSignal): Promise<string | null> {
+async function readBounded(response: Response, signal: AbortSignal, maxBytes = MAX_RESPONSE_BYTES): Promise<string | null> {
   const declared = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+  if (Number.isFinite(declared) && declared > maxBytes) {
     void response.body?.cancel().catch(() => {});
     return null;
   }
@@ -92,7 +93,7 @@ async function readBounded(response: Response, signal: AbortSignal): Promise<str
       const { value, done } = await withAbort(reader.read(), signal);
       if (done) break;
       total += value.byteLength;
-      if (total > MAX_RESPONSE_BYTES) return null;
+      if (total > maxBytes) return null;
       chunks.push(value);
     }
     const data = new Uint8Array(total);
@@ -100,6 +101,41 @@ async function readBounded(response: Response, signal: AbortSignal): Promise<str
     for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.byteLength; }
     return new TextDecoder().decode(data);
   } finally { void reader.cancel().catch(() => {}); }
+}
+
+/** Read-only checks. Provider usage may lag and may not include all other
+ * clients of an organisation; the shared local reservation remains mandatory. */
+async function freePreflight(key: string, signal: AbortSignal): Promise<string | null> {
+  const day = new Date().toISOString().slice(0, 10);
+  const usageUrl = new URL(USAGE_ENDPOINT);
+  usageUrl.searchParams.set('start_after', `${day}T00:00:00Z`);
+  usageUrl.searchParams.set('limit', '1');
+  const boundedSignal = AbortSignal.any([signal, AbortSignal.timeout(METADATA_TIMEOUT_MS)]);
+  const read = async (url: string): Promise<unknown> => {
+    const response = await withAbort(fetch(url, { headers: { 'X-API-Key': key }, redirect: 'error', signal: boundedSignal }), boundedSignal);
+    if (!response.ok) { void response.body?.cancel().catch(() => {}); return null; }
+    const body = await readBounded(response, boundedSignal, MAX_METADATA_BYTES);
+    return body ? JSON.parse(body) as unknown : null;
+  };
+  try {
+    const [wallet, usage] = await Promise.all([read(WALLET_ENDPOINT), read(usageUrl.href)]);
+    signal.throwIfAborted();
+    if (!wallet || typeof wallet !== 'object' || !usage || typeof usage !== 'object') return null;
+    const rates = (wallet as { rates?: unknown }).rates;
+    if (!rates || typeof rates !== 'object') return null;
+    const { meters, as_of: asOf } = rates as { meters?: unknown; as_of?: unknown };
+    if (!Array.isArray(meters) || typeof asOf !== 'string') return null;
+    const timestamp = Date.parse(asOf);
+    const ageMs = Date.now() - timestamp;
+    if (!Number.isFinite(timestamp) || ageMs > 300_000 || ageMs < -60_000) return null;
+    const fetchMeters = meters.filter((meter: unknown) => meter && typeof meter === 'object' && (meter as { label?: unknown }).label === 'TinyFish Fetch');
+    if (fetchMeters.length !== 1) return null;
+    const meter = fetchMeters[0] as { currency?: unknown; per?: unknown; unit_amount?: unknown };
+    if (meter.currency !== 'USD' || meter.per !== 'url' || typeof meter.unit_amount !== 'string' || !/^0(?:\.0{1,6})?$/.test(meter.unit_amount)) return null;
+    const total = (usage as { total?: unknown }).total;
+    if (typeof total !== 'number' || !Number.isSafeInteger(total) || total < 0 || total >= DAILY_REMOTE_LIMIT) return null;
+    return new Date().toISOString().slice(0, 10) === day ? day : null;
+  } catch { signal.throwIfAborted(); return null; }
 }
 
 /** Caller must retain the real typed outcome of both prior attempts. No retry
@@ -119,7 +155,10 @@ export async function fetchEngTinyfishFallback(input: EngTinyfishFallbackInput):
   try {
     input.signal?.throwIfAborted();
     if (!await publicUrl(requested, controller.signal)) return null;
+    const preflightDay = await freePreflight(settings.key, controller.signal);
+    if (!preflightDay) return null;
     if (!await reserveEngTinyfishUrl(settings.accountId, controller.signal)) return null;
+    if (new Date().toISOString().slice(0, 10) !== preflightDay) return null;
     const response = await fetch(ENDPOINT, {
       method: 'POST', redirect: 'error', signal: controller.signal,
       headers: { 'Content-Type': 'application/json', 'X-API-Key': settings.key },
