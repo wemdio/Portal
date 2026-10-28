@@ -1,5 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { qualifyReply } from '@/lib/instantly/leadQualifier';
+import { PRODUCT_LABELS, type Product } from '@/lib/polzaRuOutreach/cascade';
+import { loadRecipientProduct } from '@/lib/polzaRuOutreach/rowProduct';
 import { loadSenderThread } from './context';
 import { loadCampaignSettings, type LeadSettings } from './settings';
 import { isClientPartyReply, withProjectLeadSettings } from './projectScope';
@@ -282,6 +284,24 @@ async function qualifyOne(
   }
 }
 
+/** Ссылка на КП продукта из `sender_folders.kp_links`: только https, без пробелов и кавычек. */
+export function kpUrlOf(links: unknown, product: Product): string | null {
+  const value = links && typeof links === 'object' && !Array.isArray(links) ? (links as Record<string, unknown>)[product] : null;
+  const url = typeof value === 'string' ? value.trim() : '';
+  return /^https:\/\/[^\s"<>]+$/i.test(url) ? url : null;
+}
+
+/** Ссылки на КП папки; один запрос на папку за круг доставки. */
+async function loadKpLinks(db: SupabaseClient, folderId: string | null, cache: Map<string, unknown>): Promise<unknown> {
+  if (!folderId) return null;
+  if (!cache.has(folderId)) {
+    const { data, error } = await db.from('sender_folders').select('kp_links').eq('id', folderId).maybeSingle();
+    if (error) throw new Error(`sender_folders: ${error.message}`);
+    cache.set(folderId, (data as { kp_links?: unknown } | null)?.kp_links ?? null);
+  }
+  return cache.get(folderId);
+}
+
 /** Лиды, ещё не доставленные в чат, у переписок, по которым в чат ещё не писали. */
 async function deliverLeads(db: SupabaseClient, tg: LeadTelegramConfig, log: Log): Promise<number> {
   const { data, error } = await db
@@ -300,6 +320,7 @@ async function deliverLeads(db: SupabaseClient, tg: LeadTelegramConfig, log: Log
 
   const settings = await loadCampaignSettings(db, rows.map((r) => r.campaign_id));
   let sent = 0;
+  const kpLinks = new Map<string, unknown>();
   for (const row of rows) {
     // Пауза после сбоя доставки: та же лесенка, что у оценки.
     if (row.tg_attempts > 0 && Date.parse(row.updated_at) > Date.now() - (RETRY_DELAYS_MIN[Math.min(row.tg_attempts - 1, 3)] * 60_000)) continue;
@@ -335,6 +356,13 @@ async function deliverLeads(db: SupabaseClient, tg: LeadTelegramConfig, log: Log
 
     try {
       const thread = await loadSenderThread(db, row.reply_id, row.recipient_id);
+      // Русский автоаутрич: какой продукт предлагали и КП к нему; строки до каскада — без блока.
+      const offered = await loadRecipientProduct(db, row.recipient_id);
+      const product = offered ? {
+        label: PRODUCT_LABELS[offered.product],
+        step: offered.cascadeNo,
+        kpUrl: kpUrlOf(await loadKpLinks(db, campaign.settings.folderId, kpLinks), offered.product),
+      } : undefined;
       const text = buildLeadMessage({
         folderName: campaign.settings.folderName,
         campaignName: campaign.campaignName,
@@ -346,6 +374,7 @@ async function deliverLeads(db: SupabaseClient, tg: LeadTelegramConfig, log: Log
         aiReason: row.ai_reason,
         threadUrl: threadUrl(row.recipient_id),
         copyEmails: thread?.replyCopy ?? [],
+        ...(product ? { product } : {}),
       });
       const messageId = await sendLeadMessage(tg, text);
       await markRow(db, row.reply_id, {
