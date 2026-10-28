@@ -191,6 +191,25 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // Последняя контрольная проба по каждому сервису за неделю: строка ящика
+    // показывает, куда легло письмо — во «Входящие» или в спам.
+    const seedByMailbox = new Map<string, Record<string, { status: string; day: string }>>();
+    if (pageIds.length) {
+      const weekAgo = new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10);
+      const { data: seedRows } = await supabaseAdmin
+        .from('sender_seed_probes')
+        .select('mailbox_id, provider, status, day')
+        .in('mailbox_id', pageIds)
+        .gte('day', weekAgo)
+        .order('day', { ascending: false })
+        .limit(pageIds.length * 30);
+      for (const row of (seedRows ?? []) as { mailbox_id: string; provider: string; status: string; day: string }[]) {
+        const acc = seedByMailbox.get(row.mailbox_id) ?? {};
+        if (!acc[row.provider]) acc[row.provider] = { status: row.status, day: row.day };
+        seedByMailbox.set(row.mailbox_id, acc);
+      }
+    }
+
     // Здоровье ящиков страницы: отправлено / отбои / ошибки за 14 дней. Сбой
     // расчёта не роняет список — просто без оценки.
     const healthByMailbox = new Map<string, { sent: number; bounced: number; failed: number }>();
@@ -240,6 +259,7 @@ export async function GET(req: NextRequest) {
           ...mailbox,
           sent_today: sentToday.get(id) ?? { total: 0, first: 0 },
           probe: probeByMailbox.get(id) ?? null,
+          seed: seedByMailbox.get(id) ?? null,
           health: counts
             ? mailboxHealth({ ...counts, status: String((mailbox as { status?: string }).status ?? '') })
             : null,

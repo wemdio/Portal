@@ -41,6 +41,8 @@ const WINDOW_END_MSK_HOUR = 17;
 const MSK_OFFSET_HOURS = 3;
 /** Первую проверку папки делаем через полчаса: доставка и фильтры не мгновенны. */
 const FIRST_CHECK_DELAY_MS = 30 * 60 * 1000;
+/** Пробу по кнопке «Проверить доставку сейчас» ждут на экране — смотрим уже через 3 минуты. */
+const MANUAL_FIRST_CHECK_DELAY_MS = 3 * 60 * 1000;
 /** Не нашли за два часа — «не дошло». */
 const MISSING_AFTER_MS = 2 * 60 * 60 * 1000;
 /** Не вошли в контрольный ящик за шесть часов — проба не засчитывается. */
@@ -271,6 +273,51 @@ export async function planSeedProbes(opts: { log: Log; now?: Date }): Promise<vo
 }
 
 /**
+ * «Проверить доставку сейчас»: по пробе с ящика на каждый сервис с рабочим
+ * контрольным ящиком — сразу, а не по дневному плану. Сегодняшняя проба ящика
+ * по этому сервису перезаписывается: одна проба на ящик и сервис в день.
+ */
+export async function queueManualSeedProbes(mailboxId: string): Promise<Array<{ provider: SeedProvider; seedEmail: string }>> {
+  if (!supabaseAdmin) throw new Error('Сервис не настроен');
+  const db = supabaseAdmin;
+  const { data: boxRows } = await db.from('sender_seed_boxes').select('id, email, provider').eq('status', 'ok').eq('enabled', true);
+  const boxes = (boxRows ?? []) as { id: string; email: string; provider: SeedProvider }[];
+  const { day } = mskParts(new Date());
+  const nowIso = new Date().toISOString();
+  const rows: Record<string, unknown>[] = [];
+  const queued: Array<{ provider: SeedProvider; seedEmail: string }> = [];
+  for (const provider of Object.keys(SEED_PROVIDERS) as SeedProvider[]) {
+    const candidates = boxes.filter((b) => b.provider === provider);
+    if (!candidates.length) continue;
+    const seed = candidates[Math.floor(Math.random() * candidates.length)];
+    const letter = PROBE_LETTERS[Math.floor(Math.random() * PROBE_LETTERS.length)];
+    rows.push({
+      day,
+      mailbox_id: mailboxId,
+      seed_box_id: seed.id,
+      provider,
+      subject: letter.subject,
+      scheduled_at: nowIso,
+      status: 'planned',
+      manual: true,
+      message_id: null,
+      sent_at: null,
+      folder: null,
+      checked_at: null,
+      attempts: 0,
+      error: null,
+      updated_at: nowIso,
+    });
+    queued.push({ provider, seedEmail: seed.email });
+  }
+  if (rows.length) {
+    const { error } = await db.from('sender_seed_probes').upsert(rows, { onConflict: 'day,mailbox_id,provider' });
+    if (error) throw new Error(`пробы не записались: ${error.message}`);
+  }
+  return queued;
+}
+
+/**
  * Отправка проб с наступившим временем — только с ящиков своего адреса, как
  * боевые письма: тот же IP, те же заголовки. Лимиты ящика не тратят.
  */
@@ -278,10 +325,10 @@ export async function sendDueSeedProbes(opts: { egressIp: string; log: Log }): P
   if (!seedProbesEnabled() || !supabaseAdmin) return;
   const db = supabaseAdmin;
   const { data: due } = await db.from('sender_seed_probes')
-    .select('id, mailbox_id, seed_box_id, subject')
+    .select('id, mailbox_id, seed_box_id, subject, manual')
     .eq('status', 'planned').lte('scheduled_at', new Date().toISOString())
     .order('scheduled_at').limit(100);
-  const probes = (due ?? []) as { id: string; mailbox_id: string; seed_box_id: string | null; subject: string }[];
+  const probes = (due ?? []) as { id: string; mailbox_id: string; seed_box_id: string | null; subject: string; manual?: boolean }[];
   if (!probes.length) return;
 
   const { data: owned } = await db.from('sender_mailboxes').select('*')
@@ -304,7 +351,8 @@ export async function sendDueSeedProbes(opts: { egressIp: string; log: Log }): P
       await fail('Контрольный ящик выключен или без входа');
       continue;
     }
-    if ((!mailbox.enabled && !mailbox.seed_watch) || mailbox.status !== 'verified') {
+    // Проба по кнопке уходит и с выключенного ящика: её запросил человек.
+    if ((!mailbox.enabled && !mailbox.seed_watch && !probe.manual) || mailbox.status !== 'verified') {
       await fail('Ящик рассылки выключен или не прошёл проверку');
       continue;
     }
@@ -437,11 +485,12 @@ export async function checkSeedProbes(opts: { log: Log }): Promise<void> {
   }
   const db = supabaseAdmin;
   const { data } = await db.from('sender_seed_probes')
-    .select('id, seed_box_id, message_id, sent_at, attempts')
+    .select('id, seed_box_id, message_id, sent_at, attempts, manual')
     .eq('status', 'sent')
-    .lt('sent_at', new Date(Date.now() - FIRST_CHECK_DELAY_MS).toISOString())
+    .lt('sent_at', new Date(Date.now() - MANUAL_FIRST_CHECK_DELAY_MS).toISOString())
     .order('sent_at').limit(300);
-  const probes = (data ?? []) as { id: string; seed_box_id: string | null; message_id: string | null; sent_at: string; attempts: number }[];
+  const probes = ((data ?? []) as { id: string; seed_box_id: string | null; message_id: string | null; sent_at: string; attempts: number; manual?: boolean }[])
+    .filter((p) => p.manual || Date.now() - new Date(p.sent_at).getTime() >= FIRST_CHECK_DELAY_MS);
   if (!probes.length) return;
 
   const bySeed = new Map<string, typeof probes>();
