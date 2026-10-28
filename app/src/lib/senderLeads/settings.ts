@@ -27,20 +27,23 @@ export const PRODUCT_OFFER_FOLDER = 'auto_ru';
 /** Текст или ссылка по продуктам каскада; продукта без значения в карте нет. */
 export type ProductTexts = Partial<Record<Product, string>>;
 
-/** Длиннее в href Telegram не принимает; читатель ссылок (process.ts, kpUrlOf) такую не берёт. */
+/** Длиннее в href Telegram не принимает: такую ссылку в сообщение не кладём. */
 export const KP_LINK_MAX = 1500;
 
 /**
- * Ссылка на КП, которую сохраняем: те же правила, что у читателя (process.ts, kpUrlOf) —
- * только https, без пробелов, кавычек и логина. null — читатель такую ссылку отбросил бы.
+ * Ссылка на КП — единый разбор и для сохранения настроек (history.ts), и для чтения
+ * при доставке лида (process.ts, kpUrlOf): только https, без пробелов, кавычек и
+ * логина, не длиннее KP_LINK_MAX. Возвращает нормализованный `url.href` (странный
+ * href не должен заставить Telegram отклонить всё сообщение о лиде); null — ссылка
+ * не годится.
  */
-export function parseKpLink(value: string): string | null {
-  const raw = value.trim();
+export function parseKpLink(value: unknown): string | null {
+  const raw = typeof value === 'string' ? value.trim() : '';
   if (!raw || /[\s"<>]/.test(raw)) return null;
   try {
     const url = new URL(raw);
     if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) return null;
-    return url.href.length <= KP_LINK_MAX ? raw : null;
+    return url.href.length <= KP_LINK_MAX ? url.href : null;
   } catch {
     return null;
   }

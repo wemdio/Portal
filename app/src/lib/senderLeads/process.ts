@@ -3,7 +3,7 @@ import { qualifyReply } from '@/lib/instantly/leadQualifier';
 import { PRODUCT_LABELS, type Product } from '@/lib/polzaRuOutreach/cascade';
 import { loadRecipientProduct } from '@/lib/polzaRuOutreach/rowProduct';
 import { loadSenderThread } from './context';
-import { loadCampaignSettings, type LeadSettings } from './settings';
+import { loadCampaignSettings, parseKpLink, type LeadSettings } from './settings';
 import { isClientPartyReply, withProjectLeadSettings } from './projectScope';
 import { buildLeadMessage, leadTelegramConfig, sendLeadMessage, threadUrl, type LeadMessageInput, type LeadTelegramConfig } from './telegram';
 import { processSenderAutoLeadCrm } from './crm';
@@ -284,25 +284,13 @@ async function qualifyOne(
   }
 }
 
-/** Длиннее в href Telegram не принимает: такую ссылку в сообщение не кладём. */
-const KP_URL_MAX = 1500;
-
 /**
- * Ссылка на КП продукта из `sender_folders.kp_links`: только https, без пробелов,
- * кавычек и логина. Разбирается `new URL()` и кладётся в нормализованном виде —
- * странный href не должен заставить Telegram отклонить всё сообщение о лиде.
+ * Ссылка на КП продукта из `sender_folders.kp_links` — в нормализованном виде, по тем
+ * же правилам, что при сохранении настроек (parseKpLink в settings.ts).
  */
 export function kpUrlOf(links: unknown, product: Product): string | null {
   const value = links && typeof links === 'object' && !Array.isArray(links) ? (links as Record<string, unknown>)[product] : null;
-  const raw = typeof value === 'string' ? value.trim() : '';
-  if (!raw || /[\s"<>]/.test(raw)) return null;
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) return null;
-    return url.href.length <= KP_URL_MAX ? url.href : null;
-  } catch {
-    return null;
-  }
+  return parseKpLink(value);
 }
 
 /** Ссылки на КП папки; один запрос на папку за круг доставки. */

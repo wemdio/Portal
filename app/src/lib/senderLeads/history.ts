@@ -188,9 +188,15 @@ type ProductMapResult = { ok: true; value: ProductTexts } | { ok: false; error: 
 
 /**
  * Карта «продукт → строка» из тела запроса. Ключи вне PRODUCTS отбрасываются,
- * пустые значения не хранятся; `check` возвращает текст ошибки для непустого значения.
+ * пустые значения не хранятся; `check` возвращает текст ошибки для непустого значения,
+ * `normalize` (если есть) приводит принятое значение к виду, в котором оно хранится.
  */
-function parseProductMap(raw: unknown, field: string, check: (text: string, label: string) => string | null): ProductMapResult {
+function parseProductMap(
+  raw: unknown,
+  field: string,
+  check: (text: string, label: string) => string | null,
+  normalize?: (text: string) => string,
+): ProductMapResult {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: `${field} — набор «продукт → текст»` };
   const value: ProductTexts = {};
   for (const product of PRODUCTS) {
@@ -202,7 +208,7 @@ function parseProductMap(raw: unknown, field: string, check: (text: string, labe
     if (!text) continue;
     const error = check(text, label);
     if (error) return { ok: false, error };
-    value[product] = text;
+    value[product] = normalize ? normalize(text) : text;
   }
   return { ok: true, value };
 }
@@ -247,8 +253,13 @@ export function parseSettingsInput(
       value.ai_offer_texts = texts.value;
     }
     if (kpLinks != null) {
-      const links = parseProductMap(kpLinks, 'Ссылки на КП', (text, label) =>
-        parseKpLink(text) ? null : `Ссылка на КП (${label}) — адрес вида https://… без пробелов`);
+      // Хранится нормализованный href — тот же, что потом кладёт в сообщение доставка лида (kpUrlOf).
+      const links = parseProductMap(
+        kpLinks,
+        'Ссылки на КП',
+        (text, label) => (parseKpLink(text) ? null : `Ссылка на КП (${label}) — адрес вида https://… без пробелов`),
+        (text) => parseKpLink(text) ?? text,
+      );
       if (!links.ok) return links;
       value.kp_links = links.value;
     }
