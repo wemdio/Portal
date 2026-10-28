@@ -80,7 +80,7 @@ import {
   withLettersDoubt,
   type Doubts,
 } from './doubts';
-import type { CascadeDecision } from './cascade';
+import { cascadeOffer, type CascadeDecision, type Product } from './cascade';
 import { loadCascadeIndex, lookupCascade, type CascadeIndex } from './cascadeIndex';
 import { companyBrand, isSuppressed, normalizeDomain, siteUrl } from './company';
 import { findRuCompanyEmail } from './findEmail';
@@ -98,7 +98,7 @@ import {
 } from './letters/templateWriter';
 import { loadLibraries, type CaseRecord } from './libraries';
 import { isFatalLlmError, llmAnswersInRun } from './llm';
-import { baseChain, decide, routeCase, routeChain, scoreCompany, splitAutomation, type Route, type Score } from './router';
+import { baseChain, decide, routeCase, routeChain, scoreCompany, type Route, type Score } from './router';
 import { amoLookup, loadAmoIndex, type AmoIndex, type AmoRecord } from './sources/amo';
 import { lookupCatalogEmails } from './sources/catalogEmail';
 import { loadSizeByInn } from './sources/directory';
@@ -326,6 +326,7 @@ interface Tally {
   stages: Stage[];
   sdr: 'strict' | 'broad' | null;
   chain: string | null;
+  product: string | null;
   /** Домен и ИНН, которые строка заняла в дедупе запуска. */
   domain: string | null;
   inn: string | null;
@@ -376,6 +377,9 @@ interface Qualified {
   vacancy: VacancyAnalysis | null;
   signals: Signal[];
   route: Route;
+  /** Что предлагаем (каскад) и номер шага: 1 — новая компания, 2–3 — вернувшаяся. */
+  product: Product;
+  cascadeNo: number;
   caseHit: { record: CaseRecord; reason: string } | null;
   score: Score;
   marketQuote: string | null;
@@ -504,6 +508,7 @@ interface JournalRow {
   pipeline_stage: string | null;
   reason_code: string | null;
   chain_type: string | null;
+  product: string | null;
   normalized_domain: string | null;
   inn: string | null;
   doubt_flags: string[] | null;
@@ -525,7 +530,7 @@ async function loadKeptJournal(db: SupabaseClient, jobId: string): Promise<Journ
     // пропустить или повторить строки, и счётчики разошлись бы с журналом.
     const { data, error } = await db
       .from('polza_ru_outreach_companies')
-      .select('id,row_status,pipeline_stage,reason_code,chain_type,normalized_domain,inn,doubt_flags,source_record_id')
+      .select('id,row_status,pipeline_stage,reason_code,chain_type,product,normalized_domain,inn,doubt_flags,source_record_id')
       .eq('job_id', jobId)
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -575,7 +580,7 @@ async function completeSpentRun(
   finishRun: (patch: Record<string, unknown>) => Promise<void>,
 ): Promise<void> {
   const kept = await loadKeptJournal(db, jobId);
-  const { funnel, reasons, chains, ready, doubtful, awaiting } = journalCounts(kept);
+  const { funnel, reasons, chains, products, ready, doubtful, awaiting } = journalCounts(kept);
   const stopReason = ready >= target ? 'target_reached' : 'budget';
   const spend = budget.snapshot();
   log('info', `job ${jobId}: no LLM budget left for new analysis ($${spend.spent_usd}/$${spend.limit_usd}) — restart keeps the journal: ${kept.length} rows, ${ready} ready (${stopReason})`);
@@ -594,6 +599,7 @@ async function completeSpentRun(
       funnel,
       reasons,
       chains,
+      products,
       doubtful,
       awaiting_templates: awaiting,
       llm: spend,
@@ -812,6 +818,8 @@ async function runJob(
     const funnel = Object.fromEntries(STAGES.map((s) => [s, 0])) as Record<Stage, number>;
     const reasons: Record<string, number> = {};
     const chains: Record<string, number> = {};
+    // Продукты каскада — рядом с цепочками (поводами).
+    const products: Record<string, number> = {};
     const doubtful = { count: 0 };
     // Предохранитель обогащения: 5 ошибок подряд — источник выключается до конца запуска.
     const enrichFails: Record<'revenue_growth' | 'news', number> = { revenue_growth: 0, news: 0 };
@@ -849,6 +857,7 @@ async function runJob(
       Object.assign(funnel, prior.funnel);
       Object.assign(reasons, prior.reasons);
       Object.assign(chains, prior.chains);
+      Object.assign(products, prior.products);
       doubtful.count = prior.doubtful;
       totals.scanned = resumedJournal.length;
       totals.ready = prior.ready;
@@ -966,7 +975,7 @@ async function runJob(
     // awaiting_templates — сколько компаний ждут «Переписать цепочку».
     // worker — аренда запуска воркером: её несёт каждая запись progress_detail.
     const detail = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
-      wave: waveNo, target, pool: pool.length, skipped_recent: skippedRecent, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, sdr,
+      wave: waveNo, target, pool: pool.length, skipped_recent: skippedRecent, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, products, sdr,
       offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count,
       // С бронями идущих запросов — как baseDetail; итог запуска пишет факт.
       llm: budget.snapshot({ includeReserved: true }),
@@ -984,7 +993,7 @@ async function runJob(
         progress_detail: detail(extra),
       });
     };
-    const newTally = (id: string): Tally => ({ id, stages: [], sdr: null, chain: null, domain: null, inn: null });
+    const newTally = (id: string): Tally => ({ id, stages: [], sdr: null, chain: null, product: null, domain: null, inn: null });
     const reach = (tally: Tally, ...stages: Stage[]) => {
       for (const s of stages) {
         funnel[s] += 1;
@@ -1004,6 +1013,11 @@ async function runJob(
         if (left > 0) chains[tally.chain] = left;
         else delete chains[tally.chain];
       }
+      if (tally.product) {
+        const left = (products[tally.product] ?? 0) - 1;
+        if (left > 0) products[tally.product] = left;
+        else delete products[tally.product];
+      }
       // Домен и ИНН строки освобождаем: иначе такая же компания дальше в
       // запуске отсеялась бы «повтором» строки, которой в журнале уже нет.
       if (tally.domain && domainOwner.get(tally.domain) === tally.id) domainOwner.delete(tally.domain);
@@ -1011,6 +1025,7 @@ async function runJob(
       tally.stages = [];
       tally.sdr = null;
       tally.chain = null;
+      tally.product = null;
       tally.domain = null;
       tally.inn = null;
     };
@@ -1021,15 +1036,16 @@ async function runJob(
     /**
      * Строка, которую лимит на ИИ вернул в необработанные: вклад в счётчики
      * вычитаем, а в журнале сбрасываем то, по чему её посчитал бы экран, —
-     * этап и цепочку. В конце запуска такие строки удаляются; если удаление не
-     * пройдёт, строка, дошедшая, скажем, до оценки, иначе числилась бы в
-     * воронке до «Оценки» и в цепочках, хотя из счётчиков запуска её уже
+     * этап, цепочку и продукт. В конце запуска такие строки удаляются; если
+     * удаление не пройдёт, строка, дошедшая, скажем, до оценки, иначе числилась
+     * бы в воронке до «Оценки» и в цепочках, хотя из счётчиков запуска её уже
      * вычли.
      */
     const returnToPool = async (id: string, tally: Tally) => {
       untally(tally);
       await updateRow(id, {
-        row_status: 'processing', pipeline_stage: 'candidates_loaded', chain_type: null, reason_code: null, reason_detail: null,
+        row_status: 'processing', pipeline_stage: 'candidates_loaded', chain_type: null, product: null, cascade_no: null,
+        reason_code: null, reason_detail: null,
       });
     };
 
@@ -1387,7 +1403,7 @@ async function runJob(
         }
       }
 
-      const picked = routeChain({
+      const route = routeChain({
         signals,
         reactivation,
         taScore: site.taScore,
@@ -1417,16 +1433,17 @@ async function runJob(
           ...(site.hasAdPixel ? ['На сайте стоят рекламные счётчики'] : []),
         ],
       };
-      if (!picked) {
+      if (!route) {
         await finish(id, { stage: 'scored', status: 'rejected', reason: 'NO_CHAIN', detail: `ЦА ${site.taScore}/10` }, base);
         return null;
       }
-      // Сплит 50/50: половина подходящих компаний получает «Автоматизированный аутрич».
-      const route = splitAutomation(picked, domain, { signals, reactivation, isB2b, marketQuote });
+      // Цепочка — повод письма, продукт — что предлагаем: вернувшейся компании
+      // следующий шаг каскада, новой — первый по поводу (cascade.ts). Сплита
+      // 50/50 на «Автоматизированный аутрич» больше нет.
+      const offer = cascadeOffer(route.chain, signals, c.cascade);
       const caseHit = routeCase(libraries.cases, site.industryGroup, route.chain);
       const score = scoreCompany({
-        // Скоринг — по исходной цепочке, чтобы сплит не менял, кто проходит порог.
-        chain: picked.chain,
+        chain: route.chain,
         primary: route.primary,
         freshnessDays: config.freshness_days,
         taScore: site.taScore,
@@ -1437,16 +1454,20 @@ async function runJob(
         siteReachable: true,
         // SDR-цепочке кейс по отрасли не нужен (Максим 23.09): письмо 2 —
         // механика, балл за доказательство не снимаем.
-        hasCase: picked.chain === 'hiring' || Boolean(routeCase(libraries.cases, site.industryGroup, picked.chain)),
+        hasCase: route.chain === 'hiring' || Boolean(caseHit),
         // Почта уже найдена и прошла проверку (или это контакт из AMO) — шаг 1.
         emailFound: true,
       });
       chains[route.chain] = (chains[route.chain] ?? 0) + 1;
       tally.chain = route.chain;
+      products[offer.product] = (products[offer.product] ?? 0) + 1;
+      tally.product = offer.product;
       const primary = route.primary;
       const patch = {
         ...base,
         chain_type: route.chain,
+        product: offer.product,
+        cascade_no: offer.cascadeNo,
         signal_type: primary?.type ?? null,
         signal_date: primary?.date ?? null,
         signal_title: primary?.title ?? null,
@@ -1492,7 +1513,10 @@ async function runJob(
       }
       await updateRow(id, { ...patch, ...doubtPatch, pipeline_stage: 'scored' });
       reach(tally, 'scored');
-      return { id, tally, domain, brand, amo: amoRec, email, site, vacancy, signals, route, caseHit, score, marketQuote, doubts };
+      return {
+        id, tally, domain, brand, amo: amoRec, email, site, vacancy, signals, route, product: offer.product, cascadeNo: offer.cascadeNo,
+        caseHit, score, marketQuote, doubts,
+      };
     };
 
     /**
@@ -2010,7 +2034,7 @@ async function runJob(
     // пишется — его расход часть итога: дожидаемся (запуск пока идёт).
     const settled = await settleCalls(COMPLETED_SETTLE_MS);
     const spend = budget.snapshot({ includeReserved: !settled });
-    log('info', `job ${jobId} done: scanned=${totals.scanned} ready=${totals.ready}/${target} (${stopReason}), llm $${spend.spent_usd}/$${spend.limit_usd} in ${spend.calls} calls`, { reasons, chains });
+    log('info', `job ${jobId} done: scanned=${totals.scanned} ready=${totals.ready}/${target} (${stopReason}), llm $${spend.spent_usd}/$${spend.limit_usd} in ${spend.calls} calls`, { reasons, chains, products });
     // Тоже только идущему: остановку между проверкой выше и этой записью не перетираем.
     await finishRun({
       status: 'completed',

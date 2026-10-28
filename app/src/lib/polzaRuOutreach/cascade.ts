@@ -93,6 +93,23 @@ export function productFor(step: CascadeStep, abroad: boolean): Product {
   return step === 'classic' && abroad ? 'classic_abroad' : step;
 }
 
+/** Что предлагает строка: шаг круга, продукт и номер шага каскада (1–3). */
+export interface CascadeOffer {
+  step: CascadeStep;
+  product: Product;
+  cascadeNo: number;
+}
+
+/**
+ * Продукт строки. Повод (цепочка) объясняет, почему пишем сейчас, продукт —
+ * что предлагаем: вернувшейся компании — следующий шаг круга, новой — первый
+ * по поводу. Номер шага — сколько уже предложено плюс этот.
+ */
+export function cascadeOffer(chain: ChainType, signals: Signal[], returning?: CascadeReturn | null): CascadeOffer {
+  const step = returning?.next ?? firstStepFor(chain);
+  return { step, product: productFor(step, isAbroad(signals)), cascadeNo: (returning?.offered.length ?? 0) + 1 };
+}
+
 export type ReplyOutcome = 'decline' | 'later' | 'other';
 
 // «Не» — только в начале слова (lookbehind): «вне интересно» отказом не считается.
