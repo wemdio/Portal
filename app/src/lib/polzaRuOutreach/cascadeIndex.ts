@@ -3,6 +3,7 @@ import 'server-only';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { chunkForInFilter } from '@/lib/sender/inFilter';
+import { isStopRequest } from '@/lib/sender/replyClassify';
 import { stripQuoted } from '@/lib/senderLeads/telegram';
 
 import {
@@ -114,6 +115,11 @@ export interface CascadeRecords {
   replies: ReplyRecord[];
   /** Адреса из общего стоп-листа, которые закрывают всю компанию (в нижнем регистре). */
   suppressedEmails: Set<string>;
+  /**
+   * Получатели, чей лид доставлен менеджерам (`sender_reply_qualifications.tg_sent_at`):
+   * ответ мог прийти уже после разговора ИИ, который закончился молчанием.
+   */
+  managerLeadRecipients: Set<string>;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -210,6 +216,18 @@ function rowAddresses(row: RowRecord): string[] {
     }
   }
   return out.map((email) => email.trim().toLowerCase()).filter(Boolean);
+}
+
+/** Жалоба на спам: «вы заблокированы за спам», «просто спамите». */
+const SPAM_RE = /(?<![а-яё])спам/i;
+
+/**
+ * Просьба убрать из рассылки или жалоба на спам. Старые ответы судил прежний regex
+ * стоп-листа, и такие ответы в стоп-лист не попали (получатель остался `replied`):
+ * без этой проверки компания получила бы следующий продукт.
+ */
+function asksToStop(text: string): boolean {
+  return isStopRequest(text, null) || SPAM_RE.test(text.slice(0, 2000).toLowerCase());
 }
 
 function pushTo<K, V>(map: Map<K, V[]>, key: K, value: V): void {
@@ -327,13 +345,34 @@ export function assembleCascadeIndex(records: CascadeRecords, now: Date, pauseDa
       if (recipient.email && records.suppressedEmails.has(recipient.email.trim().toLowerCase())) suppressed = true;
       if (recipient.lead_verdict === 'not_lead' && recipient.lead_verdict_source === 'manual') closed = true;
 
+      // Ответы человека: отказ, «напишите позже», просьба убрать из рассылки / жалоба на спам.
+      // «Позже» бьёт отказ (решение владельца 28.10.2026), но только если сказано не раньше
+      // отказа: «напишите через квартал» после «нет, спасибо» — ждём, наоборот — закрыто.
+      let declineAt = -1;
+      let laterReplyAt = -1;
+      for (const reply of repliesByRecipient.get(recipient.id) ?? []) {
+        const text = stripQuoted(reply.body ?? '');
+        if (asksToStop(text)) suppressed = true;
+        const outcome = classifyCascadeReply(text);
+        const at = toDate(reply.received_at) ?? toDate(reply.created_at);
+        if (outcome === 'decline') declineAt = Math.max(declineAt, at?.getTime() ?? 0);
+        if (outcome === 'later') {
+          laterReplyAt = Math.max(laterReplyAt, at?.getTime() ?? 0);
+          laterAt = maxDate(laterAt, at);
+        }
+      }
+      const asksLater = laterReplyAt >= 0;
+      if (declineAt >= 0 && !(asksLater && laterReplyAt >= declineAt)) closed = true;
+
       // Лид — передача менеджеру (разговор ИИ дошёл до передачи), ручная метка «лид» или
       // метка ИИ без разговора (ИИ-квалификатор выключен) либо с разговором, который упал:
       // при сбое лид уходит менеджерам, как раньше. Разговор, который закончился молчанием
-      // без передачи (`no_reply`), лидом не считается. Остановленный разговор (`stopped`:
+      // без передачи (`no_reply`), лидом не считается — если только ответ позже не дошёл до
+      // менеджеров старым путём (`managerLeadRecipients`). Остановленный разговор (`stopped`:
       // вмешался менеджер, sender/manualWorker.ts) — тоже лид: компанией занимается человек.
       const conversation = conversationByRecipient.get(recipient.id);
       if (conversation?.state === 'handed_off' || conversation?.state === 'stopped' || conversation?.handoff_reply_id) lead = true;
+      if (records.managerLeadRecipients.has(recipient.id)) lead = true;
       if (
         recipient.lead_verdict === 'lead' &&
         (recipient.lead_verdict_source === 'manual' || !conversation || conversation.state === 'failed')
@@ -343,15 +382,14 @@ export function assembleCascadeIndex(records: CascadeRecords, now: Date, pauseDa
       // ИИ ещё ведёт разговор с ответившим: новую цепочку не начинаем.
       if (conversation?.state === 'active') chainRunning = true;
       // Разговор закрыт — отказ (и у закрытых до появления close_reason, где причины нет).
-      if (conversation?.state === 'closed') closed = true;
-      if (conversation?.close_reason === 'decline' || conversation?.close_reason === 'counter_offer') closed = true;
-      if (conversation?.close_reason === 'stop') suppressed = true;
-
-      for (const reply of repliesByRecipient.get(recipient.id) ?? []) {
-        const outcome = classifyCascadeReply(stripQuoted(reply.body ?? ''));
-        if (outcome === 'decline') closed = true;
-        if (outcome === 'later') laterAt = maxDate(laterAt, toDate(reply.received_at) ?? toDate(reply.created_at));
-      }
+      // Просьба «позже» отказ ИИ не перебивает: он закрывает разговор отказом на то же письмо.
+      // Встречное предложение и «не пишите» остаются закрытием.
+      const closeReason = conversation?.close_reason ?? null;
+      const laterBeatsClose = asksLater && (closeReason === null || closeReason === 'decline');
+      if (conversation?.state === 'closed' && !laterBeatsClose) closed = true;
+      if (closeReason === 'decline' && !laterBeatsClose) closed = true;
+      if (closeReason === 'counter_offer') closed = true;
+      if (closeReason === 'stop') suppressed = true;
     }
     items.push({
       row,
@@ -649,7 +687,22 @@ export async function loadCascadeIndex(
     suppressions.filter((s) => s.reason !== 'hard_bounce').map((s) => String(s.email).trim().toLowerCase()),
   );
 
-  const index = assembleCascadeIndex({ rows, recipients, messages, conversations, replies, suppressedEmails }, now, pauseDays);
+  // Лиды, доставленные менеджерам: после разговора ИИ без ответа (`no_reply`) ответ мог прийти старым путём.
+  const managerLeads = await selectByIn<{ reply_id: string; recipient_id: string }>('qualifications', 'reply_id', recipientIds, (chunk, after) => {
+    const query = db
+      .from('sender_reply_qualifications')
+      .select('reply_id,recipient_id')
+      .in('recipient_id', chunk)
+      .not('tg_sent_at', 'is', null);
+    return (after === null ? query : query.gt('reply_id', after)).order('reply_id', { ascending: true }).limit(PAGE);
+  });
+  const managerLeadRecipients = new Set(managerLeads.map((q) => String(q.recipient_id)));
+
+  const index = assembleCascadeIndex(
+    { rows, recipients, messages, conversations, replies, suppressedEmails, managerLeadRecipients },
+    now,
+    pauseDays,
+  );
 
   // Сигналы нужны только вернувшимся (решение `due`) — подгружаем у них одних.
   const dueByRow = new Map(index.due.map((company) => [company.lastRowId, company] as const));
