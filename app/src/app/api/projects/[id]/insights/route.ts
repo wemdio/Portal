@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { buildProjectInsights } from '@/lib/instantly/projectInsights';
 import { isDatasetConfigured, refreshAbIfStale } from '@/lib/instantlyDataset';
 
@@ -14,9 +15,11 @@ export const dynamic = 'force-dynamic';
  * then computes metrics against the analytics dataset DB. No AI at render.
  */
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const authed = await requireInternalToolAuth(req);
+  if ('error' in authed) return authed.error;
   const { id: projectId } = await params;
   if (!supabaseInstantly) {
     return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });

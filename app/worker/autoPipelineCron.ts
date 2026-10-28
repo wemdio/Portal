@@ -24,7 +24,8 @@
  *   cd /path/to/portal/app && node --env-file=../.env dist/workers/autoPipelineCron.js
  *
  * Альтернативный путь без сборки — оставлен HTTP-эндпоинт
- * /api/cron/auto-hh-pipeline?secret=<CRON_SECRET>. Удобно для отладки в проде,
+ * /api/cron/auto-hh-pipeline (заголовок `Authorization: Bearer <CRON_SECRET>`).
+ * Удобно для отладки в проде,
  * но cron'ить через wget/curl менее надёжно, чем прямой node-вызов.
  */
 
