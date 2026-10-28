@@ -483,7 +483,7 @@ function companyInput(row: WaitingRow, key: TemplateKey, libraries: Libraries): 
   const primary = mainSignal(row, signals);
   const prior = row.prior_contact === true;
   const fitReasons = Array.isArray(row.fit_reasons) ? row.fit_reasons : [];
-  const product = fitReasons.find((r): r is string => typeof r === 'string' && r.startsWith(PRODUCT_PREFIX));
+  const productLine = fitReasons.find((r): r is string => typeof r === 'string' && r.startsWith(PRODUCT_PREFIX));
   return {
     chain,
     product,
@@ -494,7 +494,7 @@ function companyInput(row: WaitingRow, key: TemplateKey, libraries: Libraries): 
     priorContact: prior,
     baseChain: chain === 'automation' ? (prior ? 'reactivation' : (primary && chainOfSignal(primary.type)) || 'icp_only') : undefined,
     marketQuote: row.market_evidence_quote,
-    productSummary: product ? product.slice(PRODUCT_PREFIX.length) : null,
+    productSummary: productLine ? productLine.slice(PRODUCT_PREFIX.length) : null,
     targetMarket: row.target_market,
     caseRecord: row.case_id ? libraries.cases.find((c) => c.case_id === row.case_id) ?? null : null,
     recipientEmail: row.recipient_email ?? '',

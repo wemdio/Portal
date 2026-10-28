@@ -213,7 +213,9 @@ export async function composeCompanyLetters(
   const occasion = input.chain === 'automation' && input.baseChain ? input.baseChain : input.chain;
   const fallback = fallbackBridge(occasion, input.product);
   const bridge = opening && fallback && firstBodies.includes(P.bridge)
-    ? (await deps.bridge({ chain: input.chain, baseChain: input.baseChain, brand: input.brand, opening, productSummary: input.productSummary })) ?? fallback
+    ? (await deps.bridge({
+      chain: input.chain, baseChain: input.baseChain, product: input.product, brand: input.brand, opening, productSummary: input.productSummary,
+    })) ?? fallback
     : null;
   const caseText = input.caseRecord?.case_text_short.trim() || null;
   const withCase = Boolean(caseText) && template.bodyWithCase !== null;
