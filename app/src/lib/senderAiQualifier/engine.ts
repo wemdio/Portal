@@ -4,11 +4,12 @@ import { buildMessageId } from '@/lib/mail/message';
 import { withHistory } from '@/lib/agencyLeadHandoff/process';
 import { loadHandoffSettings } from '@/lib/agencyLeadHandoff/settings';
 import { isWithinWindow, nextWindowSlot, type SendWindow } from '@/lib/sender/sendWindow';
+import { unsubscribeRecipient } from '@/lib/sender/unsubscribe';
 import { stripQuoted } from '@/lib/senderLeads/telegram';
 import type { Log } from '@/lib/senderLeads/process';
 import { aiQualifierConfig, requestAiStep, type AiPromptInput } from './ai';
 import { hasOpenAmoDeal } from './amo';
-import { decideStep, reminderDueAt, replyDueAt } from './decide';
+import { closeReasonOf, decideStep, reminderDueAt, replyDueAt } from './decide';
 import { AI_LETTER_CANCELLED, MAX_AI_ATTEMPTS, MAX_AI_LETTERS, type AiConversationRow, type AiFolderKey, type AiState } from './types';
 
 /**
@@ -335,7 +336,7 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
     language, mode, history, aiMessages: conv.ai_messages,
     offerText: folder.ai_offer_text ?? '', ccEmail: cc[0] ?? null,
   });
-  const decision = decideStep(step, { aiMessages: conv.ai_messages, stopRequested: false });
+  const decision = decideStep(step, { aiMessages: conv.ai_messages, stopRequested: step.stopRequested });
   const processed = { last_reply_id: newest.id, attempts: 0 };
 
   if (decision.kind === 'no_reply') {
@@ -349,7 +350,21 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
       await enqueueAiLetter(db, { conv, recipient, replyTo: newest, text: decision.letter, cc: [], history });
       ctx.result.letters += 1;
     }
-    await patchConversation(db, conv.recipient_id, { ...processed, state: 'closed', summary: step.summary || null, next_action_at: null, last_error: null });
+    // Просьба не писать, которую понял ИИ, — тот же отказ, что стоп-слово в repliesWorker:
+    // адрес в общий стоп-лист, получатель отписан, письма в очереди отменены. До закрытия:
+    // не записалось — ход считается сбойным и повторится, разговор остаётся открытым.
+    if (step.stopRequested) {
+      const failed = await unsubscribeRecipient(db, {
+        recipientId: conv.recipient_id,
+        emails: [leadAddress, recipient.email],
+        note: 'ИИ: просьба не писать',
+      });
+      if (failed) throw new Error(`стоп-лист: ${failed}`);
+    }
+    await patchConversation(db, conv.recipient_id, {
+      ...processed, state: 'closed', close_reason: closeReasonOf(step), summary: step.summary || null,
+      next_action_at: null, last_error: null,
+    });
     ctx.result.closed += 1;
     return;
   }
