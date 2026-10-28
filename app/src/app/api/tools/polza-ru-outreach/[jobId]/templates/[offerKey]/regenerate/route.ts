@@ -8,11 +8,10 @@ import { loadLibraries, type Libraries } from '@/lib/polzaRuOutreach/libraries';
 import { regenerateOfferChain } from '@/lib/polzaRuOutreach/regenerate';
 import { authed, jsonError } from '@/lib/polzaRuOutreach/routeAuth';
 import {
-  CHAIN_LABELS,
-  CHAIN_TYPES,
   RU_OUTREACH_PARSER_TYPE,
+  isTemplateKey,
   sanitizeRuOutreachConfig,
-  type ChainType,
+  templateKeyLabel,
   type RuOutreachConfig,
 } from '@/lib/polzaRuOutreach/types';
 
@@ -44,8 +43,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   const auth = await authed(req);
   if ('error' in auth) return auth.error;
   const { jobId, offerKey } = await ctx.params;
-  if (!(CHAIN_TYPES as readonly string[]).includes(offerKey)) return jsonError('Неизвестный оффер', 400);
-  const chain = offerKey as ChainType;
+  // Оффер — продукт каскада или, у запусков до каскада, цепочка (повод).
+  if (!isTemplateKey(offerKey)) return jsonError('Неизвестный оффер', 400);
+  const key = offerKey;
   if (!outreachApiKey('ru')) {
     return jsonError('Не задан ключ ИИ для русского автоаутрича (POLZA_RU_OUTREACH_API_KEY в .env сервера)', 400);
   }
@@ -57,7 +57,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     .eq('parser_type', RU_OUTREACH_PARSER_TYPE)
     .maybeSingle();
   if (jobErr) {
-    await logError('polza_ru_outreach.template.regenerate.failed', jobErr, { jobId, offer: chain }, { userId: auth.user.id });
+    await logError('polza_ru_outreach.template.regenerate.failed', jobErr, { jobId, offer: key }, { userId: auth.user.id });
     return jsonError(jobErr.message, 500);
   }
   if (!job) return jsonError('Запуск не найден', 404);
@@ -74,7 +74,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   try {
     libraries = await loadLibraries(auth.supabase, config.sender_id);
   } catch (err) {
-    await logError('polza_ru_outreach.template.regenerate.failed', err, { jobId, offer: chain }, { userId: auth.user.id });
+    await logError('polza_ru_outreach.template.regenerate.failed', err, { jobId, offer: key }, { userId: auth.user.id });
     return jsonError(err instanceof Error ? err.message : 'Не удалось загрузить библиотеки', 500);
   }
   const sender = libraries.sender;
@@ -84,9 +84,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     // Лимит на ИИ и уже потраченное regenerate берёт из снимка запуска,
     // прочитанного под отметкой пересборки: «Переписать» тратит из того же лимита.
     const result = await regenerateOfferChain({
-      db: auth.supabase, jobId, chain, target: config.limit, libraries, sender, deadlineAt: startedAt + ROUTE_BUDGET_MS,
+      db: auth.supabase, jobId, key, target: config.limit, libraries, sender, deadlineAt: startedAt + ROUTE_BUDGET_MS,
     });
-    if (result.kind === 'missing') return jsonError(`В запуске нет цепочки оффера «${CHAIN_LABELS[chain]}»`, 404);
+    if (result.kind === 'missing') return jsonError(`В запуске нет цепочки оффера «${templateKeyLabel(key)}»`, 404);
     if (result.kind === 'active') return jsonError(result.state === 'stopping' ? STOPPING_TEXT : RUNNING_TEXT, 409);
     if (result.kind === 'budget') {
       return jsonError(
@@ -99,7 +99,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     if (result.kind === 'busy') {
       return jsonError(
         result.reason === 'writing' && result.offer
-          ? `Сейчас пишется цепочка оффера «${CHAIN_LABELS[result.offer]}» — обновите экран через минуту`
+          ? `Сейчас пишется цепочка оффера «${templateKeyLabel(result.offer)}» — обновите экран через минуту`
           : 'Цепочки этого запуска уже переписывают — обновите экран через минуту',
         409,
       );
@@ -111,7 +111,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     await logAudit(
       'polza_ru_outreach.template.regenerated',
       'Русский автоаутрич: цепочка оффера переписана',
-      { jobId, offer: chain, ...result.summary },
+      { jobId, offer: key, ...result.summary },
       { userId: auth.user.id },
     );
     return NextResponse.json(result.summary);
@@ -120,7 +120,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     // портала, а настройка ИИ: текст ошибки уже понятный.
     if (err instanceof LlmAuthError) return jsonError(err.message, 502);
     if (err instanceof BudgetExceededError) return jsonError(err.message, 409);
-    await logError('polza_ru_outreach.template.regenerate.failed', err, { jobId, offer: chain }, { userId: auth.user.id });
+    await logError('polza_ru_outreach.template.regenerate.failed', err, { jobId, offer: key }, { userId: auth.user.id });
     return jsonError(err instanceof Error ? err.message : 'Не удалось переписать цепочку', 500);
   }
 }

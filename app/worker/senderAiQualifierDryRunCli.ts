@@ -1,6 +1,6 @@
 import { aiQualifierConfig, requestAiStep } from '@/lib/senderAiQualifier/ai';
 import { decideStep } from '@/lib/senderAiQualifier/decide';
-import { loadConversationHistory } from '@/lib/senderAiQualifier/engine';
+import { loadConversationHistory, offerContextFor } from '@/lib/senderAiQualifier/engine';
 import { createWorkerLogger, requireSupabaseAdmin } from './_shared';
 
 /**
@@ -48,7 +48,7 @@ async function main(): Promise<void> {
     try {
       const step = await requestAiStep(cfg, {
         language, mode: 'reply', aiMessages: 0, history, ccEmail: 'manager@example.com',
-        offerText: folder.ai_offer_text ?? '',
+        ...await offerContextFor(db, folder, row.recipient_id as string, log),
       });
       const decision = decideStep(step, { aiMessages: 0, stopRequested: false });
       const lead = history.filter((m) => m.from === 'lead').at(-1)?.text.slice(0, 300) ?? '';

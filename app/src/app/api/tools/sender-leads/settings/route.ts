@@ -40,7 +40,7 @@ export async function PUT(req: NextRequest) {
     const key = parseFolderKey(new URL(req.url).searchParams.get('folder'));
     if (!key) return jsonError('Не указана папка', 400);
 
-    const parsed = parseSettingsInput(await req.json().catch(() => null));
+    const parsed = parseSettingsInput(await req.json().catch(() => null), key);
     if (!parsed.ok) return jsonError(parsed.error, 400);
 
     // ИИ берёт только ответы после включения: момент включения фиксируем при
@@ -72,6 +72,9 @@ export async function PUT(req: NextRequest) {
         criteriaLength: parsed.value.lead_criteria?.length ?? 0,
         aiEnabled: parsed.value.ai_enabled ?? null,
         aiOfferTextLength: parsed.value.ai_offer_text?.length ?? null,
+        // Только продукты, у которых есть текст или ссылка: сами тексты в журнал не пишем.
+        aiOfferProducts: parsed.value.ai_offer_texts ? Object.keys(parsed.value.ai_offer_texts) : null,
+        kpLinkProducts: parsed.value.kp_links ? Object.keys(parsed.value.kp_links) : null,
       },
       { userId: auth.user.id },
     );

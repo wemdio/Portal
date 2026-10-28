@@ -23,12 +23,14 @@ export function CampaignRail({ items, active, onSelect }: {
   // Верх колонки — сразу под шапкой портала; высоту шапки берём со страницы.
   const railTop = useHeaderBottom();
 
+  // z-[35]: выше карточек страницы с relative z-30 (иначе они закрывали
+  // подсказку), но ниже шапки портала (z-40) с её меню и окон (z-50).
   return (
     <>
       <nav
         aria-label="Разделы кампании"
         style={{ top: railTop, height: `calc(100vh - ${railTop}px)` }}
-        className="fixed left-0 z-30 hidden w-14 flex-col items-center justify-center gap-1 border-r border-gray-200 bg-white py-3 lg:flex"
+        className="fixed left-0 z-[35] hidden w-14 flex-col items-center justify-center gap-1 border-r border-gray-200 bg-white py-3 lg:flex"
       >
         {items.map((item) => {
           const Icon = item.icon;

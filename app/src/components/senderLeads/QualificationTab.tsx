@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { ExternalLink, Loader2, RefreshCw } from 'lucide-react';
-import { AI_OFFER_TEXT_MAX, LEAD_CRITERIA_MAX } from '@/lib/senderLeads/settings';
+import { PRODUCTS, PRODUCT_SHORT_LABELS, type Product } from '@/lib/polzaRuOutreach/cascade';
+import { AI_OFFER_TEXT_MAX, LEAD_CRITERIA_MAX, PRODUCT_OFFER_FOLDER, parseKpLink, type ProductTexts } from '@/lib/senderLeads/settings';
 import type { OwnReplySettingsDto } from '@/lib/ownReplyLeads/settings';
 import type {
   LeadHistoryCounts,
@@ -25,6 +26,27 @@ const FILTERS: { id: LeadHistoryFilter; label: string; tone: string }[] = [
 ];
 
 const EMPTY_COUNTS: LeadHistoryCounts = { all: 0, lead: 0, sent: 0, not_lead: 0, pending: 0, error: 0 };
+
+type ProductFields = Record<Product, string>;
+
+const EMPTY_PRODUCT_FIELDS: ProductFields = { sdr: '', classic: '', classic_abroad: '', auto: '' };
+
+/** Карта из настроек папки → значения полей: у каждого продукта своё поле, пустое — если не задано. */
+function productFields(saved: ProductTexts): ProductFields {
+  return { ...EMPTY_PRODUCT_FIELDS, ...saved };
+}
+
+/** Поля, отличающиеся от сохранённых; пробелы по краям не в счёт. */
+function productFieldsChanged(fields: ProductFields, saved: ProductTexts): boolean {
+  return PRODUCTS.some((p) => fields[p].trim() !== (saved[p] ?? ''));
+}
+
+/** Только заполненные поля: пустое сервер всё равно не хранит. */
+function productFieldsToSave(fields: ProductFields): ProductTexts {
+  const out: ProductTexts = {};
+  for (const p of PRODUCTS) if (fields[p].trim()) out[p] = fields[p].trim();
+  return out;
+}
 
 function formatAt(value: string | null): string {
   if (!value) return '—';
@@ -118,6 +140,10 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
   const [criteria, setCriteria] = useState('');
   const [aiEnabled, setAiEnabled] = useState(false);
   const [aiOfferText, setAiOfferText] = useState('');
+  // Короткие КП и ссылки на КП по продуктам каскада — только у русского автоаутрича.
+  const productFolder = folderKey === PRODUCT_OFFER_FOLDER;
+  const [productOffers, setProductOffers] = useState<ProductFields>(EMPTY_PRODUCT_FIELDS);
+  const [productLinks, setProductLinks] = useState<ProductFields>(EMPTY_PRODUCT_FIELDS);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -136,6 +162,8 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
     setCriteria(settings.criteria);
     setAiEnabled(settings.aiEnabled);
     setAiOfferText(settings.aiOfferText);
+    setProductOffers(productFields(settings.aiOfferTexts ?? {}));
+    setProductLinks(productFields(settings.kpLinks ?? {}));
   };
 
   const applyOwn = (settings: OwnReplySettingsDto, isEn: boolean) => {
@@ -167,14 +195,20 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
 
   const folderDirty = loaded !== null
     && (enabled !== loaded.enabled || telegram !== loaded.telegram || criteria.trim() !== loaded.criteria.trim()
-      || aiEnabled !== loaded.aiEnabled || aiOfferText.trim() !== loaded.aiOfferText.trim());
+      || aiEnabled !== loaded.aiEnabled || aiOfferText.trim() !== loaded.aiOfferText.trim()
+      || (productFolder && (productFieldsChanged(productOffers, loaded.aiOfferTexts ?? {})
+        || productFieldsChanged(productLinks, loaded.kpLinks ?? {}))));
   const ownLoadedCriteria = ownLoaded ? (ownIsEn ? ownLoaded.criteriaEn : ownLoaded.criteriaRu) : '';
   const ownDirty = ownLoaded !== null
     && (ownEnabled !== ownLoaded.enabled || ownCriteria.trim() !== ownLoadedCriteria.trim());
   const dirty = folderDirty || ownDirty;
   const tooLong = criteria.trim().length > LEAD_CRITERIA_MAX
     || aiOfferText.trim().length > AI_OFFER_TEXT_MAX
+    || (productFolder && PRODUCTS.some((p) => productOffers[p].trim().length > AI_OFFER_TEXT_MAX))
     || ownCriteria.trim().length > LEAD_CRITERIA_MAX;
+  // Ссылку, которую сервер не принял бы (не https, пробелы), видно сразу, а не после «Сохранить».
+  const linkInvalid = (p: Product) => productLinks[p].trim() !== '' && parseKpLink(productLinks[p]) === null;
+  const linksInvalid = productFolder && PRODUCTS.some(linkInvalid);
 
   const save = async () => {
     setSaving(true);
@@ -184,7 +218,10 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
       // Одна кнопка на вкладку: сохраняет и папку, и блок «наши кампании» — что изменено.
       const [folderRes, ownRes] = await Promise.all([
         folderDirty
-          ? saveLeadSettings(folderKey, { enabled, telegram, criteria: criteria.trim(), aiEnabled, aiOfferText: aiOfferText.trim() })
+          ? saveLeadSettings(folderKey, {
+            enabled, telegram, criteria: criteria.trim(), aiEnabled, aiOfferText: aiOfferText.trim(),
+            ...(productFolder ? { aiOfferTexts: productFieldsToSave(productOffers), kpLinks: productFieldsToSave(productLinks) } : {}),
+          })
           : null,
         ownDirty
           ? saveOwnSettings(ownIsEn
@@ -319,8 +356,66 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
                 placeholder="Что делаем, ориентир цены, кейс"
                 className="mt-1.5 w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
               />
-              <p className="mt-1 text-xs text-zinc-500">Цены и кейсы ИИ берёт только отсюда.</p>
+              <p className="mt-1 text-xs text-zinc-500">
+                {productFolder ? 'Запасное: если у продукта ниже нет своего КП.' : 'Цены и кейсы ИИ берёт только отсюда.'}
+              </p>
             </div>
+
+            {productFolder ? (
+              <div className="space-y-3 border-t border-zinc-100 pt-3">
+                <div>
+                  <h3
+                    className="text-sm font-semibold text-zinc-900"
+                    title="Текст нужен ИИ в переписке, ссылка идёт менеджеру в сообщении о лиде. Нет текста продукта — ИИ берёт общее «Короткое КП», нет ссылки — строки «КП» в сообщении не будет."
+                  >
+                    КП по продуктам
+                  </h3>
+                  <p className="text-xs text-zinc-500">Пусто — берётся общее «Короткое КП», ссылка не показывается.</p>
+                </div>
+                {PRODUCTS.map((product) => {
+                  const text = productOffers[product];
+                  return (
+                    <div key={product} className="space-y-2 rounded-lg border border-zinc-200 p-3">
+                      <div className="flex items-baseline justify-between gap-3">
+                        <label htmlFor={`ai-offer-${product}`} className="text-sm font-medium text-zinc-900">
+                          {PRODUCT_SHORT_LABELS[product]}
+                        </label>
+                        <span className={`text-xs ${text.trim().length > AI_OFFER_TEXT_MAX ? 'text-red-600' : 'text-zinc-400'}`}>
+                          {text.trim().length} / {AI_OFFER_TEXT_MAX}
+                        </span>
+                      </div>
+                      <textarea
+                        id={`ai-offer-${product}`}
+                        value={text}
+                        onChange={(e) => {
+                          setProductOffers((prev) => ({ ...prev, [product]: e.target.value }));
+                          touch();
+                        }}
+                        rows={3}
+                        placeholder="Короткое КП этого продукта: что делаем, ориентир цены, кейс"
+                        className="w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
+                      />
+                      <div>
+                        <input
+                          type="url"
+                          aria-label={`Ссылка на КП: ${PRODUCT_SHORT_LABELS[product]}`}
+                          value={productLinks[product]}
+                          onChange={(e) => {
+                            setProductLinks((prev) => ({ ...prev, [product]: e.target.value }));
+                            touch();
+                          }}
+                          placeholder="Ссылка на КП: https://…"
+                          className={`w-full rounded-lg border bg-white px-3 py-2 text-sm text-zinc-900 ${linkInvalid(product) ? 'border-red-400' : 'border-zinc-300'}`}
+                        />
+                        {linkInvalid(product) ? (
+                          <p className="mt-1 text-xs text-red-600">Нужна ссылка https:// без пробелов.</p>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
           </div>
 
           <div className="space-y-3 border-t border-zinc-200 pt-4">
@@ -375,7 +470,7 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
             <button
               type="button"
               onClick={() => void save()}
-              disabled={saving || !dirty || tooLong || (folderDirty && !loaded?.folderExists)}
+              disabled={saving || !dirty || tooLong || linksInvalid || (folderDirty && !loaded?.folderExists)}
               className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-50"
             >
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}

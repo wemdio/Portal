@@ -68,6 +68,11 @@ export interface LeadMessageInput {
   threadUrl: string | null;
   /** Кто ещё был в ответе клиента: при ответе из AMO их надо вернуть в «Копию» вручную. */
   copyEmails?: string[];
+  /**
+   * Русский автоаутрич: какой продукт предлагали и ссылка на его КП. Нет поля —
+   * строка до каскада или рассылка не русского автоаутрича: блока в сообщении нет.
+   */
+  product?: { label: string; step: number | null; kpUrl: string | null };
 }
 
 export function buildLeadMessage(input: LeadMessageInput): string {
@@ -78,6 +83,11 @@ export function buildLeadMessage(input: LeadMessageInput): string {
     ? `${input.replyFrom} (писали на ${input.recipientEmail})`
     : input.recipientEmail;
   lines.push(`<b>Контакт:</b> ${escapeHtml(clip(contact, 320))}`);
+  if (input.product) {
+    const step = input.product.step ? ` · шаг ${input.product.step} из 3` : '';
+    lines.push(`<b>Продукт:</b> ${escapeHtml(clip(input.product.label, 120))}${step}`);
+    if (input.product.kpUrl) lines.push(`<b>КП:</b> <a href="${escapeHtml(input.product.kpUrl)}">открыть</a>`);
+  }
   if (input.copyEmails?.length) {
     lines.push(`<b>В копии у клиента:</b> ${escapeHtml(clip(input.copyEmails.join(', '), 400))} — из AMO добавляйте в «Копию» вручную`);
   }

@@ -1,14 +1,16 @@
 import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { buildMessageId } from '@/lib/mail/message';
+import { loadRecipientProduct } from '@/lib/polzaRuOutreach/rowProduct';
 import { withHistory } from '@/lib/agencyLeadHandoff/process';
 import { loadHandoffSettings } from '@/lib/agencyLeadHandoff/settings';
 import { isWithinWindow, nextWindowSlot, type SendWindow } from '@/lib/sender/sendWindow';
+import { cancelPendingMessages, markUnsubscribed, suppressEmails } from '@/lib/sender/unsubscribe';
 import { stripQuoted } from '@/lib/senderLeads/telegram';
 import type { Log } from '@/lib/senderLeads/process';
-import { aiQualifierConfig, requestAiStep, type AiPromptInput } from './ai';
+import { aiQualifierConfig, productPitchOf, requestAiStep, type AiPromptInput } from './ai';
 import { hasOpenAmoDeal } from './amo';
-import { decideStep, reminderDueAt, replyDueAt } from './decide';
+import { closeReasonOf, decideStep, reminderDueAt, replyDueAt } from './decide';
 import { AI_LETTER_CANCELLED, MAX_AI_ATTEMPTS, MAX_AI_LETTERS, type AiConversationRow, type AiFolderKey, type AiState } from './types';
 
 /**
@@ -108,6 +110,46 @@ async function loadAiFolders(db: SupabaseClient): Promise<{ folders: Map<string,
   if (campaignError) throw new Error(`sender_campaigns: ${campaignError.message}`);
   for (const c of (campaigns ?? []) as Array<{ id: string; folder_id: string }>) campaignFolder.set(c.id, c.folder_id);
   return { folders, campaignFolder };
+}
+
+/**
+ * Короткие КП по продуктам папки (`sender_folders.ai_offer_texts`). Читаются отдельно
+ * от общего запроса папок: до миграции каскада колонки нет, и общий запрос уронил бы
+ * весь круг ИИ, в том числе английский автоаутрич. Любой сбой — пусто и предупреждение:
+ * ход идёт с общим «Коротким КП» папки.
+ */
+async function loadProductOfferTexts(db: SupabaseClient, folderId: string, log: Log): Promise<Record<string, unknown>> {
+  try {
+    const { data, error } = await db.from('sender_folders').select('ai_offer_texts').eq('id', folderId).maybeSingle();
+    if (error) throw new Error(error.message);
+    const texts = (data as { ai_offer_texts?: unknown } | null)?.ai_offer_texts;
+    return texts && typeof texts === 'object' && !Array.isArray(texts) ? texts as Record<string, unknown> : {};
+  } catch (err) {
+    log('warn', `ИИ-квалификатор: короткие КП по продуктам папки ${folderId} не прочитаны, берём общее: ${errorText(err)}`);
+    return {};
+  }
+}
+
+/**
+ * «Короткое КП» и описание предложения для промпта. Русский автоаутрич (auto_ru):
+ * текст того продукта, который предлагали этому получателю, а если его нет —
+ * общее «Короткое КП» папки; прогрев к встрече — и для строк до каскада (продукта
+ * нет). Английский автоаутрич — как раньше, без обращения к продуктам. Сбой чтения
+ * продукта получателя — исключение: ход повторится, а не уйдёт с КП не того продукта.
+ */
+export async function offerContextFor(
+  db: SupabaseClient,
+  folder: { id: string; key: string; ai_offer_text: string | null },
+  recipientId: string,
+  log: Log,
+): Promise<Pick<AiPromptInput, 'offerText' | 'cascade' | 'productPitch'>> {
+  const general = folder.ai_offer_text ?? '';
+  if (folder.key !== 'auto_ru') return { offerText: general, cascade: false, productPitch: null };
+  const offered = await loadRecipientProduct(db, recipientId);
+  if (!offered) return { offerText: general, cascade: true, productPitch: null };
+  const own = (await loadProductOfferTexts(db, folder.id, log))[offered.product];
+  const text = typeof own === 'string' ? own.trim() : '';
+  return { offerText: text || general, cascade: true, productPitch: productPitchOf(offered.product) };
 }
 
 /** Ответил ли оператор с портала: ручное письмо, не автопередача, не передача клиенту и не ИИ. */
@@ -270,11 +312,12 @@ interface StepContext {
   ccEmails: string[];
   newest: ReplyRow | null;
   result: AiPassResult;
+  log: Log;
 }
 
 /** Один ход разговора; если делать пока нечего — только переносит срок. */
 async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx: StepContext): Promise<void> {
-  const { folder, newest, recipient } = ctx;
+  const { folder, newest, recipient, log } = ctx;
   const now = new Date();
   const planNext = async (due: Date) => {
     if (!conv.next_action_at || Date.parse(conv.next_action_at) !== due.getTime()) {
@@ -333,9 +376,9 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
 
   const step = await requestAiStep(cfg, {
     language, mode, history, aiMessages: conv.ai_messages,
-    offerText: folder.ai_offer_text ?? '', ccEmail: cc[0] ?? null,
+    ...await offerContextFor(db, folder, conv.recipient_id, log), ccEmail: cc[0] ?? null,
   });
-  const decision = decideStep(step, { aiMessages: conv.ai_messages, stopRequested: false });
+  const decision = decideStep(step, { aiMessages: conv.ai_messages, stopRequested: step.stopRequested });
   const processed = { last_reply_id: newest.id, attempts: 0 };
 
   if (decision.kind === 'no_reply') {
@@ -349,7 +392,21 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
       await enqueueAiLetter(db, { conv, recipient, replyTo: newest, text: decision.letter, cc: [], history });
       ctx.result.letters += 1;
     }
-    await patchConversation(db, conv.recipient_id, { ...processed, state: 'closed', summary: step.summary || null, next_action_at: null, last_error: null });
+    // Просьба не писать, которую понял ИИ, — тот же отказ, что стоп-слово в repliesWorker:
+    // адрес в общий стоп-лист, письма в очереди отменены, получатель отписан. До закрытия
+    // разговора и по шагам: любой сбой — ход сбойный и повторится, разговор остаётся открытым.
+    // Статус получателя ставится последним: по нему повтор (CLOSED_RECIPIENT) считает дело
+    // сделанным, значит, стоп-лист и очередь к этому моменту уже записаны.
+    if (step.stopRequested) {
+      const failed = await suppressEmails(db, [leadAddress, recipient.email], 'ИИ: просьба не писать')
+        ?? await cancelPendingMessages(db, conv.recipient_id)
+        ?? await markUnsubscribed(db, conv.recipient_id);
+      if (failed) throw new Error(`стоп-лист: ${failed}`);
+    }
+    await patchConversation(db, conv.recipient_id, {
+      ...processed, state: 'closed', close_reason: closeReasonOf(step), summary: step.summary || null,
+      next_action_at: null, last_error: null,
+    });
     ctx.result.closed += 1;
     return;
   }
@@ -490,7 +547,7 @@ export async function runSenderAiQualifier(db: SupabaseClient, log: Log): Promis
       // Пауза после сбоя: следующий ход не раньше назначенного времени.
       if (conv.attempts > 0 && conv.next_action_at && Date.parse(conv.next_action_at) > now) continue;
       const ccEmails = handoff.find((s) => s.scope === conv.folder_key)?.cc_emails ?? [];
-      await stepConversation(db, conv, { folder, recipient, ccEmails, newest: newest.get(conv.recipient_id) ?? null, result });
+      await stepConversation(db, conv, { folder, recipient, ccEmails, newest: newest.get(conv.recipient_id) ?? null, result, log });
     } catch (err) {
       await recordFailure(db, conv, err, log);
     }

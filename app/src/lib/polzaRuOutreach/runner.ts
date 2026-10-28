@@ -3,7 +3,8 @@
  *
  * Поток — дорогое в конце (docs/superpowers/specs/2026-09-26-outreach-to-sender-design.md §2 RU):
  *  1. бесплатно: AMO по ИНН → домен (в т.ч. сайт работодателя hh) → AMO по
- *     домену, повторы в запуске, «уже выгружалась»;
+ *     домену, повторы в запуске, каскад (кому уже писали — следующий продукт
+ *     после паузы, cascadeIndex.ts);
  *  2. почта, тоже бесплатно: поиск на сайте, SMTP-проверка, стоп-лист. Нет
  *     рабочей почты — отсев до ИИ: разбор компании, которой некуда писать, —
  *     выброшенные деньги. Почта не проверена — строка сразу очень спорная,
@@ -70,7 +71,7 @@ import {
 } from '@/lib/outreachLlm/workerLease';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy, findStrictOutboundDuty, isSdrRoleTitle, type VacancyAnalysis } from './analyze';
-import { collectCandidates, type Candidate } from './collect';
+import { cascadeCandidates, collectCandidates, loadRecentAttempts, sourceTypeOf, type Candidate, type CascadePool } from './collect';
 import {
   computeDoubts,
   lettersQaDoubtText,
@@ -79,7 +80,9 @@ import {
   withLettersDoubt,
   type Doubts,
 } from './doubts';
-import { companyBrand, isSuppressed, loadPreviouslyExported, normalizeDomain, siteUrl, type ExportedIndex } from './company';
+import { PRODUCTS, cascadeHead, cascadeOffer, cascadePool, cascadeSlotFree, type CascadeDecision, type Product } from './cascade';
+import { CascadeClaims, loadCascadeIndex, lookupCascade, type CascadeCompany, type CascadeIndex } from './cascadeIndex';
+import { companyBrand, isSuppressed, normalizeDomain, siteUrl } from './company';
 import { findRuCompanyEmail } from './findEmail';
 import { journalCounts } from './funnel';
 import { buildBridge, type BridgeRequest } from './letters/bridge';
@@ -95,7 +98,7 @@ import {
 } from './letters/templateWriter';
 import { loadLibraries, type CaseRecord } from './libraries';
 import { isFatalLlmError, llmAnswersInRun } from './llm';
-import { baseChain, decide, routeCase, routeChain, scoreCompany, splitAutomation, type Route, type Score } from './router';
+import { baseChain, decide, routeCase, routeChain, scoreCompany, type Route, type Score } from './router';
 import { amoLookup, loadAmoIndex, type AmoIndex, type AmoRecord } from './sources/amo';
 import { lookupCatalogEmails } from './sources/catalogEmail';
 import { loadSizeByInn } from './sources/directory';
@@ -105,15 +108,14 @@ import type { HhVacancyRef } from './sources/hhPool';
 import { findNewsSignals } from './sources/news';
 import { analyzeSite, type SiteAnalysis } from './sources/siteSignals';
 import {
-  CHAIN_LABELS,
-  CHAIN_TYPES,
   sanitizeRuOutreachConfig,
   STAGES,
   TEMPLATE_VERSION,
-  type ChainType,
+  templateKeyLabel,
   type RuOutreachConfig,
   type Signal,
   type Stage,
+  type TemplateKey,
 } from './types';
 
 /** Целое из env в рамках. Пусто или мусор — значение по умолчанию: NaN в пуле дал бы ноль потоков. */
@@ -139,8 +141,9 @@ function envNumber(name: string, fallback: number, min: number, max: number): nu
  * Лимит строгий: каждый вызов писателя бронирует свою оценку сверху
  * (writerAttemptWorstUsd — около $0.14: 12 000 токенов ответа Gemini 3.1 Pro
  * по $10.8 за миллион и промпт, с наценкой Requesty), а шаблоны офферов волны
- * пишутся разом. Поэтому запас — не меньше первых попыток всех семи офферов
- * (около $1) с четвертью сверху: её съедят строки, чей разбор начался до
+ * пишутся разом. Поэтому запас — не меньше первых попыток всех четырёх
+ * продуктов (около $0.6; шаблон с 29.10.2026 пишется на продукт, а не на
+ * повод) с четвертью сверху: её съедят строки, чей разбор начался до
  * стоп-линии, и гипотезы сегментов. Базовый запас — $1 (env), но не больше
  * пятой части лимита; итог — не больше половины лимита: при маленьком лимите
  * разбору должно что-то остаться, и первых попыток тогда хватит не на все
@@ -152,7 +155,7 @@ const WRITER_RESERVE_MARGIN = 1.25;
 const WRITER_RESERVE_MAX_SHARE = 0.5;
 
 export function writerReserveUsd(limitUsd: number): number {
-  const firstAttempts = CHAIN_TYPES.length * writerAttemptWorstUsd() * WRITER_RESERVE_MARGIN;
+  const firstAttempts = PRODUCTS.length * writerAttemptWorstUsd() * WRITER_RESERVE_MARGIN;
   const base = Math.min(WRITER_RESERVE_USD, limitUsd * WRITER_RESERVE_SHARE);
   return Math.min(limitUsd * WRITER_RESERVE_MAX_SHARE, Math.max(base, firstAttempts));
 }
@@ -197,6 +200,14 @@ const DRIVER_TICK_MS = 2_000;
 // Шаблон пишется один раз на оффер: компании оффера, дошедшие до писем
 // одновременно, ждут одного писателя.
 const LETTERS_CONCURRENCY = 4;
+/** Пояснение к «Каскад закрыт»: почему компании больше не пишем. */
+const CASCADE_CLOSED_DETAIL: Record<Extract<CascadeDecision, { kind: 'closed' }>['reason'], string> = {
+  lead: 'ответ — лид, им занимается менеджер',
+  declined: 'отказ или «не лид»',
+  suppressed: 'отписка, жалоба или стоп-лист',
+  all_offered: 'предложены все три продукта',
+};
+
 /** Карточек вакансий на компанию: у неё может быть и РОП, и SDR. */
 const MAX_VACANCY_CARDS = 2;
 const MIN_WAVE = 20;
@@ -315,6 +326,7 @@ interface Tally {
   stages: Stage[];
   sdr: 'strict' | 'broad' | null;
   chain: string | null;
+  product: string | null;
   /** Домен и ИНН, которые строка заняла в дедупе запуска. */
   domain: string | null;
   inn: string | null;
@@ -365,6 +377,9 @@ interface Qualified {
   vacancy: VacancyAnalysis | null;
   signals: Signal[];
   route: Route;
+  /** Что предлагаем (каскад) и номер шага: 1 — новая компания, 2–3 — вернувшаяся. */
+  product: Product;
+  cascadeNo: number;
   caseHit: { record: CaseRecord; reason: string } | null;
   score: Score;
   marketQuote: string | null;
@@ -493,6 +508,9 @@ interface JournalRow {
   pipeline_stage: string | null;
   reason_code: string | null;
   chain_type: string | null;
+  product: string | null;
+  /** Шаг каскада: больше 1 — вернувшаяся компания. */
+  cascade_no: number | null;
   normalized_domain: string | null;
   inn: string | null;
   doubt_flags: string[] | null;
@@ -514,7 +532,7 @@ async function loadKeptJournal(db: SupabaseClient, jobId: string): Promise<Journ
     // пропустить или повторить строки, и счётчики разошлись бы с журналом.
     const { data, error } = await db
       .from('polza_ru_outreach_companies')
-      .select('id,row_status,pipeline_stage,reason_code,chain_type,normalized_domain,inn,doubt_flags,source_record_id')
+      .select('id,row_status,pipeline_stage,reason_code,chain_type,product,cascade_no,normalized_domain,inn,doubt_flags,source_record_id')
       .eq('job_id', jobId)
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -564,7 +582,7 @@ async function completeSpentRun(
   finishRun: (patch: Record<string, unknown>) => Promise<void>,
 ): Promise<void> {
   const kept = await loadKeptJournal(db, jobId);
-  const { funnel, reasons, chains, ready, doubtful, awaiting } = journalCounts(kept);
+  const { funnel, reasons, chains, products, ready, doubtful, awaiting } = journalCounts(kept);
   const stopReason = ready >= target ? 'target_reached' : 'budget';
   const spend = budget.snapshot();
   log('info', `job ${jobId}: no LLM budget left for new analysis ($${spend.spent_usd}/$${spend.limit_usd}) — restart keeps the journal: ${kept.length} rows, ${ready} ready (${stopReason})`);
@@ -583,6 +601,7 @@ async function completeSpentRun(
       funnel,
       reasons,
       chains,
+      products,
       doubtful,
       awaiting_templates: awaiting,
       llm: spend,
@@ -777,15 +796,21 @@ async function runJob(
     });
     templatesRef = templates;
     const amo: AmoIndex = await loadAmoIndex(db);
-    const exported: ExportedIndex = config.include_previously_exported
-      ? { domains: new Set(), inns: new Set() }
-      : await loadPreviouslyExported(db, jobId);
+    // Кому уже писали: каскад решает, пора ли предложить следующий продукт, ждать
+    // паузу или больше не писать. «Брать уже выгруженные» — без каскада, как раньше.
+    const cascadeNow = new Date();
+    const cascade: CascadeIndex | null = config.include_previously_exported
+      ? null
+      : await loadCascadeIndex(db, jobId, cascadeNow, config.cascade_pause_days);
+    // Вернувшиеся, которых недавно уже пробовали (строка не стала готовой): в начало
+    // пула их не ставим — иначе такая компания занимала бы его каждый запуск.
+    const attempted = cascade ? await loadRecentAttempts(db, cascade, jobId, config.cascade_pause_days, cascadeNow) : new Set<CascadeCompany>();
     const collected = await collectCandidates(db, config, amo, maxScan, (message) => log('info', `job ${jobId}: ${message}`));
     const { sourceErrors, skippedRecent } = collected;
     const doneSources = new Set(resumedJournal.map((r) => r.source_record_id).filter((v): v is string => Boolean(v)));
     const doneDomains = new Set(resumedJournal.map((r) => r.normalized_domain).filter((v): v is string => Boolean(v)));
     const doneInns = new Set(resumedJournal.map((r) => r.inn).filter((v): v is string => Boolean(v)));
-    const pool = resumedJournal.length
+    const sourcePool = resumedJournal.length
       ? collected.pool.filter((c) => {
           if (c.sourceRecordId && doneSources.has(c.sourceRecordId)) return false;
           const d = normalizeDomain(c.website);
@@ -793,12 +818,31 @@ async function runJob(
           return !(c.inn && doneInns.has(c.inn));
         })
       : collected.pool;
+    // Вернувшиеся компании (прошла пауза каскада) — не больше заказанного числа;
+    // половина из них — в начало пула, остальные — после новых (cascadePool).
+    const split: CascadePool = cascade
+      ? cascadeCandidates(cascade, target, {
+          sources: sourcePool,
+          freshnessDays: config.freshness_days,
+          head: cascadeHead(target),
+          skip: (company) =>
+            attempted.has(company) ||
+            Boolean((company.domain && doneDomains.has(company.domain)) || (company.inn && doneInns.has(company.inn))),
+          now: cascadeNow,
+        })
+      : { returning: [], fresh: sourcePool };
+    const pool = cascadePool(split.fresh, split.returning, target);
+    // Сколько новых (не вернувшихся) кандидатов в пуле от позиции i до конца.
+    const newFrom = new Array<number>(pool.length + 1).fill(0);
+    for (let i = pool.length - 1; i >= 0; i -= 1) newFrom[i] = newFrom[i + 1] + (pool[i].cascade ? 0 : 1);
     if (Object.keys(sourceErrors).length) log('warn', `job ${jobId}: source errors`, sourceErrors);
-    log('info', `job ${jobId}: pool=${pool.length}, skipped_recent=${skippedRecent}, target=${target}, sources=${config.sources.join(',')}`);
+    log('info', `job ${jobId}: pool=${pool.length} (returning ${split.returning.length}, recently tried ${attempted.size}), skipped_recent=${skippedRecent}, target=${target}, sources=${config.sources.join(',')}`);
 
     const funnel = Object.fromEntries(STAGES.map((s) => [s, 0])) as Record<Stage, number>;
     const reasons: Record<string, number> = {};
     const chains: Record<string, number> = {};
+    // Продукты каскада — рядом с цепочками (поводами).
+    const products: Record<string, number> = {};
     const doubtful = { count: 0 };
     // Предохранитель обогащения: 5 ошибок подряд — источник выключается до конца запуска.
     const enrichFails: Record<'revenue_growth' | 'news', number> = { revenue_growth: 0, news: 0 };
@@ -836,6 +880,7 @@ async function runJob(
       Object.assign(funnel, prior.funnel);
       Object.assign(reasons, prior.reasons);
       Object.assign(chains, prior.chains);
+      Object.assign(products, prior.products);
       doubtful.count = prior.doubtful;
       totals.scanned = resumedJournal.length;
       totals.ready = prior.ready;
@@ -845,10 +890,16 @@ async function runJob(
     // или ИНН он повторил (уборка после стопа по лимиту).
     const domainOwner = new Map<string, string>();
     const innOwner = new Map<string, string>();
+    // Компания индекса каскада — одна на все свои домены и ИНН: карточка с доменом
+    // и карточка с ИНН той же компании (у каждой ключ, которого нет у другой) — повтор.
+    // Отсеянная строка компанию отпускает: вторая карточка может дойти до готовой.
+    const cascadeClaims = new CascadeClaims();
     for (const r of resumedJournal) {
       if (r.reason_code === 'DUPLICATE_COMPANY') continue;
       if (r.normalized_domain) domainOwner.set(r.normalized_domain, String(r.id));
       if (r.inn) innOwner.set(r.inn, String(r.id));
+      const company = cascade && r.row_status !== 'rejected' ? lookupCascade(cascade, r.normalized_domain, r.inn) : null;
+      if (company) cascadeClaims.hold(company, String(r.id));
     }
     const duplicates: Duplicate[] = [];
     // MX и catch-all доменов для SMTP-проверки почты — один кэш на запуск.
@@ -875,24 +926,24 @@ async function runJob(
     // проверки не в счёт: писатель отвечает. Считаем попытки записи (attempt
     // шаблона), а не строки: строк у одной попытки много.
     let writerWorks = false;
-    const writerFailures = new Map<ChainType, { error: string; attempts: Set<number> }>();
+    const writerFailures = new Map<TemplateKey, { error: string; attempts: Set<number> }>();
     const noteTemplate = (template: ChainTemplate) => {
       if (template.status === 'ok') {
         writerWorks = true;
         return;
       }
       if (!template.error || writerWorks) return;
-      const seen = writerFailures.get(template.chain) ?? { error: template.error, attempts: new Set<number>() };
+      const seen = writerFailures.get(template.key) ?? { error: template.error, attempts: new Set<number>() };
       seen.error = template.error;
       seen.attempts.add(template.attempt);
-      writerFailures.set(template.chain, seen);
+      writerFailures.set(template.key, seen);
       const failedTwice = [...writerFailures.values()].some((f) => f.attempts.size >= 2);
       if (writerFailures.size >= WRITER_FAIL_OFFERS || failedTwice) {
-        const list = [...writerFailures].map(([chain, f]) => `«${CHAIN_LABELS[chain]}» — ${f.error}`).join('; ');
+        const list = [...writerFailures].map(([key, f]) => `«${templateKeyLabel(key)}» — ${f.error}`).join('; ');
         throw new LlmSilentError(`Gemini не пишет цепочки: ${list}`.slice(0, 1000));
       }
     };
-    // Строки, которые ждут шаблон оффера, не прошедший проверку или не
+    // Строки, которые ждут шаблон продукта, не прошедший проверку или не
     // написанный (очень спорные с TEMPLATE_FAILED). «Переписать цепочку» может
     // сделать их готовыми, поэтому они идут в счёт заказанного числа: иначе
     // запуск докупал бы разбор новых компаний сверх того, что потом можно
@@ -902,9 +953,9 @@ async function runJob(
     // Из них — те, чей шаблон не написан из-за молчания модели: на шаге писем
     // следующей волны (или в конце запуска) шаблон пишется ещё раз, и эти
     // строки собираются заново.
-    const parked = new Map<ChainType, Qualified[]>();
+    const parked = new Map<Product, Qualified[]>();
     const parkedIds = new Set<string>();
-    const retriedChains = new Set<ChainType>();
+    const retriedProducts = new Set<Product>();
     // Ключ ИИ отвергнут или ИИ молчит: запуск уже падает — остальным потокам
     // новых строк не брать.
     let halted = false;
@@ -953,7 +1004,7 @@ async function runJob(
     // awaiting_templates — сколько компаний ждут «Переписать цепочку».
     // worker — аренда запуска воркером: её несёт каждая запись progress_detail.
     const detail = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
-      wave: waveNo, target, pool: pool.length, skipped_recent: skippedRecent, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, sdr,
+      wave: waveNo, target, pool: pool.length, skipped_recent: skippedRecent, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, products, sdr,
       offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count,
       // С бронями идущих запросов — как baseDetail; итог запуска пишет факт.
       llm: budget.snapshot({ includeReserved: true }),
@@ -971,7 +1022,7 @@ async function runJob(
         progress_detail: detail(extra),
       });
     };
-    const newTally = (id: string): Tally => ({ id, stages: [], sdr: null, chain: null, domain: null, inn: null });
+    const newTally = (id: string): Tally => ({ id, stages: [], sdr: null, chain: null, product: null, domain: null, inn: null });
     const reach = (tally: Tally, ...stages: Stage[]) => {
       for (const s of stages) {
         funnel[s] += 1;
@@ -991,32 +1042,42 @@ async function runJob(
         if (left > 0) chains[tally.chain] = left;
         else delete chains[tally.chain];
       }
+      if (tally.product) {
+        const left = (products[tally.product] ?? 0) - 1;
+        if (left > 0) products[tally.product] = left;
+        else delete products[tally.product];
+      }
       // Домен и ИНН строки освобождаем: иначе такая же компания дальше в
       // запуске отсеялась бы «повтором» строки, которой в журнале уже нет.
       if (tally.domain && domainOwner.get(tally.domain) === tally.id) domainOwner.delete(tally.domain);
       if (tally.inn && innOwner.get(tally.inn) === tally.id) innOwner.delete(tally.inn);
+      cascadeClaims.release(tally.id);
       tally.stages = [];
       tally.sdr = null;
       tally.chain = null;
+      tally.product = null;
       tally.domain = null;
       tally.inn = null;
     };
     const finish = async (id: string, r: Rejection, patch: Record<string, unknown> = {}) => {
       reasons[r.reason] = (reasons[r.reason] ?? 0) + 1;
+      // Отсеянная строка готовой не станет — компанию каскада отпускаем (до await).
+      if (r.status === 'rejected') cascadeClaims.release(id);
       await updateRow(id, { ...patch, row_status: r.status, pipeline_stage: r.stage, reason_code: r.reason, reason_detail: r.detail ?? null });
     };
     /**
      * Строка, которую лимит на ИИ вернул в необработанные: вклад в счётчики
      * вычитаем, а в журнале сбрасываем то, по чему её посчитал бы экран, —
-     * этап и цепочку. В конце запуска такие строки удаляются; если удаление не
-     * пройдёт, строка, дошедшая, скажем, до оценки, иначе числилась бы в
-     * воронке до «Оценки» и в цепочках, хотя из счётчиков запуска её уже
+     * этап, цепочку и продукт. В конце запуска такие строки удаляются; если
+     * удаление не пройдёт, строка, дошедшая, скажем, до оценки, иначе числилась
+     * бы в воронке до «Оценки» и в цепочках, хотя из счётчиков запуска её уже
      * вычли.
      */
     const returnToPool = async (id: string, tally: Tally) => {
       untally(tally);
       await updateRow(id, {
-        row_status: 'processing', pipeline_stage: 'candidates_loaded', chain_type: null, reason_code: null, reason_detail: null,
+        row_status: 'processing', pipeline_stage: 'candidates_loaded', chain_type: null, product: null, cascade_no: null,
+        reason_code: null, reason_detail: null,
       });
     };
 
@@ -1083,9 +1144,16 @@ async function runJob(
       }
       reach(tally, 'company_resolved');
 
-      // Проверка и захват домена/ИНН — без await между ними: параллельные
-      // потоки не займут одну компанию дважды.
-      const owners = [domainOwner.get(domain), c.inn ? innOwner.get(c.inn) : undefined].filter((o): o is string => Boolean(o));
+      // Компания, которой уже писали (по домену или ИНН индекса каскада): одна на
+      // все свои ключи, даже если у этой карточки только часть из них.
+      const known = cascade ? lookupCascade(cascade, domain, c.inn) : null;
+      // Проверка и захват домена/ИНН и компании каскада — без await между ними:
+      // параллельные потоки не займут одну компанию дважды.
+      const owners = [
+        domainOwner.get(domain),
+        c.inn ? innOwner.get(c.inn) : undefined,
+        known ? cascadeClaims.ownerOf(known) : undefined,
+      ].filter((o): o is string => Boolean(o));
       if (owners.length) {
         duplicates.push({ id, tally, owners: Array.from(new Set(owners)) });
         await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'DUPLICATE_COMPANY' });
@@ -1097,9 +1165,21 @@ async function runJob(
         innOwner.set(c.inn, id);
         tally.inn = c.inn;
       }
-      if (exported.domains.has(domain) || (c.inn && exported.inns.has(c.inn))) {
-        await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'PREVIOUSLY_EXPORTED' });
-        return null;
+      if (known) {
+        cascadeClaims.hold(known, id);
+        // Пауза прошла — дальше со следующим продуктом каскада, иначе ждёт или каскад закрыт.
+        const decision = known.decision;
+        if (decision.kind === 'wait') {
+          const until = decision.until.toISOString().slice(0, 10);
+          const waitDetail = known.facts.offered.length ? `пауза до ${until}` : `закреплена за другим запуском до ${until}`;
+          await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'CASCADE_WAIT', detail: waitDetail });
+          return null;
+        }
+        if (decision.kind === 'closed') {
+          await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'CASCADE_CLOSED', detail: CASCADE_CLOSED_DETAIL[decision.reason] });
+          return null;
+        }
+        c.cascade = { next: decision.next, offered: [...known.facts.offered] };
       }
       reach(tally, 'deduplicated');
 
@@ -1361,7 +1441,7 @@ async function runJob(
         }
       }
 
-      const picked = routeChain({
+      const route = routeChain({
         signals,
         reactivation,
         taScore: site.taScore,
@@ -1370,7 +1450,7 @@ async function runJob(
         revenue,
         employees,
         hasAdPixel: site.hasAdPixel,
-        hasCaseFor: (chain) => Boolean(routeCase(libraries.cases, site.industryGroup, chain)),
+        hasCaseFor: (chain) => Boolean(routeCase(libraries.cases, site.industryGroup, chain, cascadeOffer(chain, signals, c.cascade).product)),
       });
       const marketQuote = vacancy?.marketQuote ?? site.customerQuote ?? null;
       const base = {
@@ -1391,16 +1471,17 @@ async function runJob(
           ...(site.hasAdPixel ? ['На сайте стоят рекламные счётчики'] : []),
         ],
       };
-      if (!picked) {
+      if (!route) {
         await finish(id, { stage: 'scored', status: 'rejected', reason: 'NO_CHAIN', detail: `ЦА ${site.taScore}/10` }, base);
         return null;
       }
-      // Сплит 50/50: половина подходящих компаний получает «Автоматизированный аутрич».
-      const route = splitAutomation(picked, domain, { signals, reactivation, isB2b, marketQuote });
-      const caseHit = routeCase(libraries.cases, site.industryGroup, route.chain);
+      // Цепочка — повод письма, продукт — что предлагаем: вернувшейся компании
+      // следующий шаг каскада, новой — первый по поводу (cascade.ts). Сплита
+      // 50/50 на «Автоматизированный аутрич» больше нет.
+      const offer = cascadeOffer(route.chain, signals, c.cascade);
+      const caseHit = routeCase(libraries.cases, site.industryGroup, route.chain, offer.product);
       const score = scoreCompany({
-        // Скоринг — по исходной цепочке, чтобы сплит не менял, кто проходит порог.
-        chain: picked.chain,
+        chain: route.chain,
         primary: route.primary,
         freshnessDays: config.freshness_days,
         taScore: site.taScore,
@@ -1411,16 +1492,20 @@ async function runJob(
         siteReachable: true,
         // SDR-цепочке кейс по отрасли не нужен (Максим 23.09): письмо 2 —
         // механика, балл за доказательство не снимаем.
-        hasCase: picked.chain === 'hiring' || Boolean(routeCase(libraries.cases, site.industryGroup, picked.chain)),
+        hasCase: route.chain === 'hiring' || Boolean(caseHit),
         // Почта уже найдена и прошла проверку (или это контакт из AMO) — шаг 1.
         emailFound: true,
       });
       chains[route.chain] = (chains[route.chain] ?? 0) + 1;
       tally.chain = route.chain;
+      products[offer.product] = (products[offer.product] ?? 0) + 1;
+      tally.product = offer.product;
       const primary = route.primary;
       const patch = {
         ...base,
         chain_type: route.chain,
+        product: offer.product,
+        cascade_no: offer.cascadeNo,
         signal_type: primary?.type ?? null,
         signal_date: primary?.date ?? null,
         signal_title: primary?.title ?? null,
@@ -1466,7 +1551,10 @@ async function runJob(
       }
       await updateRow(id, { ...patch, ...doubtPatch, pipeline_stage: 'scored' });
       reach(tally, 'scored');
-      return { id, tally, domain, brand, amo: amoRec, email, site, vacancy, signals, route, caseHit, score, marketQuote, doubts };
+      return {
+        id, tally, domain, brand, amo: amoRec, email, site, vacancy, signals, route, product: offer.product, cascadeNo: offer.cascadeNo,
+        caseHit, score, marketQuote, doubts,
+      };
     };
 
     /**
@@ -1538,20 +1626,39 @@ async function runJob(
     // места ждёт: место освободится, если письма соседа не выйдут, — в
     // LIMIT_REACHED она уходит, только когда лимит действительно набран (как у
     // английского аутрича).
+    //
+    // Вернувшимся компаниям (каскад) — не больше половины заказанного, пока в
+    // пуле есть новые кандидаты (cascadeSlotFree): иначе строка отсеивается
+    // CASCADE_CAP — готовой она не стала, и следующий запуск возьмёт её снова.
     let lettersInFlight = 0;
     let slotWaiters: Array<() => void> = [];
-    const takeLettersSlot = async (): Promise<boolean> => {
+    const returningRows = {
+      ready: resumedJournal.filter((r) => r.row_status === 'ready' && (r.cascade_no ?? 1) > 1).length,
+      inFlight: 0,
+    };
+    // Новые кандидаты, которые запуск ещё может взять: не начатые, в пределах
+    // потолка просмотра. Новых волн не будет (лимит, сбой, остановка) — их нет.
+    const newLeft = (): number => {
+      if (halted || budgetStop || runAbort.signal.aborted) return 0;
+      const end = Math.min(pool.length, cursor + Math.max(0, maxScan - totals.scanned));
+      return newFrom[cursor] - newFrom[end];
+    };
+    /** ok — место взято; limit — лимит готовых набран; cap — половина запуска уже за вернувшимися. */
+    const takeLettersSlot = async (returning: boolean): Promise<'ok' | 'limit' | 'cap'> => {
       for (;;) {
-        if (totals.ready >= target) return false;
+        if (totals.ready >= target) return 'limit';
+        if (returning && !cascadeSlotFree(returningRows.ready + returningRows.inFlight, target, newLeft())) return 'cap';
         if (totals.ready + lettersInFlight < target) {
           lettersInFlight += 1;
-          return true;
+          if (returning) returningRows.inFlight += 1;
+          return 'ok';
         }
         await new Promise<void>((resolve) => slotWaiters.push(resolve));
       }
     };
-    const releaseLettersSlot = () => {
+    const releaseLettersSlot = (returning: boolean) => {
       lettersInFlight -= 1;
+      if (returning) returningRows.inFlight -= 1;
       const waiting = slotWaiters;
       slotWaiters = [];
       for (const wake of waiting) wake();
@@ -1572,8 +1679,18 @@ async function runJob(
       }
       // Лимит готовых набран — строка оценку прошла, а до писем не дошла: стоит
       // на этапе писем, воронка (funnel.ts) считает её до «Оценки» включительно.
-      if (!(await takeLettersSlot())) {
+      // Так же стоит вернувшаяся, которой не хватило половины запуска.
+      const returning = q.cascadeNo > 1;
+      const slot = await takeLettersSlot(returning);
+      if (slot === 'limit') {
         await finish(q.id, { stage: 'sequence_assembled', status: 'manual_review', reason: 'LIMIT_REACHED', detail: 'лимит готовых компаний уже набран' }, scoringDoubts(q));
+        return;
+      }
+      if (slot === 'cap') {
+        await finish(q.id, {
+          stage: 'sequence_assembled', status: 'rejected', reason: 'CASCADE_CAP',
+          detail: `вернувшимся — не больше ${cascadeHead(target)} из ${target}, пока есть новые компании`,
+        }, scoringDoubts(q));
         return;
       }
       try {
@@ -1590,16 +1707,17 @@ async function runJob(
         }
         throw err;
       } finally {
-        releaseLettersSlot();
+        releaseLettersSlot(returning);
       }
     };
 
     /** Письма строки с занятым местом в лимите готовых. */
     const buildLetters = async (q: Qualified) => {
-      // Шаблон цепочки оффера: пишется, когда до писем дошла первая компания
-      // оффера; остальные ждут тот же промис. Лимит на ИИ до записи шаблона —
-      // BudgetExceededError: строка возвращается в необработанные (safe()).
-      const template = await templates.get(q.route.chain);
+      // Шаблон цепочки продукта: пишется, когда до писем дошла первая компания
+      // продукта; остальные ждут тот же промис. Повод компании подставляется в
+      // шаблон кодом. Лимит на ИИ до записи шаблона — BudgetExceededError:
+      // строка возвращается в необработанные (safe()).
+      const template = await templates.get(q.product);
       lettersStillWanted();
       const scoringDetail = q.doubts.detail.join('; ') || null;
       if (template.status !== 'ok' || !template.letters) {
@@ -1610,9 +1728,9 @@ async function runJob(
         // повтора ещё не было — строка соберётся заново на следующей волне.
         doubtful.count += 1;
         awaiting.count += 1;
-        if (template.error && !retriedChains.has(q.route.chain)) {
+        if (template.error && !retriedProducts.has(q.product)) {
           parkedIds.add(q.id);
-          parked.set(q.route.chain, [...(parked.get(q.route.chain) ?? []), q]);
+          parked.set(q.product, [...(parked.get(q.product) ?? []), q]);
         }
         await updateRow(q.id, {
           ...withLettersDoubt(q.doubts.flags, scoringDetail, 'TEMPLATE_FAILED', templateDoubtText(template)),
@@ -1631,6 +1749,7 @@ async function runJob(
         template.letters,
         {
           chain: q.route.chain,
+          product: q.product,
           brand: q.brand,
           isRouting: q.email.isRouting,
           primary: q.route.primary,
@@ -1688,6 +1807,7 @@ async function runJob(
         return;
       }
       totals.ready += 1;
+      if (q.cascadeNo > 1) returningRows.ready += 1;
       reach(q.tally, 'ready');
       // Признаки сомнения — с оценки: у строки, ждавшей шаблон, в базе ещё стоит
       // TEMPLATE_FAILED.
@@ -1770,10 +1890,10 @@ async function runJob(
     const lettersStep = async (fresh: Qualified[]) => {
       const again = templates.retryFailed();
       const retryRows: Qualified[] = [];
-      for (const chain of again) {
-        retriedChains.add(chain);
-        retryRows.push(...(parked.get(chain) ?? []));
-        parked.delete(chain);
+      for (const product of again) {
+        retriedProducts.add(product);
+        retryRows.push(...(parked.get(product) ?? []));
+        parked.delete(product);
       }
       if (again.length) {
         log('info', `job ${jobId}: writing chain templates again after the model did not answer: ${again.join(', ')} (${retryRows.length} rows waiting)`);
@@ -1783,14 +1903,14 @@ async function runJob(
       const rows = [...retryRows, ...fresh].sort((a, b) => b.score.total - a.score.total);
       phase = 'writing_letters';
       await publish(phase, { qualified: fresh.length });
-      // Шаблоны офферов — заранее и все сразу: иначе четыре потока писем ждали
-      // бы писателя по очереди, оффер за оффером. Только офферы строк, которым
-      // хватит мест в лимите готовых, — за лишний оффер не платим. Ошибку
-      // записи увидит строка оффера в finalize.
+      // Шаблоны продуктов — заранее и все сразу: иначе четыре потока писем
+      // ждали бы писателя по очереди, продукт за продуктом. Только продукты
+      // строк, которым хватит мест в лимите готовых, — за лишний не платим.
+      // Ошибку записи увидит строка продукта в finalize.
       if (!halted) {
         const room = Math.max(0, target - totals.ready);
-        for (const chain of new Set(rows.slice(0, room).map((q) => q.route.chain))) {
-          templates.get(chain).catch(() => undefined);
+        for (const product of new Set(rows.slice(0, room).map((q) => q.product))) {
+          templates.get(product).catch(() => undefined);
         }
       }
       await runPool(rows, LETTERS_CONCURRENCY, async (q) => {
@@ -1823,7 +1943,7 @@ async function runJob(
           .insert(
             chunk.map((c) => ({
               job_id: jobId,
-              source_type: c.sources.join('+'),
+              source_type: sourceTypeOf(c),
               source_record_id: c.sourceRecordId,
               source_url: c.sourceUrls[0] ?? null,
               source_urls: c.sourceUrls,
@@ -1984,7 +2104,7 @@ async function runJob(
     // пишется — его расход часть итога: дожидаемся (запуск пока идёт).
     const settled = await settleCalls(COMPLETED_SETTLE_MS);
     const spend = budget.snapshot({ includeReserved: !settled });
-    log('info', `job ${jobId} done: scanned=${totals.scanned} ready=${totals.ready}/${target} (${stopReason}), llm $${spend.spent_usd}/$${spend.limit_usd} in ${spend.calls} calls`, { reasons, chains });
+    log('info', `job ${jobId} done: scanned=${totals.scanned} ready=${totals.ready}/${target} (returning ${returningRows.ready}, ${stopReason}), llm $${spend.spent_usd}/$${spend.limit_usd} in ${spend.calls} calls`, { reasons, chains, products });
     // Тоже только идущему: остановку между проверкой выше и этой записью не перетираем.
     await finishRun({
       status: 'completed',

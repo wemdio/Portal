@@ -6,13 +6,14 @@
  * баллу пригодности 0–100: сила повода 35, свежесть 20, доказательство 20,
  * кейс под отрасль 15, размер под оффер 10, второй повод той же цепочки +5.
  * При равенстве — порядок CEO. «Только профиль» — только при ЦА ≥ 7.
- * Затем сплит 50/50 (splitAutomation): половина подходящих компаний получает
- * «Автоматизированный аутрич»; скоринг при этом считается по исходной цепочке.
+ * Цепочка — повод письма; что предлагаем, с 29.10.2026 решает каскад продуктов
+ * (cascade.ts), сплита 50/50 на «Автоматизированный аутрич» больше нет.
  *
  * Скоринг компании (сумма 100): сила сигнала 30, свежесть 15, ЦА-балл 20, B2B 10,
  * размер 10, сайт 5, кейс 5, почта 5. Порог из формы: от него пишем, ниже — пропуск.
  */
 
+import type { Product } from './cascade';
 import type { CaseRecord } from './libraries';
 import type { ChainType, IndustryGroup, Signal, SignalType } from './types';
 
@@ -25,7 +26,7 @@ const STRENGTH: Record<ChainType, number> = {
   event: 25,
   growth_event: 20,
   icp_only: 0,
-  // Сплит не участвует в скоринге: компания оценивается по своей цепочке.
+  // Цепочка строк до каскада (сплит 50/50), роутер её не выбирает.
   automation: 0,
 };
 
@@ -54,7 +55,7 @@ const CHAIN_OF: Partial<Record<SignalType, Exclude<ChainType, 'reactivation' | '
 /** Сила повода «найм» по обычной вакансии продаж: строгий SDR — 30, обычная — 25. */
 const BROAD_HIRING_STRENGTH = 25;
 
-/** Порядок CEO — только для равных баллов. «Автоматизация» сюда не входит: её даёт сплит. */
+/** Порядок CEO — только для равных баллов. «Автоматизации» здесь нет: роутер её не выбирает. */
 const CEO_ORDER: ChainType[] = ['reactivation', 'hiring', 'ad_budget', 'event', 'growth_event', 'icp_only'];
 
 const CHAIN_SHORT: Record<ChainType, string> = {
@@ -95,11 +96,14 @@ export interface Route {
   reason: string;
   /** Второй вариант с баллом или null. */
   runnerUp: string | null;
-  /** У «Автоматизации» — цепочка, которую компания получила бы без сплита. */
+  /**
+   * У «Автоматизации» строк до каскада — цепочка, которую компания получила бы
+   * без сплита 50/50 (восстанавливает «Переписать цепочку»). Роутер её не ставит.
+   */
   from?: ChainType;
 }
 
-/** Цепочка до сплита 50/50: по ней скоринг, «возврат» и повод письма. */
+/** Цепочка до сплита 50/50 (строки до каскада): по ней «возврат» и повод письма. */
 export function baseChain(route: Route): ChainType {
   return route.from ?? route.chain;
 }
@@ -111,76 +115,6 @@ export function baseChain(route: Route): ChainType {
  */
 export function chainOfSignal(type: SignalType): ChainType | null {
   return CHAIN_OF[type] ?? null;
-}
-
-/**
- * Признаки нескольких сегментов (INSTRUCTION_03 §9.1): продукты, регионы,
- * партнёры, дилеры, филиалы, отдел продаж, вакансии продаж.
- */
-const SEGMENT_SIGNALS: Partial<Record<SignalType, string>> = {
-  partner_program: 'партнёрская программа',
-  dealer_search: 'ищет дилеров',
-  new_region: 'новый регион',
-  new_office: 'филиалы / новые точки',
-  export_launch: 'экспорт',
-  product_launch: 'новый продукт',
-  sales_team: 'отдел продаж',
-  sales_hiring: 'вакансия продаж',
-  sales_hiring_broad: 'вакансия продаж',
-};
-
-export interface AutomationFitInput {
-  signals: Signal[];
-  reactivation: boolean;
-  isB2b: boolean;
-  /** Дословная цитата о рынке/клиентах — сегменты различимы. */
-  marketQuote: string | null;
-}
-
-/**
- * Подходит ли компания под «Автоматизированный аутрич» (INSTRUCTION_03 §9):
- * B2B и либо был разговор в AMO, либо два независимых признака нескольких
- * сегментов. Возвращает «почему подходит» или null.
- */
-export function automationFit(i: AutomationFitInput): string | null {
-  if (!i.isB2b) return null;
-  if (i.reactivation) return 'был разговор в AMO';
-  const found = new Set<string>();
-  for (const s of i.signals) {
-    const label = SEGMENT_SIGNALS[s.type];
-    if (label && s.level !== 'NONE') found.add(label);
-  }
-  if (i.marketQuote) found.add('рынок назван на сайте');
-  return found.size >= 2 ? [...found].join(', ') : null;
-}
-
-/** Детерминированная половина по домену: повторный запуск кладёт компанию в ту же группу. */
-export function automationHalf(domain: string): boolean {
-  let h = 2166136261;
-  for (const ch of domain.trim().toLowerCase()) {
-    h ^= ch.charCodeAt(0);
-    h = Math.imul(h, 16777619);
-  }
-  return (h >>> 0) % 2 === 0;
-}
-
-/**
- * Сплит 50/50 (решение 25.09.2026): подходящая компания из половины по домену
- * получает «Автоматизированный аутрич» вместо своей цепочки. SDR («найм») —
- * отдельный оффер Максима и в сплит не входит.
- */
-export function splitAutomation(route: Route, domain: string, fit: AutomationFitInput): Route {
-  if (route.chain === 'hiring') return route;
-  const why = automationFit(fit);
-  if (!why) return route;
-  if (!automationHalf(domain)) return { ...route, reason: `${route.reason}; сплит 50/50: осталась своя цепочка` };
-  return {
-    ...route,
-    chain: 'automation',
-    from: route.chain,
-    reason: `автоматизация (сплит 50/50 вместо «${CHAIN_SHORT[route.chain]}»): ${why}`,
-    runnerUp: `${CHAIN_SHORT[route.chain]} ${route.fit}`,
-  };
 }
 
 function ageDays(s: Signal | null, now: number): number | null {
@@ -358,11 +292,22 @@ export function decide(total: number, writeThreshold: number): Decision {
   return total >= writeThreshold ? 'write' : 'skip';
 }
 
-/** Кейс по отраслевой группе; только утверждённые и разрешённые для этой цепочки. */
-export function routeCase(cases: CaseRecord[], group: IndustryGroup | null, chain: ChainType): { record: CaseRecord; reason: string } | null {
+/**
+ * Кейс по отраслевой группе; только утверждённые и разрешённые для этой цепочки
+ * (повода) или продукта каскада: в allowed_chains кейса — поводы и продукты,
+ * пусто — везде.
+ */
+export function routeCase(
+  cases: CaseRecord[],
+  group: IndustryGroup | null,
+  chain: ChainType,
+  product: Product,
+): { record: CaseRecord; reason: string } | null {
   // С 09.10.2026 кейс по отрасли есть и в письме 3 цепочки «найм»
   // (утверждённые тексты); раньше SDR-цепочке его не подбирали.
   if (!group) return null;
-  const hit = cases.find((c) => c.industry_groups.includes(group) && (!c.allowed_chains.length || c.allowed_chains.includes(chain)));
+  const hit = cases.find(
+    (c) => c.industry_groups.includes(group) && (!c.allowed_chains.length || c.allowed_chains.includes(chain) || c.allowed_chains.includes(product)),
+  );
   return hit ? { record: hit, reason: `отраслевая группа «${group}»` } : null;
 }

@@ -14,6 +14,7 @@ import {
   isStopRequest,
 } from './replyClassify';
 import type { MailboxRow, ReplyKind } from './types';
+import { cancelPendingMessages, unsubscribeRecipient } from './unsubscribe';
 
 /**
  * Опрос входящих по подключённым ящикам: складываем ответы, связываем их с
@@ -163,16 +164,6 @@ async function wasEverContacted(email: string | null): Promise<boolean> {
   return Boolean(sameCompany?.length);
 }
 
-/** Отменяет ещё не отправленные письма лида: после ответа дожимать нельзя. */
-async function cancelPendingMessages(recipientId: string): Promise<void> {
-  if (!supabaseAdmin) return;
-  await supabaseAdmin
-    .from('sender_messages')
-    .update({ status: 'canceled' })
-    .eq('recipient_id', recipientId)
-    .in('status', ['scheduled', 'sending']);
-}
-
 async function applyReply(params: {
   kind: ReplyKind;
   recipientId: string | null;
@@ -196,21 +187,18 @@ async function applyReply(params: {
     const stop = isStopRequest(params.replyBody, params.replySubject);
     const stopEmail = params.replyFrom?.toLowerCase() ?? null;
     if (stop && stopEmail) {
-      await db
-        .from('sender_suppressions')
-        .upsert({ email: stopEmail, reason: 'unsubscribe', note: 'попросил больше не писать' }, { onConflict: 'email' });
-      await db
-        .from('sender_recipients')
-        .update({ status: 'unsubscribed', next_step_at: null, updated_at: nowIso })
-        .eq('id', params.recipientId);
-      await cancelPendingMessages(params.recipientId);
+      await unsubscribeRecipient(db, {
+        recipientId: params.recipientId,
+        emails: [stopEmail],
+        note: 'попросил больше не писать',
+      });
       return;
     }
     await db
       .from('sender_recipients')
       .update({ status: 'replied', replied_at: nowIso, next_step_at: null, updated_at: nowIso })
       .eq('id', params.recipientId);
-    await cancelPendingMessages(params.recipientId);
+    await cancelPendingMessages(db, params.recipientId);
     return;
   }
 
@@ -236,7 +224,7 @@ async function applyReply(params: {
         .from('sender_recipients')
         .update({ status: 'bounced', next_step_at: null, updated_at: nowIso })
         .eq('id', recipientId);
-      await cancelPendingMessages(recipientId);
+      await cancelPendingMessages(db, recipientId);
     }
   }
 }

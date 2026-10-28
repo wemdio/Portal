@@ -56,6 +56,9 @@ export interface RuJob {
 export interface RuRow {
   id: string;
   chain_type: ChainType | null;
+  /** Продукт каскада (sdr, classic, classic_abroad, auto) и номер шага 1–3; у строк до каскада — null. */
+  product: string | null;
+  cascade_no: number | null;
   source_type: string;
   source_url: string | null;
   source_urls: string[];

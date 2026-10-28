@@ -8,6 +8,9 @@ export type AiState = 'active' | 'handed_off' | 'no_reply' | 'closed' | 'stopped
 
 export type AiFolderKey = 'auto_ru' | 'auto_en';
 
+/** Почему ИИ закрыл разговор: отказ, встречное предложение или просьба не писать. */
+export type AiCloseReason = 'decline' | 'counter_offer' | 'stop';
+
 /** Ответ модели на один ход разговора. */
 export interface AiStep {
   /** Подтвердил ли лид, что это ему актуально. */
@@ -44,6 +47,8 @@ export interface AiConversationRow {
   handoff_reply_id: string | null;
   handoff_contact: string | null;
   summary: string | null;
+  /** Заполнена только у закрытых разговоров; у прочих закрытий причины нет. */
+  close_reason: AiCloseReason | null;
   attempts: number;
   last_error: string | null;
   started_at: string;
