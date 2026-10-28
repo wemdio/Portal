@@ -1,7 +1,16 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { VeContactUploadStatus } from '@/lib/verticalEngineV2/contactUploadStatus';
+import {
+  SENDER_CLOSED_LAUNCH_HINT,
+  senderCampaignHint,
+  senderCampaignStartable,
+  senderCampaignStateLabel,
+  senderSendingStoppedNote,
+  senderStartButtonLabel,
+  senderStartReport,
+} from '@/lib/verticalEngineV2/senderTransport/labels';
 import { VE_API, veEngineCall, veEnginePost } from './api';
 import { HE } from './design';
 import { StatusBox } from './ui';
@@ -12,8 +21,25 @@ export function ContactUploadNotice({ templateId }: { templateId: string }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [queued, setQueued] = useState(false);
+  const [sender, setSender] = useState(false);
+  const [launchClosed, setLaunchClosed] = useState(false);
+  // Отправку кампаний Движка остановил администратор (этап 6): запуск отсюда и в «Рассылке» откажет.
+  const [sendingStopped, setSendingStopped] = useState<VeContactUploadStatus['sending_stopped'] | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [startReport, setStartReport] = useState<string[] | null>(null);
+  // Отдельно от error: ту сбрасывает каждый удачный опрос, а отказ запуска должен остаться виден.
+  const [startError, setStartError] = useState('');
   const requestVersion = useRef(0);
   const submitting = useRef(false);
+
+  const applyStatus = useCallback((data: VeContactUploadStatus) => {
+    setBlocked(data.blocked);
+    setCampaigns(data.campaigns ?? []);
+    setSender(data.transport === 'sender');
+    setLaunchClosed(data.launch_closed === true);
+    setSendingStopped(data.transport === 'sender' && data.sending_stopped ? data.sending_stopped : null);
+    if (data.blocked) setQueued(false);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -27,9 +53,7 @@ export function ContactUploadNotice({ templateId }: { templateId: string }) {
         );
         if (cancelled || version !== requestVersion.current) return;
         if (!response.ok) throw new Error(response.data.error ?? 'Не удалось проверить загрузку');
-        setBlocked(response.data.blocked);
-        setCampaigns(response.data.campaigns ?? []);
-        if (response.data.blocked) setQueued(false);
+        applyStatus(response.data);
         setError('');
       } catch (caught) {
         if (!cancelled && version === requestVersion.current) setError(caught instanceof Error ? caught.message : 'Не удалось проверить загрузку');
@@ -38,7 +62,7 @@ export function ContactUploadNotice({ templateId }: { templateId: string }) {
     void refresh();
     const timer = setInterval(() => void refresh(), 30_000);
     return () => { cancelled = true; controller.abort(); clearInterval(timer); };
-  }, [templateId]);
+  }, [templateId, applyStatus]);
 
   async function retry() {
     if (!blocked || submitting.current) return;
@@ -58,11 +82,43 @@ export function ContactUploadNotice({ templateId }: { templateId: string }) {
     } finally { submitting.current = false; setBusy(false); }
   }
 
-  if (!blocked && !queued && !error && !campaigns?.length) return null;
+  /** Кампании «Рассылки» запускает специалист — отсюда, как кнопкой «Запустить» в самой «Рассылке». */
+  async function startSender() {
+    if (submitting.current) return;
+    submitting.current = true;
+    ++requestVersion.current;
+    setStarting(true);
+    setStartError('');
+    setStartReport(null);
+    try {
+      const response = await veEnginePost<{ error?: string; results?: Array<{ campaign_name: string; outcome: string; message: string | null }>; notes?: string[] }>(
+        `${VE_API}/templates/${templateId}/sender-start`, {},
+      );
+      if (!response.ok) throw new Error(response.data.error ?? 'Не удалось запустить кампании в «Рассылке»');
+      setStartReport(senderStartReport(response.data.results ?? [], response.data.notes ?? []));
+      // Новое состояние — пока кнопка выключена: иначе её можно нажать по старому списку.
+      // Не прочиталось — покажет следующий опрос.
+      try {
+        const status = await veEngineCall<VeContactUploadStatus & { error?: string }>(`${VE_API}/templates/${templateId}/upload`);
+        if (status.ok) applyStatus(status.data);
+      } catch { /* следующий опрос */ }
+    } catch (caught) {
+      setStartError(caught instanceof Error ? caught.message : 'Не удалось запустить кампании в «Рассылке»');
+    } finally {
+      ++requestVersion.current;
+      submitting.current = false;
+      setStarting(false);
+    }
+  }
+
+  const startable = sender && !launchClosed && !sendingStopped ? (campaigns ?? []).filter(senderCampaignStartable).length : 0;
+  if (!blocked && !queued && !error && !startError && !campaigns?.length) return null;
   return <div className="space-y-2" aria-live="polite">
+    {sender && sendingStopped && campaigns?.length ? <p className="font-medium">{senderSendingStoppedNote(sendingStopped.at)}</p> : null}
     {campaigns?.map(campaign => <div key={campaign.campaign_id} className="space-y-1">
-      <p className="font-medium">{campaigns.length > 1 ? `${campaign.campaign_name}: ` : ''}{
-        campaign.remote_status === 0 ? 'Черновик в Instantly — ожидает Start'
+      <p className="font-medium">{campaigns.length > 1 ? `${campaign.campaign_name}: ` : ''}{sender
+        ? senderCampaignStateLabel(campaign.remote_status, launchClosed)
+        : campaign.remote_status === 0 ? 'Черновик в Instantly — ожидает Start'
         : campaign.remote_status === 2 ? 'На паузе в Instantly — отправка выключена'
         : campaign.remote_status === 1 || campaign.remote_status === 4 ? 'Включена в Instantly — отправка по расписанию'
         : campaign.remote_status === 3 ? 'Текущая отправка завершена в Instantly'
@@ -70,9 +126,18 @@ export function ContactUploadNotice({ templateId }: { templateId: string }) {
         : 'Кампания требует проверки в Instantly'}</p>
       <p className={HE.muted}>Загружено через Portal: {campaign.leads_count.toLocaleString('ru-RU')} контактов.
         {campaign.status_observed_at ? ` Последняя проверка: ${new Date(campaign.status_observed_at).toLocaleString('ru-RU')}.` : ''}</p>
-      {campaign.remote_status === 0 || campaign.remote_status === 2 ? <p className={HE.muted}>
+      {sender ? (launchClosed ? <p className={HE.muted}>{SENDER_CLOSED_LAUNCH_HINT}</p>
+        // Пока отправка остановлена, подсказка «запустите» не к месту; про письма (−1) — остаётся.
+        : sendingStopped && campaign.remote_status !== -1 ? null
+        : senderCampaignHint(campaign) ? <p className={HE.muted}>{senderCampaignHint(campaign)}</p> : null)
+        : campaign.remote_status === 0 || campaign.remote_status === 2 ? <p className={HE.muted}>
         Проверьте кампанию и нажмите Start в Instantly. Portal сам отправку не включает; после Start продолжит дозагрузку по плану.</p> : null}
     </div>)}
+    {startable ? <button type="button" className={HE.btnPrimary} disabled={starting} onClick={() => void startSender()}>
+      {starting ? 'Запускаем…' : senderStartButtonLabel(startable)}
+    </button> : null}
+    {startReport ? <StatusBox tone="info">{startReport.map((line, index) => <span key={index} className="block">{line}</span>)}</StatusBox> : null}
+    {startError ? <StatusBox tone="error">{startError}</StatusBox> : null}
     {blocked ? <StatusBox tone="info">
       <p className="font-medium">Нет места для контактов в Instantly</p>
       <p className="mt-1">Загрузка новых контактов проекта приостановлена. Освободите место в рабочем пространстве Instantly или увеличьте тариф, затем запросите дозаливку.</p>

@@ -20,6 +20,15 @@ interface VeRenewableTaskState {
   unavailable?: unknown;
   hit_ceiling?: unknown;
   task?: unknown;
+  /** Курсор близнеца 2ГИС и связь пары (план R3 «Курсор»): переносятся при переоткрытии. */
+  two_gis?: unknown;
+  two_gis_pair_id?: unknown;
+}
+
+/** Закладка, с которой закрытая задача читается дальше: каталог Яндекс Карт или курсор близнеца 2ГИС.
+ * Недоступный близнец терминален: курсор у него только для аудита. Для каталога смысл прежний — !!catalog. */
+export function veHasSourceCursor(state: VeRenewableTaskState | null | undefined): boolean {
+  return !!state && (!!state.catalog || (!!state.two_gis && !state.unavailable));
 }
 
 /** Старая задача карт: закрыта, каталог по её запросам ещё не читали. */
@@ -33,7 +42,7 @@ export function isVeLegacyMapsTask(state: VeRenewableTaskState | null | undefine
 /** Закрытая задача, у которой источник ещё не исчерпан. */
 export function isVeRenewableSourceTask(state: VeRenewableTaskState | null | undefined): boolean {
   return !!state && state.status === 'done' && !state.exhausted && !state.hit_ceiling && !state.unavailable
-    && (state.source === 'companies_directory' || !!state.catalog || isVeLegacyMapsTask(state));
+    && (state.source === 'companies_directory' || veHasSourceCursor(state) || isVeLegacyMapsTask(state));
 }
 
 /**
@@ -47,5 +56,8 @@ export function reopenVeSourceTask<T extends VeRenewableTaskState>(state: T): T 
   return { source: state.source, task: state.task, status: 'pending', child_job_id: null, rows: 0,
     ...(state.catalog ? { catalog: state.catalog } : {}),
     ...(state.directory_cursors ? { directory_cursors: state.directory_cursors } : {}),
-    ...(legacy ? { legacy_child_job_id: legacy } : {}) } as unknown as T;
+    ...(legacy ? { legacy_child_job_id: legacy } : {}),
+    // Пара и курсор близнеца — у любой задачи: и у Яндекс-задачи, и у самого близнеца.
+    ...(state.two_gis ? { two_gis: state.two_gis } : {}),
+    ...(typeof state.two_gis_pair_id === 'string' && state.two_gis_pair_id ? { two_gis_pair_id: state.two_gis_pair_id } : {}) } as unknown as T;
 }

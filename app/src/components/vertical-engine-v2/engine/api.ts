@@ -7,6 +7,8 @@
 
 import { authFetch } from '@/lib/authFetch';
 import type { ClientBriefFields } from '@/lib/clientBrief';
+import type { VeSenderMarketView, VeSenderOption, VeSenderPoolSummary } from '@/lib/verticalEngineV2/senderTransport/labels';
+import type { VeSenderSwitchState } from '@/lib/verticalEngineV2/senderTransport/switches';
 import type {
   VeBase,
   VeChain,
@@ -37,6 +39,12 @@ export interface VeCollectTask {
   source?: string;
   status?: string;
   rows?: number;
+  /** Только у близнеца 2ГИС базы с флагом (срез public_info): закрыт, исчерпан, у потолка, пояснение, причина отсрочки. */
+  unavailable?: boolean;
+  exhausted?: boolean;
+  hit_ceiling?: boolean;
+  note?: string;
+  postponed?: string;
 }
 
 /**
@@ -136,6 +144,8 @@ export interface VeCollectInfo {
   target_progress?: import('@/lib/verticalEngineV2/collectionTarget').VeCollectionTargetProgress;
   /** Более ранняя база проекта, которую ждёт этот сбор. */
   waiting_for_base_id?: string | null;
+  /** База ждёт справочник организаций: с какого времени и почему (причина на момент засыпания). */
+  two_gis_sleep?: { since?: string; reason?: string } | null;
   /** Снимок обработки; не означает, что итоговая база уже сохранена. */
   construct?: {
     status?: string;
@@ -345,6 +355,25 @@ export interface VeCasePreviewResponse {
 
 export interface VeProjectsResponse {
   projects?: VeProject[];
+  /** Рынки, где новые запуски идут в «Рассылку»; нет поля — везде Instantly. */
+  launch_transport?: VeSenderMarketView[];
+  error?: string;
+}
+
+export type { VeSenderSwitchState };
+
+/** GET /sender-switches — состояние выключателей Движка → «Рассылка» (этап 6). */
+export interface VeSenderSwitchesResponse {
+  state?: VeSenderSwitchState;
+  /** admin: панель показывает кнопки (пишет POST /api/admin/ve2-sender). */
+  can_manage?: boolean;
+  error?: string;
+}
+
+/** POST /api/admin/ve2-sender — отчёт строками и свежее состояние. */
+export interface VeSenderSwitchActionResponse {
+  lines?: string[];
+  state?: VeSenderSwitchState;
   error?: string;
 }
 
@@ -513,6 +542,11 @@ export interface VeDeliveryPlanPreviewRequest {
   target_contacts: number;
   preset_id: string;
   segmentation_audit_id?: string;
+  /**
+   * Специалист выбрал «Рассылку» (этап 7); нет поля — Instantly. Только
+   * 'sender': тело обзора Instantly не меняется.
+   */
+  expected_transport?: 'sender';
 }
 
 /** Серверный расчёт, общий для preview и финального запуска. */
@@ -537,8 +571,28 @@ export interface VeDeliveryPlanPreviewDto {
   capacity_deficit: number;
   delivery_timezone?: string | null;
   delivery_schedule_days?: number[] | null;
+  /** Способ отправки этого обзора — эхо выбора специалиста (expected_transport); нет поля — Instantly. */
+  transport?: 'instantly' | 'sender';
+  /** Только у запуска в «Рассылку»: ящики пресета там; null — проверить не вышло. */
+  sender_pool?: VeSenderPoolSummary | null;
   /** Только без периода: карточка проекта для показа. */
   project_term?: Omit<VePortalProjectTermDto, 'issue'> | null;
+}
+
+/**
+ * GET templates/{id}/launch-transport (этап 7): можно ли выбрать «Рассылку» для
+ * нового запуска шаблона. transport — для вкладок, открытых до выкладки
+ * (всегда Instantly); нет sender — «Рассылку» не предлагаем.
+ */
+export interface VeLaunchTransportOptionResponse {
+  transport?: 'instantly' | 'sender';
+  sender?: VeSenderOption;
+  error?: string;
+}
+
+/** GET projects/{id}/outreach: sender — можно ли выбрать «Рассылку» для нового автоаутрича проекта (без писем). */
+export interface VeOutreachSenderOptionField {
+  sender?: VeSenderOption;
 }
 
 export interface VeDeliveryPlanPreviewResponse {

@@ -18,7 +18,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const result = await prepareVeOutreachLaunch(supabaseAdmin, supabaseInstantly, { projectId: id, userId: authed.auth.userId, request, retryFailedAudits: retry_failed_audits });
     return NextResponse.json(result);
   } catch (error) {
-    return NextResponse.json({ error: error instanceof VeOutreachLaunchError ? error.message : 'Не удалось подготовить обзор запуска.' },
+    return NextResponse.json({
+      error: error instanceof VeOutreachLaunchError ? error.message : 'Не удалось подготовить обзор запуска.',
+      // Экран отличает отказ «Рассылки» от остальных (этап 7) — по коду.
+      ...(error instanceof VeOutreachLaunchError && error.code ? { code: error.code } : {}),
+    },
       { status: error instanceof VeOutreachLaunchError ? error.status : error instanceof z.ZodError || error instanceof SyntaxError ? 400 : 500 });
   }
 }

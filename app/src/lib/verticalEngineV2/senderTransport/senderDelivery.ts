@@ -63,7 +63,7 @@ async function readOwnSenderCampaigns(
 }
 
 /** Адреса пула каждой кампании, строчными. */
-async function readCampaignPools(portalDb: SupabaseClient, campaignIds: string[]): Promise<Map<string, string[]>> {
+export async function readCampaignPools(portalDb: SupabaseClient, campaignIds: string[]): Promise<Map<string, string[]>> {
   const { data: links, error } = await portalDb.from('sender_campaign_mailboxes')
     .select('campaign_id, mailbox_id').in('campaign_id', campaignIds);
   if (error) throw new Error(`пул ящиков «Рассылки» не прочитан: ${error.message}`);
@@ -125,6 +125,9 @@ export async function observeSenderLaunchItem(
   input: { veProjectId: string; item: { id: string; mailbox_ids: unknown }; campaigns: Array<{ id: string; campaign_id: string }> },
 ): Promise<string[]> {
   if (!input.campaigns.length) throw new Error('Prepared launch has no campaign children');
+  // Момент — до чтений: медленный проход не перезапишет более свежее
+  // наблюдение (например, «Идёт» сразу после запуска) своим старым.
+  const observedAt = new Date().toISOString();
   const campaignIds = input.campaigns.map((campaign) => campaign.campaign_id);
   const portalProjectId = await readPortalProjectId(portalDb, input.veProjectId);
   const campaigns = await readOwnSenderCampaigns(portalDb, portalProjectId, campaignIds);
@@ -146,7 +149,6 @@ export async function observeSenderLaunchItem(
     if (fault) notes.push(`кампания «Рассылки» ${id}: ${fault} — подача в неё остановлена`);
     statuses.set(id, fault ? TEMPLATE_FAULT_REMOTE_STATUS : senderRemoteStatus(campaign.status));
   }
-  const observedAt = new Date().toISOString();
   const observations = campaignIds.map((id) => ({ campaign_id: id, status: statuses.get(id)!, status_observed_at: observedAt }));
   const { data, error } = await portalDb.rpc('ve_observe_manual_campaigns', {
     p_item_id: input.item.id, p_campaigns: observations, p_now: new Date().toISOString(),

@@ -5,10 +5,12 @@ import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, normalizeVeReta
 import { deriveVeRetailAudienceScope, veRetailSourceProfileForScope, type VeRetailSourceProfile } from './legacyRetailAudience';
 import { VE_YANDEX_CATALOG_MAPPING_REVISION } from './yandexCatalog';
 import { veSourceStrategyKey } from './adaptiveCollection';
+import { isVeTwoGisTask } from './twoGisQuarantine';
 import { projectMarket, type VeMarket } from './market';
 import type { VeCollectTask, VeSourcePlan } from './prompts/sourcePlan';
 import { isVeRestaurantCatalogAudience } from './restaurantSourcePolicy';
 import { readVeCollectionGeography, type VeCollectionGeography } from './collectionGeography';
+import { readVeTwoGisSourceFlag, type VeTwoGisSourceFlag } from './twoGisSettings';
 
 export interface VeSourceAudienceHypothesis {
   id: string; title: string; description?: string | null; status: string | null;
@@ -102,7 +104,8 @@ export function canRefreshVeAudienceSources(info: RefreshableInfo): boolean {
   return info.collection_mode === 'preview' && !info.refill && !info.campaign_id && !info.supply_batch_id
     && !info.audience_snapshot && (!info.construct || info.construct.status === 'done') && !info.preview_pipeline?.batches.length && !info.adaptive_collection?.pending
     && !info.company_name_recovery && !info.saved_email_recovery?.batch && !info.validation_retry && !info.relevance_review_requested
-    && !info.tasks?.some((task) => task.status === 'dispatched' || task.status === 'pending');
+    // Отложенный близнец 2ГИС синхронный и без дочерней задачи: это не незавершённая работа.
+    && !info.tasks?.some((task) => !isVeTwoGisTask(task) && (task.status === 'dispatched' || task.status === 'pending'));
 }
 export function needsLegacyFintechAudienceRefresh(info: RefreshableInfo): boolean {
   if (!canRefreshVeAudienceSources(info) || info.hypotheses?.length !== 1 || !isVeBroadFintechAudience(info.hypotheses[0])
@@ -194,11 +197,13 @@ export function normalizeVeAudienceSourcePlan(plan: VeSourcePlan, hypotheses: Ve
 
 /** Follow the actual approved launch lineage, never today's edited hypothesis
  * or brief. Geography is independent of structured audience rollout: a manual
- * preview can freeze it without having an audience snapshot or cost policy. */
+ * preview can freeze it without having an audience snapshot or cost policy.
+ * Флаг 2ГИС едет той же линией, даже без снимка и географии; можно ли им
+ * пользоваться базе поставки, решает baseCollect по текущим настройкам. */
 export async function loadVeApprovedSupplyAudience(db: SupabaseClient, input: {
   projectId: string; hypothesisId: string; batchId: string; baseId: string;
 }): Promise<{ snapshot: VeCollectionAudienceSnapshot | null; costPolicy: VeSourceCostPolicy | null;
-  geography: VeCollectionGeography | null } | null> {
+  geography: VeCollectionGeography | null; twoGisSource?: VeTwoGisSourceFlag } | null> {
   const { data: batch, error: batchError } = await db.from('ve_contact_supply_batches')
     .select('plan_id,base_id').eq('id', input.batchId).maybeSingle();
   if (batchError || !batch || batch.base_id !== input.baseId || !batch.plan_id) throw new Error('Supply audience batch is unavailable');
@@ -209,7 +214,7 @@ export async function loadVeApprovedSupplyAudience(db: SupabaseClient, input: {
     .select('base_id,project_id,hypothesis_id').eq('id', plan.item_id).maybeSingle();
   if (itemError || !item || !item.base_id || item.project_id !== input.projectId || item.hypothesis_id !== input.hypothesisId) throw new Error('Supply audience launch is unavailable');
   const { data: source, error: sourceError } = await db.from('ve_bases')
-    .select('id,project_id,hypothesis_id,audience_snapshot:collect_info->audience_snapshot,cost_policy:collect_info->cost_policy,collection_geography:collect_info->collection_geography')
+    .select('id,project_id,hypothesis_id,audience_snapshot:collect_info->audience_snapshot,cost_policy:collect_info->cost_policy,collection_geography:collect_info->collection_geography,two_gis_source:collect_info->two_gis_source')
     .eq('id', item.base_id).maybeSingle();
   if (sourceError || !source || source.project_id !== input.projectId || source.hypothesis_id !== input.hypothesisId) throw new Error('Supply source audience is unavailable');
   const snapshot = readVeCollectionAudienceSnapshot(source.audience_snapshot);
@@ -217,7 +222,10 @@ export async function loadVeApprovedSupplyAudience(db: SupabaseClient, input: {
   const geography = readVeCollectionGeography(source.collection_geography);
   if (snapshot && (snapshot.hypotheses.length !== 1 || snapshot.hypotheses[0].id !== input.hypothesisId
     || !costPolicy)) throw new Error('Supply source audience does not match approval');
-  return snapshot || geography ? { snapshot: snapshot ? structuredClone(snapshot) : null,
+  // Чужая форма флага — как его нет. Без флага ответ прежний: ключа twoGisSource нет.
+  const twoGisSource = readVeTwoGisSourceFlag((source as { two_gis_source?: unknown }).two_gis_source);
+  return snapshot || geography || twoGisSource ? { snapshot: snapshot ? structuredClone(snapshot) : null,
     costPolicy: costPolicy ? structuredClone(costPolicy) : null,
-    geography: geography ? structuredClone(geography) : null } : null;
+    geography: geography ? structuredClone(geography) : null,
+    ...(twoGisSource ? { twoGisSource } : {}) } : null;
 }

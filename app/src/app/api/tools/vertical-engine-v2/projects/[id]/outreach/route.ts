@@ -6,6 +6,7 @@ import { enqueueVeContactReprojections, loadVeOutreachSetup } from '@/lib/vertic
 import { VE_MAX_EMAILS_PER_COMPANY_MAX, VE_MAX_EMAILS_PER_COMPANY_MIN } from '@/lib/verticalEngineV2/companyContactCap';
 import { checkVeContinuationRequest, checkVePreparationRequest, type VePreparationAction } from '@/lib/verticalEngineV2/preparationRequest';
 import { logAudit } from '@/lib/loggerServer';
+import { readVeSenderLaunchAvailability, veSenderOptionView } from '@/lib/verticalEngineV2/senderTransport/transport';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -19,7 +20,14 @@ export async function GET(req: NextRequest, { params }: Context) {
     const auth = await requireInternalToolAuth(req);
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 503 });
-    try { return NextResponse.json(await loadVeOutreachSetup(supabaseAdmin, (await params).id)); }
+    try {
+      const projectId = (await params).id;
+      const setup = await loadVeOutreachSetup(supabaseAdmin, projectId);
+      // Можно ли выбрать «Рассылку» для нового автоаутрича проекта (этап 7, по умолчанию Instantly);
+      // письма каждой гипотезы проверяет обзор запуска.
+      const sender = veSenderOptionView(await readVeSenderLaunchAvailability(supabaseAdmin, projectId));
+      return NextResponse.json({ ...setup, sender });
+    }
     catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : 'Не удалось загрузить подготовку' }, { status: 503 }); }
   });
 }

@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { readHeProjectOwner } from './letterBrandGuard';
+import { heEngUnverifiedSiteEmail, type HeEngCollectionRow } from './engCollectionTarget';
 import { heLaunchEmailStrength, heLaunchEmailVerdict } from './launchHandoff';
 
 /** ENG client policy only; neither a US staff project nor an unreadable owner opts in. */
@@ -21,4 +22,25 @@ export function selectHeEngEmailRows<T extends { _email_status?: unknown }>(rows
   return rows
     .filter((row) => heLaunchEmailVerdict(row._email_status, policy) === 'accepted')
     .sort((a, b) => heLaunchEmailStrength(b._email_status, policy) - heLaunchEmailStrength(a._email_status, policy));
+}
+
+/** ok 3, catch-all 2, an unverified address from the company's own site 1, anything else 0 (not kept). */
+function heEngCollectRank(status: unknown, row: HeEngCollectionRow): number {
+  const policy = { allowCatchAll: true };
+  if (heLaunchEmailVerdict(status, policy) === 'accepted') return heLaunchEmailStrength(status, policy);
+  return heEngUnverifiedSiteEmail(status, row) ? 1 : 0;
+}
+
+/**
+ * What a collection keeps for an ENG client: the checked addresses of
+ * selectHeEngEmailRows and, after them, unverified addresses from the company's
+ * own site (heEngUnverifiedSiteEmail). Stable order before any limit. Sending
+ * and the client's counts still go by selectHeEngEmailRows.
+ */
+export function selectHeEngCollectRows<T>(items: readonly T[], view: (item: T) => { status: unknown; row: HeEngCollectionRow }): T[] {
+  return items
+    .map((item) => { const { status, row } = view(item); return { item, rank: heEngCollectRank(status, row) }; })
+    .filter(({ rank }) => rank > 0)
+    .sort((a, b) => b.rank - a.rank)
+    .map(({ item }) => item);
 }

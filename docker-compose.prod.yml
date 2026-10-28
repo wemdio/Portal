@@ -945,6 +945,10 @@ services:
     container_name: portal-worker-vertical-engine-v2
     env_file:
       - .env
+      # TWOGIS_VE2_DATABASE_URL: свой пользователь VE2 в базе 2ГИС (twogis_ve2, шаг Ш3 плана 2ГИС).
+      # Файл живёт только на сервере (0600) и не входит в бэкап .env; нет файла — 2ГИС просто не читается.
+      - path: .env.twogis-ve2
+        required: false
     environment:
       - NODE_ENV=production
       - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}

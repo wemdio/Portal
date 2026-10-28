@@ -2,7 +2,7 @@ import { ENG_COUNTRIES } from './engCountries';
 import type { HeEngRegistryProvider } from './engPublicRegistryTypes';
 
 /** ISO 17442: an LEI is 18 characters plus two check digits, valid when mod 97 equals 1. */
-function validLei(id: string): boolean {
+export function validLei(id: string): boolean {
   if (!/^[A-Z0-9]{18}\d{2}$/.test(id)) return false;
   let remainder = 0;
   for (const char of id) {
@@ -11,6 +11,13 @@ function validLei(id: string): boolean {
   }
   return remainder === 1;
 }
+/** The public ESMA register query for one record; the query value follows. */
+export const ESMA_RECORD = 'https://registers.esma.europa.eu/solr/esma_registers_upreg/select?q=';
+/** The EBA register's page of one payment or e-money institution; its entity type and code follow. */
+export const EBA_RECORD = 'https://euclid.eba.europa.eu/register/pir/view/';
+export const HE_ENG_EBA_ENTITY_TYPES: readonly string[] = ['PSD_PI', 'PSD_EMI', 'PSD_AISP'];
+/** The CRO open-data query for one company number (the datastore table id may change); the number is group 1. */
+export const HE_ENG_CRO_RECORD = /^https:\/\/opendata\.cro\.ie\/api\/3\/action\/datastore_search\?resource_id=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}&filters=%7B%22company_num%22%3A(\d{1,7})%7D$/;
 function engCountry(country: unknown): boolean {
   return typeof country === 'string' && ENG_COUNTRIES.some(item => item.value === country);
 }
@@ -36,6 +43,55 @@ export function heEngRegistryRecordValid(provider: unknown, id: unknown, country
       url.searchParams.get('query_param') === 'USDOT' && url.searchParams.get('query_string') === id;
     case 'companies_house': return country === 'united kingdom' && /^[A-Z0-9]{8}$/.test(id) &&
       url.href === `https://find-and-update.company-information.service.gov.uk/company/${id}`;
+    // A PRA-authorised firm by its FCA firm reference number on the public FCA register.
+    case 'pra': return country === 'united kingdom' && /^\d{6,7}$/.test(id) &&
+      url.href === `https://register.fca.org.uk/s/search?q=${id}&type=Companies`;
+    // An ESMA-registered fund manager by its LEI, or by ESMA's own record id when it has none.
+    case 'esma': return engCountry(country) && (validLei(id) ? url.href === `${ESMA_RECORD}ae_lei:${id}`
+      : /^ae\d{1,9}$/.test(id) && url.href === `${ESMA_RECORD}id:${id}`);
+    // A PSD2 payment or e-money institution by the code the EBA register keys it on
+    // («IE_CBI!C182347», «FT00128275»), on its page for the entity type.
+    case 'eba': return engCountry(country) && /^[A-Za-z0-9][A-Za-z0-9_!.-]{3,29}$/.test(id) &&
+      HE_ENG_EBA_ENTITY_TYPES.some(type => url.href === `${EBA_RECORD}${type}/${id}`);
+    // National registers by the company's own number on their public company page
+    // (Irish records: the CRO open-data query for that company number).
+    case 'prh': return country === 'finland' && /^\d{7}-\d$/.test(id) && url.href === `https://tietopalvelu.ytj.fi/yritys/${id}`;
+    case 'czso': return country === 'czechia' && /^\d{8}$/.test(id) && url.href === `https://ares.gov.cz/ekonomicke-subjekty?ico=${id}`;
+    case 'cro': return country === 'ireland' && /^\d{1,7}$/.test(id) && HE_ENG_CRO_RECORD.exec(url.href)?.[1] === id;
+    case 'ariregister': return country === 'estonia' && /^\d{8}$/.test(id) && url.href === `https://ariregister.rik.ee/eng/company/${id}`;
+    // A Wikidata organisation by its item id; the country comes from its headquarters (or own) statement.
+    case 'wikidata': return engCountry(country) && /^Q[1-9]\d{0,11}$/.test(id) && url.href === `https://www.wikidata.org/wiki/${id}`;
+    // A company filing with the SEC by its CIK on EDGAR, an SEC-registered adviser by its CRD number;
+    // the country comes from the filing's business address or the adviser's main office.
+    case 'sec_companies': return engCountry(country) && /^[1-9]\d{0,9}$/.test(id) && url.href === `https://www.sec.gov/edgar/browse/?CIK=${id}`;
+    case 'sec_advisers': return engCountry(country) && /^[1-9]\d{0,7}$/.test(id) && url.href === `https://adviserinfo.sec.gov/firm/summary/${id}`;
+    // A US tax-exempt organisation by its EIN on ProPublica's copy of the IRS returns.
+    case 'irs': return country === 'united states' && /^\d{9}$/.test(id) && url.href === `https://projects.propublica.org/nonprofits/organizations/${id}`;
+    // NCES ids differ by list: IPEDS unit id (6 digits), CCD district id (7), Private School Survey id (8 characters).
+    case 'nces': return country === 'united states' && (/^\d{6}$/.test(id) ? url.href === `https://nces.ed.gov/collegenavigator/?id=${id}`
+      : /^\d{7}$/.test(id) ? url.href === `https://nces.ed.gov/ccd/districtsearch/district_detail.asp?ID2=${id}`
+        : /^[A-Z0-9]{8}$/.test(id) && url.href === `https://nces.ed.gov/surveys/pss/privateschoolsearch/school_detail.asp?ID=${id}`);
+    // A charity in England and Wales by its registered number; its register page is keyed by the
+    // Commission's own organisation number, which the extract gives with it.
+    case 'charity_commission': return country === 'united kingdom' && /^\d{6,8}$/.test(id) &&
+      /^https:\/\/register-of-charities\.charitycommission\.gov\.uk\/en\/charity-search\/-\/charity-details\/\d{1,9}$/.test(url.href);
+    // A school or college by its URN, an academy trust by «T» and its group id.
+    case 'gias': return country === 'united kingdom' && (/^\d{5,7}$/.test(id)
+      ? url.href === `https://get-information-schools.service.gov.uk/Establishments/Establishment/Details/${id}`
+      : /^T\d{1,7}$/.test(id) && url.href === `https://get-information-schools.service.gov.uk/Groups/Group/Details/${id.slice(1)}`);
+    // A CQC-registered provider by its provider id.
+    case 'cqc': return country === 'united kingdom' && /^1-\d{6,12}$/.test(id) && url.href === `https://www.cqc.org.uk/provider/${id}`;
+    // A US credit union by its NCUA charter number on the NCUA locator.
+    case 'ncua': return country === 'united states' && /^\d{1,8}$/.test(id) && url.href === `https://mapping.ncua.gov/CreditUnionDetails/${id}`;
+    // A Swedish company by its organisation number on Bolagsverket's company page, which its legal form also keys.
+    case 'scb': return country === 'sweden' && /^\d{10}$/.test(id) &&
+      /^https:\/\/foretagsinfo\.bolagsverket\.se\/sok-foretagsinformation-web\/foretag\/(\d{10})\/foretagsform\/[A-Z]{1,5}$/.exec(url.href)?.[1] === id;
+    // A German market actor by its MaStR number: the register's public list filtered to that number.
+    case 'mastr': return country === 'germany' && /^[A-Z]{3}9\d{11}$/.test(id) &&
+      url.href === `https://www.marktstammdatenregister.de/MaStR/Akteur/Marktakteur/IndexOeffentlich?filter=MaStR-Nr.~eq~%27${id}%27`;
+    // An organisation in the EU Transparency Register by its identification number; the country comes from its head office.
+    case 'eu_transparency': return engCountry(country) && /^\d{9,15}-\d{2}$/.test(id) &&
+      url.href === `https://transparency-register.europa.eu/search-register-or-update/organisation-detail_en?id=${id}`;
     // Global sources: the country comes from the record itself (GLEIF headquarters,
     // or the OpenStreetMap country boundary containing the premises).
     case 'gleif': return engCountry(country) && validLei(id) && url.href === `https://api.gleif.org/api/v1/lei-records/${id}`;

@@ -126,7 +126,7 @@ export async function getVeDirectoryPlanPopulation(
 const VE_UNSIZED_SOURCE_LABELS: Record<string, string> = {
   known_websites: 'официальные сайты платформ',
   hh_live: 'вакансии hh.ru', eng_hiring: 'вакансии', yandex_maps: 'Яндекс Карты', google_maps: 'Google Maps',
-  pdl: 'каталог PDL', funded: 'каталог стартапов',
+  pdl: 'каталог PDL', funded: 'каталог стартапов', two_gis: 'справочник организаций',
 };
 
 export function veUnsizedSourceLabels(tasks: VeCollectTask[]): string[] {

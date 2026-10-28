@@ -4,13 +4,16 @@ import type { AppendLeadsToClientCampaignInput } from '@/lib/clientLaunch/append
 import { getVeProjectExclusionIdentity, loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow } from './projectExclusions';
 import { readContactDeliveryPages } from './contactDeliveryInventory';
 import { findEmailColumn } from './launchHandoff';
+import { isVeTwoGisLead, isVeTwoGisRow, VE_TWO_GIS_ROW_FIELD } from './twoGisQuarantine';
 
 /** Private reserve metadata survives operator aliases, never goes to Instantly. */
 export function withVeDeliveryCompanyIdentity(
   lead: LeadCreatePayload,
   row: Record<string, unknown>,
 ): LeadCreatePayload & Record<string, unknown> {
-  return { ...lead, _ve_company_identity: getVeProjectExclusionIdentity(veProjectExclusionRow(row, lead.email)) };
+  return { ...lead, _ve_company_identity: getVeProjectExclusionIdentity(veProjectExclusionRow(row, lead.email)),
+    // 2ГИС: компактный признак (не карточка и не адрес); guard такие строки не выпускает.
+    ...(isVeTwoGisRow(row) ? { [VE_TWO_GIS_ROW_FIELD]: true } : {}) };
 }
 
 export function veDeliveryPolicyRow(row: { email_normalized: string; lead_payload?: unknown }): Record<string, unknown> {
@@ -111,12 +114,15 @@ export function createVeDeliveryExclusionGuard(
     const policyRows = rules.inns.length + rules.domains.length > 0
       ? await resolveIdentities(leads.map(lead => ({ email_normalized: lead.email.trim().toLowerCase(), lead_payload: lead })))
       : leads as unknown as Record<string, unknown>[];
-    const inputIndexes = policyRows.flatMap((row, index) => matchVeProjectExclusion(row, rules) ? [] : [index]);
+    // 2ГИС (R1): выдача закрыта — снимаем с чанка окончательно, без новых чтений.
+    const inputIndexes = policyRows.flatMap((row, index) =>
+      isVeTwoGisLead(leads[index]) || matchVeProjectExclusion(row, rules) ? [] : [index]);
     return {
       inputIndexes,
       leads: inputIndexes.map((index) => {
         const clean = { ...leads[index] } as LeadCreatePayload & Record<string, unknown>;
         delete clean._ve_company_identity;
+        delete clean[VE_TWO_GIS_ROW_FIELD];
         return clean;
       }),
       beforeRequest: async () => {

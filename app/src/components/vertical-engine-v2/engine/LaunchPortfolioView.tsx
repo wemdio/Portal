@@ -171,6 +171,8 @@ function campaignName(campaign: PortfolioCampaignDto): string {
 
 function safeCampaignUrl(value: string | null | undefined): string | null {
   if (!value) return null;
+  // Кампания «Рассылки» — путь на этом же сайте (/tools/sender/campaigns/…).
+  if (/^\/tools\/sender\/campaigns\/[0-9a-f-]{36}$/i.test(value)) return value;
   try {
     const parsed = new URL(value);
     return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : null;

@@ -31,12 +31,26 @@ import {
   type VeDeliveryPlanBindingDto,
   type VeDeliveryPlanPreviewDto,
   type VeJobSummary,
+  type VeLaunchTransportOptionResponse,
   type VePortalProjectOptionDto,
 } from '../api';
 import { HE, StatusDot } from '../design';
 import { SearchableSelect } from '../SearchableSelect';
 import { ContactSupplyPanel, useContactSupply, type ContactSupplyController } from '../ContactSupplyPanel';
 import { OperatorText, StatusBox, formatDate } from '../ui';
+import { ContactUploadNotice } from '../ContactUploadNotice';
+import {
+  parseVeSenderOption,
+  senderCreateCampaignsLabel,
+  senderOpenLabel,
+  senderPaceWarning,
+  senderPoolLine,
+  veLaunchTransportSwitchView,
+  veSenderRefusal,
+  veSenderRefusalText,
+  type VeSenderOption,
+} from '@/lib/verticalEngineV2/senderTransport/labels';
+import { LaunchTransportSwitch } from '../LaunchTransportSwitch';
 import {
   SegmentationAuditPanel,
   useSegmentationAudit,
@@ -433,6 +447,42 @@ export function useTemplateLaunch(
   const [boundPresetId, setBoundPresetId] = useState<string | null>(null);
   const [presetId, setPresetId] = useState('');
   const [canCreateClient, setCanCreateClient] = useState(false);
+  /**
+   * Где создать кампании нового запуска — выбор специалиста (этап 7), по
+   * умолчанию Instantly. По шаблону: выбор другого шаблона не переживает смену.
+   * Экран выбор не меняет никогда, даже при отказе «Рассылки».
+   */
+  const [choice, setChoice] = useState<{ templateId: string; transport: 'instantly' | 'sender' } | null>(null);
+  const launchTransport: 'instantly' | 'sender' = templateId && choice?.templateId === templateId ? choice.transport : 'instantly';
+  /**
+   * Можно ли выбрать «Рассылку» — только GET launch-transport (он же проверяет
+   * письма шаблона). null — не предлагаем: нет поля, ошибка или ответа нет.
+   */
+  const [senderOptionState, setSenderOptionState] = useState<{ templateId: string; option: VeSenderOption | null } | null>(null);
+  const senderOption = templateId && senderOptionState?.templateId === templateId ? senderOptionState.option : null;
+  /** Отказ сервера «Рассылке» (обзор или запуск) — у переключателя, пока специалист не сменит выбор. */
+  const [senderRefusalState, setSenderRefusalState] = useState<{ templateId: string; message: string; retryable: boolean } | null>(null);
+  const senderRefusal = templateId && senderRefusalState?.templateId === templateId ? senderRefusalState : null;
+  const senderSwitch = veLaunchTransportSwitchView({ choice: launchTransport, option: senderOption, refusal: senderRefusal?.message ?? null });
+  /** Последний запрос доступности: ответ на более ранний (или другого шаблона) отбрасывается. */
+  const senderOptionRequest = useRef(0);
+  const loadSenderOption = useCallback((id: string) => {
+    const request = ++senderOptionRequest.current;
+    // Прежнее значение остаётся до ответа: переключатель не мигает при повторном открытии.
+    void veEngineCall<VeLaunchTransportOptionResponse>(`${VE_API}/templates/${id}/launch-transport`)
+      .then((response) => {
+        if (request !== senderOptionRequest.current) return;
+        setSenderOptionState({ templateId: id, option: response?.ok ? parseVeSenderOption(response.data?.sender) : null });
+      })
+      .catch(() => {
+        if (request === senderOptionRequest.current) setSenderOptionState({ templateId: id, option: null });
+      });
+  }, []);
+  useEffect(() => {
+    if (!templateId) return;
+    loadSenderOption(templateId);
+    return () => { senderOptionRequest.current += 1; };
+  }, [loadSenderOption, templateId]);
   const [mailboxTagOptions, setMailboxTagOptions] = useState<VeMailboxTagOption[]>([]);
   const [portalProjects, setPortalProjects] = useState<VePortalProjectOptionDto[] | null>(null);
   const [portalProjectId, setPortalProjectId] = useState('');
@@ -442,6 +492,8 @@ export function useTemplateLaunch(
   const [deliveryPreview, setDeliveryPreview] = useState<VeDeliveryPlanPreviewDto | null>(null);
   const [deliveryPreviewState, setDeliveryPreviewState] = useState<DeliveryPreviewState>('idle');
   const [deliveryPreviewError, setDeliveryPreviewError] = useState<string | null>(null);
+  /** Пересчитать обзор без смены полей: «Повторить проверку» доступности «Рассылки». */
+  const [previewReload, setPreviewReload] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -487,6 +539,9 @@ export function useTemplateLaunch(
     if (!templateId) return;
     setFormOpen(true);
     setSubmitError(null);
+    // Доступность «Рассылки» — заново при каждом открытии: страница могла
+    // открыться до «Разрешить выбор» или до выключения подачи.
+    loadSenderOption(templateId);
     // Polling replaces template objects; load settings only once for this identity.
     if (settingsLoad.current?.templateId === templateId) return;
     const request = { templateId, active: true };
@@ -591,12 +646,29 @@ export function useTemplateLaunch(
         setDeliveryPreviewState('error');
         setDeliveryPreviewError('Не удалось загрузить проекты Portal и план выполнения.');
       });
-  }, [clearDeliveryPreview, templateId]);
+  }, [clearDeliveryPreview, loadSenderOption, templateId]);
 
   const selectPreset = useCallback((id: string) => {
     setPresetId(id);
     clearDeliveryPreview();
   }, [clearDeliveryPreview]);
+
+  /** Специалист выбрал, где создать кампании: прежний обзор и отказ к новому выбору не относятся. */
+  const selectTransport = useCallback((transport: 'instantly' | 'sender') => {
+    if (!templateId) return;
+    setChoice({ templateId, transport });
+    setSenderRefusalState(null);
+    setSubmitError(null);
+    clearDeliveryPreview();
+  }, [clearDeliveryPreview, templateId]);
+
+  /** «Повторить проверку»: заново доступность «Рассылки» и обзор. */
+  const retrySenderCheck = useCallback(() => {
+    if (!templateId) return;
+    setSenderRefusalState(null);
+    loadSenderOption(templateId);
+    setPreviewReload((value) => value + 1);
+  }, [loadSenderOption, templateId]);
 
   const selectPortalProject = useCallback((id: string) => {
     setPortalProjectId(id);
@@ -619,6 +691,11 @@ export function useTemplateLaunch(
     setLoadError(null);
   }, [clearDeliveryPreview]);
 
+  // Записанный запуск: план — только показ, его способ знает запись; обзор — без выбора.
+  const previewTransport: 'instantly' | 'sender' = recorded ? 'instantly' : launchTransport;
+  // Выбрана «Рассылка», а она закрыта: повтор обзора дал бы тот же отказ.
+  const previewSenderBlocked = previewTransport === 'sender' && senderSwitch.blocked;
+
   useEffect(() => {
     const periodId = expectedPortalPeriodId;
     if (
@@ -629,7 +706,8 @@ export function useTemplateLaunch(
       periodId === undefined ||
       !segmentationAuditId ||
       targetContacts === null ||
-      activePeriodIssue
+      activePeriodIssue ||
+      previewSenderBlocked
     ) {
       return;
     }
@@ -645,16 +723,28 @@ export function useTemplateLaunch(
         target_contacts: targetContacts,
         preset_id: presetId,
         segmentation_audit_id: segmentationAuditId,
+        // Только «Рассылка»: у Instantly тело запроса прежнее.
+        ...(previewTransport === 'sender' ? { expected_transport: 'sender' as const } : {}),
       })
         .then(({ ok, data }) => {
           if (cancelled) return;
+          const refusal = !ok && previewTransport === 'sender' ? veSenderRefusal(data) : null;
+          if (refusal) {
+            // Выбор не меняем: причина — у переключателя, дальше решает специалист.
+            setDeliveryPreview(null);
+            setDeliveryPreviewState('idle');
+            setDeliveryPreviewError(null);
+            setSenderRefusalState({ templateId: template.id, ...refusal });
+            return;
+          }
           const preview = data.preview ?? null;
           if (
             !ok ||
             !isValidDeliveryPreview(preview) ||
             preview.portal_project_id !== portalProjectId ||
             (preview.portal_period_id ?? null) !== periodId ||
-            preview.target_contacts !== targetContacts
+            preview.target_contacts !== targetContacts ||
+            (preview.transport ?? 'instantly') !== previewTransport
           ) {
             setDeliveryPreview(null);
             setDeliveryPreviewState('error');
@@ -683,6 +773,9 @@ export function useTemplateLaunch(
     formOpen,
     portalProjectId,
     presetId,
+    previewReload,
+    previewSenderBlocked,
+    previewTransport,
     segmentationAuditId,
     targetContacts,
     template,
@@ -695,7 +788,9 @@ export function useTemplateLaunch(
       targetContacts !== null &&
       deliveryPreview.portal_project_id === portalProjectId &&
       (deliveryPreview.portal_period_id ?? null) === expectedPortalPeriodId &&
-      deliveryPreview.target_contacts === targetContacts,
+      deliveryPreview.target_contacts === targetContacts &&
+      // Новый запуск — обзор именно выбранного способа (нет поля — Instantly).
+      (recorded !== null || (deliveryPreview.transport ?? 'instantly') === launchTransport),
   );
 
   const submit = useCallback(
@@ -708,10 +803,13 @@ export function useTemplateLaunch(
         !segmentationAuditId ||
         !deliveryPlanReady ||
         !deliveryPreview ||
+        senderSwitch.blocked ||
+        (launchTransport === 'sender' && deliveryPreview.sender_pool?.ready === 0) ||
         submitting
       ) {
         return;
       }
+      const transport = launchTransport;
       setSubmitting(true);
       setSubmitError(null);
       veEnginePost<VeLaunchResponse>(`${VE_API}/templates/${template.id}/launch`, {
@@ -721,6 +819,8 @@ export function useTemplateLaunch(
         portal_project_id: deliveryPreview.portal_project_id,
         expected_portal_period_id: deliveryPreview.portal_period_id,
         target_contacts: deliveryPreview.target_contacts,
+        // Только «Рассылка»: у Instantly тело запроса прежнее.
+        ...(transport === 'sender' ? { expected_transport: 'sender' } : {}),
       })
         .then(({ ok, data }) => {
           if (data.code === 'TEMPLATE_LAUNCH_UNCERTAIN' || data.code === 'TEMPLATE_LAUNCH_IN_PROGRESS') {
@@ -736,7 +836,15 @@ export function useTemplateLaunch(
               onSegmentationRejected('incomplete');
               return;
             }
-            setSubmitError(data.error ?? 'Не удалось отправить в запуск');
+            const refusal = transport === 'sender' ? veSenderRefusal(data) : null;
+            if (refusal) {
+              // Выбор не меняем, причина — у переключателя. 409: обзор этого выбора
+              // больше не годится; 503: обзор оставляем — «Повторить проверку» повторит.
+              setSenderRefusalState({ templateId: template.id, ...refusal });
+              if (!refusal.retryable) clearDeliveryPreview();
+              return;
+            }
+            setSubmitError(veSenderRefusalText(data.error ?? 'Не удалось отправить в запуск', data.code));
             return;
           }
           setRecorded(data.launch);
@@ -746,8 +854,13 @@ export function useTemplateLaunch(
         .catch(() => setSubmitError('Не удалось отправить в запуск'))
         .finally(() => setSubmitting(false));
     },
-    [deliveryPlanReady, deliveryPreview, onSegmentationRejected, presets, template, presetId, submitting],
+    [
+      clearDeliveryPreview, deliveryPlanReady, deliveryPreview, launchTransport, onSegmentationRejected, presets, template, presetId,
+      senderSwitch.blocked, submitting,
+    ],
   );
+  // Повторить проверку можно, когда «Рассылку» не удалось проверить; на отказ 409 ответ — выбрать Instantly.
+  const senderCanRetry = senderSwitch.blocked && (senderRefusal ? senderRefusal.retryable : true);
 
   return {
     recorded,
@@ -762,6 +875,14 @@ export function useTemplateLaunch(
     mailboxTagOptions,
     portalProjects,
     portalProjectId,
+    /** Выбор специалиста: где создать кампании нового запуска (по умолчанию Instantly). */
+    launchTransport,
+    senderOption,
+    senderRefusal: senderRefusal?.message ?? null,
+    senderSwitch,
+    senderCanRetry,
+    selectTransport,
+    retrySenderCheck,
     selectedPortalProject,
     activePortalPeriod,
     projectTerm,
@@ -772,7 +893,8 @@ export function useTemplateLaunch(
     changeTargetContacts,
     deliveryPlanLocked,
     deliveryPreview,
-    deliveryPreviewState,
+    // Обзор, прерванный закрытием «Рассылки», не «считается» дальше: эффект его отменил.
+    deliveryPreviewState: previewSenderBlocked && deliveryPreviewState === 'loading' ? 'idle' as const : deliveryPreviewState,
     deliveryPreviewError,
     deliveryPlanReady,
     activePeriodIssue,
@@ -821,12 +943,14 @@ function formatEmailCount(count: number | null): string {
   return formatRussianCount(count, ['почта', 'почты', 'почт']);
 }
 
-export function DeliveryPlanBlock({ launch, disabled = false, preparedPreview, uploadMode = 'daily' }: {
+export function DeliveryPlanBlock({ launch, disabled = false, preparedPreview, uploadMode = 'daily', recordedTransport }: {
   launch: TemplateLaunchState;
   disabled?: boolean;
   /** Outreach preflight supplies the preview for the current request; null means it is not ready yet. */
   preparedPreview?: VeDeliveryPlanPreviewDto | null;
   uploadMode?: 'daily' | 'all_ready';
+  /** Записанный запуск: куда ушли его кампании. Главнее обзора — тот говорит о новом запуске. */
+  recordedTransport?: 'instantly' | 'sender';
 }) {
   const externalPreview = preparedPreview !== undefined;
   const preparedPreviewMatches = !!preparedPreview && isValidDeliveryPreview(preparedPreview) &&
@@ -835,6 +959,7 @@ export function DeliveryPlanBlock({ launch, disabled = false, preparedPreview, u
     preparedPreview.target_contacts === launch.targetContacts;
   const preview = externalPreview ? (preparedPreviewMatches ? preparedPreview : null) : launch.deliveryPreview;
   const previewReady = externalPreview ? preparedPreviewMatches : launch.deliveryPlanReady;
+  const senderView = (recordedTransport ?? preview?.transport) === 'sender';
   const period = launch.activePortalPeriod;
   const targetInvalid = launch.targetContactsInput.trim() !== '' && launch.targetContacts === null;
   const periodLabel = preview?.portal_period_label?.trim() || period?.label?.trim() || 'Активный период';
@@ -994,11 +1119,22 @@ export function DeliveryPlanBlock({ launch, disabled = false, preparedPreview, u
             <span className="text-gray-400"> · </span>
             мощность отправителей: {preview.sender_capacity.toLocaleString('ru-RU')} в день
           </p>
+          {senderView ? (
+            <>
+              {/* Нет поля — ящики не читались (старый ответ), а не «не удалось проверить». */}
+              <p className={`mt-1 text-[11px] ${preview.sender_pool === undefined || preview.sender_pool?.ready ? 'text-gray-500' : 'text-red-600'}`}>
+                Отправка через «Рассылку».{preview.sender_pool === undefined ? '' : ` ${senderPoolLine(preview.sender_pool)}`}
+              </p>
+              {senderPaceWarning(preview.sender_capacity, preview.sender_pool) ? (
+                <p className="mt-1 text-[11px] text-amber-700">{senderPaceWarning(preview.sender_capacity, preview.sender_pool)}</p>
+              ) : null}
+            </>
+          ) : null}
           <p className="mt-1 text-[11px] text-gray-500">
             Всего в резерве: {(preview.reserve_remaining ?? preview.ready_remaining).toLocaleString('ru-RU')}
             {' · '}Загружено, ждёт первого контакта: {(preview.outstanding_count ?? 0).toLocaleString('ru-RU')}.
             {' '}{uploadMode === 'all_ready'
-              ? 'Загрузка не засчитывается в обязательство. Прогноз отправки не ограничивает загрузку готовых контактов. Расписание и скорость отправки задаются в Instantly.'
+              ? `Загрузка не засчитывается в обязательство. Прогноз отправки не ограничивает загрузку готовых контактов. Расписание и скорость отправки задаются в ${senderView ? '«Рассылке»' : 'Instantly'}.`
               : 'Загрузка не засчитывается в обязательство. Прогноз предполагает отправку в пределах дневного лимита; дата допуска новой гипотезы зависит от очереди и сезонности.'}
           </p>
 
@@ -1261,6 +1397,17 @@ export function CreateClientPresetInline({
 
 function PreparedCampaigns({info, warnings}: {info: VeTemplateLaunchInfo; warnings: string[]}) {
   const campaigns = info.campaigns?.length ? info.campaigns : [info];
+  if (info.transport === 'sender') {
+    return <section aria-label="Кампании подготовлены" className="space-y-3">
+      <p className="ve2-h3">Кампании подготовлены в «Рассылке»</p>
+      <p className={HE.muted}>Пока запуск открыт, система загружает контакты по плану. Проверьте письма, контакты и настройки,
+        затем запустите кампании — на карточке ниже или в самой «Рассылке». Подтверждать отправку в Portal не нужно.</p>
+      <p className={HE.muted}>Запуском и паузой отправки управляет специалист в «Рассылке».</p>
+      {campaigns.map(campaign => <a key={campaign.campaign_id} href={campaign.campaign_url} target="_blank"
+        rel="noreferrer" className="ve2-link block">{senderOpenLabel(campaign.campaign_name)}</a>)}
+      {warnings.map(warning => <StatusBox key={warning} tone="info">{warning}</StatusBox>)}
+    </section>;
+  }
   return <section aria-label="Кампании подготовлены" className="space-y-3">
     <p className="ve2-h3">Кампании подготовлены в Instantly</p>
     <p className={HE.muted}>Система загружает первую порцию контактов по плану. Проверьте письма, контакты и настройки,
@@ -1292,12 +1439,16 @@ function LaunchSection({
 }) {
   const recorded = launch.recorded ?? (audit.phase === 'launch_succeeded' ? audit.launchInfo : null);
   const selectedPreset = launch.presets?.find((preset) => preset.id === launch.presetId) ?? null;
+  // Где создать кампании нового запуска — выбор специалиста (по умолчанию Instantly).
+  const sender = launch.launchTransport === 'sender';
+  const senderPoolEmpty = sender && launch.deliveryPreview?.transport === 'sender' && launch.deliveryPreview.sender_pool?.ready === 0;
   if (recorded) {
     return <div className="space-y-3">
       <PreparedCampaigns info={recorded} warnings={launch.warnings} />
+      {recorded.transport === 'sender' ? <ContactUploadNotice key={template.id} templateId={template.id} /> : null}
       <ContactSupplyPanel supply={supply} />
       {recorded.portal_project_id ? (
-        launch.formOpen ? <DeliveryPlanBlock launch={launch} /> : (
+        launch.formOpen ? <DeliveryPlanBlock launch={launch} recordedTransport={recorded.transport === 'sender' ? 'sender' : 'instantly'} /> : (
           <button type="button" onClick={launch.openForm} className="ve2-b-quiet">План и запас контактов</button>
         )
       ) : null}
@@ -1311,10 +1462,24 @@ function LaunchSection({
       <SegmentationAuditPanel audit={audit} />
       {audit.canLaunch && audit.auditId ? (
         <div className={`space-y-3 px-4 py-3 ${HE.infoPanel}`}>
-          <p className="text-sm font-medium text-gray-800">
-            Запуск в Instantly: кампании будут созданы <b>на паузе</b>, получатели загрузятся из проверенной раскладки.
-            Запуск — кнопкой Start в Instantly после проверки.
-          </p>
+          <LaunchTransportSwitch
+            choice={launch.launchTransport}
+            view={launch.senderSwitch}
+            busy={launch.submitting}
+            onChange={launch.selectTransport}
+            onRetry={launch.senderCanRetry ? launch.retrySenderCheck : undefined}
+          />
+          {sender ? (
+            <p className="text-sm font-medium text-gray-800">
+              Запуск в «Рассылку»: кампании будут созданы <b>черновиками</b>, получатели загрузятся из проверенной раскладки.
+              Запуск — кнопкой «Запустить» после проверки.
+            </p>
+          ) : (
+            <p className="text-sm font-medium text-gray-800">
+              Запуск в Instantly: кампании будут созданы <b>на паузе</b>, получатели загрузятся из проверенной раскладки.
+              Запуск — кнопкой Start в Instantly после проверки.
+            </p>
+          )}
           {launch.presets === null && !launch.loadError ? (
             <p className="text-xs text-gray-500" role="status">Загружаем настройки отправки…</p>
           ) : null}
@@ -1382,17 +1547,20 @@ function LaunchSection({
                     launch.submitting ||
                     !selectedPreset ||
                     selectedPreset.mailbox_count === 0 ||
+                    senderPoolEmpty ||
+                    launch.senderSwitch.blocked ||
                     !launch.deliveryPlanReady || !supply.approved
                   }
                   className={HE.btnPrimary}
                 >
                   {launch.submitting
-                    ? 'Создаём кампании…'
+                    ? sender ? 'Создаём черновики…' : 'Создаём кампании…'
                     : (() => {
                         const groups = audit.summary
                           ? audit.summary.segments.filter((segment) => segment.count > 0).length +
                             (audit.summary.defaultGroup.count > 0 ? 1 : 0)
                           : 0;
+                        if (sender) return senderCreateCampaignsLabel(groups);
                         return groups === 1 ? 'Создать кампанию (на паузе)' : `Создать ${groups} кампании на паузе`;
                       })()}
                 </button>
@@ -1465,6 +1633,11 @@ export function Step5Template(props: {
     segmentationAudit.auditId,
     handleSegmentationRejected,
   );
+  // Записанный запуск знает, куда ушёл; до него — выбор специалиста (по умолчанию Instantly).
+  const recordedLaunch = launch.recorded ?? segmentationAudit.launchInfo;
+  const launchToSender = recordedLaunch
+    ? recordedLaunch.transport === 'sender'
+    : launch.launchTransport === 'sender';
   const supplyContext = launch.deliveryPlanReady && launch.deliveryPreview && segmentationAudit.auditId ? {
     preset_id: launch.presetId, portal_project_id: launch.deliveryPreview.portal_project_id,
     expected_portal_period_id: launch.deliveryPreview.portal_period_id,
@@ -1675,12 +1848,14 @@ export function Step5Template(props: {
       {/* Запуск: существующие audit/recovery/portfolio состояния живут внутри одной панели. */}
       <section className="ve2-panel px-5 py-[18px]" aria-labelledby="ve2-template-launch-title">
         <p id="ve2-template-launch-title" className={HE.eyebrow}>
-          01 → Запуск в Instantly
+          {launchToSender ? '01 → Запуск в «Рассылку»' : '01 → Запуск в Instantly'}
         </p>
         {!launch.recorded && segmentationAudit.phase !== 'launch_succeeded' ? (
           <>
             <p className={`mt-2 ${HE.muted}`}>
-              Кампании будут созданы на паузе. Ничего не уйдёт без ручной активации после проверки.
+              {launchToSender
+                ? 'Кампании будут созданы черновиками в «Рассылке». Ничего не уйдёт без ручного запуска после проверки.'
+                : 'Кампании будут созданы на паузе. Ничего не уйдёт без ручной активации после проверки.'}
             </p>
             {baseOverLaunchLimit ? (
               <p className="mt-2 text-xs text-gray-500">

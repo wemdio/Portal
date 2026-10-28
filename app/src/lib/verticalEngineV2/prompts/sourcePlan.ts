@@ -21,9 +21,21 @@ import { readVeAudienceScope, veAudienceScopeText, type VeAudienceScope } from '
 import { readVeCollectionGeography, type VeCollectionGeography } from '../collectionGeography';
 
 export interface VeCollectTask {
-  source: 'companies_directory' | 'hh_live' | 'yandex_maps' | 'google_maps' | 'pdl' | 'funded' | 'eng_hiring' | 'known_websites';
+  source: 'companies_directory' | 'hh_live' | 'yandex_maps' | 'google_maps' | 'pdl' | 'funded' | 'eng_hiring' | 'known_websites' | 'two_gis';
   /** Code-owned discovery hints, intentionally absent from the LLM schema. */
   known_websites?: { catalog: 'adult-platforms-2026-10-19' };
+  /**
+   * Снимок 2ГИС — задача-близнец Яндекс-задачи. Ставит только код, в схеме модели
+   * её нет. Связь с Яндекс-задачей — `two_gis_pair_id` в состояниях, не здесь:
+   * поле входит в ключ стратегии.
+   * Где читать — только veTwoGisQueryScope(two_gis_query) (collectionGeography.ts):
+   * region_codes/cities — копия, которую пишет лишь география брифа; у близнеца без
+   * брифа их нет, хотя geo («Москва») сужает чтение. Напрямую их не читать.
+   */
+  two_gis_query?: {
+    from_queries: string[]; geo?: string; region_codes?: string[]; cities?: string[];
+    collection_geography?: VeCollectionGeography;
+  };
   /** Что и зачем собираем, 1 строка. */
   rationale: string;
   directory_filters?: {
@@ -103,7 +115,7 @@ const SYSTEM = `Ты — head of lead research в агентстве Polza, эк
 
 /** Правило фильтра licenceGroups: в подсказку попадает, только когда снимок лицензий загружен
  * (licenceSnapshotReady), иначе модель ставила бы фильтр, который пока ничего не находит. */
-const LICENCE_RULE = `\n\nФИЛЬТР ЛИЦЕНЗИЙ ДЛЯ companies_directory: licenceGroups — лицензия по реестру МСП ФНС: компания проходит, если у неё есть лицензия хотя бы одной группы. Бери, когда аудиторию прямо задаёт лицензируемая деятельность: ${LICENCE_GROUPS.map((group) => `${group.code} — ${group.label}`).join('; ')}. Лицензия точнее ОКВЭД: с ней okvedCodes можно не ставить, а для узкой специальности оставь точный код (стоматология: 86.23 и medical). Лицензия подтверждает вид деятельности, но не специальность и не размер; для узкой медицинской гипотезы первым источником по-прежнему идёт каталог её специальности, medical — дополнительная задача реестра. В реестре лицензий только малый и средний бизнес и только юрлица: крупных сетей, холдингов и ИП в нём нет. Поэтому для гипотезы про сети, крупные компании или ИП licenceGroups не может быть единственным отбором: добавь задачу реестра по ОКВЭД или каталога по рубрике без него. Если лицензия прямо не следует из гипотезы, licenceGroups не ставь.`;
+const LICENCE_RULE = `\n\nФИЛЬТР ЛИЦЕНЗИЙ ДЛЯ companies_directory: licenceGroups — лицензия по реестру МСП ФНС: компания проходит, если у неё есть лицензия хотя бы одной группы. Бери, когда аудиторию прямо задаёт лицензируемая деятельность: ${LICENCE_GROUPS.map((group) => `${group.code} — ${group.label}`).join('; ')}. Для клиник medical ставь только вместе с okvedCodes: класс 86 или точный код специальности (стоматология: 86.23 и medical; косметология: 96.02 и medical). Лицензию medical без такого ОКВЭД держат в основном не клиники: перевозчики с медосмотром водителей, зуботехнические лаборатории, спа. В реестре лицензий есть только около двух третей действующих клиник, поэтому рядом с задачей «ОКВЭД 86 и medical» нужна задача реестра по тому же ОКВЭД без licenceGroups. Для остальных групп лицензия точнее ОКВЭД: с ней okvedCodes можно не ставить. Лицензия подтверждает вид деятельности, но не специальность и не размер; для узкой медицинской гипотезы первым источником по-прежнему идёт каталог её специальности, medical — дополнительная задача реестра. В реестре лицензий только малый и средний бизнес и только юрлица: крупных сетей, холдингов и ИП в нём нет. Поэтому для гипотезы про сети, крупные компании или ИП licenceGroups не может быть единственным отбором: добавь задачу реестра по ОКВЭД или каталога по рубрике без него. Если лицензия прямо не следует из гипотезы, licenceGroups не ставь.`;
 
 export interface SourcePlanPromptInput {
   verticalName: string;

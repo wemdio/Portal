@@ -205,6 +205,23 @@ async function checkStopListsBeforeStart(id: string) {
 const VE2_MANAGED_CAMPAIGN = 'Кампанией управляет Движок вертикалей: её можно только поставить на паузу';
 
 /**
+ * Черновик Движка вертикалей, которого нет в его очереди, — след
+ * несостоявшегося запуска: сверка запуска его удаляет. Запустить его — значит
+ * слать мимо плана и запереть сверку. null — запускать можно.
+ */
+async function orphanVeDraftError(id: string) {
+  const { data: campaign, error } = await supabaseAdmin!
+    .from('sender_campaigns').select('source_kind').eq('id', id).maybeSingle();
+  if (error) return jsonError(error.message, 500);
+  if (campaign?.source_kind !== 've2') return null;
+  const { data: queued, error: queueError } = await supabaseAdmin!
+    .from('ve_launch_queue_campaigns').select('id').eq('campaign_id', id).limit(1);
+  if (queueError) return jsonError(queueError.message, 500);
+  if ((queued ?? []).length) return null;
+  return jsonError('Это черновик несостоявшегося запуска Движка вертикалей — сверьте запуск в Движке, запускать его нельзя', 409);
+}
+
+/**
  * Правка настроек кампании: название, пул ящиков, письмо и окно отправки.
  *
  * Только у черновика и остановленной кампании. У идущей запрещено намеренно:
@@ -318,6 +335,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
     try {
       if (!body.action) return await updateSettings(id, body);
+      if (body.action === 'start' || body.action === 'schedule') {
+        const orphanError = await orphanVeDraftError(id);
+        if (orphanError) return orphanError;
+      }
       if (body.action === 'schedule') {
         // Сверка и при запуске (startCampaign), но о закрытых адресах лучше
         // узнать сейчас, а не когда подойдёт время.

@@ -10,6 +10,10 @@ import { requeueVeJob, type VeStageContext, type VeStageResult } from './stages/
 import type { VeBase, VeJob, VeSegmentationAudit, VeTemplate } from './types';
 import { readDeliveryRate } from './contactDeliveryRateService';
 import { activateDeliveredContactCampaigns } from './contactDeliveryActivation';
+import { resolveRequestedVeLaunchTransport, transportOf } from './senderTransport/transport';
+import { attachVeSenderPool } from './senderTransport/senderPool';
+import { veSenderTemplateIssue } from './senderTransport/senderLaunchPlan';
+import type { VeSenderPoolSummary } from './senderTransport/labels';
 
 const itemSchema = z.object({
   hypothesis_id: z.string().uuid(), base_id: z.string().uuid(), template_id: z.string().uuid(),
@@ -21,6 +25,9 @@ export const outreachLaunchRequestSchema = z.object({
   // null — проект Portal без периодов; поле обязательно, чтобы режим был выбран явно.
   portal_project_id: z.string().uuid(), expected_portal_period_id: z.string().uuid().nullable(),
   target_contacts: z.number().int().positive().max(1_000_000), items: z.array(itemSchema).min(1).max(50),
+  // Способ отправки, выбранный специалистом (этап 7); нет — Instantly. Экран шлёт поле только для
+  // «Рассылки»: хеш запроса и повторы старых запусков не меняются.
+  expected_transport: z.enum(['instantly', 'sender']).optional(),
 }).strict();
 export type VeOutreachLaunchRequest = z.infer<typeof outreachLaunchRequestSchema>;
 type LaunchItem = VeOutreachLaunchRequest['items'][number];
@@ -31,9 +38,34 @@ export interface VeOutreachRun {
   request: VeOutreachLaunchRequest; request_hash: string; items: RunItem[]; error: string | null; created_at: string; updated_at: string;
 }
 export class VeOutreachLaunchError extends Error {
-  constructor(message: string, readonly status = 409) { super(message); }
+  /** code — только там, где экрану нужно отличить отказ (смена способа отправки). */
+  constructor(message: string, readonly status = 409, readonly code?: string) { super(message); }
 }
-function fail(message: string): never { throw new VeOutreachLaunchError(message); }
+function fail(message: string, code?: string): never { throw new VeOutreachLaunchError(message, 409, code); }
+
+const SENDER_INSTEAD = ' Эту гипотезу можно запустить через Instantly.';
+
+/** Письма гипотезы против ограничений «Рассылки» — до согласования и до приёма запуска. */
+function senderLetterIssue(template: { letters?: unknown }): { error: string; code: string } | null {
+  const issue = veSenderTemplateIssue(template.letters);
+  return issue ? { error: `${issue.error}${SENDER_INSTEAD}`, code: issue.code } : null;
+}
+
+/** Готовые ящики «Рассылки» в пресете — из обзора с ящиками (attachVeSenderPool). */
+function senderPoolIssue(preview: unknown): string | null {
+  const pool = (preview as { sender_pool?: VeSenderPoolSummary | null } | undefined)?.sender_pool;
+  if (!pool) return 'Ящики «Рассылки» не проверились — повторите.';
+  if (!pool.ready) return `В пресете нет готовых ящиков «Рассылки» — их нужно проверить и включить в «Рассылке».${SENDER_INSTEAD}`;
+  return null;
+}
+
+/** Выбор специалиста «Рассылка» разрешён прямо сейчас — для нового обзора и приёма запуска. */
+async function assertSenderChoice(db: SupabaseClient, projectId: string, request: VeOutreachLaunchRequest): Promise<boolean> {
+  if (request.expected_transport !== 'sender') return false;
+  const resolved = await resolveRequestedVeLaunchTransport(db, projectId, 'sender');
+  if (!resolved.ok) throw new VeOutreachLaunchError(resolved.error, resolved.status, resolved.code);
+  return true;
+}
 function canonicalRequest(input: VeOutreachLaunchRequest): VeOutreachLaunchRequest {
   return { ...input, items: [...input.items].sort((a, b) => a.hypothesis_id.localeCompare(b.hypothesis_id)) };
 }
@@ -103,11 +135,15 @@ export async function prepareVeOutreachLaunch(db: SupabaseClient, instantlyDb: S
 }) {
   const { projectId, userId, request } = input;
   await readSetup(db, projectId, request);
+  // «Рассылка» не разрешена — отказ всего обзора с кодом (экран покажет причину у переключателя).
+  const sender = await assertSenderChoice(db, projectId, request);
   const items: Array<Record<string, unknown>> = [];
   for (const item of request.items) {
     try {
       const { template, base } = await readItem(db, projectId, item);
       if (parseLaunchInfo(template.launch_info)) fail('Для этой базы уже созданы кампании. Используйте существующий запуск.');
+      const letterIssue = sender ? senderLetterIssue(template) : null;
+      if (letterIssue) fail(letterIssue.error, letterIssue.code);
       const snapshot = prepareAuditSnapshot(template, base);
       if (!snapshot.audience.leads.length || snapshot.audience.leads.length > VE_LAUNCH_MAX_LEADS) fail('Количество проверенных адресатов не подходит для запуска.');
       const { data: audits, error } = await db.from('ve_segmentation_audits').select('*').eq('template_id', item.template_id)
@@ -116,10 +152,15 @@ export async function prepareVeOutreachLaunch(db: SupabaseClient, instantlyDb: S
       const current = (audits ?? []).find((audit) => validateStoredAuditSnapshot({ audit, template, base }).state === 'current') as VeSegmentationAudit | undefined;
       if (current) {
         const reviewed = { ...item, segmentation_audit_id: current.id };
-        const preview = await buildVeContactDeliveryPreview(db, instantlyDb, deliveryInput(request, reviewed));
+        // Ящики «Рассылки» — в обзоре (панель запуска их показывает); без готовых — не готово.
+        const preview = await attachVeSenderPool(db, instantlyDb, await buildVeContactDeliveryPreview(db, instantlyDb,
+          { ...deliveryInput(request, reviewed), requestedTransport: sender ? 'sender' : 'instantly' }),
+        { templateId: reviewed.template_id, presetId: request.preset_id });
         if (preview.status !== 200) fail(typeof preview.body.error === 'string' ? preview.body.error : 'Не удалось проверить условия отправки.');
         const details = preview.body.preview as { prospective_ready?: number; sender_capacity?: number } | undefined;
         if (!details?.prospective_ready || !details.sender_capacity) fail('Нет новых проверенных контактов или доступных отправителей.');
+        const poolIssue = sender ? senderPoolIssue(preview.body.preview) : null;
+        if (poolIssue) fail(poolIssue, 'VE_SENDER_POOL_EMPTY');
         items.push({ ...reviewed, status: 'ready', summary: current.summary, preview: preview.body.preview });
         continue;
       }
@@ -134,10 +175,15 @@ export async function prepareVeOutreachLaunch(db: SupabaseClient, instantlyDb: S
       if (queueError || !row?.audit_row?.id) throw new VeOutreachLaunchError('Не удалось поставить проверку аудитории в очередь.', 503);
       items.push({ ...item, segmentation_audit_id: row.audit_row.id, status: 'working' });
     } catch (error) {
-      items.push({ ...item, status: 'blocked', error: error instanceof VeOutreachLaunchError ? error.message : 'Не удалось подготовить проверку запуска.' });
+      items.push({
+        ...item, status: 'blocked',
+        error: error instanceof VeOutreachLaunchError ? error.message : 'Не удалось подготовить проверку запуска.',
+        ...(error instanceof VeOutreachLaunchError && error.code ? { code: error.code } : {}),
+      });
     }
   }
-  return { ready: items.every((item) => item.status === 'ready'), items };
+  // Способ отправки — выбор специалиста; обзор подтверждает его, запуск возвращает (expected_transport).
+  return { ready: items.every((item) => item.status === 'ready'), items, transport: sender ? 'sender' : 'instantly' };
 }
 
 export async function startVeOutreach(db: SupabaseClient, instantlyDb: SupabaseClient, input: {
@@ -160,14 +206,27 @@ export async function startVeOutreach(db: SupabaseClient, instantlyDb: SupabaseC
     return { existing: true, run: active as VeOutreachRun };
   }
   await readSetup(db, input.projectId, request);
+  // Выбор специалиста «Рассылка» — разрешён ли сейчас; Instantly ничего не читает.
+  const sender = await assertSenderChoice(db, input.projectId, request);
+  let poolChecked = false;
   for (const item of request.items) {
     if (!item.segmentation_audit_id) fail('Дождитесь проверки аудитории и просмотрите обзор запуска.');
     const { template, base } = await readItem(db, input.projectId, item);
     if (parseLaunchInfo(template.launch_info)) fail('Для этой базы уже созданы кампании. Используйте существующий запуск.');
+    const letterIssue = sender ? senderLetterIssue(template) : null;
+    if (letterIssue) fail(letterIssue.error, letterIssue.code);
     const audit = await readAudit(db, item);
     if (validateStoredAuditSnapshot({ audit, template, base }).state !== 'current' || audit.launch_status !== 'idle') fail('Проверка аудитории изменилась или уже используется в запуске.');
-    const preview = await buildVeContactDeliveryPreview(db, instantlyDb, deliveryInput(request, item));
-    if (preview.status !== 200) fail(typeof preview.body.error === 'string' ? preview.body.error : 'Условия запуска недоступны.');
+    const built = await buildVeContactDeliveryPreview(db, instantlyDb,
+      { ...deliveryInput(request, item), requestedTransport: sender ? 'sender' : 'instantly' });
+    if (built.status !== 200) fail(typeof built.body.error === 'string' ? built.body.error : 'Условия запуска недоступны.');
+    // Пресет у запуска один: готовые ящики «Рассылки» проверяем один раз.
+    if (sender && !poolChecked) {
+      const preview = await attachVeSenderPool(db, instantlyDb, built, { templateId: item.template_id, presetId: request.preset_id });
+      const poolIssue = senderPoolIssue(preview.body.preview);
+      if (poolIssue) fail(poolIssue, 'VE_SENDER_POOL_EMPTY');
+      poolChecked = true;
+    }
   }
   const { data, error } = await db.rpc('ve_start_outreach', { p_project_id: input.projectId, p_actor_id: input.userId,
     p_idempotency_key: input.idempotencyKey, p_request: request, p_request_hash: hash });
@@ -209,6 +268,19 @@ export async function runVeOutreachStartStage(job: VeJob, ctx: VeStageContext, i
     if (!launch) {
       // A reserved or uncertain provider creation is not replayed blindly after restart.
       if (audit.launch_status !== 'idle') fail('Предыдущая попытка создания кампаний уже выполнялась. Проверьте её результат перед новым запуском.');
+      // До согласования запаса: иначе после отказа осталось бы согласование без запуска.
+      // Принятый запуск в «Рассылку» проверяет только разрешение: выключенная подача или
+      // остановленная отправка его не отменяют — гипотезы подождут (обещание панели этапа 6).
+      if (request.expected_transport === 'sender') {
+        const resolved = await resolveRequestedVeLaunchTransport(db, job.project_id, 'sender', process.env, 'accepted');
+        if (!resolved.ok) {
+          throw new VeOutreachLaunchError(
+            resolved.status === 503 ? resolved.error : `${resolved.error} Эту гипотезу можно запустить заново через Instantly.`,
+            resolved.status, resolved.code);
+        }
+        const letterIssue = senderLetterIssue(template);
+        if (letterIssue) fail(letterIssue.error, letterIssue.code);
+      }
       item.status = 'approving'; await saveProgress(db, job, run); ctx.signal?.throwIfAborted();
       const approved = await approveVeContactSupply(db, instantlyDb, { ...deliveryInput(request, item), userId: run.requested_by,
         confirmed: true, reviewedRevision: item.preview_revision });
@@ -216,15 +288,20 @@ export async function runVeOutreachStartStage(job: VeJob, ctx: VeStageContext, i
       item.status = 'creating'; await saveProgress(db, job, run); ctx.signal?.throwIfAborted();
       const created = await runVeTemplateLaunch({ portalDb: db, instantlyDb, ...deliveryInput(request, item),
         segmentationAuditId: item.segmentation_audit_id!, force: false, confirmSegmentation: true, userId: run.requested_by,
-        locale: 'ru', eventPrefix: 'tools.vertical-engine-v2.outreach.start' });
-      if (created.status < 200 || created.status >= 300) fail(typeof created.body.error === 'string' ? created.body.error : 'Не удалось подтвердить создание кампаний.');
+        locale: 'ru', eventPrefix: 'tools.vertical-engine-v2.outreach.start', senderScope: 'accepted',
+        ...(request.expected_transport ? { expectedTransport: request.expected_transport } : {}) });
+      if (created.status < 200 || created.status >= 300) {
+        fail(typeof created.body.error === 'string' ? created.body.error : 'Не удалось подтвердить создание кампаний.',
+          typeof created.body.code === 'string' ? created.body.code : undefined);
+      }
       const { data: updated, error: readError } = await db.from('ve_templates').select('launch_info').eq('id', item.template_id).single();
       if (readError) throw new Error('Could not read committed campaign launch');
       launch = parseLaunchInfo(updated?.launch_info);
     }
     if (!launch || launch.reconciliation_required || launch.segmentation_audit_id !== item.segmentation_audit_id
       || launch.preset_id !== request.preset_id || launch.portal_project_id !== request.portal_project_id
-      || (launch.portal_period_id ?? null) !== request.expected_portal_period_id || launch.target_contacts !== request.target_contacts) fail('Сохранённые кампании не соответствуют этому запуску. Нужна сверка.');
+      || (launch.portal_period_id ?? null) !== request.expected_portal_period_id || launch.target_contacts !== request.target_contacts
+      || transportOf(launch.transport) !== (request.expected_transport ?? 'instantly')) fail('Сохранённые кампании не соответствуют этому запуску. Нужна сверка.');
     const { data: queue, error: queueError } = await db.from('ve_launch_queue_items').select('id,status,plan_version')
       .eq('template_id', item.template_id).eq('project_id', job.project_id).maybeSingle();
     if (queueError || !queue) fail('Кампании сохранены, но очередь активации пока недоступна.');
@@ -245,7 +322,15 @@ export async function runVeOutreachStartStage(job: VeJob, ctx: VeStageContext, i
 
   } catch (error_) {
     ctx.signal?.throwIfAborted();
-    item.status = 'blocked'; item.error = error_ instanceof VeOutreachLaunchError ? error_.message : 'Запуск остановлен из-за технической ошибки. Сохранённые кампании не создаются повторно.';
+    if (error_ instanceof VeOutreachLaunchError && error_.code === 'VE_LAUNCH_TRANSPORT_UNAVAILABLE') {
+      // Не прочитали выключатели — не повод останавливать гипотезу навсегда: повторим.
+      item.status = 'waiting'; item.code = error_.code;
+      item.error = 'Не удалось проверить, доступна ли «Рассылка». Повторим через минуту.';
+    } else {
+      item.status = 'blocked';
+      item.error = error_ instanceof VeOutreachLaunchError ? error_.message : 'Запуск остановлен из-за технической ошибки. Сохранённые кампании не создаются повторно.';
+      if (error_ instanceof VeOutreachLaunchError && error_.code) item.code = error_.code;
+    }
   }
   run.status = run.items.every((candidate) => candidate.status === 'active') ? 'active'
     : run.items.every((candidate) => ['active', 'blocked'].includes(candidate.status)) ? 'blocked' : 'waiting';

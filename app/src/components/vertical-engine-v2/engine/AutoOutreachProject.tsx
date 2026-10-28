@@ -7,6 +7,12 @@ import type { VeBaseAudienceSummary } from '@/lib/verticalEngineV2/baseAudienceS
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
 import { parseLaunchInfo } from '@/lib/verticalEngineV2/launchHandoff';
 import {
+  parseVeSenderOption,
+  senderRunItemLabel,
+  senderRunLabel,
+  type VeSenderOption,
+} from '@/lib/verticalEngineV2/senderTransport/labels';
+import {
   VE_API,
   veEngineCall,
   veEnginePost,
@@ -17,6 +23,7 @@ import {
   type VeBaseSummary,
   type VePreparationAction,
   type VeContinuationCheck,
+  type VeOutreachSenderOptionField,
 } from './api';
 import { HE } from './design';
 import { StatusBox, formatDate, prettyProjectName } from './ui';
@@ -214,6 +221,10 @@ export function AudienceSummary({
 export function AutoOutreachProject({ projectId, onBack }: { projectId: string; onBack: () => void }) {
   const [detail, setDetail] = useState<ProjectData | null>(null);
   const [snapshot, setSnapshot] = useState<VeOutreachSetupResponse | null>(null);
+  // Можно ли выбрать «Рассылку» для нового автоаутрича (этап 7, по умолчанию Instantly).
+  // Отдельно от snapshot: ответы POST его заменяют без этого поля.
+  const [senderOption, setSenderOption] = useState<VeSenderOption | null>(null);
+  const senderChoice = senderOption?.allowed === true;
   const [run, setRun] = useState<VeOutreachRun | null>(null);
   const [step, setStep] = useState(1);
   const [error, setError] = useState('');
@@ -284,6 +295,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           dossiers: project.data.dossiers ?? [],
           cases: project.data.cases ?? [],
         });
+      if (setup.ok) setSenderOption(parseVeSenderOption((setup.data as VeOutreachSetupResponse & VeOutreachSenderOptionField).sender));
       if (setup.ok)
         setSnapshot((current) =>
           !current || setup.data.setup.revision >= current.setup.revision ? setup.data : current,
@@ -346,6 +358,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     };
   }, [refresh, working]);
   const locked = !!run && ['queued', 'running', 'waiting'].includes(run.status);
+  const runToSender = run?.request.expected_transport === 'sender';
   const contactLimit = snapshot?.setup.max_emails_per_company ?? null;
   const contactLimitText = contactLimitDraft ?? (contactLimit === null ? '' : String(contactLimit));
   const parsedContactLimit = parseContactLimitDraft(contactLimitText);
@@ -1077,7 +1090,9 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                 <h3 className="ve2-h3">Одобрены и готовы к запуску: {readyForLaunchCount}</h3>
                 <p className={HE.muted}>
                   Выберите одну или несколько одобренных баз. Остальные могут продолжать подготовку.
-                  На следующем шаге выберите клиента и подготовьте кампанию. Отправку вы включите в Instantly.
+                  {senderChoice
+                    ? 'На следующем шаге выберите клиента и подготовьте кампании: в Instantly (по умолчанию) или черновиками в «Рассылке» — способ выбирается при запуске.'
+                    : 'На следующем шаге выберите клиента и подготовьте кампанию. Отправку вы включите в Instantly.'}
                 </p>
                 <div className="divide-y divide-[var(--ve2-line)]">
                   {visibleHypotheses.filter((h) => launchStates[h.id]?.ready || launchHypothesisIds.includes(h.id)).map((h) => {
@@ -1142,6 +1157,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                         }}>Управлять добором</button>
                     ) : null}
                     {!launchStates[h.id]?.launched ? <PreparationProgress compact preparation={p} base={base} jobs={detail.jobs} approved={approved}
+                      senderChoice={senderChoice}
                       preparationSelected={selectedIds.includes(h.id)} hypothesisTitle={h.title}
                       canPauseOrphan={canPauseOrphan && h.status !== 'rejected' && !!h.vertical_id}
                       onStart={() => void change({ action: 'prepare', hypothesis_id: h.id })}
@@ -1261,6 +1277,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
               templates={detail.templates}
               titles={titles}
               hypothesisIds={launchHypothesisIds}
+              senderOption={senderOption}
+              onSenderOptionReload={() => void refresh()}
               onBack={() => jump(3)}
               onPresetChange={setPresetId}
               onStarted={(value) => {
@@ -1274,15 +1292,16 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           {step === 5 ? (
             <section className="space-y-5">
               <h2 className="ve2-h2">{run?.status === 'waiting' && run.items.some(item => item.code === 'VE_LAUNCH_REVIEW_REQUIRED')
-                ? 'Кампании ожидают проверки специалиста' : run ? RUN_LABELS[run.status] : 'Результаты'}</h2>
+                ? 'Кампании ожидают проверки специалиста' : run ? (runToSender && senderRunLabel(run.status)) || RUN_LABELS[run.status] : 'Результаты'}</h2>
               {run?.error ? <StatusBox tone="error">{run.error}</StatusBox> : null}
-              {run ? <ContactUploadModePanel key={projectId} projectId={projectId} mode={uploadMode}
+              {run ? <ContactUploadModePanel key={projectId} projectId={projectId} mode={uploadMode} sender={runToSender}
                 disabled={busy || ['queued', 'running'].includes(run.status)} onSaved={uploadModeSaved} /> : null}
               {run?.request.target_contacts ? <DeliveryTargetPanel key={projectId} projectId={projectId} uploadMode={uploadMode}
                 disabled={busy || ['queued', 'running', 'waiting'].includes(run.status)} onSaved={() => void refresh()} /> : null}
               {run?.request.preset_id && run.items.length ? <DeliveryRatePanel projectId={projectId}
                 presetId={run.request.preset_id} templateIds={run.items.map(item => item.template_id)}
-                disabled={busy || ['queued', 'running'].includes(run.status)} supplyOnly={uploadMode === 'all_ready'} /> : null}
+                disabled={busy || ['queued', 'running'].includes(run.status)} supplyOnly={uploadMode === 'all_ready'}
+                transport={runToSender ? 'sender' : 'instantly'} /> : null}
               {!locked && resultTemplates.length ? (
                 <button
                   type="button"
@@ -1297,7 +1316,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                 <div key={item.hypothesis_id}>
                   <h3 className="ve2-h3">{titles[item.hypothesis_id]}</h3>
                   <p className={HE.muted}>
-                    {item.error ??
+                    {item.error ?? (runToSender ? senderRunItemLabel(item.status) : null) ??
                       {
                         queued: 'В очереди',
                         approving: 'Фиксируем согласование',

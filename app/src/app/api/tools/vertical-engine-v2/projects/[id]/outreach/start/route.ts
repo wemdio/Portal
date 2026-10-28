@@ -21,7 +21,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       request, idempotencyKey: idempotency_key, confirmedCustomerApproval: confirmed_customer_approval });
     return NextResponse.json(result, { status: result.existing ? 200 : 202 });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof VeOutreachLaunchError ? error.message : 'Не удалось сохранить запрос запуска. Обновите обзор и повторите.' },
+    return NextResponse.json({ error: error instanceof VeOutreachLaunchError ? error.message : 'Не удалось сохранить запрос запуска. Обновите обзор и повторите.',
+      ...(error instanceof VeOutreachLaunchError && error.code ? { code: error.code } : {}) },
       { status: error instanceof VeOutreachLaunchError ? error.status : error instanceof z.ZodError || error instanceof SyntaxError ? 400 : 500 });
   }
 }

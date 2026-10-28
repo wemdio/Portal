@@ -39,7 +39,22 @@ const DIRECTORY_HOSTS = new Set(['linkedin.com', 'facebook.com', 'instagram.com'
   'thomsonlocal.com', '192.com', 'cylex-uk.co.uk', 'cylex.de', 'hackforddata.com', 'rooplex.co.uk',
   'scoriff.co.uk', 'businessmad.com', 'northdata.com', 'northdata.de', 'bloomberg.com', 'rocketreach.co',
   'apollo.io', 'signalhire.com', 'lusha.com', 'cbinsights.com', 'pitchbook.com', 'preqin.com', 'legal500.com',
-  'chambers.com', 'vat-search.ie', 'solocheck.ie', 'societe.com', 'pappers.fr', 'infogreffe.fr', 'verif.com',
+  'chambers.com', 'vat-search.ie', 'solocheck.ie', 'societe.com', 'pappers.fr', 'infogreffe.fr', 'verif.com', 'bankofengland.co.uk', 'esma.europa.eu',
+  'eba.europa.eu', 'ytj.fi', 'prh.fi', 'finder.fi', 'asiakastieto.fi', 'kauppalehti.fi', 'fonecta.fi', 'ares.gov.cz',
+  'justice.cz', 'czso.cz', 'kurzy.cz', 'firmy.cz', 'detail.cz', 'cro.ie', 'vision-net.ie', 'rik.ee', 'inforegister.ee',
+  'teatmik.ee', 'e-krediidiinfo.ee', 'wikidata.org',
+  // US lists and the directories that copy them: SEC, FINRA, IRS copies, NCES and school/college rankings.
+  'sec.gov', 'finra.org', 'irs.gov', 'propublica.org', 'guidestar.org', 'candid.org', 'charitynavigator.org', 'causeiq.com',
+  'nces.ed.gov', 'niche.com', 'greatschools.org', 'privateschoolreview.com', 'publicschoolreview.com', 'usnews.com',
+  'stockanalysis.com', 'macrotrends.net', 'marketscreener.com', 'seekingalpha.com', 'prnewswire.com', 'businesswire.com', 'globenewswire.com',
+  // UK registers and care, school and credit union directories.
+  'charitycommission.gov.uk', 'get-information-schools.service.gov.uk', 'compare-school-performance.service.gov.uk', 'ofsted.gov.uk',
+  'cqc.org.uk', 'carehome.co.uk', 'homecare.co.uk', 'ncua.gov', 'mycreditunion.gov', 'creditunionsonline.com',
+  // Swedish, German and EU registers and the directories that copy them.
+  'bolagsverket.se', 'scb.se', 'allabolag.se', 'ratsit.se', 'hitta.se', 'merinfo.se', 'bolagsfakta.se', 'proff.se', 'eniro.se', 'syna.se',
+  'marktstammdatenregister.de', 'bundesnetzagentur.de', 'unternehmensregister.de', 'handelsregister.de', 'online-handelsregister.de',
+  'firmenwissen.de', 'creditreform.de', 'dasoertliche.de', 'gelbeseiten.de', 'wlw.de', 'transparency-register.europa.eu', 'lobbyfacts.eu',
+  'integritywatch.eu',
   'manageo.fr', 'proff.no', 'purehelp.no', '1881.no', 'gulesider.no', 'bizapedia.com', 'manta.com',
   'buzzfile.com', 'yelp.com', 'bbb.org', 'sophymarine.com', 'experian.com', 'ebay.com', 'amazon.com']);
 // Legal-form words: the register says «LTD», the company's own footer «Limited».
@@ -53,7 +68,15 @@ const LEGAL_FORM_PHRASES: readonly string[][] = [
   ['b', 'v'], ['n', 'v'], ['s', 'a'], ['a', 'g'], ['a', 's'], ['a', 'b'], ['s', 'e'], ['spa'], ['s', 'p', 'a'], ['srl'],
   ['s', 'r', 'l'], ['sl'], ['s', 'l'], ['dac'], ['vvag'], ['aktiengesellschaft'], ['kommanditgesellschaft'],
   ['gesellschaft', 'mit', 'beschränkter', 'haftung'],
+  // Czech, Estonian and Irish forms: «JetBrains s.r.o.», «Veriff OÜ», «Intercom R&D Unlimited Company».
+  ['spol', 's', 'r', 'o'], ['s', 'r', 'o'], ['sro'], ['v', 'o', 's'], ['k', 's'], ['oü'], ['ou'], ['unlimited', 'company'],
+  ['designated', 'activity', 'company'],
+  // Swedish and German forms: «Fortnox AB (publ)», «Advokatfirman Vinge KB», «… ekonomisk förening», «… e.V.», «… gGmbH».
+  ['publ'], ['aktiebolag'], ['bankaktiebolag'], ['försäkringsaktiebolag'], ['kommanditbolag'], ['kb'], ['handelsbolag'], ['hb'],
+  ['ekonomisk', 'förening'], ['ek', 'för'], ['e', 'v'], ['ev'], ['ggmbh'], ['ohg'], ['kgaa'], ['ug'],
 ];
+// Swedish names may open with the form: «Aktiebolaget Volvo», «Kommanditbolaget Advokaterna Peyron».
+const LEADING_LEGAL_FORMS: ReadonlySet<string> = new Set(['aktiebolaget', 'kommanditbolaget', 'handelsbolaget']);
 
 export type HeEngRegistryResolutionReason = 'confirmed_registry' | 'confirmed_website' | 'invalid_website' |
   'website_not_found' | 'website_search_unavailable' | 'website_unavailable' | 'identity_unconfirmed' |
@@ -93,6 +116,7 @@ function nameWords(value: unknown): string[] {
 /** The legal name without its trailing legal form, for comparing register, catalog and site. */
 function legalNameKey(value: unknown): string {
   const words = nameWords(value);
+  while (words.length > 1 && LEADING_LEGAL_FORMS.has(words[0])) words.shift();
   for (let changed = true; changed && words.length > 1;) {
     changed = false;
     for (const phrase of LEGAL_FORM_PHRASES) {
@@ -131,15 +155,21 @@ function candidateFingerprint(candidate: HeEngRegistryCandidate): string {
   return fingerprint([candidate.provider, candidate.recordId, candidate.company, candidate.country, candidate.address,
     candidate.addressKind, candidate.category, candidate.employees ?? '', candidate.employeeYear ?? null, candidate.website,
     candidate.emails, candidate.description, candidate.sourceUrl,
-    // Only GLEIF records carry it; older candidates keep their fingerprint.
-    ...(candidate.localRegistryId !== undefined ? [candidate.localRegistryId] : [])]);
+    // Only some registries carry them; older candidates keep their fingerprint.
+    ...(candidate.localRegistryId !== undefined ? [candidate.localRegistryId] : []),
+    ...(candidate.supervisorReference !== undefined ? [{ supervisorReference: candidate.supervisorReference }] : []),
+    ...(candidate.vatNumber !== undefined ? [{ vatNumber: candidate.vatNumber }] : [])]);
 }
 function hasRegistryCountry(candidate: HeEngRegistryCandidate): boolean {
   // The adapter validates the record address; never infer country from the
   // discovery task. UK and French adapters supply validated domestic
   // registered offices; accepting their country does not claim a local team.
+  // The PRA lists state incorporation in the UK instead of an address; the
+  // Finnish, Czech, Irish and Estonian registers hold only domestic companies,
+  // as do the IRS, NCES and NCUA lists (a mailing address in a US state) and the Charity Commission's (England and Wales).
   return (candidate.addressKind === 'business' ||
-      (['companies_house', 'france'].includes(candidate.provider) && candidate.addressKind === 'registered')) &&
+      (['companies_house', 'france', 'pra', 'prh', 'czso', 'cro', 'ariregister', 'irs', 'nces', 'ncua', 'charity_commission', 'scb', 'mastr'].includes(candidate.provider) &&
+        candidate.addressKind === 'registered')) &&
     text(candidate.address).length >= 5 &&
     heEngRegistryRecordValid(candidate.provider, candidate.recordId, country(candidate.country), candidate.sourceUrl);
 }
@@ -164,7 +194,8 @@ const CATALOG_LEGAL_FORMS: Readonly<Record<string, readonly string[]>> = {
   'united states': ['inc', 'llc', 'corp', 'corporation', 'co'],
   germany: ['gmbh', 'ag', 'se', 'gmbh & co. kg', 'kg'], austria: ['gmbh', 'ag'], switzerland: ['ag', 'sa', 'gmbh'],
   netherlands: ['bv', 'b.v.', 'nv', 'n.v.'], belgium: ['nv', 'bv', 'sa', 'srl'], luxembourg: ['sa', 's.a.', 'sarl'],
-  denmark: ['a/s', 'aps'], sweden: ['ab'], finland: ['oy', 'oyj'], ireland: ['ltd', 'limited', 'dac', 'plc'],
+  denmark: ['a/s', 'aps'], sweden: ['ab'], finland: ['oy', 'oyj', 'ab'], ireland: ['ltd', 'limited', 'dac', 'plc', 'unlimited company'],
+  czechia: ['s.r.o.', 'a.s.', 'spol. s r.o.'], estonia: ['oü', 'as'],
   spain: ['sa', 'sl', 's.a.', 's.l.'], italy: ['spa', 'srl', 's.p.a.', 's.r.l.'],
 };
 function catalogNameVariants(company: string, countryValue: string): string[] {
@@ -186,7 +217,9 @@ function websiteVariants(site: string): string[] {
 }
 const GENERIC_NAME_WORDS = new Set(['insurance', 'services', 'service', 'financial', 'finance', 'group', 'holdings',
   'holding', 'management', 'capital', 'investments', 'investment', 'international', 'global', 'solutions',
-  'consulting', 'partners', 'company', 'limited', 'brokers', 'broking', 'underwriting', 'risk', 'uk', 'europe']);
+  'consulting', 'partners', 'company', 'limited', 'brokers', 'broking', 'underwriting', 'risk', 'uk', 'europe',
+  // «Example Trust» is not named by trustpilot.com.
+  'trust', 'charity', 'charitable', 'foundation', 'friends', 'society', 'association']);
 /** Search hits whose domain carries the company's own words come first. */
 function brandScore(site: string, company: string): number {
   const label = (heCompanySiteIdentity(site)?.registrable ?? '').split('.')[0].replace(/[^a-z0-9]/g, '');
@@ -194,24 +227,37 @@ function brandScore(site: string, company: string): number {
   return label ? words.reduce((score, word) => score + (label.includes(word) ? word.length : 0), 0) : 0;
 }
 // Pages where UK/EU law puts the company number: legal notice, terms, privacy.
-const LEGAL_LINK = /\b(?:legal|impressum|imprint|mentions[\s-]*l[ée]gales|regulatory|company[\s-]*(?:information|details)|important[\s-]*information|terms|privacy)\b/i;
+// Finnish, Estonian and Czech pages that carry the company number: contact details
+// (yhteystiedot, kontaktid), company details (rekvisiidid), terms and privacy.
+const LEGAL_LINK = /\b(?:legal|impressum|imprint|mentions[\s-]*l[ée]gales|regulatory|company[\s-]*(?:information|details)|important[\s-]*information|terms|privacy|yhteystiedot|tietosuoja(?:seloste)?|k[äa]ytt[öo]ehdot|rekvisiidid|kontaktid|andmekaitse|privaatsus|kasutustingimused|podm[íi]nky|osobn[íi]ch|gdpr)\b/i;
 // Insurers sell «legal expenses» cover; those product pages are not legal notices.
 const LEGAL_PRODUCT = /\blegal[\s-]*(?:expenses?|cover|protection|services?|advice|aid|insurance|assistance)\b/i;
 function legalLinkRank(label: string): number {
-  return /\bterms\b/i.test(label) ? 1 : /\bprivacy\b/i.test(label) ? 2 : 0;
+  return /\b(?:terms|k[äa]ytt[öo]ehdot|kasutustingimused|podm[íi]nky)\b/i.test(label) ? 1
+    : /\b(?:privacy|tietosuoja(?:seloste)?|andmekaitse|privaatsus|osobn[íi]ch|gdpr)\b/i.test(label) ? 2 : 0;
 }
-/** Same-origin legal pages linked from the home page, legal notice first. */
-function legalLinks(html: string, baseUrl: string): string[] {
+// A US nonprofit prints its EIN where a donor needs it — gifts of stock, donor-advised funds,
+// tax information («Tax ID# 53-0196605», «EIN: …» on the Red Cross's pages) — then on its
+// ways-to-give and financial pages; a donation form or account page rarely has it.
+const NONPROFIT_LINKS: ReadonlyArray<readonly [RegExp, number]> = [
+  [/\b(?:tax[\s-]*(?:id|information|exempt(?:ion)?)|form[\s-]*990|ein|donor[\s-]*advised|stocks?|securities|wire[\s-]*transfers?)\b/i, -3],
+  [/\b(?:ways[\s-]*to[\s-]*(?:give|donate)|planned[\s-]*giving|financials?|financial[\s-]*(?:information|statements)|annual[\s-]*reports?|transparency|accountability)\b/i, -2],
+  [/\b(?:donate|donations?|give[\s-]*now)\b/i, -1],
+];
+const NOT_GIVING_PAGE = /\b(?:account|log[\s-]*in|sign[\s-]*in|history|cart|checkout)\b/i;
+/** Same-origin legal pages linked from the home page, legal notice first; for a US nonprofit, its donation and financial pages first. */
+function legalLinks(html: string, baseUrl: string, nonprofit = false): string[] {
   const $ = cheerio.load(html);
   const found = new Map<string, number>();
   $('a[href]').slice(0, 600).each((_index, node) => {
     const href = ($(node).attr('href') ?? '').trim();
     const label = `${href} ${$(node).text()}`.slice(0, 300);
-    if (!href || /^(?:#|mailto:|tel:|javascript:)/i.test(href) || !LEGAL_LINK.test(label) || LEGAL_PRODUCT.test(label)) return;
+    const giving = nonprofit && !NOT_GIVING_PAGE.test(label) ? NONPROFIT_LINKS.find(([pattern]) => pattern.test(label))?.[1] : undefined;
+    if (!href || /^(?:#|mailto:|tel:|javascript:)/i.test(href) || (giving === undefined && (!LEGAL_LINK.test(label) || LEGAL_PRODUCT.test(label)))) return;
     try {
       const url = new URL(href, baseUrl);
       url.hash = '';
-      if (url.origin === new URL(baseUrl).origin && !found.has(url.href)) found.set(url.href, legalLinkRank(label));
+      if (url.origin === new URL(baseUrl).origin && !found.has(url.href)) found.set(url.href, giving ?? legalLinkRank(label));
     } catch { /* Not a link. */ }
   });
   return [...found].sort((a, b) => a[1] - b[1]).map(([url]) => url);
@@ -278,6 +324,21 @@ const UK_COMPANY_NUMBER_LABELS = '(?:company\\s+(?:registration\\s+|reg(?:istere
   + '|registered\\s+(?:in\\s+(?:england(?:\\s*(?:and|&)\\s*wales)?|wales|scotland|northern\\s+ireland)\\s*)?(?:company\\s+)?(?:number|no|nr)'
   + '|registered\\s+in\\s+(?:england(?:\\s*(?:and|&)\\s*wales)?|wales|scotland|northern\\s+ireland)(?=\\s*#)'
   + '|reg\\.?\\s*(?:number|no|nr)|under\\s+(?:registration\\s+)?(?:number|no)|crn)';
+// Wording that introduces a partner firm before its FRN on another firm's site.
+const PRA_THIRD_PARTY = /\b(?:underwritten|insured|provided|arranged|issued|administered|introduced|supplied|offered)\s+by\b|\bappointed\s+representatives?\b|\bintroducers?\b|\bcredit\s+brokers?\b|\blenders?\b|\bon\s+behalf\s+of\b|\bin\s+partnership\s+with\b|\bpanel\s+of\b/i;
+// An adviser representative's own site names the firm it works through: «Advisory services offered through
+// Example Advisors, LLC, a registered investment adviser (CRD# 123456)». That site is not the firm's.
+const ADVISER_THIRD_PARTY = /\b(?:offered|provided|conducted|transacted)\s+(?:through|by)\b|\b(?:registered|investment\s+advis[eo]r)\s+representatives?\s+(?:of|with)\b|\bin\s+association\s+with\b|\baffiliated\s+with\b/i;
+// A fundraiser's, a shop's or a trading company's site names the charity it works for: «All proceeds go to
+// Example Trust, registered charity no. 1062876», «in aid of …», «a subsidiary of …».
+// Not «in partnership with» or «on behalf of»: a charity's own footer says them too («We work in partnership with the NHS»).
+const CHARITY_THIRD_PARTY = /\b(?:in\s+aid\s+of|in\s+support\s+of|proudly\s+support(?:s|ing)|rais(?:e|es|ed|ing)\s+(?:funds|money)\s+for|fundrais\w*\s+(?:for|on\s+behalf\s+of)|proceeds\s+(?:go|goes|will\s+go|are\s+(?:donated|given|going))\s+to|subsidiary\s+of|trading\s+(?:arm|company)\s+of|(?:charity|charitable)\s+partners?|(?:official|chosen|nominated|partner)\s+charity|charity\s+of\s+the\s+year)\b/i;
+// A Swedish shop's, dealer's or subsidiary's footer prints the bank, finance company or parent it names: «faktura och
+// delbetalning via Klarna Bank AB (publ), org.nr 556737-0431», «dotterbolag till AB Volvo (org.nr 556012-5790)».
+const SWEDISH_THIRD_PARTY = /\b(?:faktura|delbetalning|avbetalning|finansiering|betalning(?:ar)?|kredit(?:er)?|leasing|försäkring(?:ar)?)\b[^.]{0,80}?\b(?:via|genom|hos|från|av|med)\b|\b(?:helägt\s+)?dotterbolag\s+(?:till|i|inom)\b|\b(?:i\s+samarbete\s+med|i\s+partnerskap\s+med|ombud\s+för|återförsäljare\s+(?:för|av)|auktoriserad\s+(?:återförsäljare|partner)|tillhandahålls\s+av|levereras\s+av|förmedlas\s+av|in\s+partnership\s+with|subsidiary\s+of|provided\s+by|powered\s+by)\b/i;
+const THIRD_PARTY: Partial<Record<HeEngRegistryCandidate['provider'], RegExp>> = {
+  pra: PRA_THIRD_PARTY, sec_advisers: ADVISER_THIRD_PARTY, charity_commission: CHARITY_THIRD_PARTY, scb: SWEDISH_THIRD_PARTY,
+};
 /**
  * A legal block names this entity. With `numberAlone` (the site's own footer) a
  * labelled registry number is enough by itself: the number is unique, and a
@@ -285,7 +346,7 @@ const UK_COMPANY_NUMBER_LABELS = '(?:company\\s+(?:registration\\s+|reg(?:istere
  * With `numberRequired` (a whole legal page) the name must come with the number.
  */
 function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
-  options: { numberAlone?: boolean; numberRequired?: boolean } = {}): boolean {
+  options: { numberAlone?: boolean; numberRequired?: boolean; brandSite?: boolean } = {}): boolean {
   const normalized = ` ${key(value)} `;
   const named = ` ${nameWords(value).join(' ')} `;
   const legalName = legalNameKey(candidate.company);
@@ -298,13 +359,59 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
     gleif: 'lei|legal\\s+entity\\s+identifier',
     // An OpenStreetMap element id never appears on a company site.
     osm: '(?!)',
+    // UK-regulated firms state their FCA firm reference number: «Firm Reference
+    // Number 202153», «(FRN: 202153)», «Financial Services Register No. 117659»,
+    // «FCA No. 202153», «under firm reference number 202153».
+    pra: ['firm\\s+reference\\s+(?:number|no|nr)(?:\\s+is)?', 'frn',
+      'financial\\s+services\\s+register[\\s,(]{1,4}(?:under\\s+)?(?:registration\\s+)?(?:number|no|nr|reference)(?:\\s+is)?',
+      'fs\\s+register\\s+(?:number|no)', '(?:fca|pra)\\s+(?:firm\\s+)?(?:registration\\s+|register\\s+|reference\\s+)?(?:number|no|nr)',
+      'financial\\s+conduct\\s+authority\\s+(?:registration\\s+|reference\\s+)?(?:number|no)',
+      'under\\s+(?:firm\\s+)?(?:reference|registration)\\s+(?:number|no)'].join('|'),
+    // An ESMA record id is the firm's LEI when it has one; ESMA's own id never appears on a site.
+    esma: 'lei|legal\\s+entity\\s+identifier',
+    // The EBA register's key never appears on a site; the supervisor's reference is matched below.
+    eba: '(?!)',
+    // National company numbers as sites label them: «Y-tunnus 0101138-5», «IČO: 26168685»,
+    // «Registered in Ireland No. 517689», «Registrikood 11694365».
+    prh: 'y-tunnus|business\\s+id|fo-nummer|org\\.?\\s*nr',
+    czso: 'ič\\s*\\([^)]{1,24}\\)|ičo|ič|ico|id\\.?\\s*no|company\\s+id|identifikační\\s+číslo|reg(?:istration)?\\.?\\s*(?:no|number)',
+    cro: `cro(?:\\s+(?:no|number))?|registered\\s+in\\s+(?:the\\s+republic\\s+of\\s+)?ireland(?:\\s*(?:no|number|nr))?|${UK_COMPANY_NUMBER_LABELS}`,
+    // A Wikidata item id never appears on a company site; its website comes with the record.
+    wikidata: '(?!)',
+    ariregister: 'registrikood|reg\\.?\\s*kood|reg\\.?\\s*nr|äriregistri\\s+kood|registry\\s+code|reg(?:istration|istry)?\\.?\\s*(?:code|no|number)',
+    // «CIK 0000320193» on investor pages; «CRD# 104689» in an adviser's disclosures;
+    // «EIN 13-1624100», «Tax ID: …», «Federal Tax ID Number …» on a nonprofit's donation page.
+    sec_companies: 'cik|central\\s+index\\s+key',
+    sec_advisers: 'crd(?:\\s+(?:no|number))?|central\\s+registration\\s+depository(?:\\s+(?:no|number))?',
+    irs: 'ein|employer\\s+identification\\s+(?:number|no)|(?:federal\\s+)?tax[\\s-]+(?:id|identification)(?:\\s+(?:number|no))?|tax[\\s-]+exempt\\s+(?:id|number)|federal\\s+id(?:\\s+(?:number|no))?',
+    // NCES ids never appear on a school's site; colleges and districts bring their website.
+    nces: '(?!)',
+    // «Registered charity number 1062876», «Charity No. 1062876», «Registered charity 1062876».
+    charity_commission: 'registered\\s+charity(?:\\s+(?:no|number|reg(?:istration)?\\s+(?:no|number)))?|charity\\s+(?:no|number|reg(?:istration)?\\s+(?:no|number))|charity\\s+commission\\s+(?:no|number)',
+    // A school's URN or DfE number is rarely printed; academy trusts print their company number (matched below).
+    gias: 'urn|unique\\s+reference\\s+number|dfe\\s+(?:no|number)',
+    cqc: 'cqc\\s+(?:provider\\s+)?(?:id|registration(?:\\s+(?:no|number))?)',
+    ncua: '(?:ncua\\s+)?charter(?:\\s+(?:no|number))?',
+    // «Org.nr 556036-0793», «Organisationsnummer: …», «Corporate identity number …».
+    scb: 'org(?:anisations)?\\.?[\\s-]*(?:nr|nummer|number|no)|corporate\\s+identity\\s+(?:number|no)|company\\s+reg(?:istration)?\\.?\\s*(?:no|number)',
+    // A MaStR number never appears on a site; the commercial register and VAT numbers are matched below.
+    mastr: '(?!)',
+    // A federation's site lists its members' Transparency Register ids; the register's records bring their website.
+    eu_transparency: '(?!)',
   };
   const id = identifierKey(candidate.recordId);
+  const thirdParty = THIRD_PARTY[candidate.provider] ?? null;
   const digits = candidate.provider === 'companies_house' ? companiesHouseDigits(id) : id;
-  const idPattern = `${digits !== id ? '(?:0[\\s.-]*)*' : ''}${digits.split('').join('[\\s.-]*')}`;
+  // EDGAR pads a CIK to ten digits («CIK 0000320193»); Companies House numbers lose their padding on sites.
+  const idPattern = `${digits !== id || candidate.provider === 'sec_companies' ? '(?:0[\\s.-]*)*' : ''}${digits.split('').join('[\\s.-]*')}`;
   // A labelled registry identifier in the company's own legal footer is a
   // second identity fact. Arbitrary numbers in articles/testimonials are not.
   const end = '(?![\\p{L}\\p{N}]|[\\s.-]{1,3}\\d)';
+  // \b is ASCII-only: «IČ:» and «äriregistri kood» need letter-aware edges.
+  const unicodeLabel = ['czso', 'ariregister'].includes(candidate.provider);
+  const opening = unicodeLabel ? '(?<![\\p{L}\\p{N}])' : '\\b', closing = unicodeLabel ? '(?![\\p{L}\\p{N}])' : '\\b';
+  // «Firm Reference Number (FRN) 202153» and «(FRN: 202153)» bracket the number.
+  const gap = candidate.provider === 'pra' ? '(?:\\s*\\(frn\\))?[\\s:./#()-]{0,12}' : '[\\s:./#-]{0,12}';
   const registryNumber = candidate.provider === 'france' ? ([
     ['siren', 'SIREN', '\\d(?:[\\s.-]*\\d){8}'],
     ['siret', 'SIRET', '\\d(?:[\\s.-]*\\d){13}'],
@@ -312,10 +419,17 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
   ] as const).some(([namespace, label, pattern]) => {
     const matches = value.matchAll(new RegExp(`\\b${label}\\b[\\s:./#-]{0,12}(${pattern})${end}`, 'giu'));
     return [...matches].some(match => frenchIdentifierMatches(match[1], id, namespace));
-  }) : id.length >= 5 && new RegExp(`\\b(?:${labels[candidate.provider]})\\b[\\s:./#-]{0,12}(${idPattern})${end}`, 'iu').test(value);
+  }) : id.length >= 5 && [...value.matchAll(new RegExp(`${opening}(?:${labels[candidate.provider]})${closing}${gap}(${idPattern})${end}`, 'giu'))]
+    // A broker's or retailer's site prints its insurer's or lender's FRN as a
+    // partner: «Policies are underwritten by …, FRN 955859»; a representative's
+    // site prints its adviser's CRD, a fundraiser's its charity's number. Unless
+    // the domain carries the firm's own name, such a number names someone else.
+    .some(match => !thirdParty || options.brandSite || !thirdParty.test(value.slice(Math.max(0, match.index - 200), match.index)));
   if (registryNumber && options.numberAlone) return true;
   if (!legalName || !named.includes(` ${legalName} `)) return false;
-  if (registryNumber || localRegistryNumber(value, candidate)) return true;
+  // A fundraiser's or trading company's footer prints the charity's company number too; a bank's or insurer's own footer prints
+  // its company number beside «lender» or «introducer» wording, so only a charity's is guarded.
+  if (registryNumber || localRegistryNumber(value, candidate, options.brandSite || candidate.provider !== 'charity_commission' ? null : thirdParty)) return true;
   // A long legal page contains most address words somewhere; only the number counts there.
   if (options.numberRequired) return false;
   const countryDefinition = ENG_COUNTRIES.find(item => item.value === country(candidate.country));
@@ -325,9 +439,17 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
     countryDefinition?.value === 'united kingdom' ? ' uk england wales scotland northern ireland' : ''}`).split(' '));
   // Single-character address parts still matter: dropping "1" or "A" would
   // match a different house or street belonging to an unrelated namesake.
-  const addressWords = [...new Set(key(candidate.address).split(' ').filter(word => word.length > 0 && !countryWords.has(word)))];
-  return addressWords.length >= 3 && addressWords.some(word => /\d/.test(word)) && addressWords.every(word => normalized.includes(` ${word} `));
+  const addressWords = [...new Set(key(candidate.address).split(' ').filter(word => word.length > 0 && !countryWords.has(word)).map(streetWord))];
+  const pageWords = ` ${normalized.trim().split(' ').map(streetWord).join(' ')} `;
+  return addressWords.length >= 3 && addressWords.some(word => /\d/.test(word)) && addressWords.every(word => pageWords.includes(` ${word} `));
 }
+// US registers abbreviate street words the USPS way («1000 INDUSTRIAL SCHOOL RD»); sites spell them out.
+const STREET_WORDS: Readonly<Record<string, string>> = {
+  street: 'st', avenue: 'ave', av: 'ave', road: 'rd', boulevard: 'blvd', drive: 'dr', lane: 'ln', court: 'ct', place: 'pl', parkway: 'pkwy',
+  highway: 'hwy', suite: 'ste', floor: 'fl', square: 'sq', terrace: 'ter', circle: 'cir', trail: 'trl', center: 'ctr', centre: 'ctr', plaza: 'plz',
+  building: 'bldg', north: 'n', south: 's', east: 'e', west: 'w', northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
+};
+function streetWord(word: string): string { return STREET_WORDS[word] ?? word; }
 /**
  * Short passages around each mention of the legal name: «issued by 1st Sure Ltd …
  * Our registered office is at: 6 Station Close, Potters Bar EN6 1TL». Address
@@ -348,29 +470,40 @@ function nameWindows(value: string, company: string): string[] {
 // Handelsregister, Dutch KvK, Danish CVR, Nordic org. numbers, Finnish Y-tunnus,
 // Irish CRO, Luxembourg RCS, Austrian Firmenbuch, Belgian KBO and others; the UK
 // Companies House forms; the NAIC company code GLEIF holds for many US insurers.
-const LOCAL_REGISTRY_LABELS = '(?:handelsregister|registernummer|registergericht|hr[ab]|kvk|kamer\\s+van\\s+koophandel|cvr|'
+const LOCAL_REGISTRY_LABELS = '(?:handelsregister|registernummer|registergericht|hr[ab]|kvk|kamer\\s+van\\s+koophandel|cvr|siren|'
+  // Supervisors' numbers that the EBA register files: German BaFin-ID, Swedish institutnummer.
+  + 'bafin[\\s-]*(?:id|nr|nummer)|bak[\\s-]*nr|institut(?:s)?nummer|'
   + 'org(?:anisations|anisasjons)?\\.?[\\s-]*(?:nr|nummer|number|no)|y-tunnus|business\\s+id|fo-nummer|cro|rcs|firmenbuch|fn|'
   + 'kbo|ondernemingsnummer|company\\s+(?:reg(?:istration)?\\.?\\s*)?(?:no|number|nr)|registration\\s+(?:no|number|nr)|'
   + 'registered\\s+(?:no|number)|reg\\.?\\s*(?:no|nr)|krs|nip|regon|cif|nif|p\\.?\\s*iva|partita\\s+iva|'
   + `naic(?:\\s+company)?(?:\\s+(?:code|number|no))?|${UK_COMPANY_NUMBER_LABELS})`;
 /**
- * GLEIF's `registeredAs`: «HRB 7876», «B123456», «12345678». A number with its
- * own letters is matched as written; a bare number needs a register label.
- * Local numbers repeat between courts and countries, so the caller also
- * requires the legal name in the same block.
+ * GLEIF's `registeredAs`: «HRB 7876», «B123456», «12345678»; or an EBA
+ * supervisor's reference: «relationship number: F0038». A number with its own
+ * letters is matched as written; a bare number needs a register label. Local
+ * numbers repeat between courts and countries, so the caller also requires the
+ * legal name in the same block.
  */
-function localRegistryNumber(value: string, candidate: HeEngRegistryCandidate): boolean {
-  if (candidate.provider !== 'gleif' || !candidate.localRegistryId) return false;
-  const chars = candidate.localRegistryId.normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
-  if (chars.length < 5 || chars.length > 30) return false;
-  // GLEIF keeps a Companies House number padded («01167327»); the site writes
-  // «company number 1167327». Same rule as companiesHouseDigits.
-  const digits = companiesHouseDigits(chars);
-  const pattern = `${digits !== chars ? '(?:0[\\s.:/-]*)*' : ''}${digits.split('').map(char => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s.:/-]*')}`;
-  const end = '(?![\\p{L}\\p{N}]|[\\s.-]{1,3}\\d)';
-  return /\p{L}/u.test(chars)
-    ? new RegExp(`(?<![\\p{L}\\p{N}])${pattern}${end}`, 'iu').test(value)
-    : new RegExp(`\\b${LOCAL_REGISTRY_LABELS}\\b[\\s:./#-]{0,16}${pattern}${end}`, 'iu').test(value);
+function localRegistryNumber(value: string, candidate: HeEngRegistryCandidate, thirdParty: RegExp | null = null): boolean {
+  // ESMA fund managers and PRA banks carry the same GLEIF number, looked up by their LEI;
+  // EBA firms the one GLEIF holds for their exact legal name, and their supervisor's reference.
+  // Charities, academy trusts and care providers carry their Companies House number; German market
+  // actors their commercial register number («HRB 84446») and VAT number.
+  if (!['gleif', 'esma', 'pra', 'eba', 'charity_commission', 'gias', 'cqc', 'mastr'].includes(candidate.provider)) return false;
+  return [candidate.localRegistryId, candidate.supervisorReference, candidate.vatNumber].some(number => {
+    const chars = (number ?? '').normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
+    if (chars.length < 5 || chars.length > 30) return false;
+    // GLEIF keeps a Companies House number padded («01167327»); the site writes
+    // «company number 1167327». Same rule as companiesHouseDigits.
+    const digits = companiesHouseDigits(chars);
+    const pattern = `${digits !== chars ? '(?:0[\\s.:/-]*)*' : ''}${digits.split('').map(char => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s.:/-]*')}`;
+    const end = '(?![\\p{L}\\p{N}]|[\\s.-]{1,3}\\d)';
+    const found = /\p{L}/u.test(chars)
+      ? value.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])${pattern}${end}`, 'giu'))
+      : value.matchAll(new RegExp(`\\b${LOCAL_REGISTRY_LABELS}\\b[\\s:./#-]{0,16}${pattern}${end}`, 'giu'));
+    // After a partner's wording («All proceeds go to …, company no. 03456789») the number is someone else's.
+    return [...found].some(match => !thirdParty || !thirdParty.test(value.slice(Math.max(0, match.index - 200), match.index)));
+  });
 }
 interface OwnFacts { identity: boolean; employees: HeEngEmployeeRange | null }
 /** Site identity is verified from its own Organization, never a search result title/snippet. */
@@ -413,21 +546,24 @@ export function readHeEngRegistryOwnSiteFacts(
   // A legal page linked from the home page of this site (terms, privacy, legal
   // notice) names the entity with its number: «Acme Ltd, company number …».
   const legalText = options.legalPage ? $('body').text().replace(/\s+/g, ' ').slice(0, 200_000) : '';
-  const legalPageMatch = !!options.legalPage && (legalBlockIdentity(legalText, candidate, { numberRequired: true }) ||
-    nameWindows(legalText, candidate.company).some(window => legalBlockIdentity(window, candidate)));
+  const brandSite = brandScore(page.url, candidate.company) > 0;
+  // A labelled EIN on a nonprofit's own giving or legal page names it, under whatever name
+  // it uses («American Red Cross» for the American National Red Cross), when the domain carries that name.
+  const legalPageMatch = !!options.legalPage && (legalBlockIdentity(legalText, candidate, { numberRequired: true, numberAlone: candidate.provider === 'irs' && brandSite, brandSite }) ||
+    nameWindows(legalText, candidate.company).some(window => legalBlockIdentity(window, candidate, { brandSite })));
   // Many sites build the footer from a div named «footer»/«copyright», not the
   // <footer> element. A long block is a page wrapper, not a footer.
   const footerMatch = $('footer, [role="contentinfo"], [id*="footer"], [class*="footer"], [id*="copyright"], [class*="copyright"]')
     .slice(0, 16).toArray()
     .some(node => !$(node).is('body, html') && $(node).text().length <= 6_000 &&
-      legalBlockIdentity($(node).text(), candidate, { numberAlone: true }));
+      legalBlockIdentity($(node).text(), candidate, { numberAlone: true, brandSite }));
   const legalName = legalNameKey(candidate.company);
   const ownHeading = !!legalName && $('title, h1').slice(0, 8).toArray()
     .some(node => ` ${nameWords($(node).text()).join(' ')} `.includes(` ${legalName} `));
   // Contact/legal blocks only establish ownership if the page itself names the
   // legal entity. A directory article mentioning a firm is not its own website.
   const contactMatch = ownHeading && $('address, #contact, .contact, #legal, .legal, #imprint, .imprint').slice(0, 12).toArray()
-    .some(node => legalBlockIdentity($(node).text().slice(0, 20_000), candidate));
+    .some(node => legalBlockIdentity($(node).text().slice(0, 20_000), candidate, { brandSite }));
   const declared = [...new Map(matching.filter(item => item.employees && (item.identity || options.trustedWebsite))
     .map(item => [JSON.stringify(item.employees), item.employees])).values()];
   return { identity: footerMatch || legalPageMatch || contactMatch || matching.some(item => item.identity),
@@ -654,7 +790,7 @@ export async function resolveHeEngRegistryCandidate(
       contentReason = lastReason;
       if (seen.size === 1) {
         // Two legal pages (where the company number lives), then contact pages.
-        const legal = legalLinks(page.html, page.url).filter(link => link.startsWith('https:') && sameSite(link, site) && !seen.has(link)).slice(0, 2);
+        const legal = legalLinks(page.html, page.url, candidate.provider === 'irs').filter(link => link.startsWith('https:') && sameSite(link, site) && !seen.has(link)).slice(0, 2);
         for (const link of legal) { queue.push(link); legalPages.add(link); }
         for (const link of discoverContactLinks(page.html, page.url)) {
           if (queue.length >= MAX_PAGES_PER_SITE - 1) break;

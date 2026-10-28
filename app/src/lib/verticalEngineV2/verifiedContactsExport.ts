@@ -3,6 +3,7 @@ import { findEmailColumn, mapBaseRowsToLeads } from './launchHandoff';
 import { prepareSegmentationAudience } from './segmentationAudit';
 import { projectCompanyNames } from './companyNames';
 import { getVeProjectExclusionIdentity, loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow } from './projectExclusions';
+import { isVeTwoGisLead, isVeTwoGisRow } from './twoGisQuarantine';
 
 type Row = Record<string, unknown>;
 type Identity = ReturnType<typeof getVeProjectExclusionIdentity>;
@@ -184,6 +185,9 @@ export async function loadVeVerifiedContactsExport(
     const visible = projectCompanyNames(audience.rows);
     audience.rows.forEach((row, index) => {
       const email = audience.leads[index].email.trim().toLowerCase();
+      // 2ГИС (R1): не «готов» — observed без ready снимает и снимки доставки этого адреса ниже.
+      // Исключения проекта для этой строки уже проверены в цикле выше.
+      if (isVeTwoGisRow(row)) return;
       const policyRow = veProjectExclusionRow(row, email);
       facts.ready.add(email);
       if (matchVeProjectExclusion(policyRow, policy)) {
@@ -272,7 +276,8 @@ export async function loadVeVerifiedContactsExport(
           || matchVeProjectExclusion(veProjectExclusionRow({ ...entry.lead_payload, _ve_company_identity: identity }, email), policy)) blockedEmails.add(email);
         // A current explicit rejection wins over its old launch snapshot. A lone
         // skipped snapshot can also be a permanent provider/invalid-email refusal.
-        if (entry.status === 'skipped' || (facts.observed.has(email) && !facts.ready.has(email))) continue;
+        if (entry.status === 'skipped' || isVeTwoGisLead(entry.lead_payload)
+          || (facts.observed.has(email) && !facts.ready.has(email))) continue;
         eligibleEmails.add(email);
         if (!contacts.has(email)) contacts.set(email, { row: deliveryCells(entry.lead_payload, email), identity,
           hypothesisIds: new Set(), baseIds: new Set() });

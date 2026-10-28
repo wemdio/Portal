@@ -21,6 +21,7 @@ import {
 import { HE, Spinner, StatusDot } from './design';
 import { matchesVeSearch } from './SearchableSelect';
 import { ProjectDetail } from './ProjectDetail';
+import { SenderSwitchPanel } from './SenderSwitchPanel';
 import { ProjectStatusBadge, StatusBox, formatDate, prettyHost, prettyProjectName } from './ui';
 
 /** Правильная русская плюрализация (проект / проекта / проектов). */
@@ -71,7 +72,9 @@ export function VeEngineWorkspace({
     void (async () => {
       try {
         const { data } = await veEngineCall<VeProjectsResponse>(`${VE_API}/projects`);
-        if (!cancelled) setProjects(Array.isArray(data.projects) ? data.projects : []);
+        if (!cancelled) {
+          setProjects(Array.isArray(data.projects) ? data.projects : []);
+        }
       } finally {
         if (!cancelled) setListLoading(false);
       }
@@ -147,6 +150,8 @@ export function VeEngineWorkspace({
               <StatusBox tone="error">{errorMsg}</StatusBox>
             </div>
           ) : null}
+          {/* Выключатели Движка → «Рассылка» (этап 6; бывшая плашка рынков этапа 4). */}
+          <SenderSwitchPanel />
 
           <div className="ve2-home-grid">
             <section className="min-w-0">

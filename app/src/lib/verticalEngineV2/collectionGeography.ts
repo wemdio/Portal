@@ -11,6 +11,8 @@ const record = (value: unknown): Record<string, unknown> => value && typeof valu
 const clean = (value: string) => value.trim().replace(/\s+/g, ' ');
 const key = (value: string) => clean(value).toLocaleLowerCase('ru').replace(/ё/g, 'е')
   .replace(/^(?:г\.\s*|г\s+|город\s+)/u, '').replace(/\s+обл\.?$/u, ' область');
+/** Ключ места: тот же, по которому сверяется география брифа (город 2ГИС в ve2.card_features — им же). */
+export const veGeographyNameKey = (value: string) => key(value);
 const EMPTY = /^(?:[-—–_.\s]+|нет|не знаю|не указано|неизвестно|n\/?a|без ограничений|нет ограничений|весь мир|worldwide|global)$/iu;
 
 export function readVeCollectionGeography(value: unknown): VeCollectionGeography | null {
@@ -63,6 +65,33 @@ export function veCollectionGeographyPlaces(required: string): VeGeographyPlace[
   return [...new Map(parts.map((part) => { const place = places.get(part)!; return [place.name, { ...place }] as const; })).values()];
 }
 
+/** 2ГИС — только Россия. Регион с кодом → region_codes, город → cities; «Россия» одна или вместе с местами
+ * России — вся страна ({}). Другая страна в списке, регион без кода или нераспознанный текст — null:
+ * близнеца не ставим (buildPlan), закрываем (applyCollectionGeography) и не читаем (часть 3).
+ * Смешанный список «Россия + места» → вся страна — правило на подтверждение чатом VE2. */
+// Четыре региона hh, чьё написание расходится с FEDERAL_DISTRICTS (Кемеровская, ХМАО-Югра, Северная
+// Осетия-Алания, Еврейская АО): код — только для 2ГИС; общий словарь мест не меняем — по нему строятся
+// фильтры реестра и hh уже идущих баз.
+const VE_TWO_GIS_HH_REGION_CODES: Record<string, string> = { '1229': '42', '1368': '86', '1475': '15', '1941': '79' };
+const twoGisRegionCode = (place: VeGeographyPlace) => place.regionCode
+  ?? (place.hhArea ? VE_TWO_GIS_HH_REGION_CODES[place.hhArea] : undefined);
+
+export function veTwoGisPlaceScope(scope: VeGeographyPlace[] | null): { region_codes?: string[]; cities?: string[] } | null {
+  if (!scope?.length || scope.some((place) => (place.kind === 'country' && place.name !== 'Россия')
+    || (place.kind === 'region' && !twoGisRegionCode(place)))) return null;
+  if (scope.some((place) => place.kind === 'country')) return {};
+  const regionCodes = [...new Set(scope.flatMap((place) => place.kind === 'region' ? [twoGisRegionCode(place)!] : []))];
+  const cities = [...new Set(scope.flatMap((place) => place.kind === 'city' ? [place.name] : []))];
+  return { ...(regionCodes.length ? { region_codes: regionCodes } : {}), ...(cities.length ? { cities } : {}) };
+}
+
+/** Где читает близнец: география брифа, иначе geo его Яндекс-задачи; без текста — вся Россия ({}). */
+export function veTwoGisQueryScope(query: { geo?: string; collection_geography?: VeCollectionGeography }):
+  { region_codes?: string[]; cities?: string[] } | null {
+  const text = query.collection_geography?.required ?? query.geo;
+  return text?.trim() ? veTwoGisPlaceScope(veCollectionGeographyPlaces(text)) : {};
+}
+
 /** Enforce known source filters after every source-policy rewrite. Unknown
  * prose remains an explicit condition for the existing planner and relevance
  * gate; it is never guessed from a few matching words. No sources, queries or
@@ -81,6 +110,14 @@ export function applyVeCollectionGeographyToPlan(plan: VeSourcePlan, geography?:
     if ((task.source === 'yandex_maps' || task.source === 'google_maps') && task.maps_query) return { ...task,
       maps_query: { ...task.maps_query, geo: scope?.map((place) => place.name).join(', ') ?? required,
         collection_geography: { version: 1 as const, required } } };
+    if (task.source === 'two_gis' && task.two_gis_query) {
+      // Близнец 2ГИС: spread сохранённого объекта, как у карт, без пересборки ключей — иначе сравнение
+      // applyCollectionGeography после jsonb видит ложную разницу. region_codes/cities пишутся всегда
+      // (undefined — ключа нет): смена географии не оставит старые коды.
+      const filters = veTwoGisPlaceScope(scope);
+      return { ...task, two_gis_query: { ...task.two_gis_query, geo: scope?.map((place) => place.name).join(', ') ?? required,
+        region_codes: filters?.region_codes, cities: filters?.cities, collection_geography: { version: 1 as const, required } } };
+    }
     return task;
   }) };
 }

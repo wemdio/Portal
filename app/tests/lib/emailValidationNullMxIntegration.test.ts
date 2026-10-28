@@ -52,6 +52,8 @@ const fetchMock = jest.fn();
 
 beforeAll(async () => {
   process.env.SMTP_PROXY_URLS = 'http://proxy-a.test:3100';
+  // Test domains (.test, Microsoft tenants) are Western destinations: the same proxy.
+  process.env.SMTP_PROXY_URLS_WEST = 'http://proxy-a.test:3100';
   global.fetch = fetchMock as unknown as typeof fetch;
   ({ validateEmail, __resetEgressBlockCache: resetEgress } = await import('@/lib/emailValidation/validator'));
   cache = await import('@/lib/emailValidation/sharedCache');

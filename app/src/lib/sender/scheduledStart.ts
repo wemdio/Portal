@@ -5,6 +5,7 @@ import { EDITABLE_CAMPAIGN_STATUSES, SenderOpError, startCampaign } from './camp
 import { fillPoolFromFolder } from './folders';
 import { ensureCampaignStopListChecked } from './stopLists';
 import { SCHEDULED_START_CLAIM_MARK } from './types';
+import { readVe2SendingSwitch, VE2_SENDING_STOPPED_CODE } from './ve2SendingSwitch';
 
 type Log = (level: 'info' | 'warn' | 'error', message: string) => void;
 
@@ -27,25 +28,31 @@ export async function runScheduledStarts(opts: { log: Log }): Promise<number> {
   if (!db) return 0;
   // Прерванный запуск (воркер упал или база не дала вернуть время) — снова в
   // очередь: сам запуск повторяем безопасно, кампания всё ещё черновик или на паузе.
+  // Отправку кампаний Движка остановил администратор (или выключатель не
+  // прочитался) — их запуски не трогаем совсем: снятое время потерялось бы.
+  const ve2Switch = await readVe2SendingSwitch(db);
+  const skipVe2 = ve2Switch.state !== 'enabled';
   const nowIso = new Date().toISOString();
-  const { error: rearmError } = await db
+  let rearm = db
     .from('sender_campaigns')
     .update({ scheduled_start_at: nowIso, scheduled_start_error: 'Запуск прервался — повторяем', updated_at: nowIso })
     .eq('scheduled_start_error', SCHEDULED_START_CLAIM_MARK)
     .is('scheduled_start_at', null)
     .in('status', EDITABLE_CAMPAIGN_STATUSES)
     .lt('updated_at', new Date(Date.now() - STALE_CLAIM_MS).toISOString());
+  if (skipVe2) rearm = rearm.neq('source_kind', 've2');
+  const { error: rearmError } = await rearm;
   if (rearmError) opts.log('warn', `Прерванные отложенные запуски не возвращены: ${rearmError.message}`);
 
   // С запасом: ждущие сверки стоп-листов остаются в выборке и не должны
   // заслонять остальные.
-  const { data, error } = await db
+  let due = db
     .from('sender_campaigns')
     .select('id, name, scheduled_start_at')
     .lte('scheduled_start_at', new Date().toISOString())
-    .in('status', EDITABLE_CAMPAIGN_STATUSES)
-    .order('scheduled_start_at')
-    .limit(200);
+    .in('status', EDITABLE_CAMPAIGN_STATUSES);
+  if (skipVe2) due = due.neq('source_kind', 've2');
+  const { data, error } = await due.order('scheduled_start_at').limit(200);
   if (error) throw new Error(error.message);
 
   let started = 0;
@@ -83,11 +90,13 @@ export async function runScheduledStarts(opts: { log: Log }): Promise<number> {
       const message = e instanceof Error ? e.message : String(e);
       opts.log('warn', `Отложенный запуск кампании «${row.name}» не удался: ${message}`);
       // Сбой базы — не повод навсегда отменять запуск: возвращаем время, следующий тик попробует снова.
-      const retry = !(e instanceof SenderOpError) || e.status >= 500;
+      // Отправку кампаний Движка остановили посреди тика — время вернуть, а не терять.
+      const stopped = e instanceof SenderOpError && e.code === VE2_SENDING_STOPPED_CODE;
+      const retry = !(e instanceof SenderOpError) || e.status >= 500 || stopped;
       // Всё ниже — только пока на кампании наша отметка: отмена и перенос
       // оператором в это время её стёрли, и их решение не затирается.
       // 409 — кампанию тем временем запустили или завершили руками: снимаем отметку.
-      const update = e instanceof SenderOpError && e.status === 409
+      const update = e instanceof SenderOpError && e.status === 409 && !stopped
         ? { scheduled_start_error: null }
         : retry
           ? { scheduled_start_at: row.scheduled_start_at as string, scheduled_start_error: message.slice(0, 500) }

@@ -1,0 +1,218 @@
+import type { SupabaseClient } from '@supabase/supabase-js';
+
+/**
+ * Настройки 2ГИС для VE2 (таблица ve_twogis_source_settings, шаг R2 плана
+ * docs/reports/2026-10-26-2gis-ve2-plan.md). Без воркерных зависимостей: модуль
+ * читают и портал (новое превью, выдача), и воркер. Сбой чтения — null: это
+ * «неизвестно», а не «выключено». Флаг не ставится и строки 2ГИС не выдаются, но
+ * близнец не закрывается, а откладывается (необратимо закрывает только mode=off).
+ *
+ * Аварийный выключатель выдачи — client_use='off': обратимо, близнецы откладываются.
+ * Переход all → internal — смена политики, а не авария: для текущих баз клиентских
+ * проектов он необратим (проект «убран из списка»: близнецы закрываются, строки освобождаются).
+ */
+export interface VeTwoGisSettings {
+  mode: 'off' | 'on';
+  reads_enabled: boolean;
+  client_use: 'off' | 'internal' | 'all';
+  internal_projects: string[];
+  excluded_projects: string[];
+  /** 'HH:MM[:SS]' UTC; start > end — окно через полночь. */
+  quiet_start_utc: string;
+  quiet_end_utc: string;
+  max_candidates: number | null;
+  snapshot_id: number | null;
+  features_version: number | null;
+  built_at: string | null;
+  mode_changed_at: string | null;
+  reads_changed_at: string | null;
+  client_use_changed_at: string | null;
+}
+
+const SELECT = 'mode, reads_enabled, client_use, internal_projects, excluded_projects, quiet_start_utc, quiet_end_utc, '
+  + 'max_candidates, snapshot_id, features_version, built_at, mode_changed_at, reads_changed_at, client_use_changed_at';
+const TIME = /^([01]\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?$/;
+
+const text = (value: unknown) => (typeof value === 'string' ? value : null);
+const strings = (value: unknown) => (Array.isArray(value) && value.every((item) => typeof item === 'string') ? value as string[] : null);
+const count = (value: unknown) => (value == null ? null : Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : undefined);
+const minutesOf = (value: string) => {
+  const match = TIME.exec(value)!;
+  return Number(match[1]) * 60 + Number(match[2]);
+};
+/** Окно считается в минутах: секунды в настройке — ошибка, а не «округлим». */
+const wholeMinute = (value: string) => {
+  const match = TIME.exec(value);
+  return !!match && (match[3] ?? '00') === '00';
+};
+
+/** Строка из БД → настройки; что-то не так — null (неизвестно), а не догадка. */
+export function parseVeTwoGisSettings(row: unknown): VeTwoGisSettings | null {
+  return parseWithProblem(row).settings;
+}
+
+function parseWithProblem(row: unknown): { settings: VeTwoGisSettings | null; problem: string | null } {
+  const invalid = (field: string) => ({ settings: null, problem: `invalid:${field}` });
+  if (!row || typeof row !== 'object') return { settings: null, problem: 'missing_row' };
+  const value = row as Record<string, unknown>;
+  const internal = strings(value.internal_projects);
+  const excluded = strings(value.excluded_projects);
+  const start = text(value.quiet_start_utc);
+  const end = text(value.quiet_end_utc);
+  const maxCandidates = count(value.max_candidates);
+  const snapshot = count(value.snapshot_id);
+  const features = count(value.features_version);
+  if (value.mode !== 'off' && value.mode !== 'on') return invalid('mode');
+  if (typeof value.reads_enabled !== 'boolean') return invalid('reads_enabled');
+  if (value.client_use !== 'off' && value.client_use !== 'internal' && value.client_use !== 'all') return invalid('client_use');
+  if (!internal) return invalid('internal_projects');
+  if (!excluded) return invalid('excluded_projects');
+  if (!start || !end || !wholeMinute(start) || !wholeMinute(end) || minutesOf(start) === minutesOf(end)) return invalid('quiet_window');
+  if (maxCandidates === undefined) return invalid('max_candidates');
+  if (snapshot === undefined) return invalid('snapshot_id');
+  if (features === undefined) return invalid('features_version');
+  return { problem: null, settings: {
+    mode: value.mode, reads_enabled: value.reads_enabled, client_use: value.client_use,
+    internal_projects: internal, excluded_projects: excluded, quiet_start_utc: start, quiet_end_utc: end,
+    max_candidates: maxCandidates, snapshot_id: snapshot, features_version: features, built_at: text(value.built_at),
+    mode_changed_at: text(value.mode_changed_at), reads_changed_at: text(value.reads_changed_at),
+    client_use_changed_at: text(value.client_use_changed_at),
+  } };
+}
+
+/** Строка 'ru'. Нет таблицы (до деплоя R2), нет строки, ошибка — null и строка в лог (только вид, без значений). */
+export async function readVeTwoGisSettings(db: SupabaseClient): Promise<VeTwoGisSettings | null> {
+  let problem: string;
+  try {
+    const { data, error } = await db.from('ve_twogis_source_settings').select(SELECT).eq('market', 'ru').maybeSingle();
+    if (error) problem = `read:${error.code ?? 'error'}`;
+    else {
+      const parsed = parseWithProblem(data);
+      if (parsed.settings) return parsed.settings;
+      problem = parsed.problem ?? 'unknown';
+    }
+  } catch (error) {
+    problem = `read:${error instanceof Error ? error.name : 'error'}`;
+  }
+  console.warn(`[ve2-2gis] settings unreadable: ${problem}`);
+  return null;
+}
+
+/** Строка 'running' старше этого — зависший прогон (вахтёр снимает такие за ~25 мин): не учитывается. */
+export const VE_OUTREACHOS_RUN_STALE_MS = 12 * 3_600_000;
+
+/**
+ * Идёт ли дневной прогон OutreachOS по общим данным 2ГИС (основная БД, outreachos_pipeline_runs).
+ * Не бросает: сбой чтения — 'unreadable', для вызывающего это «идёт» (близнец ждёт). Читают и
+ * портал (шлюз конструктора, часть 5), и воркер; клиент воркера — сервисный, RLS сотрудников не мешает.
+ */
+export async function readVeOutreachOsRunning(db: SupabaseClient, now: Date): Promise<'idle' | 'running' | 'unreadable'> {
+  let problem: string;
+  try {
+    const { data, error } = await db.from('outreachos_pipeline_runs').select('id').eq('status', 'running')
+      .gte('started_at', new Date(now.getTime() - VE_OUTREACHOS_RUN_STALE_MS).toISOString()).limit(1);
+    if (!error) return Array.isArray(data) && data.length ? 'running' : 'idle';
+    problem = String(error.code ?? 'error');
+  } catch (error) {
+    problem = error instanceof Error ? error.name : 'error';
+  }
+  console.warn(`[ve2-2gis] outreachos status unreadable: ${problem}`);
+  return 'unreadable';
+}
+
+/**
+ * Выдача строк 2ГИС проекту. open; closed — аварийное client_use='off' (отсрочка,
+ * через сутки близнец закрывается, можно открыть обратно); removed — проект
+ * исключён или не в списке (близнец закрывается сразу); unknown — настройки не
+ * прочитались (временно «не разрешено»).
+ */
+export type VeTwoGisOutputState = 'open' | 'closed' | 'removed' | 'unknown';
+
+export function veTwoGisOutputState(settings: VeTwoGisSettings | null, projectId: string): VeTwoGisOutputState {
+  if (!settings || !projectId) return 'unknown';
+  if (settings.client_use === 'off') return 'closed';
+  if (settings.client_use === 'all') return settings.excluded_projects.includes(projectId) ? 'removed' : 'open';
+  return settings.internal_projects.includes(projectId) ? 'open' : 'removed';
+}
+
+/** Выдача строк 2ГИС проекту: all — всем, кроме excluded_projects; internal — только internal_projects. */
+export function veTwoGisOutputOpen(settings: VeTwoGisSettings | null, projectId: string): boolean {
+  return veTwoGisOutputState(settings, projectId) === 'open';
+}
+
+/** Снимок для чтения проверен сборкой (шаг Ш5): без него флаг заморозил бы пустой снимок. */
+export const veTwoGisSnapshotReady = (settings: VeTwoGisSettings | null):
+  settings is VeTwoGisSettings & { snapshot_id: number; features_version: number; built_at: string } =>
+  !!settings && settings.snapshot_id != null && settings.features_version != null && settings.built_at != null;
+
+/** Флаг 2ГИС новому RU-превью: 2ГИС включён, снимок собран и выдача проекту открыта. */
+export function veTwoGisFlagAllowed(settings: VeTwoGisSettings | null, projectId: string): boolean {
+  return settings?.mode === 'on' && veTwoGisSnapshotReady(settings) && veTwoGisOutputOpen(settings, projectId);
+}
+
+/** collect_info.two_gis_source (план R3 «Флаг»): ставит только вставка нового RU-превью
+ * (baseCollectEnqueue); база поставки копирует его в baseCollect. Нет поля — нет близнецов. */
+export const VE_TWO_GIS_SOURCE_FLAG_VERSION = 1;
+export interface VeTwoGisSourceFlag {
+  version: typeof VE_TWO_GIS_SOURCE_FLAG_VERSION;
+  snapshot_id: number;
+  features_version: number;
+  /** Потолок кандидатов близнеца на базу; null — собственный лимит базы. */
+  max_candidates: number | null;
+  frozen_at: string;
+}
+
+/** Только после veTwoGisFlagAllowed: без проверенного снимка флага нет. */
+export function createVeTwoGisSourceFlag(settings: VeTwoGisSettings, now: Date): VeTwoGisSourceFlag | null {
+  if (!veTwoGisSnapshotReady(settings)) return null;
+  return { version: VE_TWO_GIS_SOURCE_FLAG_VERSION, snapshot_id: settings.snapshot_id,
+    features_version: settings.features_version, max_candidates: settings.max_candidates, frozen_at: now.toISOString() };
+}
+
+const positiveInt = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+
+/** jsonb → флаг. Чужая форма — null: база ведёт себя как без флага (без близнеца), а не падает. */
+export function readVeTwoGisSourceFlag(value: unknown): VeTwoGisSourceFlag | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const flag = value as Record<string, unknown>;
+  if (flag.version !== VE_TWO_GIS_SOURCE_FLAG_VERSION || !positiveInt(flag.snapshot_id) || !positiveInt(flag.features_version)
+    || (flag.max_candidates !== null && !positiveInt(flag.max_candidates))
+    || typeof flag.frozen_at !== 'string' || !Number.isFinite(Date.parse(flag.frozen_at))) return null;
+  return { version: VE_TWO_GIS_SOURCE_FLAG_VERSION, snapshot_id: flag.snapshot_id, features_version: flag.features_version,
+    max_candidates: flag.max_candidates as number | null, frozen_at: flag.frozen_at };
+}
+
+/** Флаг заморожен на снимке и таблице сайтов, проверенных сейчас. Проверка страницы (часть 3) — тем же предикатом. */
+export function veTwoGisFlagCurrent(flag: VeTwoGisSourceFlag | null, settings: VeTwoGisSettings | null): boolean {
+  return !!flag && veTwoGisSnapshotReady(settings) && flag.snapshot_id === settings.snapshot_id
+    && flag.features_version === settings.features_version;
+}
+
+/** Конец тихого окна, если now внутри него, иначе null. Окно [start, end) по UTC, start > end — через полночь. */
+export function veTwoGisQuietUntil(settings: VeTwoGisSettings, now: Date): Date | null {
+  const start = minutesOf(settings.quiet_start_utc);
+  const end = minutesOf(settings.quiet_end_utc);
+  const current = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const inside = start < end ? current >= start && current < end : current >= start || current < end;
+  if (!inside) return null;
+  const until = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), Math.floor(end / 60), end % 60));
+  if (until.getTime() <= now.getTime()) until.setUTCDate(until.getUTCDate() + 1);
+  return until;
+}
+
+/**
+ * Причина на уровне настроек (без проекта: выдачу проекту даёт veTwoGisOutputState).
+ * off — mode=off, необратимо; settings_unavailable — не прочитались, отсрочка.
+ */
+export type VeTwoGisReadBlock = { reason: 'off' } | { reason: 'settings_unavailable' } | { reason: 'not_built' }
+  | { reason: 'reads_disabled' } | { reason: 'quiet'; until: Date };
+
+/** Почему читать 2ГИС сейчас нельзя; null — можно. */
+export function veTwoGisReadBlock(settings: VeTwoGisSettings | null, now: Date): VeTwoGisReadBlock | null {
+  if (!settings) return { reason: 'settings_unavailable' };
+  if (settings.mode !== 'on') return { reason: 'off' };
+  if (!veTwoGisSnapshotReady(settings)) return { reason: 'not_built' };
+  if (!settings.reads_enabled) return { reason: 'reads_disabled' };
+  const until = veTwoGisQuietUntil(settings, now);
+  return until ? { reason: 'quiet', until } : null;
+}

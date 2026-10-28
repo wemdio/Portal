@@ -15,11 +15,12 @@ import {
   isDisposable,
   isRole,
   isFreeProvider,
+  isFreeMailPlaceholder,
   suggestTypo,
   type ValidationResult,
   type DomainInfo,
 } from './shared';
-import { cachedCatchAll, cachedValidation, isConclusiveValidation, rememberCatchAll, rememberValidation } from './sharedCache';
+import { bouncedBefore, cachedCatchAll, cachedValidation, isConclusiveValidation, rememberCatchAll, rememberValidation } from './sharedCache';
 
 // Re-export everything from shared so the worker can import from one place
 export { checkSyntax, normalizeEmail, isDisposable, isRole, isFreeProvider, suggestTypo } from './shared';
@@ -167,10 +168,45 @@ const SMTP_PROXY_URLS: string[] = (() => {
   return [];
 })();
 
+// Western mail gateways (Microsoft, Proofpoint, Mimecast, Google…) feed
+// Spamhaus; Yandex, Mail.ru and Russian hosting mostly do not. The probe IPs
+// checked 0.6–1.9 million Russian addresses a week for months unlisted and went
+// to Spamhaus CSS from 14.10.2026, when English outreach and ENG began probing
+// Western companies (owner 26.10.2026: «российские проверки на старых IP,
+// западные на отдельных»). Without this list a Western address is not probed.
+const SMTP_PROXY_URLS_WEST: string[] = (process.env.SMTP_PROXY_URLS_WEST ?? '')
+  .split(',').map((u) => u.trim()).filter(Boolean);
+
 const SMTP_PROXY_API_KEY = process.env.SMTP_PROXY_API_KEY ?? '';
 const SMTP_PROXY_TIMEOUT_MS = 25_000;
 
-let proxyIndex = 0;
+const proxyIndex: Record<SmtpProbePool, number> = { ru: 0, west: 0 };
+
+export type SmtpProbePool = 'ru' | 'west';
+
+// Russian and CIS zones, Cyrillic ones in punycode (рф, бел, қаз, укр, москва,
+// рус, онлайн, сайт, орг, дети).
+const RU_ZONE_RE = /\.(?:ru|su|by|kz|uz|kg|tj|am|az|md|ua|moscow|tatar|xn--p1ai|xn--90ais|xn--80ao21a|xn--j1amh|xn--80adxhks|xn--p1acf|xn--80asehdb|xn--80aswg|xn--c1avg|xn--d1acj3b)\.?$/i;
+// Russian hosting whose MX names are not in a Russian zone.
+const RU_MX_RE = /(?:^|\.)beget\.com\.?$/i;
+
+/**
+ * Which probe IPs check this address: the long-standing ones for Russian
+ * destinations, separate ones for everything else. A big Western gateway wins
+ * over a Russian domain zone (a .ru company on Microsoft 365 is probed from the
+ * Western IPs); an unknown server outside Russian zones counts as Western.
+ */
+export function smtpProbePool(email: string, mxHost: string): SmtpProbePool {
+  const provider = smtpEgressKey(mxHost);
+  if (provider === 'provider:yandex' || provider === 'provider:mailru') return 'ru';
+  if (provider.startsWith('provider:')) return 'west';
+  const domain = email.slice(email.lastIndexOf('@') + 1);
+  return RU_ZONE_RE.test(domain) || RU_ZONE_RE.test(mxHost) || RU_MX_RE.test(mxHost) ? 'ru' : 'west';
+}
+
+/** Detail step of a Western address left unprobed: final, the queue does not retry it. */
+export const SMTP_POOL_UNAVAILABLE_STEP = 'smtp_pool_unavailable';
+const SMTP_POOL_UNAVAILABLE_ERROR = 'Western destination: no separate probe IPs configured, not probed';
 
 // ─── Per-(MX host × egress IP) transport-block memory ───────────────────────
 // Some MX operators block a specific probe IP (e.g. Yandex silently drops the
@@ -273,7 +309,8 @@ function markGreylistAffinity(mxHost: string, url: string): void {
 export function __resetEgressBlockCache(): void {
   mxEgressBlock.clear();
   mxGreylistAffinity.clear();
-  proxyIndex = 0;
+  proxyIndex.ru = 0;
+  proxyIndex.west = 0;
 }
 
 /**
@@ -283,11 +320,12 @@ export function __resetEgressBlockCache(): void {
  * (b) IPs known to be blocked for this MX or its provider left out. Empty when
  * every IP is blocked: the caller then sends no probe (see above).
  */
-function proxyTryOrder(mxHost: string): string[] {
-  const n = SMTP_PROXY_URLS.length;
+function proxyTryOrder(mxHost: string, pool: SmtpProbePool): string[] {
+  const urls = pool === 'west' ? SMTP_PROXY_URLS_WEST : SMTP_PROXY_URLS;
+  const n = urls.length;
   const rotated: string[] = [];
-  for (let i = 0; i < n; i += 1) rotated.push(SMTP_PROXY_URLS[(proxyIndex + i) % n]);
-  proxyIndex = (proxyIndex + 1) % n;
+  for (let i = 0; i < n; i += 1) rotated.push(urls[(proxyIndex[pool] + i) % n]);
+  proxyIndex[pool] = (proxyIndex[pool] + 1) % n;
   let order = rotated.filter((u) => !isEgressBlocked(mxHost, u));
   // Greylist retries must return from the SAME IP that greylisted → pin it first
   // (unless it has since become transport-blocked for this MX, in which case we
@@ -364,7 +402,11 @@ async function smtpVerifyViaProxy(
   // MX — kept as the fallback to return if every other proxy is also blocked.
   let lastInconclusive: SmtpCheckResult | null = null;
 
-  const order = proxyTryOrder(mxHost);
+  const pool = smtpProbePool(email, mxHost);
+  if (pool === 'west' && !SMTP_PROXY_URLS_WEST.length) {
+    return { code: 0, exists: null, isCatchAll: null, greylist: false, error: SMTP_POOL_UNAVAILABLE_ERROR };
+  }
+  const order = proxyTryOrder(mxHost, pool);
   if (!order.length) {
     return { code: 0, exists: null, isCatchAll: null, greylist: false,
       error: `Every egress IP is blocked by ${smtpEgressKey(mxHost)}; no probe until the block expires` };
@@ -572,19 +614,69 @@ function validationAddress(rawEmail: string): string {
  * Every validation path calls this. An address with a conclusive SMTP verdict
  * from the last EMAIL_VALIDATION_CACHE_TTL_DAYS (sharedCache.ts) is answered
  * without a probe; a new conclusive verdict is kept. Unknown is never kept.
+ * A placeholder on free mail skips the cache: its kept catch_all must not win.
  */
 export async function validateEmail(
   rawEmail: string,
   domainCache: Map<string, DomainInfo>,
 ): Promise<ValidationResult> {
   const email = validationAddress(rawEmail);
-  if (checkSyntax(email).valid) {
+  if (checkSyntax(email).valid && !isFreeMailPlaceholder(email)) {
     const cached = await cachedValidation(email);
-    if (cached) return cached;
+    if (cached) return withBounceHistory(email, cached, domainCache);
   }
   const result = await validateEmailBySmtp(email, domainCache);
   if (isConclusiveValidation(result)) rememberValidation(email, result);
-  return result;
+  return withBounceHistory(email, result, domainCache);
+}
+
+/**
+ * Our sends answer what SMTP cannot. In 01.08–09.10.2026 a re-send to an
+ * address that had already bounced bounced again in 69% of cases on the
+ * Mail.ru group and 64% on catch-all company domains, but in 33% when SMTP had
+ * confirmed the mailbox. So a recent bounce with no sign of life after it
+ * (email_bounce_history) turns catch_all into invalid. ok stays ok, and so does
+ * unknown: it says something about our side (greylisting, a throttled or banned
+ * probe IP, a proxy or DNS outage, no probe IPs), not about the mailbox, and its
+ * retries must keep running. The cache keeps the SMTP verdict; the history is
+ * read on every check.
+ */
+async function withBounceHistory(
+  email: string,
+  result: ValidationResult,
+  domainCache: Map<string, DomainInfo>,
+): Promise<ValidationResult> {
+  if (result.result !== 'catch_all') return result;
+  const bounce = await bouncedBefore(email);
+  if (!bounce || await yandexHosted(email, domainCache)) return result;
+  return {
+    ...result,
+    result: 'invalid', quality: 'bad', error: undefined,
+    details: {
+      ...result.details,
+      step: 'bounced_before', verdict_before: result.result,
+      last_bounced_at: bounce.lastBouncedAt, bounces: bounce.bounces,
+      error: 'Адрес уже отбивался в наших рассылках',
+    },
+  };
+}
+
+/**
+ * Yandex has refused our Google sending mailboxes by policy since 10.10.2026
+ * (554 5.7.1 for ~92% of cold mail), so a bounce from a Yandex-hosted domain
+ * says nothing about the mailbox — 14.5% of catch-all domains sit on Yandex 360.
+ * An undetermined MX counts as Yandex: the verdict is kept, never guessed.
+ */
+async function yandexHosted(email: string, domainCache: Map<string, DomainInfo>): Promise<boolean> {
+  const domain = email.substring(email.lastIndexOf('@') + 1);
+  let info = domainCache.get(domain);
+  if (!info) {
+    const mx = await lookupMX(domain);
+    if (mx.lookupFailed) return true;
+    info = { domain, mxHosts: mx.mxHosts, mxFound: mx.found, isCatchAll: null, isDisposable: isDisposable(domain), checkedAt: new Date() };
+    domainCache.set(domain, info);
+  }
+  return info.mxHosts.some((host) => smtpEgressKey(host) === 'provider:yandex');
 }
 
 async function validateEmailBySmtp(
@@ -617,6 +709,17 @@ async function validateEmailBySmtp(
       is_free: freeFlag, is_role: roleFlag, is_disposable: true, is_catch_all: false,
       did_you_mean: null, mx_found: false, smtp_code: 0,
       details: { step: 'disposable' },
+    };
+  }
+
+  // info@mail.ru, 00000@mail.ru: no SMTP answer can reject such an address
+  // (the Mail.ru group accepts any mailbox), so it is judged by form (shared.ts).
+  if (isFreeMailPlaceholder(email)) {
+    return {
+      result: 'invalid', quality: 'bad',
+      is_free: true, is_role: roleFlag, is_disposable: false, is_catch_all: false,
+      did_you_mean: null, mx_found: false, smtp_code: 0,
+      details: { step: 'placeholder', error: 'Шаблонный адрес на бесплатной почте' },
     };
   }
 
@@ -723,6 +826,7 @@ async function validateEmailBySmtp(
       }
       if (smtpResult.exists !== null || smtpResult.isCatchAll !== null) break;
       if (smtpResult.greylist) break;
+      if (smtpResult.error === SMTP_POOL_UNAVAILABLE_ERROR) break;
       // Proxy transport itself failed (HTTP 5xx / abort / all proxies down) —
       // don't retry the other MX through the same down proxy; let the worker
       // re-queue the whole item instead.
@@ -748,6 +852,17 @@ async function validateEmailBySmtp(
 
   details.smtp_code = smtpResult.code;
   if (smtpResult.error) details.smtp_error = smtpResult.error;
+
+  // Wording without «временн»/proxy/timeout: the queue treats it as final.
+  if (smtpResult.error === SMTP_POOL_UNAVAILABLE_ERROR) {
+    return {
+      result: 'unknown', quality: 'risky',
+      is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: isCatchAll,
+      did_you_mean: didYouMean, mx_found: mxFound, smtp_code: 0,
+      details: { ...details, step: SMTP_POOL_UNAVAILABLE_STEP },
+      error: 'Западный адрес не проверялся: отдельные IP для таких проверок не настроены',
+    };
+  }
 
   if (smtpResult.greylist) {
     return {

@@ -22,11 +22,12 @@ import html
 import io
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from collections import deque
+from collections import Counter, deque
 from urllib.parse import urlparse
 
 try:
@@ -2127,14 +2128,15 @@ async def check_pipeline_runs() -> list[str]:
         await conn.close()
 
 
-def _repeat_bucket(since) -> int:
-    """Номер окна напоминаний: ключ алерта меняется раз в SENDER_REPEAT_MINUTES от начала проблемы."""
+def _repeat_bucket(since, every_minutes: int | None = None) -> int:
+    """Номер окна напоминаний: ключ алерта меняется раз в every_minutes
+    (по умолчанию SENDER_REPEAT_MINUTES) от начала проблемы."""
     if since is None:
         return 0
     if since.tzinfo is None:
         since = since.replace(tzinfo=timezone.utc)
     minutes = (datetime.now(timezone.utc) - since).total_seconds() / 60
-    return int(minutes // SENDER_REPEAT_MINUTES)
+    return int(minutes // max(1, every_minutes or SENDER_REPEAT_MINUTES))
 
 
 async def _check_sender(conn) -> list[str]:
@@ -2346,19 +2348,1589 @@ async def check_sender() -> list[str]:
         await conn.close()
 
 
-async def run_job_monitor() -> None:
-    """Run parser queue/failure checks independently from general health."""
+# ── Упавшие базы VE2 и ENG ──────────────────────────────────────────────────
+#
+# Сборщики пишут status='failed' в ve_bases (русские вертикали) и he_bases
+# (ENG и старый движок гипотез). За 30 дней до 26.10.2026 так упали 15 баз VE2
+# и 8 баз ENG, а узнавали об этом только из карточки проекта. Одно сообщение на
+# падение: ключ — база и текст ошибки. Когда база выходит из 'failed' (её
+# продолжили), ключ снимается, и следующее падение снова придёт в чат. Пачка баз
+# с одной ошибкой (13.10 кончился баланс Requesty — 7 баз за час) приходит одним
+# сообщением со списком проектов.
+
+_BASE_FAILURE_BASELINE_KEY = "base-monitor:v1:initialized"
+_BASE_FAILURE_GROUP_MIN = 3
+# Telegram отвергает сообщение длиннее 4096 символов целиком, а ключи дедупа к
+# этому моменту уже взяты: блоков в одном сообщении не больше этого числа.
+_BASE_FAILURE_MAX_ITEMS = 6
+
+
+@dataclass(frozen=True)
+class BaseMonitorSpec:
+    key: str
+    table: str
+    log_hint: str
+    select_sql: str
+
+
+_BASE_MONITOR_SPECS: tuple[BaseMonitorSpec, ...] = (
+    BaseMonitorSpec(
+        "ve", "ve_bases", "portal-worker-vertical-engine-v2",
+        "SELECT b.id::text AS id, b.updated_at, 'VE2' AS engine, p.name AS project_name, "
+        "       h.title AS detail, coalesce(nullif(btrim(b.error), ''), pr.last_error) AS error "
+        "FROM public.ve_bases b "
+        "LEFT JOIN public.ve_projects p ON p.id = b.project_id "
+        "LEFT JOIN public.ve_hypotheses h ON h.id = b.hypothesis_id "
+        "LEFT JOIN LATERAL (SELECT nullif(btrim(o.last_error), '') AS last_error "
+        "  FROM public.ve_outreach_preparations o WHERE o.base_id = b.id LIMIT 1) pr ON true "
+        "WHERE b.status = 'failed'",
+    ),
+    BaseMonitorSpec(
+        "he", "he_bases", "portal-worker-hypothesis-engine-eng / portal-worker-hypothesis-engine",
+        "SELECT b.id::text AS id, b.updated_at, "
+        "       CASE WHEN p.market = 'us' THEN 'ENG' ELSE 'движка гипотез' END AS engine, "
+        "       p.name AS project_name, v.name AS detail, nullif(btrim(b.error), '') AS error "
+        "FROM public.he_bases b "
+        "LEFT JOIN public.he_projects p ON p.id = b.project_id "
+        "LEFT JOIN public.he_verticals v ON v.id = b.vertical_id "
+        "WHERE b.status = 'failed'",
+    ),
+)
+
+# A base that left 'failed' (or was deleted) frees its keys for the next failure.
+_BASE_FAILURE_RECOVERED_SQL = (
+    "DELETE FROM {alerts} a WHERE a.alert_key LIKE $1 "
+    "AND NOT EXISTS (SELECT 1 FROM public.{table} b "
+    "  WHERE b.id::text = split_part(a.alert_key, ':', 3) AND b.status = 'failed')"
+)
+
+
+def _base_failure_key(spec: BaseMonitorSpec, row) -> str:
+    digest = hashlib.sha1(str(row["error"] or "").encode()).hexdigest()[:10]
+    return f"base-failed:{spec.key}:{row['id']}:{digest}"
+
+
+def _bases_word(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return "база"
+    if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        return "базы"
+    return "баз"
+
+
+def _base_error_group(error: str) -> str:
+    """Same error with different request ids or numbers groups together."""
+    text = re.sub(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "#", error.lower())
+    return re.sub(r"\d+", "#", text)[:120]
+
+
+def _base_failure_hint(error: str) -> str:
+    text = error.lower()
+    if "requesty" in text and ("402" in text or "balance" in text):
+        return "Похоже, кончился баланс Requesty — пополните его."
+    if "serper" in text and ("402" in text or "credit" in text):
+        return "Похоже, кончились кредиты Serper."
+    return ""
+
+
+def _format_failed_bases(items: list[tuple[BaseMonitorSpec, object]]) -> list[str]:
+    """One block per failed base; three or more with one error become one block."""
+    groups: dict[tuple[str, str, str], list[tuple[BaseMonitorSpec, object, str]]] = {}
+    for spec, row in items:
+        error = str(row["error"] or "ошибка не записана")
+        groups.setdefault((spec.key, str(row["engine"]), _base_error_group(error)), []).append((spec, row, error))
+    blocks: list[str] = []
+    for (_, engine, _), members in groups.items():
+        spec, _, error = members[0]
+        hint = _base_failure_hint(error)
+        logs = " / ".join(
+            f"<code>docker logs {html.escape(container.strip())} --tail 200</code>"
+            for container in spec.log_hint.split(" / ")
+        )
+        tail = (f"{hint}\n" if hint else "") + f"Логи: {logs}"
+        if len(members) >= _BASE_FAILURE_GROUP_MIN:
+            word = _bases_word(len(members))
+            projects = Counter(str(row["project_name"] or "без проекта") for _, row, _ in members)
+            shown = projects.most_common(_BASE_FAILURE_MAX_ITEMS)
+            listed = ", ".join(html.escape(name) + (f" ({count})" if count > 1 else "") for name, count in shown)
+            if len(projects) > len(shown):
+                listed += f" и ещё {len(projects) - len(shown)}"
+            blocks.append(
+                f"🔴 <b>{'Упала' if word == 'база' else 'Упали'} {len(members)} {word} {html.escape(engine)} "
+                f"с одной ошибкой</b>\n"
+                f"Проекты: {listed}\n"
+                f"Ошибка: <code>{html.escape(error[:300])}</code>\n{tail}"
+            )
+            continue
+        for _, row, row_error in members:
+            detail = f" · {html.escape(str(row['detail']))}" if row["detail"] else ""
+            blocks.append(
+                f"🔴 <b>Упала база {html.escape(engine)}</b>\n"
+                f"Проект: <b>{html.escape(str(row['project_name'] or 'без проекта'))}</b>{detail}\n"
+                f"Ошибка: <code>{html.escape(row_error[:300])}</code>\n"
+                f"<code>#{html.escape(str(row['id'])[:8])}</code> · {_msk(row['updated_at'])}\n{tail}"
+            )
+    if len(blocks) > _BASE_FAILURE_MAX_ITEMS:
+        rest = len(blocks) - _BASE_FAILURE_MAX_ITEMS
+        blocks = blocks[:_BASE_FAILURE_MAX_ITEMS] + [f"…и ещё {rest} — подробности в карточках проектов."]
+    return blocks
+
+
+async def _baseline_failed_bases(conn) -> bool:
+    """Mark failures from before this monitor as seen. Returns True once the baseline exists."""
+    if await conn.fetchval(f"SELECT 1 FROM {JOB_ALERTS_TABLE} WHERE alert_key = $1", _BASE_FAILURE_BASELINE_KEY):
+        return True
+    for spec in _BASE_MONITOR_SPECS:
+        try:
+            rows = await conn.fetch(spec.select_sql)
+        except Exception as e:
+            print(f"[health] failed-bases baseline {spec.table} skipped: {e}")
+            continue
+        if rows:
+            await conn.executemany(
+                f"INSERT INTO {JOB_ALERTS_TABLE} (alert_key) VALUES ($1) ON CONFLICT (alert_key) DO NOTHING",
+                [(_base_failure_key(spec, row),) for row in rows],
+            )
+    await conn.execute(
+        f"INSERT INTO {JOB_ALERTS_TABLE} (alert_key) VALUES ($1) ON CONFLICT (alert_key) DO NOTHING",
+        _BASE_FAILURE_BASELINE_KEY,
+    )
+    return False
+
+
+async def check_failed_bases() -> list[str]:
+    """Return alerts for VE2 and ENG bases that newly failed with an error."""
+    if not DATABASE_URL:
+        return []
     try:
-        stuck, failed, pipelines, sender = await asyncio.gather(
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+    except Exception as e:
+        print(f"[health] failed-bases connect error: {_normalize_network_error(e)}")
+        return []
+    fresh: list[tuple[BaseMonitorSpec, object]] = []
+    try:
+        if not await _baseline_failed_bases(conn):
+            print("[health] failed-bases baseline initialized")
+            return []
+        for spec in _BASE_MONITOR_SPECS:
+            try:
+                await conn.execute(
+                    _BASE_FAILURE_RECOVERED_SQL.format(alerts=JOB_ALERTS_TABLE, table=spec.table),
+                    f"base-failed:{spec.key}:%",
+                )
+                rows = await conn.fetch(spec.select_sql)
+            except Exception as e:
+                print(f"[health] failed-bases query {spec.table} skipped: {e}")
+                continue
+            for row in rows:
+                if _is_manual_stop_error(row["error"]):
+                    continue
+                if await _claim_job_alert(conn, _base_failure_key(spec, row)):
+                    fresh.append((spec, row))
+    finally:
+        await conn.close()
+    return _format_failed_bases(fresh)
+
+
+# ── Движок → «Рассылка»: запуски VE2 через свою рассылку и карточки лидов ────
+#
+# Этап 6 плана 24.10.2026: у запусков Движка через «Рассылку» есть четыре
+# выключателя (новые запуски, подача контактов, отправка, карточки лидов), и
+# каждый звено может встать молча. Отдельное сообщение «ДВИЖОК → РАССЫЛКА» со
+# своим тегом (HEALTH_VE2_SENDER_ALERT_MENTION, по умолчанию никого): блоки
+# «РАССЫЛКИ» тегают ответственного за почтовые хосты, а здесь — лиды и запуски
+# проектов. Набор минимальный, по разбору дизайна (одна причина — один блок):
+#   A — выключатель переключили (одно сообщение на переключение) и он всё ещё
+#       выключен (напоминание раз в 12 ч от переключения, не по календарю);
+#   B — выключатель не держит: кампания идёт, письмо ушло или автопередача
+#       поставлена после выключения;
+#   C — отправку вернули, а кампании, которые она остановила, не продолжены;
+#   D — идущая кампания молчит ≥ 3 часов окна, хотя ей есть что слать;
+#   E — у идущей кампании не осталось рабочих ящиков;
+#   F — наблюдение запуска «Рассылки» устарело — подача контактов стоит;
+#   G — строки подачи висят в attempting / uncertain;
+#   H — воркер лидов встал (ответы без оценки, лиды без карточки, карточки
+#       не берутся) — одним блоком;
+#   I — оценка ответов не проходит дольше 2 ч;
+#   J — карточка лида не доставлена (висит дольше часа или сдалась).
+# Без baseline: разовые выборки смотрят не дальше 7 суток назад, напоминания
+# считаются от времени самой проблемы (_repeat_bucket), а не по датам — иначе
+# ключ менялся бы в 00:00 UTC и будил чат в 03:00 МСК.
+# Монитор не бросает исключений: gather в run_job_monitor идёт без
+# return_exceptions, и одно исключение лишило бы цикл всех сообщений с уже
+# взятыми ключами. Каждый SELECT — со своим try/except и timeout=5 (иначе 15
+# запросов по 15 с задержали бы весь монитор на минуты). Ключ берётся только
+# после того, как текст блока собран: сбой форматирования не съедает алерт.
+# Как у остальных мониторов, ключ берётся до отправки: если Telegram не принял
+# сообщение, разовые алерты (автопередача после выключения, сдавшаяся карточка)
+# теряются, остальные вернутся напоминанием через 2 ч.
+
+
+def _env_int(name: str, default: int, floor: int) -> int:
+    """Целое из env с нижней границей. Опечатка в .env не роняет мониторинг.
+
+    Голый int(os.environ...) при импорте падал бы с ValueError, контейнер
+    уходил бы в перезапуски, и loop-watchdog гасил бы его — без алертов вовсе.
+    Значение переменной не печатаем, только её имя.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return max(floor, default)
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        print(f"[health] {name}: не целое число — беру {default}", flush=True)
+        return max(floor, default)
+    if value < floor:
+        print(f"[health] {name}: меньше {floor} — беру {floor}", flush=True)
+        return floor
+    return value
+
+
+VE2_SENDER_ALERT_MENTION = os.environ.get("HEALTH_VE2_SENDER_ALERT_MENTION", "").strip()
+# Пока проблема держится — напоминание раз в столько минут (как у «Рассылки»).
+VE2_REPEAT_MINUTES = _env_int("HEALTH_VE2_REPEAT_MIN", 120, 30)
+# Выключатель, который так и не вернули: напоминание раз в столько часов от
+# переключения (12 ч — утром и вечером, а не каждые 2 ч).
+VE2_SWITCH_REMINDER_HOURS = _env_int("HEALTH_VE2_SWITCH_REMINDER_HOURS", 12, 1)
+# Остановка отправки — две транзакции: флаг, затем пауза идущих кампаний
+# (секунды). Кампания, которая идёт дольше этого после остановки, — стоп не
+# держит. Тем же запасом меряем автопередачу после выключения карточек.
+VE2_STOP_GRACE_MINUTES = _env_int("HEALTH_VE2_STOP_GRACE_MIN", 5, 1)
+# Письма, которые почтовый воркер уже взял пачкой, уходят и после паузы (до 20
+# на адрес, обычно секунды). Письмо кампании Движка позже этого — утечка.
+VE2_STOP_LEAK_MINUTES = _env_int("HEALTH_VE2_STOP_LEAK_MIN", 10, 2)
+# Продолжение отправки идёт в одном запросе панели (до 45 с); строки, оставшиеся
+# открытыми после ответа 503/500, ждут повторного нажатия.
+VE2_RESUME_STALE_MINUTES = _env_int("HEALTH_VE2_RESUME_STALE_MIN", 15, 5)
+# Часы окна отправки без единого письма при готовых к отправке получателях.
+VE2_SILENT_WINDOW_HOURS = _env_int("HEALTH_VE2_SILENT_WINDOW_HOURS", 3, 1)
+# Ящики перепроверяются сами: ждём, пока последнее изменение пула не станет
+# старше этого, — короткий провал не алертим.
+VE2_NO_MAILBOX_MINUTES = _env_int("HEALTH_VE2_NO_MAILBOX_MIN", 15, 5)
+# Подача обходит проекты по очереди раз в 5 мин, рядом с выгрузками Instantly;
+# медленный обход или деплой (пересоздаёт все воркеры) дают десятки минут без
+# поломки. Подача в «Рассылку» суточная — час ничего не стоит.
+VE2_OBSERVE_STALE_MINUTES = _env_int("HEALTH_VE2_OBSERVE_STALE_MIN", 60, 20)
+# attempting переживает аренду 5 мин + 5 мин запаса сверки; uncertain сверка
+# разбирает через 10–20 мин после финала.
+VE2_ROWS_ATTEMPTING_MINUTES = _env_int("HEALTH_VE2_ROWS_ATTEMPTING_MIN", 30, 15)
+VE2_ROWS_UNCERTAIN_MINUTES = _env_int("HEALTH_VE2_ROWS_UNCERTAIN_MIN", 60, 30)
+VE2_ROWS_REPEAT_MINUTES = 24 * 60
+# Воркер лидов берёт 20 ответов на оценку и 10 лидов в карточки в минуту.
+VE2_QUALIFY_BACKLOG_MINUTES = _env_int("HEALTH_VE2_QUALIFY_BACKLOG_MIN", 30, 10)
+VE2_CARD_MISSING_MINUTES = _env_int("HEALTH_VE2_CARD_MISSING_MIN", 15, 5)
+VE2_CARD_IDLE_MINUTES = _env_int("HEALTH_VE2_CARD_IDLE_MIN", 10, 5)
+# Лесенка повторов оценки 1/5/15/60 мин кончается за ~1,5 ч.
+VE2_QUALIFY_STUCK_MINUTES = _env_int("HEALTH_VE2_QUALIFY_STUCK_MIN", 120, 60)
+# Лесенка доставки карточки 1/5/15/60 мин: за час — около четырёх попыток.
+VE2_CARD_PENDING_MINUTES = _env_int("HEALTH_VE2_CARD_PENDING_MIN", 60, 30)
+# Разовые алерты смотрят не дальше этого: ключи старше 90 дней удаляются при
+# старте, и без окна старые строки пришли бы снова.
+VE2_WINDOW_DAYS = 7
+VE2_QUERY_TIMEOUT_SEC = 5
+# Telegram отвергает сообщение длиннее 4096 символов целиком, а ключи к этому
+# моменту уже взяты.
+VE2_SENDER_MAX_BLOCKS = 6
+VE2_SENDER_MAX_CHARS = 3500
+VE2_TEXT_LIMIT = 200
+VE2_LIST_LIMIT = 5
+_VE2_TAIL_RESERVE = 400
+
+_VE2_MARKET_LABELS = {"ru": "РФ", "us": "США"}
+# Этап 7: способ отправки выбирает специалист при запуске (по умолчанию Instantly); режим рынка
+# лишь разрешает выбрать «Рассылку».
+_VE2_MODE_LABELS = {
+    "choice": "специалист выбирает при запуске (Instantly или «Рассылка», по умолчанию Instantly)",
+    "pilot": "«Рассылку» можно выбрать только в проектах пилота",
+    "sender": "«Рассылку» можно выбрать во всех проектах",
+}
+_VE2_LEADS_LOGS = "<code>docker logs portal-worker-sender-leads --tail 200</code>"
+_VE2_ENGINE_LOGS = "<code>docker logs portal-worker-vertical-engine-v2 --tail 200</code>"
+_VE2_MAIL_HOST_LOGS = "на почтовом хосте <code>docker ps -a | grep sender-worker</code>"
+_VE2_PROFILE_NAME = "coalesce(nullif(btrim(pf.full_name), ''), pf.email)"
+
+# A. Рынки, где выключены новые запуски «Рассылки» или подача контактов, и рынки,
+# где выключатели вернули за 7 суток. Пишут строку только панель выключателей
+# (updated_by) и запасной SQL из инструкции (note) — по ним возврат отличаем от
+# строк, которые с миграции никто не трогал (updated_at там — время миграции).
+_VE2_MARKETS_SQL = (
+    "SELECT s.market, s.mode, s.mode_before_stop, s.sender_uploads_enabled, s.updated_at, s.note, "
+    f"       {_VE2_PROFILE_NAME} AS changed_by "
+    "FROM public.ve_launch_transport_settings s "
+    "LEFT JOIN public.profiles pf ON pf.id = s.updated_by "
+    "WHERE (s.mode = 'instantly' AND s.mode_before_stop IS NOT NULL) OR NOT s.sender_uploads_enabled "
+    "   OR (s.updated_at > now() - make_interval(days => $1) AND (s.updated_by IS NOT NULL OR s.note IS NOT NULL)) "
+    "ORDER BY s.market"
+)
+# A. Отправка кампаний Движка: выключена — всегда; включена — если вернули за 7 суток.
+_VE2_SENDING_SWITCH_SQL = (
+    "SELECT g.sending_enabled, coalesce(g.sending_changed_at, g.updated_at) AS changed_at, "
+    f"       g.sending_note AS note, {_VE2_PROFILE_NAME} AS changed_by, "
+    "       (SELECT count(*) FROM public.ve_sender_sending_pauses p WHERE p.resumed_at IS NULL) AS open_pauses "
+    "FROM public.ve_sender_global_settings g "
+    "LEFT JOIN public.profiles pf ON pf.id = g.sending_changed_by "
+    "WHERE g.id AND (NOT g.sending_enabled "
+    "  OR (g.sending_changed_at IS NOT NULL AND g.sending_changed_at > now() - make_interval(days => $1)))"
+)
+# A. Карточки лидов: выключены (и сколько лидов с тех пор осталось без карточки)
+# или снова включены за 7 суток. Пока карточки включены, строку меняет только
+# включение («прислать пропущенных» — сразу следом), поэтому updated_at — его время.
+_VE2_CARDS_SWITCH_SQL = (
+    "SELECT s.enabled, s.disabled_at, s.updated_at, coalesce(s.disabled_at, s.updated_at) AS off_at, s.note, "
+    f"       {_VE2_PROFILE_NAME} AS changed_by, "
+    "       CASE WHEN s.enabled THEN 0 ELSE ("
+    "         SELECT count(DISTINCT q.recipient_id) FROM public.sender_reply_qualifications q "
+    "           JOIN public.sender_campaigns c ON c.id = q.campaign_id "
+    "          WHERE q.status = 'lead' AND q.tg_sent_at IS NULL "
+    "            AND q.qualified_at >= coalesce(s.disabled_at, s.updated_at) "
+    "            AND c.source_kind = 've2' AND c.project_id IS NOT NULL "
+    "            AND NOT EXISTS (SELECT 1 FROM public.sender_project_lead_cards card "
+    "                             WHERE card.recipient_id = q.recipient_id)) END AS missed_leads "
+    "FROM public.sender_project_lead_settings s "
+    "LEFT JOIN public.profiles pf ON pf.id = s.updated_by "
+    "WHERE s.id AND (NOT s.enabled "
+    "  OR (s.disabled_at IS NOT NULL AND s.updated_at > now() - make_interval(days => $1)))"
+)
+# B. Отправка остановлена, а кампания Движка идёт (нет триггера, ручной SQL).
+_VE2_HOLD_RUNNING_SQL = (
+    "SELECT c.id::text AS id, c.name, pr.name AS project_name, "
+    "       coalesce(g.sending_changed_at, g.updated_at) AS changed_at, count(*) OVER () AS total "
+    "FROM public.ve_sender_global_settings g "
+    "JOIN public.sender_campaigns c ON c.source_kind = 've2' AND c.status = 'running' "
+    "LEFT JOIN public.projects pr ON pr.id = c.project_id "
+    "WHERE g.id AND NOT g.sending_enabled "
+    "  AND coalesce(g.sending_changed_at, g.updated_at) < now() - make_interval(mins => $1) "
+    "ORDER BY c.updated_at, c.id LIMIT 50"
+)
+# B. Письмо шага кампании Движка ушло позже остановки + запас на взятую пачку.
+_VE2_HOLD_LETTERS_SQL = (
+    "SELECT c.id::text AS id, c.name, pr.name AS project_name, count(*) AS letters, "
+    "       min(m.sent_at) AS first_sent, max(m.sent_at) AS last_sent, "
+    "       coalesce(g.sending_changed_at, g.updated_at) AS changed_at "
+    "FROM public.ve_sender_global_settings g "
+    "JOIN public.sender_campaigns c ON c.source_kind = 've2' "
+    "JOIN public.sender_messages m ON m.campaign_id = c.id AND m.status = 'sent' "
+    "LEFT JOIN public.projects pr ON pr.id = c.project_id "
+    "WHERE g.id AND NOT g.sending_enabled "
+    "  AND m.sent_at > coalesce(g.sending_changed_at, g.updated_at) + make_interval(mins => $1) "
+    "  AND m.sent_at > now() - make_interval(days => $2) "
+    "GROUP BY c.id, c.name, pr.name, coalesce(g.sending_changed_at, g.updated_at) "
+    "ORDER BY min(m.sent_at) LIMIT 20"
+)
+# B. Карточки выключены, а автопередача поставила письмо клиенту. Автопередача —
+# карточка в режиме auto без нажатия человека (decided_at пуст): «Передать» на
+# уже отправленной карточке при выключенных карточках работает намеренно.
+_VE2_HOLD_HANDOFF_SQL = (
+    "SELECT m.id::text AS id, m.status, m.created_at, c.name AS campaign_name, pr.name AS project_name, "
+    "       coalesce(s.disabled_at, s.updated_at) AS off_at "
+    "FROM public.sender_project_lead_settings s "
+    "JOIN public.sender_manual_messages m ON m.handoff IS NOT NULL "
+    "  AND m.created_at > coalesce(s.disabled_at, s.updated_at) + make_interval(mins => $1) "
+    "  AND m.created_at > now() - make_interval(days => $2) "
+    "JOIN public.sender_campaigns c ON c.id = m.campaign_id AND c.source_kind = 've2' "
+    "JOIN public.sender_project_lead_cards card ON card.recipient_id = m.recipient_id "
+    "  AND card.handoff_mode = 'auto' AND card.decided_at IS NULL "
+    "LEFT JOIN public.projects pr ON pr.id = c.project_id "
+    "WHERE s.id AND NOT s.enabled "
+    "ORDER BY m.created_at, m.id LIMIT 50"
+)
+# C. Отправку вернули, а строки остановки открыты (продолжение оборвалось на 503/500).
+_VE2_RESUME_SQL = (
+    "SELECT coalesce(g.sending_changed_at, g.updated_at) AS changed_at, count(*) AS open_rows, "
+    "       count(DISTINCT p.campaign_id) AS campaigns, "
+    "       (array_agg(c.name ORDER BY p.created_at, p.id))[1:5] AS sample_names "
+    "FROM public.ve_sender_global_settings g "
+    "JOIN public.ve_sender_sending_pauses p ON p.resumed_at IS NULL "
+    "LEFT JOIN public.sender_campaigns c ON c.id = p.campaign_id "
+    "WHERE g.id AND g.sending_enabled "
+    "  AND coalesce(g.sending_changed_at, g.updated_at) < now() - make_interval(mins => $1) "
+    "GROUP BY 1"
+)
+# D. Идущая кампания Движка молчит ≥ N часов окна, хотя есть кому писать с
+# рабочего ящика с запасом лимита. Учёт лимита — как planner.remainingQuota
+# (отправлено с полуночи UTC + в очереди); три ветки union all — под частичные
+# индексы sender_messages. Молчание считаем от позднего из старта, последней
+# правки кампании (запуск, продолжение, пауза двигают updated_at — пауза
+# выключателем не засчитывается в молчание) и последнего ушедшего письма.
+_VE2_SILENT_SQL = (
+    "WITH pool AS ("
+    "  SELECT DISTINCT cm.mailbox_id FROM public.sender_campaign_mailboxes cm "
+    "    JOIN public.sender_campaigns c ON c.id = cm.campaign_id "
+    "   WHERE c.source_kind = 've2' AND c.status = 'running'"
+    "), used AS ("
+    "  SELECT q.mailbox_id, count(*) AS total_used, count(*) FILTER (WHERE q.step_no = 1) AS first_used FROM ("
+    "    SELECT x.mailbox_id, x.step_no FROM public.sender_messages x "
+    "     WHERE x.status = 'scheduled' AND x.mailbox_id IN (SELECT mailbox_id FROM pool) "
+    "    UNION ALL "
+    "    SELECT x.mailbox_id, x.step_no FROM public.sender_messages x "
+    "     WHERE x.status = 'sending' AND x.mailbox_id IN (SELECT mailbox_id FROM pool) "
+    "    UNION ALL "
+    "    SELECT x.mailbox_id, x.step_no FROM public.sender_messages x "
+    "     WHERE x.status = 'sent' AND x.mailbox_id IN (SELECT mailbox_id FROM pool) "
+    "       AND x.sent_at >= date_trunc('day', now(), 'UTC')"
+    "  ) q GROUP BY q.mailbox_id"
+    "), room AS ("
+    "  SELECT mb.id AS mailbox_id, mb.daily_total_limit - coalesce(u.total_used, 0) AS total_left, "
+    "         mb.daily_campaign_limit - coalesce(u.first_used, 0) AS first_left "
+    "    FROM public.sender_mailboxes mb LEFT JOIN used u ON u.mailbox_id = mb.id "
+    "   WHERE mb.id IN (SELECT mailbox_id FROM pool) AND mb.status = 'verified' AND mb.enabled"
+    "), camp AS ("
+    "  SELECT c.id, c.name, c.project_id, c.timezone, c.send_hour_from, c.send_hour_to, c.send_weekdays, "
+    "         greatest(c.started_at, c.updated_at, "
+    "                  (SELECT max(m.sent_at) FROM public.sender_messages m "
+    "                    WHERE m.campaign_id = c.id AND m.status = 'sent')) AS last_activity "
+    "    FROM public.sender_campaigns c WHERE c.source_kind = 've2' AND c.status = 'running'"
+    "), scored AS ("
+    "  SELECT camp.*, "
+    "    (extract(isodow FROM now() AT TIME ZONE camp.timezone)::int = ANY (camp.send_weekdays) "
+    "     AND extract(hour FROM now() AT TIME ZONE camp.timezone) >= camp.send_hour_from "
+    "     AND extract(hour FROM now() AT TIME ZONE camp.timezone) < camp.send_hour_to) AS in_window_now, "
+    "    (SELECT count(*) FROM generate_series("
+    "        date_trunc('hour', greatest(camp.last_activity, now() - interval '7 days'), camp.timezone) + interval '1 hour', "
+    "        now() - interval '1 hour', interval '1 hour') AS h(slot) "
+    "      WHERE extract(isodow FROM h.slot AT TIME ZONE camp.timezone)::int = ANY (camp.send_weekdays) "
+    "        AND extract(hour FROM h.slot AT TIME ZONE camp.timezone) >= camp.send_hour_from "
+    "        AND extract(hour FROM h.slot AT TIME ZONE camp.timezone) < camp.send_hour_to) AS silent_window_hours, "
+    "    (SELECT count(*) FROM public.sender_recipients r "
+    "      WHERE r.campaign_id = camp.id AND r.status = 'active' "
+    "        AND r.next_step_at <= now() - interval '30 minutes' "
+    "        AND EXISTS (SELECT 1 FROM public.sender_campaign_mailboxes cm JOIN room ON room.mailbox_id = cm.mailbox_id "
+    "                     WHERE cm.campaign_id = camp.id "
+    "                       AND room.total_left > 0 AND (r.last_step_sent > 0 OR room.first_left > 0) "
+    # Правило планировщика (app/src/lib/sender/planner.ts, «Ящик соседа»): первое письмо адреса
+    # компании без ящика идёт только с ящика соседа по group_key, если тот ещё рабочий в пуле;
+    # лимит соседа выбран — адрес ждёт, это не «молчание».
+    "                       AND (r.mailbox_id = cm.mailbox_id "
+    "                            OR (r.mailbox_id IS NULL AND (r.last_step_sent > 0 OR r.group_key IS NULL "
+    "                                OR NOT EXISTS (SELECT 1 FROM public.sender_recipients n "
+    "                                                 JOIN public.sender_campaign_mailboxes ncm "
+    "                                                   ON ncm.campaign_id = camp.id AND ncm.mailbox_id = n.mailbox_id "
+    "                                                 JOIN public.sender_mailboxes nb "
+    "                                                   ON nb.id = n.mailbox_id AND nb.status = 'verified' AND nb.enabled "
+    "                                                WHERE n.campaign_id = camp.id AND n.group_key = r.group_key AND n.id <> r.id) "
+    "                                OR EXISTS (SELECT 1 FROM public.sender_recipients n "
+    "                                            WHERE n.campaign_id = camp.id AND n.group_key = r.group_key "
+    "                                              AND n.id <> r.id AND n.mailbox_id = cm.mailbox_id)))))) AS sendable_due, "
+    "    (SELECT count(*) FROM public.sender_messages m JOIN room ON room.mailbox_id = m.mailbox_id "
+    "      WHERE m.campaign_id = camp.id AND m.status = 'scheduled' "
+    "        AND m.scheduled_at <= now() - interval '30 minutes') AS overdue_scheduled "
+    "  FROM camp"
+    ") "
+    "SELECT s.id::text AS id, s.name, pr.name AS project_name, s.last_activity, s.silent_window_hours, "
+    "       s.sendable_due, s.overdue_scheduled, e.ips AS egress_ips, e.seen AS egress_seen "
+    "FROM scored s "
+    "LEFT JOIN public.projects pr ON pr.id = s.project_id "
+    "LEFT JOIN LATERAL ("
+    "  SELECT array_agg(x.ip ORDER BY x.ip) AS ips, array_agg(x.last_seen_at ORDER BY x.ip) AS seen "
+    "    FROM public.sender_egress_ips x "
+    "   WHERE x.ip IN (SELECT mb.egress_ip FROM public.sender_campaign_mailboxes cm "
+    "                    JOIN public.sender_mailboxes mb ON mb.id = cm.mailbox_id WHERE cm.campaign_id = s.id)"
+    ") e ON true "
+    "WHERE s.in_window_now AND s.silent_window_hours >= $1 AND (s.sendable_due > 0 OR s.overdue_scheduled > 0) "
+    "ORDER BY s.last_activity LIMIT 20"
+)
+# E. Идущая кампания Движка с активными получателями без рабочего ящика в пуле:
+# планировщик её только пропускает (лог), письма не ставятся. Ящики
+# перепроверяются сами, поэтому ждём, пока последнее изменение пула (падение
+# или правка ящика) и самой кампании не станет старше N минут.
+_VE2_NO_MAILBOX_SQL = (
+    "SELECT c.id::text AS id, c.name, pr.name AS project_name, x.pool_size, x.last_failed_at, "
+    "       coalesce(greatest(x.last_failed_at, c.started_at), c.updated_at) AS anchor, "
+    "       (SELECT count(*) FROM public.sender_recipients r "
+    "         WHERE r.campaign_id = c.id AND r.status = 'active') AS active_recipients "
+    "FROM public.sender_campaigns c "
+    "LEFT JOIN public.projects pr ON pr.id = c.project_id "
+    "LEFT JOIN LATERAL ("
+    "  SELECT count(*) AS pool_size, max(mb.failed_at) AS last_failed_at, "
+    "         greatest(max(mb.failed_at), max(mb.updated_at)) AS last_change "
+    "    FROM public.sender_campaign_mailboxes cm JOIN public.sender_mailboxes mb ON mb.id = cm.mailbox_id "
+    "   WHERE cm.campaign_id = c.id"
+    ") x ON true "
+    "WHERE c.source_kind = 've2' AND c.status = 'running' "
+    "  AND c.updated_at < now() - make_interval(mins => $1) "
+    "  AND (x.last_change IS NULL OR x.last_change < now() - make_interval(mins => $1)) "
+    "  AND EXISTS (SELECT 1 FROM public.sender_recipients r WHERE r.campaign_id = c.id AND r.status = 'active') "
+    "  AND NOT EXISTS (SELECT 1 FROM public.sender_campaign_mailboxes cm "
+    "                    JOIN public.sender_mailboxes mb ON mb.id = cm.mailbox_id "
+    "                   WHERE cm.campaign_id = c.id AND mb.status = 'verified' AND mb.enabled) "
+    "ORDER BY c.updated_at, c.id LIMIT 20"
+)
+# F. Наблюдение запуска «Рассылки» не обновлялось N минут: наблюдение бросает
+# ошибку (кампания закрыта, чужая, пул изменён, план или одобрение подачи
+# поменялись), и подача в кампанию закрыта. Текст ошибки есть только в логе
+# воркера VE2. Подача, выключенная выключателем, — штатно, её не алертим.
+# Условия проекта повторяют отбор обхода подачи
+# (app/src/lib/verticalEngineV2/contactDeliveryScheduler.ts:141-146 — статусы
+# строк очереди, :166-185 — привязка проекта и all_ready/sender_daily_capacity).
+# Поменялся отбор там — поменять здесь, иначе алерт будет ложным или немым.
+# Возраст считаем от позднего из наблюдения (у нового запуска его ещё нет —
+# тогда от создания строки) и последнего переключения рынка: после включения
+# подачи наблюдение законно старое, пока обход не прошёл.
+_VE2_OBSERVE_STALE_SQL = (
+    "SELECT qc.id::text AS row_id, qc.campaign_id, coalesce(qc.campaign_name, sc.name) AS campaign_name, "
+    "       p.name AS project_name, qc.status_observed_at, "
+    "       greatest(coalesce(qc.status_observed_at, qc.created_at), s.updated_at) AS anchor, "
+    "       sc.status AS sender_status, sc.source_kind, (sc.id IS NULL) AS missing, "
+    "       (sc.id IS NOT NULL AND sc.project_id IS DISTINCT FROM p.portal_project_id) AS foreign_project, "
+    "       (sc.id IS NOT NULL AND (NOT EXISTS (SELECT 1 FROM public.sender_campaign_mailboxes cm WHERE cm.campaign_id = sc.id) "
+    "         OR EXISTS (SELECT 1 FROM public.sender_campaign_mailboxes cm "
+    "                      JOIN public.sender_mailboxes mb ON mb.id = cm.mailbox_id "
+    "                     WHERE cm.campaign_id = sc.id "
+    "                       AND NOT (lower(btrim(mb.email)) = ANY (ARRAY(SELECT lower(btrim(x)) FROM unnest(qi.mailbox_ids) x)))))) "
+    "         AS pool_edited, "
+    "       (SELECT count(*) FROM public.ve_contact_delivery_rows r "
+    "         WHERE r.item_id = qi.id AND r.campaign_row_id = qc.id AND r.status IN ('ready', 'reserved')) AS waiting_rows "
+    "FROM public.ve_launch_queue_campaigns qc "
+    "JOIN public.ve_launch_queue_items qi ON qi.id = qc.item_id "
+    "JOIN public.ve_projects p ON p.id = qi.project_id "
+    "LEFT JOIN public.sender_campaigns sc ON sc.id::text = qc.campaign_id "
+    "LEFT JOIN public.ve_launch_transport_settings s ON s.market = coalesce(p.market, 'ru') "
+    "WHERE qc.transport = 'sender' "
+    "  AND qi.status IN ('prepared', 'queued', 'active', 'uncertain') "
+    "  AND greatest(coalesce(qc.status_observed_at, qc.created_at), s.updated_at) < now() - make_interval(mins => $1) "
+    "  AND coalesce(s.sender_uploads_enabled, false) "
+    "  AND p.portal_project_id IS NOT NULL AND p.target_contacts > 0 "
+    "  AND p.delivery_schedule_days IS NOT NULL AND p.delivery_timezone IS NOT NULL "
+    "  AND p.delivery_plan_bound_at IS NOT NULL AND p.delivery_plan_bound_by IS NOT NULL "
+    "  AND p.launch_preset_id IS NOT NULL "
+    "  AND (p.contact_upload_mode = 'all_ready' OR p.sender_daily_capacity > 0) "
+    "  AND EXISTS (SELECT 1 FROM public.ve_contact_delivery_rows r "
+    "               WHERE r.item_id = qi.id AND r.campaign_row_id = qc.id "
+    "                 AND r.status IN ('ready', 'reserved', 'attempting', 'uncertain')) "
+    "ORDER BY anchor, qc.id LIMIT 20"
+)
+# G. Строки подачи в кампании «Рассылки» висят: attempting — не идёт сверка
+# подачи; uncertain — сверка не может проверить строки. reserved не берём:
+# строки приостановленной кампании законно лежат в резерве до полуночи
+# (в том числе после «Остановить отправку»), а устаревшее наблюдение — это F.
+_VE2_ROWS_STUCK_SQL = (
+    "SELECT qc.campaign_id, coalesce(qc.campaign_name, sc.name) AS campaign_name, p.name AS project_name, "
+    "       r.status, count(*) AS n, "
+    "       min(CASE r.status WHEN 'attempting' THEN r.attempted_at ELSE r.finalized_at END) AS since, "
+    "       max(r.last_error) AS sample_error "
+    "FROM public.ve_launch_queue_campaigns qc "
+    "JOIN public.ve_launch_queue_items qi ON qi.id = qc.item_id "
+    "JOIN public.ve_projects p ON p.id = qi.project_id "
+    "LEFT JOIN public.sender_campaigns sc ON sc.id::text = qc.campaign_id "
+    "JOIN public.ve_contact_delivery_rows r "
+    "  ON r.ve_project_id = qi.project_id AND r.item_id = qi.id AND r.campaign_row_id = qc.id "
+    "WHERE qc.transport = 'sender' "
+    "  AND ((r.status = 'attempting' AND r.attempted_at < now() - make_interval(mins => $1)) "
+    "    OR (r.status = 'uncertain' AND r.finalized_at < now() - make_interval(mins => $2))) "
+    "  AND (CASE r.status WHEN 'attempting' THEN r.attempted_at ELSE r.finalized_at END) "
+    "      > now() - make_interval(days => $3) "
+    "GROUP BY qc.campaign_id, coalesce(qc.campaign_name, sc.name), p.name, r.status "
+    "ORDER BY since LIMIT 20"
+)
+# H. Воркер лидов (worker-sender-leads, без healthcheck контейнера) встал —
+# видно только по данным: ответы кампаний Движка без оценки, лиды без карточки,
+# карточки, которые не берутся в доставку. Пока карточки выключены, их части
+# молчат (это напоминание A); после включения отсчёт идёт от включения.
+# Время включения — updated_at, а не enabled_at: «прислать пропущенных»
+# отодвигает enabled_at назад к выключению (до 7 суток), и лиды/карточки того
+# времени сразу выглядели бы старыми. Пока карточки включены, строку меняет
+# только включение (и сдвиг отсечки сразу следом) — триггер ставит updated_at.
+_VE2_LEADS_WORKER_SQL = (
+    "WITH s AS ("
+    "  SELECT st.enabled, st.enabled_at, st.updated_at AS on_at "
+    "    FROM public.sender_project_lead_settings st WHERE st.id"
+    "), l1 AS ("
+    "  SELECT count(*) AS n, min(q.created_at) AS oldest "
+    "    FROM public.sender_lead_queue q JOIN public.sender_campaigns c ON c.id = q.campaign_id "
+    "   WHERE c.source_kind = 've2' "
+    "     AND q.created_at < now() - make_interval(mins => $1) "
+    "     AND q.created_at > now() - make_interval(days => $4)"
+    "), l4 AS ("
+    "  SELECT count(*) AS n, min(greatest(q.qualified_at, s.on_at)) AS oldest "
+    "    FROM public.sender_reply_qualifications q "
+    "    JOIN s ON s.enabled "
+    "    JOIN public.sender_recipients r ON r.id = q.recipient_id "
+    "    JOIN public.sender_campaigns c ON c.id = q.campaign_id "
+    "    LEFT JOIN public.sender_project_lead_cards card ON card.recipient_id = q.recipient_id "
+    "   WHERE q.status = 'lead' AND q.tg_sent_at IS NULL "
+    "     AND q.qualified_at >= s.enabled_at "
+    "     AND greatest(q.qualified_at, s.on_at) < now() - make_interval(mins => $2) "
+    "     AND q.qualified_at > now() - make_interval(days => $4) "
+    "     AND c.source_kind = 've2' AND c.project_id IS NOT NULL "
+    "     AND NOT (coalesce(r.lead_verdict, '') = 'not_lead' AND coalesce(r.lead_verdict_source, '') = 'manual') "
+    "     AND (card.recipient_id IS NULL "
+    "          OR (card.status = 'undelivered' AND NOT (q.reply_id = ANY (card.merged_reply_ids))))"
+    "), l5 AS ("
+    "  SELECT count(*) AS n, min(greatest(coalesce(card.next_attempt_at, card.created_at), s.on_at)) AS oldest "
+    "    FROM public.sender_project_lead_cards card JOIN s ON s.enabled "
+    "   WHERE card.status = 'pending' "
+    "     AND greatest(coalesce(card.next_attempt_at, card.created_at), s.on_at) < now() - make_interval(mins => $3)"
+    ") "
+    "SELECT l1.n AS replies, l1.oldest AS replies_oldest, l4.n AS leads, l4.oldest AS leads_oldest, "
+    "       l5.n AS cards, l5.oldest AS cards_oldest "
+    "FROM l1, l4, l5"
+)
+# I. Оценка ответа кампании Движка не прошла за 2 ч (лесенка повторов уже
+# кончилась): ключ ИИ, провайдер или чтение проекта. Группы — по тексту ошибки.
+_VE2_QUALIFY_SQL = (
+    "SELECT coalesce(nullif(btrim(q.last_error), ''), 'ошибка не записана') AS error, "
+    "       count(*) AS n, min(q.created_at) AS oldest, "
+    "       (array_agg(DISTINCT pr.name) FILTER (WHERE pr.name IS NOT NULL))[1:5] AS projects "
+    "FROM public.sender_reply_qualifications q "
+    "JOIN public.sender_campaigns c ON c.id = q.campaign_id "
+    "LEFT JOIN public.projects pr ON pr.id = c.project_id "
+    "WHERE c.source_kind = 've2' AND q.status IN ('pending', 'error') AND q.retry_exhausted_at IS NULL "
+    "  AND q.created_at < now() - make_interval(mins => $1) "
+    "  AND q.created_at > now() - make_interval(days => $2) "
+    "GROUP BY 1 ORDER BY 2 DESC LIMIT 20"
+)
+# J. Карточка лида не доставлена дольше часа (около четырёх попыток), пока
+# карточки включены: отсчёт — от создания или от включения карточек
+# (updated_at строки настроек, как в H: enabled_at сдвигается назад).
+_VE2_CARDS_PENDING_SQL = (
+    "SELECT coalesce(nullif(btrim(card.last_error), ''), 'ошибка не записана') AS error, "
+    "       count(*) AS n, min(greatest(card.created_at, s.updated_at)) AS oldest, "
+    "       (array_agg(DISTINCT pr.name) FILTER (WHERE pr.name IS NOT NULL))[1:5] AS projects "
+    "FROM public.sender_project_lead_cards card "
+    "JOIN public.sender_project_lead_settings s ON s.id AND s.enabled "
+    "LEFT JOIN public.projects pr ON pr.id = card.project_id "
+    "WHERE card.status = 'pending' "
+    "  AND greatest(card.created_at, s.updated_at) < now() - make_interval(mins => $1) "
+    "  AND card.created_at > now() - make_interval(days => $2) "
+    "GROUP BY 1 ORDER BY 2 DESC LIMIT 20"
+)
+# J. Карточка сдалась (undelivered): 7 суток сбоев или пропала переписка,
+# проект или тред — специалист лида не видел. Одно сообщение на сдачу.
+_VE2_CARDS_UNDELIVERED_SQL = (
+    "SELECT card.recipient_id::text AS recipient_id, card.updated_at, "
+    "       coalesce(nullif(btrim(card.last_error), ''), 'ошибка не записана') AS error, pr.name AS project_name "
+    "FROM public.sender_project_lead_cards card "
+    "LEFT JOIN public.projects pr ON pr.id = card.project_id "
+    "WHERE card.status = 'undelivered' AND card.updated_at > now() - make_interval(days => $1) "
+    "ORDER BY card.updated_at, card.recipient_id LIMIT 50"
+)
+
+
+def _ve2_utc(ts):
+    if ts is None:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
+def _ve2_iso(ts) -> str:
+    ts = _ve2_utc(ts)
+    return ts.isoformat() if ts is not None else "none"
+
+
+def _ve2_at(anchor, minutes: int) -> str:
+    """Часть ключа: время самой проблемы и номер окна напоминаний от него."""
+    return f"{_ve2_iso(anchor)}:{_repeat_bucket(_ve2_utc(anchor), minutes)}"
+
+
+def _ve2_slot(anchor, minutes: int) -> str:
+    """Часть ключа для сводки, чей самый старый случай сдвигается.
+
+    Пока воркер медленно, но разбирает очередь, самый старый ответ каждый цикл
+    другой: точное время в ключе слало бы сводку каждые 5 минут. Время
+    округляется вниз до шага напоминаний — новая сводка не чаще раза за шаг,
+    а пока проблема та же — напоминание от её начала.
+    """
+    anchor = _ve2_utc(anchor)
+    if anchor is None:
+        return "none:0"
+    step = max(60, minutes * 60)
+    slot = datetime.fromtimestamp(int(anchor.timestamp() // step) * step, timezone.utc)
+    return f"{slot.isoformat()}:{_repeat_bucket(anchor, minutes)}"
+
+
+def _ve2_text(value, limit: int = VE2_TEXT_LIMIT) -> str:
+    """Текст из базы в сообщение: одна строка, не длиннее limit, экранирован."""
+    text = " ".join(str(value if value is not None else "").split())
+    if len(text) > limit:
+        text = text[: limit - 1] + "…"
+    return html.escape(text)
+
+
+def _ve2_name(campaign, project=None) -> str:
+    name = f"«{_ve2_text(campaign or 'без названия', 120)}»"
+    return name + (f" ({_ve2_text(project, 80)})" if project else "")
+
+
+def _ve2_who(row) -> str:
+    who = f", {_ve2_text(row['changed_by'], 80)}" if row["changed_by"] else ""
+    note = f": «{_ve2_text(row['note'])}»" if row["note"] else ""
+    return who + note
+
+
+def _ve2_list(lines: list[str], total: int | None = None) -> str:
+    total = len(lines) if total is None else total
+    shown = lines[:VE2_LIST_LIMIT]
+    more = total - len(shown)
+    return "\n".join(shown) + (f"\n…и ещё {more}" if more > 0 else "")
+
+
+def _ve2_minutes_word(minutes: int) -> str:
+    return f"{minutes // 60} ч" if minutes % 60 == 0 and minutes >= 60 else f"{minutes} мин"
+
+
+async def _ve2_fetch(conn, name: str, sql: str, *args) -> list:
+    """SELECT с потолком 5 с; ошибка — в лог каждый цикл (и про отсутствующую таблицу)."""
+    try:
+        return list(await conn.fetch(sql, *args, timeout=VE2_QUERY_TIMEOUT_SEC))
+    except Exception as e:
+        print(f"[health] ve2-sender {name} query skipped: {_format_exception_message(e, 300)}")
+        return []
+
+
+async def _ve2_claim(conn, key: str) -> bool:
+    try:
+        return await _claim_job_alert(conn, key)
+    except Exception as e:
+        print(f"[health] ve2-sender claim skipped ({key[:60]}): {_format_exception_message(e, 200)}")
+        return False
+
+
+async def _ve2_switch_alerts(conn) -> list[str]:
+    """A. Выключатель переключили / он всё ещё выключен — одним блоком."""
+    reminder = VE2_SWITCH_REMINDER_HOURS * 60
+    lines: list[str] = []
+    for row in await _ve2_fetch(conn, "switch markets", _VE2_MARKETS_SQL, VE2_WINDOW_DAYS):
+        market = str(row["market"])
+        label = _ve2_text(_VE2_MARKET_LABELS.get(market, market.upper()), 20)
+        changed = row["updated_at"]
+        state = []
+        if row["mode"] == "instantly" and row["mode_before_stop"]:
+            back = _VE2_MODE_LABELS.get(str(row["mode_before_stop"]), str(row["mode_before_stop"]))
+            state.append(f"новые запуски идут только в Instantly (вернуть: {_ve2_text(back)})")
+        if not row["sender_uploads_enabled"]:
+            state.append("подача контактов в кампании «Рассылки» выключена")
+        if not state:
+            # Всё включено, строку меняли за 7 суток — одно сообщение на изменение.
+            mode = _VE2_MODE_LABELS.get(str(row["mode"]), "только Instantly (режим рынка)")
+            line = (f"• Рынок {label}: настройки изменены — новые запуски: {_ve2_text(mode)}; подача "
+                    f"контактов в «Рассылку» включена — {_msk(changed)}{_ve2_who(row)}.")
+            if await _ve2_claim(conn, f"ve2sw:market:{market}:{_ve2_iso(changed)}:on"):
+                lines.append(line)
+            continue
+        when = (f"переключили {_msk(changed)}" if _repeat_bucket(_ve2_utc(changed), reminder) <= 0
+                else f"так с {_msk(changed)}")
+        line = f"• Рынок {label}: {'; '.join(state)} — {when}{_ve2_who(row)}."
+        if await _ve2_claim(conn, f"ve2sw:market:{market}:{_ve2_at(changed, reminder)}"):
+            lines.append(line)
+    for row in await _ve2_fetch(conn, "switch sending", _VE2_SENDING_SWITCH_SQL, VE2_WINDOW_DAYS):
+        changed = row["changed_at"]
+        if row["sending_enabled"]:
+            line = f"• Отправку кампаний Движка вернули {_msk(changed)}{_ve2_who(row)}."
+            key = f"ve2sw:sending:on:{_ve2_iso(changed)}"
+        else:
+            first = _repeat_bucket(_ve2_utc(changed), reminder) <= 0
+            line = (("• Отправка кампаний Движка остановлена " if first
+                     else "• Отправка кампаний Движка всё ещё остановлена — с ")
+                    + f"{_msk(changed)}{_ve2_who(row)}. "
+                    f"На паузе по выключателю кампаний: {int(row['open_pauses'] or 0)}.")
+            key = f"ve2sw:sending:off:{_ve2_at(changed, reminder)}"
+        if await _ve2_claim(conn, key):
+            lines.append(line)
+    for row in await _ve2_fetch(conn, "switch lead cards", _VE2_CARDS_SWITCH_SQL, VE2_WINDOW_DAYS):
+        if row["enabled"]:
+            line = f"• Карточки лидов снова включены {_msk(row['updated_at'])}{_ve2_who(row)}."
+            key = f"ve2sw:cards:on:{_ve2_iso(row['disabled_at'])}"
+        else:
+            off = row["off_at"]
+            first = _repeat_bucket(_ve2_utc(off), reminder) <= 0
+            line = (("• Карточки лидов выключены " if first else "• Карточки лидов всё ещё выключены — с ")
+                    + f"{_msk(off)}{_ve2_who(row)}. Лидов проектов без карточки с тех пор: "
+                    f"{int(row['missed_leads'] or 0)} — им не пришло ничего (ни карточки, ни уведомления).")
+            key = f"ve2sw:cards:off:{_ve2_at(off, reminder)}"
+        if await _ve2_claim(conn, key):
+            lines.append(line)
+    if not lines:
+        return []
+    return [
+        "🟡 <b>Выключатели Движка → «Рассылка»</b>\n" + "\n".join(lines) + "\n"
+        f"Напоминание — раз в {VE2_SWITCH_REMINDER_HOURS} ч, пока выключено. Вернуть — на панели "
+        "выключателей в Движке вертикалей (кнопки у админа)."
+    ]
+
+
+async def _ve2_hold_alerts(conn) -> list[str]:
+    """B. Выключатель не держит."""
+    blocks: list[str] = []
+    rows = await _ve2_fetch(conn, "hold running", _VE2_HOLD_RUNNING_SQL, VE2_STOP_GRACE_MINUTES)
+    if rows:
+        changed = rows[0]["changed_at"]
+        total = int(rows[0]["total"] or len(rows))
+        digest = hashlib.sha1(",".join(sorted(str(r["id"]) for r in rows)).encode()).hexdigest()[:10]
+        text = (
+            f"🔴 <b>Отправка Движка остановлена, а кампании идут: {total}</b>\n"
+            f"Остановили {_msk(changed)}. Идут:\n"
+            + _ve2_list([f"• {_ve2_name(r['name'], r['project_name'])}" for r in rows], total) + "\n"
+            "Стоп не держит. Проверьте, применена ли миграция 20261026_0020 (триггер "
+            "<code>sender_campaigns_ve2_sending_hold</code>), и кто запустил кампании. "
+            "Нажмите «Остановить отправку» ещё раз — она поставит их на паузу."
+        )
+        key = f"ve2s:hold:running:{_ve2_iso(changed)}:{digest}:{_repeat_bucket(_ve2_utc(changed), VE2_REPEAT_MINUTES)}"
+        if await _ve2_claim(conn, key):
+            blocks.append(text)
+
+    rows = await _ve2_fetch(conn, "hold letters", _VE2_HOLD_LETTERS_SQL, VE2_STOP_LEAK_MINUTES, VE2_WINDOW_DAYS)
+    first_sent = min((_ve2_utc(r["first_sent"]) for r in rows if r["first_sent"]), default=None)
+    last_sent = max((_ve2_utc(r["last_sent"]) for r in rows if r["last_sent"]), default=None)
+    # Пока письма продолжают уходить — напоминание раз в 2 ч; утечка кончилась —
+    # тишина: ушедшие письма лежат весь стоп, и без этого алерт шёл бы неделю.
+    leaking = last_sent is not None and (
+        datetime.now(timezone.utc) - last_sent).total_seconds() < VE2_REPEAT_MINUTES * 60
+    if rows and leaking:
+        letters = sum(int(r["letters"] or 0) for r in rows)
+        text = (
+            f"🔴 <b>Письма кампаний Движка уходят после остановки отправки: {letters}</b>\n"
+            f"Остановили {_msk(rows[0]['changed_at'])}; первое письмо после остановки — {_msk(first_sent)}, "
+            f"последнее — {_msk(last_sent)}.\n"
+            + _ve2_list([f"• {_ve2_name(r['name'], r['project_name'])}: писем {int(r['letters'] or 0)}" for r in rows])
+            + "\nСтоп не держит. Проверьте, что кампании Движка на паузе, и нет ли зависшей пачки отправки: "
+            f"{_VE2_MAIL_HOST_LOGS}."
+        )
+        key = f"ve2s:hold:letters:{_ve2_iso(rows[0]['changed_at'])}:{_ve2_at(first_sent, VE2_REPEAT_MINUTES)}"
+        if await _ve2_claim(conn, key):
+            blocks.append(text)
+
+    rows = await _ve2_fetch(conn, "hold handoff", _VE2_HOLD_HANDOFF_SQL, VE2_STOP_GRACE_MINUTES, VE2_WINDOW_DAYS)
+    fresh = []
+    for r in rows:
+        line = f"• {_ve2_name(r['campaign_name'], r['project_name'])}: {_msk(r['created_at'])}, {_ve2_text(r['status'], 20)}"
+        if await _ve2_claim(conn, f"ve2l:hold:handoff:{r['id']}"):
+            fresh.append(line)
+    if fresh:
+        blocks.append(
+            f"🔴 <b>Карточки лидов выключены, а автопередача поставила письма клиенту: {len(fresh)}</b>\n"
+            f"Выключили {_msk(rows[0]['off_at'])}. Письма передачи:\n" + _ve2_list(fresh) + "\n"
+            "Если письмо поставил человек из «Писем» «Рассылки» — всё в порядке. Иначе выключатель "
+            f"карточек не держит: {_VE2_LEADS_LOGS}"
+        )
+    return blocks
+
+
+async def _ve2_resume_alerts(conn) -> list[str]:
+    """C. Отправку вернули, а кампании, остановленные выключателем, не продолжены."""
+    blocks: list[str] = []
+    for row in await _ve2_fetch(conn, "resume", _VE2_RESUME_SQL, VE2_RESUME_STALE_MINUTES):
+        names = [f"• {_ve2_name(name)}" for name in (row["sample_names"] or [])]
+        text = (
+            f"🟠 <b>Отправку Движка вернули, но кампании не продолжены: {int(row['campaigns'] or 0)}</b>\n"
+            f"Вернули {_msk(row['changed_at'])}; на паузе по выключателю остались:\n"
+            + _ve2_list(names, int(row["campaigns"] or len(names))) + "\n"
+            "Нажмите «Продолжить отправку» ещё раз на панели выключателей Движка. Кампанию, которой "
+            "нужно остаться на паузе, отметьте «Оставить на паузе»."
+        )
+        if await _ve2_claim(conn, f"ve2s:resume:{_ve2_at(row['changed_at'], VE2_REPEAT_MINUTES)}"):
+            blocks.append(text)
+    return blocks
+
+
+async def _ve2_silent_alerts(conn) -> list[str]:
+    """D. Идущая кампания Движка молчит в окне отправки, хотя ей есть что слать."""
+    lines: list[str] = []
+    for row in await _ve2_fetch(conn, "silent campaigns", _VE2_SILENT_SQL, VE2_SILENT_WINDOW_HOURS):
+        ips = list(row["egress_ips"] or [])
+        seen = list(row["egress_seen"] or [])
+        egress = ", ".join(
+            f"{_ve2_text(ip, 40)} (на связи {_msk(seen[i]) if i < len(seen) and seen[i] else 'никогда'})"
+            for i, ip in enumerate(ips[:3])
+        ) or "не назначены"
+        line = (
+            f"• {_ve2_name(row['name'], row['project_name'])}: часов окна без писем — "
+            f"{int(row['silent_window_hours'] or 0)}, последнее — {_msk(row['last_activity'])}; "
+            f"готовы к отправке получателей: {int(row['sendable_due'] or 0)}, просрочено писем: "
+            f"{int(row['overdue_scheduled'] or 0)}. Адреса: {egress}"
+        )
+        if await _ve2_claim(conn, f"ve2s:silent:{row['id']}:{_ve2_at(row['last_activity'], VE2_REPEAT_MINUTES)}"):
+            lines.append(line)
+    if not lines:
+        return []
+    return [
+        f"🟠 <b>Кампании Движка молчат в окне отправки: {len(lines)}</b>\n" + _ve2_list(lines) + "\n"
+        "Получатели и ящики с запасом лимита есть, а письма не ставятся или не уходят. Проверьте "
+        f"планировщик и воркеры адресов: {_VE2_MAIL_HOST_LOGS}; упавший воркер адреса покажет "
+        "и сообщение «РАССЫЛКА»."
+    ]
+
+
+async def _ve2_no_mailbox_alerts(conn) -> list[str]:
+    """E. У идущей кампании Движка не осталось рабочих ящиков."""
+    lines: list[str] = []
+    for row in await _ve2_fetch(conn, "no mailbox", _VE2_NO_MAILBOX_SQL, VE2_NO_MAILBOX_MINUTES):
+        failed = f", последний упал {_msk(row['last_failed_at'])}" if row["last_failed_at"] else ""
+        line = (
+            f"• {_ve2_name(row['name'], row['project_name'])}: ждут писем получателей — "
+            f"{int(row['active_recipients'] or 0)}, ящиков в пуле — {int(row['pool_size'] or 0)}, "
+            f"рабочих — 0{failed}"
+        )
+        if await _ve2_claim(conn, f"ve2s:nobox:{row['id']}:{_ve2_at(row['anchor'], VE2_REPEAT_MINUTES)}"):
+            lines.append(line)
+    if not lines:
+        return []
+    return [
+        f"🔴 <b>У кампаний Движка не осталось рабочих ящиков: {len(lines)}</b>\n" + _ve2_list(lines) + "\n"
+        "Письма этих кампаний не планируются. Проверьте или замените ящики пула в «Рассылке» "
+        "(подтверждённые и включённые)."
+    ]
+
+
+def _ve2_stale_cause(row) -> str:
+    if row["missing"]:
+        return "кампании «Рассылки» нет — её удалили"
+    if row["sender_status"] == "done":
+        return "кампанию завершили (done) — подача в неё закрыта насовсем"
+    if row["foreign_project"] or row["source_kind"] != "ve2":
+        return "кампания привязана к другому проекту"
+    if row["pool_edited"]:
+        return "пул ящиков кампании изменён вручную — верните ящики запуска"
+    return "причина в логе: план, цель или одобрение подачи поменялись, сбой БД или воркер VE2 не обходит"
+
+
+async def _ve2_observe_alerts(conn) -> list[str]:
+    """F. Наблюдение запуска «Рассылки» устарело — подача контактов стоит."""
+    lines: list[str] = []
+    for row in await _ve2_fetch(conn, "observe stale", _VE2_OBSERVE_STALE_SQL, VE2_OBSERVE_STALE_MINUTES):
+        observed = _msk(row["status_observed_at"]) if row["status_observed_at"] else "не было"
+        line = (
+            f"• {_ve2_name(row['campaign_name'], row['project_name'])}: наблюдение — {observed}, "
+            f"ждут подачи контактов: {int(row['waiting_rows'] or 0)} — {_ve2_stale_cause(row)}"
+        )
+        if await _ve2_claim(conn, f"ve2s:stale:{row['row_id']}:{_ve2_at(row['anchor'], VE2_REPEAT_MINUTES)}"):
+            lines.append(line)
+    if not lines:
+        return []
+    return [
+        f"🟠 <b>Подача контактов в «Рассылку» стоит: кампаний {len(lines)}</b>\n" + _ve2_list(lines) + "\n"
+        f"Состояние кампании не обновлялось {_ve2_minutes_word(VE2_OBSERVE_STALE_MINUTES)}, "
+        f"подача в неё закрыта. Ошибка — в логе (VE2 sender campaign state): {_VE2_ENGINE_LOGS}"
+    ]
+
+
+async def _ve2_rows_alerts(conn) -> list[str]:
+    """G. Строки подачи в кампании «Рассылки» висят в attempting / uncertain."""
+    lines: list[str] = []
+    for row in await _ve2_fetch(conn, "delivery rows", _VE2_ROWS_STUCK_SQL, VE2_ROWS_ATTEMPTING_MINUTES,
+                                VE2_ROWS_UNCERTAIN_MINUTES, VE2_WINDOW_DAYS):
+        error = f", ошибка: <code>{_ve2_text(row['sample_error'])}</code>" if row["sample_error"] else ""
+        line = (
+            f"• {_ve2_name(row['campaign_name'], row['project_name'])}: строк в «{_ve2_text(row['status'], 20)}» — "
+            f"{int(row['n'] or 0)}, с {_msk(row['since'])}{error}"
+        )
+        key = f"ve2s:rows:{row['campaign_id']}:{row['status']}:{_ve2_slot(row['since'], VE2_ROWS_REPEAT_MINUTES)}"
+        if await _ve2_claim(conn, key):
+            lines.append(line)
+    if not lines:
+        return []
+    return [
+        f"🟠 <b>Строки подачи в «Рассылку» зависли: кампаний {len(lines)}</b>\n" + _ve2_list(lines) + "\n"
+        f"attempting дольше {_ve2_minutes_word(VE2_ROWS_ATTEMPTING_MINUTES)} — не идёт сверка подачи; uncertain "
+        f"дольше {_ve2_minutes_word(VE2_ROWS_UNCERTAIN_MINUTES)} — сверка не может проверить строки "
+        f"(запуск не active или чужая кампания). {_VE2_ENGINE_LOGS}"
+    ]
+
+
+async def _ve2_leads_worker_alerts(conn) -> list[str]:
+    """H. Воркер лидов встал: ответы без оценки, лиды без карточки, карточки не берутся."""
+    rows = await _ve2_fetch(conn, "leads worker", _VE2_LEADS_WORKER_SQL, VE2_QUALIFY_BACKLOG_MINUTES,
+                            VE2_CARD_MISSING_MINUTES, VE2_CARD_IDLE_MINUTES, VE2_WINDOW_DAYS)
+    if not rows:
+        return []
+    row = rows[0]
+    parts: list[str] = []
+    anchors = []
+    for column, label, minutes in (
+        ("replies", "ответов кампаний Движка ждут оценки", VE2_QUALIFY_BACKLOG_MINUTES),
+        ("leads", "лидов без карточки", VE2_CARD_MISSING_MINUTES),
+        ("cards", "карточек не берутся в доставку", VE2_CARD_IDLE_MINUTES),
+    ):
+        if int(row[column] or 0) > 0:
+            oldest = row[f"{column}_oldest"]
+            parts.append(f"• {label} дольше {_ve2_minutes_word(minutes)}: {int(row[column])}, "
+                         f"самый старый случай — {_msk(oldest)}")
+            if oldest is not None:
+                anchors.append(_ve2_utc(oldest))
+    if not parts:
+        return []
+    text = (
+        "🔴 <b>Воркер лидов «Рассылки» не разбирает лиды Движка</b>\n" + "\n".join(parts) + "\n"
+        f"У контейнера нет healthcheck — видно только по данным. {_VE2_LEADS_LOGS}"
+    )
+    anchor = min(anchors) if anchors else None
+    if await _ve2_claim(conn, f"ve2l:worker:{_ve2_slot(anchor, VE2_REPEAT_MINUTES)}"):
+        return [text]
+    return []
+
+
+def _ve2_error_groups(rows) -> list[dict]:
+    """Строки (error, n, oldest, projects) → группы одной ошибки (номера и id не различаем)."""
+    groups: dict[str, dict] = {}
+    for row in rows:
+        error = str(row["error"] or "ошибка не записана")
+        entry = groups.setdefault(_base_error_group(error), {"error": error, "n": 0, "oldest": None, "projects": []})
+        entry["n"] += int(row["n"] or 0)
+        oldest = _ve2_utc(row["oldest"])
+        if oldest is not None and (entry["oldest"] is None or oldest < entry["oldest"]):
+            entry["oldest"] = oldest
+        for name in row["projects"] or []:
+            if name and name not in entry["projects"]:
+                entry["projects"].append(name)
+    return sorted(groups.items(), key=lambda item: -item[1]["n"])
+
+
+def _ve2_projects(names: list) -> str:
+    if not names:
+        return ""
+    shown = ", ".join(_ve2_text(name, 60) for name in names[:3])
+    return f"; проекты: {shown}" + (f" и ещё {len(names) - 3}" if len(names) > 3 else "")
+
+
+async def _ve2_qualify_alerts(conn) -> list[str]:
+    """I. Оценка ответов кампаний Движка не проходит — по группам ошибки."""
+    rows = await _ve2_fetch(conn, "qualification", _VE2_QUALIFY_SQL, VE2_QUALIFY_STUCK_MINUTES, VE2_WINDOW_DAYS)
+    lines: list[str] = []
+    total = 0
+    for group, entry in _ve2_error_groups(rows):
+        line = (f"• ответов: {entry['n']}, самый старый — {_msk(entry['oldest'])}{_ve2_projects(entry['projects'])}. "
+                f"Ошибка: <code>{_ve2_text(entry['error'])}</code>")
+        digest = hashlib.sha1(group.encode()).hexdigest()[:10]
+        if await _ve2_claim(conn, f"ve2l:qualify:{digest}:{_ve2_slot(entry['oldest'], VE2_REPEAT_MINUTES)}"):
+            lines.append(line)
+            total += entry["n"]
+    if not lines:
+        return []
+    return [
+        f"🟠 <b>Оценка ответов кампаний Движка не проходит: {total}</b>\n"
+        f"Дольше {_ve2_minutes_word(VE2_QUALIFY_STUCK_MINUTES)} без результата — повторы по лесенке уже кончились:\n"
+        + _ve2_list(lines) + "\n"
+        "Проверьте ключ ИИ (SENDER_LEADS_AI_API_KEY), провайдера и чтение проекта: " + _VE2_LEADS_LOGS
+    ]
+
+
+async def _ve2_cards_alerts(conn) -> list[str]:
+    """J. Карточка лида не доставлена: висит дольше часа или сдалась."""
+    lines: list[str] = []
+    rows = await _ve2_fetch(conn, "cards pending", _VE2_CARDS_PENDING_SQL, VE2_CARD_PENDING_MINUTES, VE2_WINDOW_DAYS)
+    for group, entry in _ve2_error_groups(rows):
+        line = (f"• не доставлены дольше {_ve2_minutes_word(VE2_CARD_PENDING_MINUTES)}: {entry['n']}, "
+                f"самая старая — {_msk(entry['oldest'])}{_ve2_projects(entry['projects'])}. "
+                f"Ошибка: <code>{_ve2_text(entry['error'])}</code>")
+        digest = hashlib.sha1(group.encode()).hexdigest()[:10]
+        if await _ve2_claim(conn, f"ve2l:pending:{digest}:{_ve2_slot(entry['oldest'], VE2_REPEAT_MINUTES)}"):
+            lines.append(line)
+    rows = await _ve2_fetch(conn, "cards undelivered", _VE2_CARDS_UNDELIVERED_SQL, VE2_WINDOW_DAYS)
+    gave_up: dict[str, dict] = {}
+    for row in rows:
+        if not await _ve2_claim(conn, f"ve2l:undelivered:{row['recipient_id']}:{_ve2_iso(row['updated_at'])}"):
+            continue
+        error = str(row["error"])
+        entry = gave_up.setdefault(_base_error_group(error), {"error": error, "n": 0, "projects": []})
+        entry["n"] += 1
+        if row["project_name"] and row["project_name"] not in entry["projects"]:
+            entry["projects"].append(row["project_name"])
+    for entry in sorted(gave_up.values(), key=lambda item: -item["n"]):
+        lines.append(f"• сдались (undelivered): {entry['n']}{_ve2_projects(entry['projects'])}. "
+                     f"Ошибка: <code>{_ve2_text(entry['error'])}</code>")
+    if not lines:
+        return []
+    return [
+        "🟠 <b>Карточки лидов Движка не доставлены</b>\n" + _ve2_list(lines) + "\n"
+        "Специалист этих лидов не видел. Проверьте бота лид-алертов, Telegram и доску лидов (база "
+        f"Instantly): {_VE2_LEADS_LOGS}"
+    ]
+
+
+# Порядок — порядок блоков в сообщении: сначала красное.
+_VE2_SENDER_CHECKS = (
+    ("hold", _ve2_hold_alerts),
+    ("no mailbox", _ve2_no_mailbox_alerts),
+    ("leads worker", _ve2_leads_worker_alerts),
+    ("resume", _ve2_resume_alerts),
+    ("silent", _ve2_silent_alerts),
+    ("observe", _ve2_observe_alerts),
+    ("rows", _ve2_rows_alerts),
+    ("qualification", _ve2_qualify_alerts),
+    ("cards", _ve2_cards_alerts),
+    ("switches", _ve2_switch_alerts),
+)
+
+
+def _ve2_sender_header() -> str:
+    return f"⚠️ <b>ДВИЖОК → РАССЫЛКА</b> — {_now_msk()}\n\n"
+
+
+def _ve2_sender_mention() -> str:
+    return f"\n{html.escape(VE2_SENDER_ALERT_MENTION)}" if VE2_SENDER_ALERT_MENTION else ""
+
+
+def _ve2_title(block: str) -> str:
+    return block.split("\n", 1)[0]
+
+
+def _ve2_shrink(block: str, limit: int) -> str:
+    """Блок длиннее limit — по строкам: заголовок, сколько влезет строк, последняя
+    строка (что делать). Каждая строка блока закрывает свои теги сама, поэтому
+    обрезка по строкам не ломает HTML."""
+    if len(block) <= limit:
+        return block
+    lines = block.split("\n")
+    title, body = lines[0], lines[1:]
+    footer = body.pop() if body else ""
+    note_reserve = 60
+    if len(title) + len(footer) + note_reserve + 2 > limit:
+        footer = ""
+    used = len(title) + (len(footer) + 1 if footer else 0)
+    kept: list[str] = []
+    for line in body:
+        if used + 1 + len(line) + note_reserve > limit:
+            break
+        kept.append(line)
+        used += 1 + len(line)
+    dropped = len(body) - len(kept)
+    parts = [title, *kept]
+    if dropped:
+        parts.append(f"…строк не поместилось: {dropped}")
+    if footer:
+        parts.append(footer)
+    text = "\n".join(parts)
+    return text if len(text) <= limit else title + "\nПодробности не поместились в сообщение."
+
+
+def _cap_ve2_blocks(blocks: list[str]) -> list[str]:
+    """Не больше VE2_SENDER_MAX_BLOCKS блоков и VE2_SENDER_MAX_CHARS на всё сообщение.
+
+    Ключи не поместившихся блоков уже взяты, поэтому их заголовки уходят
+    хвостом «…и ещё N» в последний блок, а не теряются молча.
+    """
+    budget = VE2_SENDER_MAX_CHARS - len(_ve2_sender_header()) - len(_ve2_sender_mention())
+    kept: list[str] = []
+    used = 0
+    rest = list(blocks)
+    while rest and len(kept) < VE2_SENDER_MAX_BLOCKS:
+        block = _ve2_shrink(rest[0], budget // 2)
+        reserve = _VE2_TAIL_RESERVE if len(rest) > 1 else 0
+        cost = len(block) + (2 if kept else 0)
+        if used + cost > budget - reserve:
+            break
+        kept.append(block)
+        used += cost
+        rest.pop(0)
+    if not rest:
+        return kept
+    room = budget - used - (2 if kept else 0)
+    tail = f"…и ещё {len(rest)}:"
+    for block in rest:
+        line = "\n• " + _ve2_title(block)
+        if len(tail) + len(line) > room:
+            break
+        tail += line
+    if tail.endswith(":"):
+        tail = tail[:-1]
+    if kept:
+        kept[-1] = kept[-1] + "\n\n" + tail
+    else:
+        kept = [tail]
+    return kept
+
+
+async def check_ve2_sender() -> list[str]:
+    """Монитор «ДВИЖОК → РАССЫЛКА» (A–J выше) — см. run_job_monitor. Не бросает исключений."""
+    blocks: list[str] = []
+    try:
+        if not DATABASE_URL:
+            return []
+        try:
+            conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        except Exception as e:
+            print(f"[health] ve2-sender connect error: {_normalize_network_error(e)}")
+            return []
+        try:
+            for name, check in _VE2_SENDER_CHECKS:
+                try:
+                    blocks.extend(await check(conn))
+                except Exception as e:
+                    print(f"[health] ve2-sender {name} skipped: {_format_exception_message(e, 300)}")
+        finally:
+            try:
+                await conn.close()
+            except Exception as e:
+                print(f"[health] ve2-sender close error: {_format_exception_message(e)}")
+        return _cap_ve2_blocks(blocks)
+    except Exception as e:
+        print(f"[health] ve2-sender monitor error: {_format_exception_message(e, 300)}")
+        kept: list[str] = []
+        for block in blocks[:VE2_SENDER_MAX_BLOCKS]:
+            if sum(len(b) + 2 for b in kept) + len(block) > VE2_SENDER_MAX_CHARS - 200:
+                break
+            kept.append(block)
+        return kept
+
+
+# ── 2ГИС → VE2 (план docs/reports/2026-10-26-2gis-ve2-plan.md, шаг «Мон») ─────
+# Свой пользователь VE2 в базе 2ГИС (twogis_ve2, Ш3) и модуль 2ГИС воркера (R3).
+# 1) строки pg_hba для twogis_ve2 и, пока у сборщика Ш5 включён вход, для
+#    twogis_ve2_builder: файл живёт в контейнере main-postgres и пропадает при
+#    его пересоздании — тогда роль войдёт и в основную базу;
+# 2) twogis_ve2 занят (не idle) всеми своими соединениями 3 цикла подряд,
+#    инстанс у предела;
+# 3) ve_twogis_source_status (R2): пауза или серия ошибок, пока mode ≠ off.
+# 4) ve_bases.public_info.two_gis_sleep (R3 части 4–5): collecting-база с активной задачей
+#    base_collect спит дольше HEALTH_TWOGIS_VE2_SLEEP_MIN; причина — на момент засыпания;
+#    ключ — база + since, напоминание раз в сутки от since. От роли twogis_ve2 не зависит.
+# Ключи — по эпизоду; когда проблемы нет, ключи эпизода удаляются.
+TWOGIS_VE2_REPEAT_MINUTES = _env_int("HEALTH_TWOGIS_VE2_REPEAT_MIN", 1440, 60)
+_TWOGIS_VE2_FULL_POOL_CYCLES: list[int] = [0]
+_TWOGIS_VE2_FULL_POOL_SINCE: list[datetime | None] = [None]
+
+# П.4. Читаем только срез public_info (его считает триггер при записи collect_info): даже
+# collect_info->'two_gis_sleep' разворачивает на сервере весь документ. Без среза (миграция
+# части 5) ключа нет — монитор молчит. Активная задача — условия частичного индекса
+# ve_jobs_one_active_base_collect_per_base: пауза подготовки снимает задачу и оставляет метку,
+# у failed-базы задачи нет. Данных карточек 2ГИС в запросе нет.
+TWOGIS_VE2_SLEEP_MINUTES = _env_int("HEALTH_TWOGIS_VE2_SLEEP_MIN", 1440, 60)
+_TWOGIS_VE2_SLEEP_GROUP_MIN = 3
+_TWOGIS_VE2_SLEEP_MAX_ITEMS = 6
+# Блоки сна идут в одно сообщение с пунктами 1–3; send_telegram не режет 4096 знаков,
+# а отклонённое сообщение потеряло бы все ключи, взятые в этом цикле.
+_TWOGIS_VE2_SLEEP_MAX_CHARS = 2400
+_TWOGIS_VE2_SLEEP_REASONS = {
+    "settings_unavailable": "настройки 2ГИС не читаются",
+    "closed": "выдача закрыта (client_use = off)",
+    "reads_disabled": "чтение выключено (reads_enabled = false)",
+    "quiet": "тихое окно",
+    "outreachos": "идёт OutreachOS или его статус не читается",
+    "import": "идёт импорт 2ГИС",
+    "busy": "пул 2ГИС занят",
+    "paused": "модуль 2ГИС на паузе",
+    "read_failed": "сбои чтения 2ГИС",
+    "error": "ошибки страницы 2ГИС",
+    "journal": "сбой журнала ve_twogis_rows",
+    "model": "сбой подбора рубрик",
+}
+_TWOGIS_VE2_SLEEP_SQL = (
+    "SELECT b.id::text AS id, p.name AS project_name, h.title AS hypothesis, j.id::text AS job_id, "
+    "       b.public_info->'two_gis_sleep'->>'since' AS since, b.public_info->'two_gis_sleep'->>'reason' AS reason "
+    "FROM public.ve_bases b "
+    "JOIN LATERAL (SELECT j.id FROM public.ve_jobs j "
+    "              WHERE j.stage = 'base_collect' AND j.status IN ('pending', 'running') "
+    "                AND jsonb_typeof(j.payload->'base_id') = 'string' "
+    "                AND nullif(btrim(j.payload->>'base_id'), '') IS NOT NULL "
+    "                AND j.payload->>'base_id' = b.id::text LIMIT 1) j ON true "
+    "LEFT JOIN public.ve_projects p ON p.id = b.project_id "
+    "LEFT JOIN public.ve_hypotheses h ON h.id = b.hypothesis_id "
+    "WHERE b.status = 'collecting' AND jsonb_typeof(b.public_info->'two_gis_sleep') = 'object'"
+)
+# Срез знает сон, только если функция среза его выдаёт (миграция части 5).
+_TWOGIS_VE2_SLEEP_SLICE_SQL = (
+    "SELECT position('two_gis_sleep' in pg_get_functiondef("
+    "'public.ve_base_public_info(public.ve_bases)'::regprocedure)) > 0"
+)
+
+
+async def _twogis_ve2_recovered(conn, prefix: str) -> None:
+    await conn.execute(f"DELETE FROM {JOB_ALERTS_TABLE} WHERE alert_key LIKE $1", f"twogis-ve2:{prefix}:%")
+
+
+async def _check_twogis_ve2(conn) -> list[str]:
+    problems: list[str] = []
+    role = await conn.fetchrow("SELECT oid, rolconnlimit FROM pg_roles WHERE rolname = 'twogis_ve2'")
+    # Сборщик Ш5 создаётся без входа; вход включают только на окно сборки.
+    builder_login = await conn.fetchval("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'twogis_ve2_builder'")
+    if role is None and not builder_login:
+        await _twogis_ve2_recovered(conn, "builder-hba")
+        return []  # Ш3 ещё не сделан или откачен: проверять нечего.
+
+    # 1. pg_hba: запрет для роли должен стоять раньше первой общей строки host.
+    rules = await conn.fetch(
+        "SELECT line_number, type, database, user_name, auth_method, error FROM pg_hba_file_rules ORDER BY line_number"
+    )
+    first_general = next((r["line_number"] for r in rules if r["type"] == "host"
+                          and "all" in (r["user_name"] or []) and r["auth_method"] != "reject"), None)
+    rules_broken = any(r["error"] for r in rules)
+
+    def hba_ok(user: str) -> bool:
+        reject = next((r["line_number"] for r in rules if r["type"] == "host" and r["auth_method"] == "reject"
+                       and user in (r["user_name"] or []) and "all" in (r["database"] or [])), None)
+        return reject is not None and (first_general is None or reject < first_general) and not rules_broken
+
+    if role is not None:
+        if hba_ok("twogis_ve2"):
+            await _twogis_ve2_recovered(conn, "hba")
+        else:
+            loaded = await conn.fetchval("SELECT pg_conf_load_time()")
+            key = f"twogis-ve2:hba:{loaded.isoformat()}:{_repeat_bucket(loaded, TWOGIS_VE2_REPEAT_MINUTES)}"
+            if await _claim_job_alert(conn, key):
+                problems.append(
+                    "🔓 <b>pg_hba main-postgres</b>: нет строк для <code>twogis_ve2</code> выше общих правил "
+                    "(пересоздан контейнер?). Пользователь VE2 сейчас может войти и в основную базу.\n"
+                    "Вернуть две строки из <code>app/scripts/2gis-dataset/README.md</code> («VE2 user»), "
+                    "затем <code>SELECT pg_reload_conf();</code>"
+                )
+    if not builder_login or hba_ok("twogis_ve2_builder"):
+        await _twogis_ve2_recovered(conn, "builder-hba")
+    else:
+        loaded = await conn.fetchval("SELECT pg_conf_load_time()")
+        key = f"twogis-ve2:builder-hba:{loaded.isoformat()}:{_repeat_bucket(loaded, TWOGIS_VE2_REPEAT_MINUTES)}"
+        if await _claim_job_alert(conn, key):
+            problems.append(
+                "🔓 <b>pg_hba main-postgres</b>: нет строк для <code>twogis_ve2_builder</code> выше общих правил, "
+                "а вход сборщику включён. Сборщик Ш5 сейчас может войти и в основную базу.\n"
+                "Вернуть две строки из <code>app/scripts/2gis-dataset/README.md</code> («Builder login»), "
+                "затем <code>SELECT pg_reload_conf();</code> — или, если окно Ш5 закрыто, "
+                "<code>ALTER ROLE twogis_ve2_builder NOLOGIN;</code>"
+            )
+    if role is None:
+        return problems
+
+    # 2. Соединения: twogis_ve2 занят всеми своими соединениями 3 цикла подряд; инстанс у предела.
+    # Простаивающие (idle) не считаем: пул может держать их между тиками, а зависнуть
+    # дольше 10–15 с роль не может (statement_timeout, idle_in_transaction_session_timeout).
+    counts = await conn.fetchrow(
+        "SELECT count(*) FILTER (WHERE usename = 'twogis_ve2' AND state IS DISTINCT FROM 'idle')::int AS ve2, "
+        "count(*)::int AS total, "
+        "current_setting('max_connections')::int AS max_conn FROM pg_stat_activity"
+    )
+    limit = role["rolconnlimit"] if role["rolconnlimit"] and role["rolconnlimit"] > 0 else 2
+    if counts["ve2"] >= limit:
+        _TWOGIS_VE2_FULL_POOL_CYCLES[0] += 1
+        _TWOGIS_VE2_FULL_POOL_SINCE[0] = _TWOGIS_VE2_FULL_POOL_SINCE[0] or datetime.now(timezone.utc)
+    else:
+        _TWOGIS_VE2_FULL_POOL_CYCLES[0] = 0
+        _TWOGIS_VE2_FULL_POOL_SINCE[0] = None
+        await _twogis_ve2_recovered(conn, "pool")
+    since = _TWOGIS_VE2_FULL_POOL_SINCE[0]
+    if _TWOGIS_VE2_FULL_POOL_CYCLES[0] >= 3 and since is not None:
+        key = f"twogis-ve2:pool:{since.isoformat()}:{_repeat_bucket(since, TWOGIS_VE2_REPEAT_MINUTES)}"
+        if await _claim_job_alert(conn, key):
+            problems.append(f"🧵 <b>2ГИС VE2</b>: <code>twogis_ve2</code> занят {counts['ve2']} из {limit} соединений "
+                            f"с {_msk(since)} — модуль 2ГИС, вероятно, завис.")
+    threshold = min(85, int(counts["max_conn"] * 0.85))
+    if counts["total"] >= threshold:
+        key = f"twogis-ve2:instance:{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H')}"
+        if await _claim_job_alert(conn, key):
+            problems.append(f"📈 <b>main-postgres</b>: {counts['total']} соединений из {counts['max_conn']} "
+                            f"(порог {threshold}); у VE2 к 2ГИС — {counts['ve2']}.")
+
+    # 3. Состояние модуля 2ГИС (таблицы R2; до их деплоя — пропуск).
+    try:
+        status = await conn.fetchrow(
+            "SELECT s.mode, t.paused_until, t.consecutive_errors, t.error_since, t.last_error_kind, t.updated_at "
+            "FROM public.ve_twogis_source_settings s JOIN public.ve_twogis_source_status t USING (market) "
+            "WHERE s.market = 'ru'"
+        )
+    except asyncpg.exceptions.UndefinedTableError:
+        return problems
+    now = datetime.now(timezone.utc)
+    fresh = status is not None and status["updated_at"] is not None and now - status["updated_at"] <= timedelta(minutes=15)
+    paused = fresh and status["paused_until"] is not None and status["paused_until"] > now
+    failing = fresh and status["error_since"] is not None and (status["consecutive_errors"] >= 3
+                                                             or status["last_error_kind"] == "role_limit")
+    if status is None or status["mode"] == "off" or (fresh and not (paused or failing)):
+        await _twogis_ve2_recovered(conn, "status")
+        return problems
+    if not (paused or failing):
+        # Строка устарела (чтений не было 15 мин): состояние неизвестно, а не исправно —
+        # ключ эпизода остаётся, и напоминание идёт раз в сутки, а не после каждой паузы.
+        return problems
+    anchor = status["error_since"] or status["paused_until"]
+    kind = status["last_error_kind"] or "pause"
+    key = f"twogis-ve2:status:{kind}:{anchor.isoformat()}:{_repeat_bucket(anchor, TWOGIS_VE2_REPEAT_MINUTES)}"
+    if await _claim_job_alert(conn, key):
+        what = {"role_limit": "упёрся в лимит соединений роли", "connect": "не подключается", "timeout": "тайм-ауты",
+                "snapshot": "снимок 2ГИС сменился", "other": "ошибки чтения"}.get(kind, "пауза чтения")
+        until = f", пауза до {_msk(status['paused_until'])}" if paused else ""
+        if kind == "snapshot":
+            # Смена снимка паузы не ставит: близнец на первом же чтении закрывается (3b: retire).
+            tail = ("Близнецы баз закрываются на первом чтении, пока <code>ve2.card_features</code> не на текущем "
+                    "снимке. Нужна пересборка Ш5 (<code>004_ve2_features.sql</code>: prepare "
+                    "<code>-v new_build=1</code> → сборщик → index → swap) и новые snapshot_id/features_version "
+                    "в <code>ve_twogis_source_settings</code>; <code>reads_enabled = false</code> лишь заставит "
+                    "новых близнецов ждать, а не закрываться.")
+        else:
+            tail = ("Базы ждут, не останавливаются; выключить чтение: "
+                    "<code>update ve_twogis_source_settings set reads_enabled = false where market = 'ru'</code>")
+        problems.append(f"🗺 <b>2ГИС VE2</b>: {what} — {status['consecutive_errors']} подряд с {_msk(anchor)}{until}. "
+                        + tail)
+    return problems
+
+
+def _twogis_sleep_since(raw) -> datetime | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        ts = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _twogis_sleep_log(job_ids: list[str]) -> str:
+    """Строки лога задач: воркер пишет их с префиксом «[base_collect <8 знаков id задачи>]».
+    Окно — по времени, не по строкам: спящая база пишет раз в 15–60 мин, а воркер общий."""
+    shown = [_ve2_text(job[:8], 8) for job in job_ids[:_TWOGIS_VE2_SLEEP_MAX_ITEMS]]
+    pattern = f"base_collect {shown[0]}" if len(shown) == 1 else f"base_collect ({'|'.join(shown)})"
+    rest = f" (и ещё {len(job_ids) - len(shown)})" if len(job_ids) > len(shown) else ""
+    return (f"Лог: <code>docker logs portal-worker-vertical-engine-v2 --since 2h 2&gt;&amp;1 | grep -E '{pattern}'</code>"
+            f"{rest}")
+
+
+def _twogis_sleep_verb(count: int) -> str:
+    return "спит" if count % 10 == 1 and count % 100 != 11 else "спят"
+
+
+def _format_twogis_sleep(items: list, now: datetime) -> list[str]:
+    hours_min = TWOGIS_VE2_SLEEP_MINUTES // 60
+    groups: dict[str, list] = {}
+    for row, since in sorted(items, key=lambda item: (item[1], str(item[0]["id"]))):
+        groups.setdefault(str(row["reason"] or ""), []).append((row, since))
+    blocks: list[tuple[str, int]] = []  # текст блока и число баз в нём
+    for reason, members in groups.items():
+        label = _ve2_text(_TWOGIS_VE2_SLEEP_REASONS.get(reason, "причина не распознана"), 80)
+        code = f" (<code>{_ve2_text(reason or '—', 40)}</code>)"
+        jobs = [str(row["job_id"] or "") for row, _ in members]
+        if len(members) >= _TWOGIS_VE2_SLEEP_GROUP_MIN:
+            projects = Counter(str(row["project_name"] or "без проекта") for row, _ in members)
+            shown = projects.most_common(_TWOGIS_VE2_SLEEP_MAX_ITEMS)
+            listed = ", ".join(_ve2_text(name, 80) + (f" ({count})" if count > 1 else "") for name, count in shown)
+            if len(projects) > len(shown):
+                listed += f" и ещё {len(projects) - len(shown)}"
+            count = len(members)
+            blocks.append((f"🛌 <b>2ГИС VE2</b>: {count} {_bases_word(count)} с близнецом {_twogis_sleep_verb(count)} "
+                           f"дольше {hours_min} ч (самая ранняя — с {_msk(members[0][1])}); причина при засыпании — "
+                           f"{label}{code}.\nПроекты: {listed}\n{_twogis_sleep_log(jobs)}", count))
+            continue
+        for (row, since), job in zip(members, jobs):
+            hours = int((now - since).total_seconds() // 3600)
+            detail = f" · {_ve2_text(row['hypothesis'], 80)}" if row["hypothesis"] else ""
+            blocks.append((f"🛌 <b>2ГИС VE2</b>: база с близнецом спит {hours} ч (дольше {hours_min} ч) — с {_msk(since)}, "
+                           f"причина при засыпании — {label}{code}.\n"
+                           f"Проект: <b>{_ve2_text(row['project_name'] or 'без проекта', 80)}</b>{detail} · "
+                           f"<code>#{_ve2_text(str(row['id'])[:8], 8)}</code>\n{_twogis_sleep_log([job])}", 1))
+    kept: list[str] = []
+    for block, _ in blocks:
+        used = sum(len(b) + 2 for b in kept)
+        if len(kept) >= _TWOGIS_VE2_SLEEP_MAX_ITEMS or used + len(block) > _TWOGIS_VE2_SLEEP_MAX_CHARS:
+            break
+        kept.append(block)
+    hidden = sum(count for _, count in blocks[len(kept):])  # ключи этих баз уже взяты: считаем базы, а не блоки
+    if hidden:
+        kept.append(f"…и ещё {hidden} {_bases_word(hidden)} — в карточках проектов.")
+    if kept:
+        kept.append("Закрытая выдача и сбои чтения закрывают близнеца сами через сутки; остальные причины — нет, "
+                    "нужен оператор. Закрыть близнецов всех баз: <code>update ve_twogis_source_settings set "
+                    "mode = 'off' where market = 'ru'</code> (для этих баз необратимо).")
+    return kept
+
+
+async def _twogis_ve2_sleep_slice(conn) -> list[str]:
+    """D18: при mode = on сон баз виден монитору только через срез public_info (миграция части 5)."""
+    try:
+        mode = await conn.fetchval("SELECT mode FROM public.ve_twogis_source_settings WHERE market = 'ru'")
+    except asyncpg.exceptions.UndefinedTableError:
+        return []
+    if mode != "on" or await conn.fetchval(_TWOGIS_VE2_SLEEP_SLICE_SQL):
+        await _twogis_ve2_recovered(conn, "sleep-slice")
+        return []
+    if not await _claim_job_alert(conn, f"twogis-ve2:sleep-slice:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"):
+        return []
+    return ["🛌 <b>2ГИС VE2</b>: сон баз 2ГИС не виден — в <code>ve_base_public_info</code> нет "
+            "<code>two_gis_sleep</code> (миграция части 5 не применена), а <code>mode = on</code>. "
+            "Пока её нет, алерт «база с близнецом спит дольше суток» молчит. Миграции ставит деплой портала. "
+            "Базы, уснувшие до него, срез увидит только со следующей записи collect_info — после деплоя "
+            "пересчитать им срез: <code>update ve_bases set collect_info = collect_info where status = 'collecting' "
+            "and public_info-&gt;'two_gis_sleep' is null and collect_info ? 'two_gis_sleep'</code>"]
+
+
+async def _check_twogis_ve2_sleep(conn) -> list[str]:
+    """Сон баз 2ГИС (п.4). Не бросает: сбой — пропуск цикла; уже взятые ключи уходят в сообщение."""
+    blocks: list[str] = []
+    try:
+        blocks = await _twogis_ve2_sleep_slice(conn)
+    except Exception as e:
+        print(f"[health] twogis-ve2 sleep slice check skipped: {_format_exception_message(e)}")
+    fresh: list = []
+    now = datetime.now(timezone.utc)
+    try:
+        rows = await conn.fetch(_TWOGIS_VE2_SLEEP_SQL, timeout=10)
+        long_sleep: list = []
+        for row in rows:
+            since = _twogis_sleep_since(row["since"])
+            if since is None:
+                print(f"[health] twogis-ve2 sleep marker unreadable: #{str(row['id'])[:8]}")
+            elif now - since >= timedelta(minutes=TWOGIS_VE2_SLEEP_MINUTES):
+                long_sleep.append((row, since))
+        episodes = [f"twogis-ve2:sleep:{row['id']}:{since.isoformat()}" for row, since in long_sleep]
+        # Чистим по возрасту, а не по отсутствию: во время полного тика метка на секунды пропадает и
+        # возвращается с тем же since, и удаление «нет в этом цикле» повторяло бы тот же алерт. Ключ старше
+        # окна напоминания + 60 мин взять заново нельзя (его окно прошло); новый эпизод — новый since и ключ.
+        await conn.execute(f"DELETE FROM {JOB_ALERTS_TABLE} WHERE alert_key LIKE 'twogis-ve2:sleep:%' "
+                           "AND NOT (alert_key LIKE ANY($1::text[])) "
+                           "AND alerted_at < now() - make_interval(mins => $2)",
+                           [f"{key}:%" for key in episodes], TWOGIS_VE2_REPEAT_MINUTES + 60)
+        for (row, since), episode in zip(long_sleep, episodes):
+            if await _claim_job_alert(conn, f"{episode}:{_repeat_bucket(since, TWOGIS_VE2_REPEAT_MINUTES)}"):
+                fresh.append((row, since))
+    except Exception as e:
+        print(f"[health] twogis-ve2 sleep check skipped: {_format_exception_message(e)}")
+    try:
+        return blocks + _format_twogis_sleep(fresh, now)
+    except Exception as e:
+        print(f"[health] twogis-ve2 sleep message failed: {_format_exception_message(e)}")
+        return blocks
+
+
+async def check_twogis_ve2() -> list[str]:
+    """Монитор «2ГИС → VE2» — см. run_job_monitor. Не бросает исключений: gather без return_exceptions."""
+    try:
+        if not DATABASE_URL:
+            return []
+        try:
+            conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        except Exception as e:
+            print(f"[health] twogis-ve2 connect error: {_normalize_network_error(e)}")
+            return []
+        try:
+            # Сон баз — не внутри _check_twogis_ve2: та выходит рано, когда роли нет.
+            problems: list[str] = []
+            try:
+                problems = await _check_twogis_ve2(conn)
+            except Exception as e:
+                print(f"[health] twogis-ve2 monitor error: {_format_exception_message(e, 300)}")
+            return problems + await _check_twogis_ve2_sleep(conn)
+        finally:
+            try:
+                await conn.close()
+            except Exception as e:
+                print(f"[health] twogis-ve2 close error: {_format_exception_message(e)}")
+    except Exception as e:
+        print(f"[health] twogis-ve2 monitor error: {_format_exception_message(e, 300)}")
+        return []
+
+
+async def run_job_monitor() -> None:
+    """Run parser, pipeline, sender, base and VE2-sender checks independently from general health."""
+    try:
+        stuck, failed, pipelines, sender, bases, ve2_sender, twogis_ve2 = await asyncio.gather(
             check_stuck_jobs(),
             check_failed_jobs(),
             check_pipeline_runs(),
             check_sender(),
+            check_failed_bases(),
+            check_ve2_sender(),
+            check_twogis_ve2(),
         )
         if sender:
             mention = f"\n{html.escape(SENDER_ALERT_MENTION)}" if SENDER_ALERT_MENTION else ""
             await send_telegram(f"⚠️ <b>РАССЫЛКА</b> — {_now_msk()}\n\n" + "\n\n".join(sender) + mention)
             print(f"[health] SENDER ALERT sent: {len(sender)} problem(s)")
+        if bases:
+            await send_telegram(f"⚠️ <b>БАЗЫ</b> — {_now_msk()}\n\n" + "\n\n".join(bases))
+            print(f"[health] BASE ALERT sent: {len(bases)} problem(s)")
+        if ve2_sender:
+            await send_telegram(_ve2_sender_header() + "\n\n".join(ve2_sender) + _ve2_sender_mention())
+            print(f"[health] VE2 SENDER ALERT sent: {len(ve2_sender)} block(s)")
+        if twogis_ve2:
+            await send_telegram(f"⚠️ <b>2ГИС → VE2</b> — {_now_msk()}\n\n" + "\n\n".join(twogis_ve2))
+            print(f"[health] 2GIS VE2 ALERT sent: {len(twogis_ve2)} problem(s)")
         problems = [*pipelines, *stuck, *failed]
         if not problems:
             print(f"[health] job monitor OK at {_now_msk()}")

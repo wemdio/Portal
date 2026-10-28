@@ -36,6 +36,9 @@ import { readVeSourceCostPolicy, withVeRetailRefreshMarket } from './sourceAudie
 import { addVeKnownWebsiteSource, needsVeKnownWebsiteContinuation } from './knownWebsiteDirectory';
 import { applyVeRestaurantSourceContinuation, needsVeRestaurantSourceContinuation } from './restaurantSourcePolicy';
 import { veCollectionGeographyFromBrief, type VeCollectionGeography } from './collectionGeography';
+import { projectMarket } from './market';
+import { createVeTwoGisSourceFlag, readVeTwoGisSettings, veTwoGisFlagAllowed, veTwoGisSnapshotReady,
+  type VeTwoGisSourceFlag } from './twoGisSettings';
 
 export interface VeBaseCollectInput {
   verticalId: string;
@@ -124,6 +127,23 @@ function repairJobPayload(base: Record<string, unknown>): Record<string, unknown
   return payload;
 }
 
+/** 2ГИС (план 26.10, R3 «Флаг»): флаг нового RU-превью, решается прямо перед INSERT. Никогда не
+ * бросает: любой сбой — база без 2ГИС. Сбой чтения настроек readVeTwoGisSettings пишет в лог сам (только вид). */
+async function freezeVeTwoGisSource(supabase: SupabaseClient, projectId: string): Promise<VeTwoGisSourceFlag | null> {
+  try {
+    const settings = await readVeTwoGisSettings(supabase);
+    if (settings && veTwoGisFlagAllowed(settings, projectId)) return createVeTwoGisSourceFlag(settings, new Date());
+    // mode=on без проверенного снимка — ошибка порядка шагов (Ш6 раньше Ш5), а не норма.
+    if (settings?.mode === 'on' && !veTwoGisSnapshotReady(settings)) {
+      console.warn('[ve2-2gis] mode=on, но снимок не проверен (Ш5): новое превью без 2ГИС');
+    }
+    return null;
+  } catch (error) {
+    console.warn(`[ve2-2gis] new preview without 2GIS: ${error instanceof Error ? error.name : 'error'}`);
+    return null;
+  }
+}
+
 async function resumeFailedPreview(
   supabase: SupabaseClient, input: VeBaseCollectInput, hypothesisId: string,
   activeBaseIds: string[], currentHypothesis: Record<string, unknown> | null,
@@ -176,6 +196,9 @@ async function resumeFailedPreview(
     ...(refreshAudience ? { audience_scope_refresh_requested: true,
       cost_policy: { version: 1, website_discovery: 'existing_only' } } : {}),
   };
+  // 2ГИС (часть 4): база упала во сне (финальный fail воркера collect_info не трогает) — метку снимаем;
+  // близнецы с курсором и отсрочкой остаются как есть, отсрочка истекает сама.
+  delete (info as { two_gis_sleep?: unknown }).two_gis_sleep;
   if (refreshGeography) {
     try {
       const prepared = prepareVeGeographyRepairContinuation(info);
@@ -365,6 +388,10 @@ export async function enqueueVeBaseCollect(
   // Read lazily after reuse/recovery checks. A retry owns its saved audience;
   // only a genuinely new preview freezes the current project geography.
   let collectionGeography: VeCollectionGeography | undefined;
+  // 2ГИС (R3 «Флаг»): рынок читается тем же запросом, что и география; настройки — один раз на
+  // запрос, только для RU-проекта и только на пути к новому INSERT. undefined — не решено, null — без 2ГИС.
+  let ruProject: boolean | undefined;
+  let twoGisSource: VeTwoGisSourceFlag | null | undefined;
 
   // A new preview starts with the project's "addresses per company" limit. A
   // failed read (or a database without the column) means no limit, and the
@@ -554,14 +581,22 @@ export async function enqueueVeBaseCollect(
       try {
         if (!collectionGeography) {
           const { data: project, error: projectError } = await supabase.from('ve_projects')
-            .select('brief').eq('id', projectId).maybeSingle();
+            .select('brief, market').eq('id', projectId).maybeSingle();
           if (projectError || !project) return { ok: false,
             message: `Не удалось сохранить географию базы: ${projectError?.message ?? 'проект не найден'}` };
           collectionGeography = veCollectionGeographyFromBrief(project.brief);
+          ruProject = projectMarket(project) === 'ru';
         }
         collectInfo.collection_geography = { ...collectionGeography };
       } catch (error) {
         return { ok: false, message: `Не удалось сохранить географию базы: ${error instanceof Error ? error.message : 'ошибка чтения брифа'}` };
+      }
+      // Только RU и только база гипотезы (строка ve_twogis_rows — проект + гипотеза). Вне try географии:
+      // сбой 2ГИС не валит постановку. Сюда доходит лишь вставка новой базы — ветки повтора и
+      // продолжения выше уже сделали continue, их collect_info не трогаем.
+      if (hypothesisId && ruProject) {
+        if (twoGisSource === undefined) twoGisSource = await freezeVeTwoGisSource(supabase, projectId);
+        if (twoGisSource) collectInfo.two_gis_source = { ...twoGisSource };
       }
     }
 

@@ -1,3 +1,4 @@
+import { domainToUnicode } from 'url';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { ValidationResult } from './shared';
 
@@ -21,8 +22,14 @@ import type { ValidationResult } from './shared';
 
 const RESULT_TABLE = 'email_validation_result_cache';
 const CATCH_ALL_TABLE = 'email_validation_catch_all_cache';
+// Bounces of our own sends (migration 20261026_0090): the Instantly webhook,
+// hard bounces of our sender and imported Instantly lead statuses.
+const BOUNCE_VIEW = 'email_bounce_history';
 const DAY_MS = 86_400_000;
 const TTL_MS = Math.max(1, Number(process.env.EMAIL_VALIDATION_CACHE_TTL_DAYS ?? '60') || 60) * DAY_MS;
+// Only a bounce of the last EMAIL_VALIDATION_BOUNCE_DAYS counts: a refusal by
+// policy (a blocked sending mailbox) must not bury an address for good.
+const BOUNCE_WINDOW_MS = Math.max(1, Number(process.env.EMAIL_VALIDATION_BOUNCE_DAYS ?? '180') || 180) * DAY_MS;
 const READ_WINDOW_MS = 15;
 const READ_BATCH = 200;
 const WRITE_DELAY_MS = 2_000;
@@ -88,8 +95,11 @@ function compactDetails(details: Record<string, unknown>): Record<string, unknow
     [key, typeof value === 'string' && value.length > MAX_DETAIL_TEXT ? value.slice(0, MAX_DETAIL_TEXT) : value]));
 }
 
+export type BounceRecord = { lastBouncedAt: string; bounces: number };
+
 const resultMemory = new Map<string, Remembered<ValidationResult>>();
 const catchAllMemory = new Map<string, Remembered<boolean>>();
+const bounceMemory = new Map<string, Remembered<BounceRecord>>();
 const pendingResults = new Map<string, { email: string; result: string; payload: ValidationResult; checked_at: string; expires_at: string }>();
 const pendingCatchAll = new Map<string, { domain: string; is_catch_all: boolean; checked_at: string; expires_at: string }>();
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -113,6 +123,26 @@ const loadCatchAll = batched<boolean>(async (domains) => {
   return new Map((data ?? []).map((row: { domain: string; is_catch_all: boolean }) => [row.domain, row.is_catch_all]));
 });
 
+// A failing lookup leaves verdicts as SMTP gave them; say so, at most every 10 minutes.
+let bounceWarnedAt = 0;
+
+const loadBounces = batched<BounceRecord>(async (emails) => {
+  const db = await database();
+  if (!db) return new Map();
+  const { data, error } = await db.from(BOUNCE_VIEW)
+    .select('email, last_bounced_at, bounces').in('email', emails)
+    .gt('last_bounced_at', new Date(Date.now() - BOUNCE_WINDOW_MS).toISOString());
+  if (error) {
+    if (Date.now() - bounceWarnedAt >= 10 * 60_000) {
+      bounceWarnedAt = Date.now();
+      console.warn(`[email-validation] bounce history lookup skipped: ${error.message}`);
+    }
+    throw new Error(error.message);
+  }
+  return new Map((data ?? []).map((row: { email: string; last_bounced_at: string; bounces: number }) =>
+    [row.email, { lastBouncedAt: row.last_bounced_at, bounces: row.bounces }]));
+});
+
 /** A kept verdict for this normalised address, or null (then probe it). */
 export async function cachedValidation(email: string): Promise<ValidationResult | null> {
   if (!(await database())) return null;
@@ -130,6 +160,27 @@ export async function cachedCatchAll(domain: string): Promise<boolean | null> {
   if (memory) return memory.value;
   const value = await loadCatchAll(domain);
   remember(catchAllMemory, domain, value, value === null ? MISS_MEMORY_MS : HIT_MEMORY_MS);
+  return value;
+}
+
+/**
+ * The latest recent bounce of this normalised address in our sends, or null.
+ * EMAIL_VALIDATION_BOUNCE_HISTORY=0 switches the lookup off.
+ */
+export async function bouncedBefore(email: string): Promise<BounceRecord | null> {
+  if (process.env.EMAIL_VALIDATION_BOUNCE_HISTORY === '0' || !(await database())) return null;
+  const memory = recalled(bounceMemory, email);
+  if (memory) return memory.value;
+  // The validator looks up IDN addresses in punycode, senders may keep them
+  // as written (info@завод.рф): ask for both forms.
+  const at = email.lastIndexOf('@');
+  const unicodeDomain = email.includes('xn--') ? domainToUnicode(email.substring(at + 1)) : '';
+  const unicode = unicodeDomain && unicodeDomain !== email.substring(at + 1) ? `${email.substring(0, at)}@${unicodeDomain}` : null;
+  const [ascii, written] = await Promise.all([loadBounces(email), unicode ? loadBounces(unicode) : Promise.resolve(null)]);
+  const value = ascii && written
+    ? { lastBouncedAt: ascii.lastBouncedAt > written.lastBouncedAt ? ascii.lastBouncedAt : written.lastBouncedAt, bounces: ascii.bounces + written.bounces }
+    : ascii ?? written;
+  remember(bounceMemory, email, value, value ? HIT_MEMORY_MS : MISS_MEMORY_MS);
   return value;
 }
 
@@ -195,6 +246,7 @@ export function __resetSharedValidationCache(): void {
   adminClient = null;
   resultMemory.clear();
   catchAllMemory.clear();
+  bounceMemory.clear();
   pendingResults.clear();
   pendingCatchAll.clear();
   if (writeTimer) { clearTimeout(writeTimer); writeTimer = null; }

@@ -29,6 +29,10 @@ const websiteEvidenceSchema = z.object({
   /** Bounded retries of a timed-out website, distinct from paid-search failures. */
   read_error_attempts: z.number().int().nonnegative().max(1000).optional(),
   search_deferred: z.literal(true).optional(),
+  /** 2ГИС (чтение только своего сайта): ИНН владельцев проверенного сайта. catch: одно плохое значение не должно обнулить весь чекпойнт (readRelevanceCheckpoint). */
+  owner_inns: z.array(z.string().regex(/^\d{10}(\d{2})?$/)).max(10).optional().catch(undefined),
+  /** 2ГИС: этот сайт уже подтверждал компанию; неудачное перечтение такой след не стирает. */
+  site_verified: z.literal(true).optional().catch(undefined),
   review_attempt: hashSchema,
   review_attempts: z.number().int().nonnegative(),
   refined: z.boolean(),

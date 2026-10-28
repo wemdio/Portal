@@ -20,6 +20,7 @@ import {
 import { applyVars, recipientVars } from './template';
 import { SCHEDULED_START_CLAIM_MARK, type CampaignSourceKind } from './types';
 import { MAX_VARIANTS } from './variants';
+import { readVe2SendingSwitch, VE2_SENDING_STOPPED_CODE, ve2SendingRefusal } from './ve2SendingSwitch';
 import { syncCampaignTagMailboxes } from './campaignTags';
 
 /**
@@ -36,10 +37,13 @@ import { syncCampaignTagMailboxes } from './campaignTags';
 export class SenderOpError extends Error {
   /** HTTP-статус, с которым роут отдаёт ошибку. */
   readonly status: number;
+  /** Машинный код отказа, если тексту нельзя доверять (например, VE2_SENDING_STOPPED). */
+  readonly code?: string;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
     this.name = 'SenderOpError';
   }
 }
@@ -225,6 +229,8 @@ export interface CreateCampaignInput {
   sourceKind?: CampaignSourceKind;
   /** Запуск автоаутрича (parser_jobs.id), из которого зальются получатели. */
   sourceJobId?: string | null;
+  /** Часть запуска (у Движка вертикалей — сегмент); с sourceJobId уникальна для 've2'. */
+  sourceRef?: string | null;
   /**
    * Черновик без ящиков — только у заливки из автоаутрича. Ящики рассылка
    * берёт из папки, а там их могли ещё не выбрать (сиды папок приходят
@@ -268,6 +274,7 @@ export async function createCampaign(input: CreateCampaignInput): Promise<{ id: 
       client_user_id: clientUserIdOf(input.clientUserId),
       source_kind: input.sourceKind ?? 'manual',
       source_job_id: input.sourceJobId ?? null,
+      ...(input.sourceRef ? { source_ref: input.sourceRef } : {}),
       created_by: input.createdBy,
     })
     .select('id')
@@ -604,7 +611,7 @@ async function assertStartable(campaignId: string): Promise<{ id: string; status
   const db = requireDb();
   const { data: campaign, error: campaignError } = await db
     .from('sender_campaigns')
-    .select('id, status, started_at')
+    .select('id, status, started_at, source_kind')
     .eq('id', campaignId)
     .maybeSingle();
   if (campaignError) throw new SenderOpError(campaignError.message, 500);
@@ -612,6 +619,11 @@ async function assertStartable(campaignId: string): Promise<{ id: string; status
   if (campaign.status === 'running') throw new SenderOpError('Кампания уже идёт', 409);
   if (!EDITABLE_CAMPAIGN_STATUSES.includes(String(campaign.status))) {
     throw new SenderOpError('Кампания завершена — запустить её снова нельзя', 409);
+  }
+  // Кампании Движка — только пока их отправку не остановил администратор (этап 6).
+  if (campaign.source_kind === 've2') {
+    const refusal = ve2SendingRefusal(await readVe2SendingSwitch(db));
+    if (refusal) throw new SenderOpError(refusal.message, refusal.status, refusal.code);
   }
 
   const { count, error: countError } = await db
@@ -650,7 +662,7 @@ async function assertStartable(campaignId: string): Promise<{ id: string; status
   if (firstVariants.some((variant) => !String(variant.subject ?? '').trim())) {
     throw new SenderOpError('У первого письма нет темы — допишите её у каждого варианта', 422);
   }
-  return campaign as { id: string; status: string; started_at: string | null };
+  return { id: String(campaign.id), status: String(campaign.status), started_at: (campaign.started_at as string | null) ?? null };
 }
 
 /**
@@ -769,7 +781,14 @@ export async function startCampaign(
   // Отмена и перенос стирают отметку воркера — тогда не запускаем.
   if (opts.scheduledClaim) switchQuery = switchQuery.eq('scheduled_start_error', SCHEDULED_START_CLAIM_MARK);
   const { data: switched, error } = await switchQuery.select('id');
-  if (error) throw new SenderOpError(error.message, 500);
+  if (error) {
+    // Триггер базы: отправку кампаний Движка остановили, пока шёл запуск.
+    if (error.message.includes(VE2_SENDING_STOPPED_CODE)) {
+      const refusal = ve2SendingRefusal({ state: 'stopped', changedAt: null })!;
+      throw new SenderOpError(refusal.message, refusal.status, refusal.code);
+    }
+    throw new SenderOpError(error.message, 500);
+  }
   if (!switched?.length) throw new SenderOpError('Кампанию уже запустили или завершили — обновите экран', 409);
 
   // База, долитая между постановкой в очередь выше и сменой статуса, легла

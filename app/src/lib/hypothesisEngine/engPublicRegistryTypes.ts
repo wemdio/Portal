@@ -1,5 +1,6 @@
 /** Server-generated ENG discovery inputs. Registry records are never validated contacts. */
-export type HeEngRegistryProvider = 'brreg' | 'france' | 'fdic' | 'nppes' | 'fmcsa' | 'companies_house' | 'gleif' | 'osm';
+export type HeEngRegistryProvider = 'brreg' | 'france' | 'fdic' | 'nppes' | 'fmcsa' | 'companies_house' | 'gleif' | 'osm' | 'pra' | 'esma' | 'eba' | 'prh' | 'czso' | 'cro' | 'ariregister' | 'wikidata'
+  | 'sec_companies' | 'sec_advisers' | 'irs' | 'nces' | 'charity_commission' | 'gias' | 'cqc' | 'ncua' | 'scb' | 'mastr' | 'eu_transparency';
 
 export interface HeEngRegistryTask {
   id: string;
@@ -16,6 +17,12 @@ export interface HeEngRegistryTask {
   countries?: string[];
   minEmployees?: number;
   maxEmployees?: number;
+  /**
+   * Categories of the same register that earlier slices of the plan read: a
+   * record in one of them is theirs, and this slice skips it, so a company comes
+   * from one slice only (a CQC provider of care homes and home care).
+   */
+  exclude?: string[];
 }
 
 export interface HeEngRegistryPlan {
@@ -38,6 +45,10 @@ export interface HeEngRegistryCandidate {
   employeeYear?: number;
   /** GLEIF: the entity's number in its local register («HRB 7876»), checked on its own site. */
   localRegistryId?: string;
+  /** EBA: the supervisor's own reference («F0038» at DNB, «C58301» at the Central Bank of Ireland), checked on its own site. */
+  supervisorReference?: string;
+  /** MaStR: the German VAT number («DE813473551») a German site prints in its legal notice. */
+  vatNumber?: string;
   website: string;
   emails: string[];
   description: string;

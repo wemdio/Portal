@@ -17,6 +17,7 @@
  * чтение сайтов заведомо мелких компаний под «крупную» гипотезу.
  */
 import { veSourceStrategyKey, type VeAdaptiveCollection } from './adaptiveCollection';
+import { veCountedPlanTasks } from './twoGisQuarantine';
 import type { VeCollectTask, VeSourcePlan } from './prompts/sourcePlan';
 
 /** Не больше двух автоматических расширений на базу: вторая очередь и новый срез. */
@@ -149,7 +150,8 @@ export function veCanWidenPlan(tasks: VeCollectTask[], policy: Pick<VeAdaptiveCo
       .filter((variant): variant is VeCollectTask => variant !== null);
     return variants.length > 0 && variants.every((variant) => !known.has(veSourceStrategyKey(variant)));
   });
-  return secondQueue || ((policy?.replan_attempts ?? 0) < 2 && tasks.length < VE_PLAN_MAX_TASKS);
+  // Близнецы two_gis вне потолка плана.
+  return secondQueue || ((policy?.replan_attempts ?? 0) < 2 && veCountedPlanTasks(tasks).length < VE_PLAN_MAX_TASKS);
 }
 
 /** Класс ОКВЭД из кода группы или подгруппы: «86.23» → «86». Прочее — как есть. */
@@ -205,7 +207,7 @@ const waterCode = (code: string) => /^(?:36|37)(?:\.|$)/.test(code.trim());
 
 /** Deliberately recognizes one unambiguous industrial audience. Unknown or
  * mixed buyers keep their plan; water being tested is not a water utility. */
-function isGenerationLaboratoryScope(input: {
+export function isVeGenerationLaboratoryScope(input: {
   market: string;
   hypotheses: Array<{ title: string; description?: string | null; broad?: boolean | null }>;
 }): boolean {
@@ -252,7 +254,7 @@ export function normalizeVeGenerationSourcePlan(plan: VeSourcePlan, input: {
    * They are an anchor/deduplication context, never part of the returned plan. */
   existingTasks?: readonly VeCollectTask[];
 }): { plan: VeSourcePlan; changed: boolean } {
-  if (!isGenerationLaboratoryScope(input)) return { plan, changed: false };
+  if (!isVeGenerationLaboratoryScope(input)) return { plan, changed: false };
   let changed = false;
   const generationCatalog = (task: VeCollectTask) => task.source === 'companies_directory'
     ? !!task.directory_filters?.okvedCodes?.length && task.directory_filters.okvedCodes.every(energyCode)

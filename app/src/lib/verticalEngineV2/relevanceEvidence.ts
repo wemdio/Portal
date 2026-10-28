@@ -24,6 +24,8 @@ export interface VeRelevanceEvidence {
   provider_error?: VeSearchProviderFailure;
   /** A cache miss postponed by acquisition policy, never a negative verdict. */
   search_deferred?: true;
+  /** Только при sourceSiteOnly и готовом тексте: ИНН владельцев всех страниц проверенного сайта (≤10). */
+  owner_inns?: string[];
   /** Телеметрия: была ли страница, не ответившая за 5 с, или кончился общий
    * дедлайн (120 с). Ярлык `website_evidence_timeout` ставится уже, чем это
    * поле: только если молчит стартовая страница собственного сайта компании
@@ -57,6 +59,8 @@ export interface VeRelevanceEvidenceOptions {
   companyEmail?: string;
   focus?: string;
   allowPaidSearch?: boolean;
+  /** 2ГИС: только этот сайт — без подсказки платёжного каталога, домена почты, памяти чужих хостов и любого поиска; без ИНН нужны бренд и город. */
+  sourceSiteOnly?: boolean;
   /** Trusted offline adapters; never selected from user/source data. */
   fetchText?: (url: string) => Promise<string>;
   fetchPage?: (url: string, signal: AbortSignal, route?: VeEvidenceRoute) => Promise<VeEvidencePage>;
@@ -390,22 +394,25 @@ export async function fetchVeRelevanceEvidence(
 ): Promise<VeRelevanceEvidence> {
   opts.signal?.throwIfAborted();
   const inn = normalizeVeCompanyInn(opts.companyInn);
-  const paymentHint = vePaymentCompanyHint(inn);
+  const sourceOnly = opts.sourceSiteOnly === true;
+  const paymentHint = sourceOnly ? undefined : vePaymentCompanyHint(inn);
   const hintSite = paymentHint ? veOfficialWebsiteCandidates(paymentHint.website)[0] : undefined;
   // Reviewed public coordinates are discovery candidates, not ownership
   // evidence. Prefer them to a stale registry URL within the same page/domain
   // budget; their pages must still publish the expected legal owner below.
   const supplied = veOfficialWebsiteCandidates([hintSite?.href ?? '', website].filter(Boolean).join(', '));
+  // 2ГИС: один сайт карточки (в поле может быть до трёх хостов через перевод строки).
+  if (sourceOnly) supplied.splice(1);
   // У 17.8% строк резерва сайта нет вовсе — им платный поиск покупается без
   // единой бесплатной попытки. Но у трети из них корпоративная почта на своём
   // домене, а домен корпоративной почты и есть сайт компании. Кандидат
   // проходит те же проверки безопасности и ту же проверку владения, что и
   // сайт из источника: он лишь даёт шанс подтвердиться бесплатно.
-  if (!supplied.length) {
+  if (!supplied.length && !sourceOnly) {
     const domain = deriveWebsiteFromEmail(opts.companyEmail);
     if (domain) supplied.push(...veOfficialWebsiteCandidates(`https://${domain}`));
   }
-  const nameSearch = Boolean(opts.companyName?.trim() && opts.companyAddress?.trim());
+  const nameSearch = !sourceOnly && Boolean(opts.companyName?.trim() && opts.companyAddress?.trim());
   const factKey = veCompanyFactKey({ inn, company: opts.companyName, address: opts.companyAddress });
   // Offline adapters never touch the real cache unless explicitly provided.
   const factStore = opts.companyFacts ?? (!opts.fetchPage && !opts.fetchText && !opts.search
@@ -424,7 +431,8 @@ export async function fetchVeRelevanceEvidence(
       if (record.company_key !== factKey) continue;
       const page = freshVeCompanyFact(record);
       const url = page && allowedUrl(page.url);
-      if (page && url && !isVeNonOfficialWebsiteHost(url.hostname)) cachedPages.set(veFactPageKey(page.url), page);
+      if (page && url && !isVeNonOfficialWebsiteHost(url.hostname)
+        && (!sourceOnly || supplied.some((other) => siteHost(other) === siteHost(url)))) cachedPages.set(veFactPageKey(page.url), page);
     }
     // Recover the confirmed company website without buying another search.
     // Раньше память фактов подключалась только при ПУСТОМ website: компания с
@@ -433,7 +441,7 @@ export async function fetchVeRelevanceEvidence(
     // попадают только страницы с подтверждённой личностью, поэтому добавлять
     // их к указанным доменам безопасно — они лишь дают шанс подтвердиться
     // бесплатно, а проверка владения остаётся прежней.
-    for (const page of cachedPages.values()) {
+    for (const page of sourceOnly ? [] : cachedPages.values()) {
       const url = allowedUrl(page.url)!;
       // Keep the supplied home on the same host. Starting from a cached legal
       // page would hide an offline home and trigger extra service requests.
@@ -447,7 +455,7 @@ export async function fetchVeRelevanceEvidence(
       if (supplied.length >= MAX_DOMAINS) break;
     }
   }
-  if (!supplied.length && !inn && !nameSearch) return { status: 'unavailable', text: '', url: '', reason: 'missing_or_unsafe_website', pages: 0 };
+  if (!supplied.length && (sourceOnly || (!inn && !nameSearch))) return { status: 'unavailable', text: '', url: '', reason: 'missing_or_unsafe_website', pages: 0 };
   const observedAt = new Date().toISOString();
   const freshPages = new Set<string>();
   const pages = new Map<string, Promise<VeEvidencePage | undefined>>();
@@ -467,6 +475,7 @@ export async function fetchVeRelevanceEvidence(
   let searchDeferred = false;
   let providerError: VeSearchProviderFailure | undefined;
   const verified = new Map<string, VeEvidencePage[]>();
+  const ownerPages = new Map<string, VeEvidencePage[]>();
   // Замер 22.09: своя главная, молчащая или отвечающая 403 нашему адресу в
   // США, через RU-прокси открывается примерно в каждом десятом случае, за
   // 1–3 с. Прокси общие с парсерами Яндекс Карт, поэтому заход через прокси
@@ -508,6 +517,9 @@ export async function fetchVeRelevanceEvidence(
   // сайта. Молчание каталога из поиска или внутренней страницы повтор не
   // лечит: половина таймаутов в замере — такие каталоги.
   let ownSilent = false;
+  // 2ГИС: чтение кончилось без страницы из-за молчания (таймаут без ответа). Таймаут, после которого повтор ответил
+  // или сайт вернул 5xx, сюда не входит: такой сайт ответил, и его ответ окончателен.
+  let unansweredTimeout = false;
   /** start — стартовая страница кандидата, page — внутренняя страница. via —
    * страница реквизитов своего сайта из proxyStarts. */
   const read = async (url: URL, parent: AbortSignal, mode: 'start' | 'page' = 'page', via?: VeProxyStart): Promise<VeEvidencePage | undefined> => {
@@ -652,6 +664,7 @@ export async function fetchVeRelevanceEvidence(
       if (mode === 'start' && directDead) deadStarts.add(url.href);
       // Сбой самого прокси молчание не отменяет: сайт так и не ответил.
       if (own && silent && !answered) ownSilent = true;
+      if (silent && !answered) unansweredTimeout = true;
       if (via === 'slow' && first.length === 1 && silent && !answered) directQuiet.add(url.href);
       return undefined;
     })();
@@ -695,7 +708,13 @@ export async function fetchVeRelevanceEvidence(
       return !inn ? (!discovered || brandMatches() ? 'supplied' : 'unknown') : [...seen].some((value) => value !== inn) ? 'conflict'
         : owners.size === 1 ? 'verified' : brandMatches() ? 'supplied' : 'unknown';
     };
-    if ((inn || discovered) && identity() === 'unknown') {
+    // 2ГИС без ИНН: страницы реквизитов читаем и после совпадения бренда, все три попытки (в тех же пределах
+    // страниц и прокси): ИНН курьера на /contacts без своего на /privacy — не владелец, а второй ИНН на другой
+    // странице даёт «несколько владельцев» — вердикта нет (D4). С ИНН — как до 3в: стоп на совпадении бренда или
+    // первом владельце; владельца гейт берёт из ИНН строки. Иначе процессор на /privacy или платёжный агент на
+    // /oferta сделали бы подтверждённый сайт конфликтом.
+    const ownerless = () => sourceOnly && !inn && !sitePages.some((page) => page.ownerInns?.length);
+    if ((inn || discovered) && (identity() === 'unknown' || ownerless())) {
       const base = new URL(initial?.url ?? start.href);
       // Re-rank newly discovered legal/about links after each page, so a hub
       // can lead to requisites without crawling unrelated navigation.
@@ -712,7 +731,7 @@ export async function fetchVeRelevanceEvidence(
         const page = await read(url, signal, 'page', viaProxy);
         if (page) sitePages.push(page);
         // Молчащий сайт без пропуска или живой ноды дальше не читаем: ярлык — таймаут.
-        if (identity() !== 'unknown' || (viaProxy === 'silent' && proxy.denied + proxyUnavailable > refused)) break;
+        if ((identity() !== 'unknown' && (!sourceOnly || inn)) || (viaProxy === 'silent' && proxy.denied + proxyUnavailable > refused)) break;
       }
       // Реквизиты slow-хоста без прокси (нет пула, живой ноды, пропуска или лимита) все
       // промолчали напрямую: это наш предел, а не ответ сайта — ярлык
@@ -730,6 +749,8 @@ export async function fetchVeRelevanceEvidence(
     const home = sitePages[0];
     if (!home) return [];
     const host = siteHost(new URL(home.url));
+    // Живой массив: страницы, дочитанные позже, тоже попадут в owner_inns (и без текста — голая таблица реквизитов).
+    if (sourceOnly) ownerPages.set(host, sitePages);
     const publish = () => verified.set(host, sitePages.filter((page) => Boolean(page.text)));
     // Preserve already verified pages if a later optional service read times out.
     publish();
@@ -756,12 +777,13 @@ export async function fetchVeRelevanceEvidence(
   try {
     await withVeDeadline(TOTAL_DEADLINE_LABEL, TOTAL_TIMEOUT_MS, opts.signal, async (signal) => {
       // Without a strong identity, do not move across unrelated supplied domains.
-      const candidates = inn ? supplied : supplied.slice(0, 1);
+      const candidates = inn && !sourceOnly ? supplied : supplied.slice(0, 1);
       const homes = await Promise.all(candidates.map((url) => read(url, signal, 'start')));
       for (let i = 0; i < candidates.length; i += 1) {
-        await inspect(candidates[i], homes[i], signal);
+        await inspect(candidates[i], homes[i], signal, sourceOnly);
       }
-      if (verified.size || (!inn && !nameSearch) || pages.size >= MAX_PAGE_READS) return;
+      // 2ГИС: поиска нет ни на каком пути — это единственное место поиска, кэша и Serper.
+      if (verified.size || sourceOnly || (!inn && !nameSearch) || pages.size >= MAX_PAGE_READS) return;
       signal.throwIfAborted();
       searchAttempted = true;
       const query = (inn ? '"' + inn + '"' : '"' + String(opts.companyName).replace(/["\r\n]/g, ' ').slice(0, 160) + '" ' + String(opts.companyAddress).slice(0, 100))
@@ -851,8 +873,12 @@ export async function fetchVeRelevanceEvidence(
       // медленная страница отправляла бы такую компанию на новый круг с новой
       // покупкой поиска, хотя ответ уже получен и он не изменится.
       : conflicted ? 'website_identity_unverified'
-        : ownSilent || deadlineTimedOut ? 'website_evidence_timeout' : unverified ? 'website_identity_unverified'
+        // 2ГИС: личность не подтверждена, а страница так и не ответила — это таймаут (повтор), не окончательный отказ.
+        : ownSilent || deadlineTimedOut || (sourceOnly && unverified && unansweredTimeout) ? 'website_evidence_timeout'
+        : unverified ? 'website_identity_unverified'
         : failed ? 'website_evidence_failed' : searchAttempted ? 'website_search_unverified' : 'no_usable_website_text',
     pages: pages.size, ...(timeout ? { timeout } : {}), ...proxyTelemetry(),
+    ...(sourceOnly && text ? { owner_inns: [...new Set([...verified.keys()].flatMap((host) => ownerPages.get(host) ?? [])
+      .flatMap((page) => page.ownerInns ?? []))].filter((inn) => /^\d{10}(\d{2})?$/.test(inn)).slice(0, 10) } : {}),
   };
 }

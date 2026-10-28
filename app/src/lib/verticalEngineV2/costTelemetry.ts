@@ -32,6 +32,29 @@ export interface VeChildSnapshot {
 
 const identifier = (value: unknown) => typeof value === 'string' && /^[\w-]{1,100}$/.test(value) ? value : undefined;
 
+// 2ГИС: близнецы two_gis стоят рядом со своими Яндекс-задачами и не дочерние джобы. Если среди
+// первых пяти задач есть близнец, хвост 5..16 читается отдельно, а в первые 4 источника идут
+// настоящие задачи; базы без близнецов читаются как раньше.
+const taskPaths = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, k) => from + k)
+  .flatMap((i) => [`source${i}:collect_info->tasks->${i}->>source`, `child${i}:collect_info->tasks->${i}->>child_job_id`]);
+const VE_TWIN_TAIL_SELECT = taskPaths(5, 16).join(',');
+
+type VeSnapshotSource = { source: string; jobId: string | undefined };
+const snapshotEntry = (row: Record<string, unknown>, i: number) => ({ source: identifier(row[`source${i}`]), jobId: identifier(row[`child${i}`]) });
+
+async function twinTail(db: SupabaseClient, baseId: string, row: Record<string, unknown>):
+  Promise<{ sources: VeSnapshotSource[]; truncated: boolean } | null> {
+  const { data, error } = await db.from('ve_bases').select(VE_TWIN_TAIL_SELECT)
+    .eq('id', baseId).abortSignal(AbortSignal.timeout(10_000)).maybeSingle();
+  if (error || !data) return null;
+  const tail = data as unknown as Record<string, unknown>;
+  const all = [...Array.from({ length: 5 }, (_, i) => snapshotEntry(row, i)), ...Array.from({ length: 11 }, (_, k) => snapshotEntry(tail, 5 + k))]
+    .filter((entry): entry is VeSnapshotSource => Boolean(entry.source));
+  const real = all.filter((entry) => entry.source !== 'two_gis');
+  return { sources: [...real.slice(0, 4), ...all.filter((entry) => entry.source === 'two_gis')],
+    truncated: real.length > 4 || Boolean(tail.source16 || tail.child16) };
+}
+
 async function childSnapshot(db: SupabaseClient, baseId?: string): Promise<VeChildSnapshot> {
   if (!baseId) return { state: 'ok', sources: [] };
   try {
@@ -39,13 +62,16 @@ async function childSnapshot(db: SupabaseClient, baseId?: string): Promise<VeChi
       .eq('id', baseId).abortSignal(AbortSignal.timeout(10_000)).maybeSingle();
     if (error || !data) return { state: 'unavailable', sources: [] };
     const row = data as unknown as Record<string, unknown>;
-    const sources = Array.from({ length: 4 }, (_, i) => ({ source: identifier(row[`source${i}`]), jobId: identifier(row[`child${i}`]) }))
+    const twins = (row.source4 || row.child4) && Array.from({ length: 5 }, (_, i) => row[`source${i}`]).includes('two_gis')
+      ? await twinTail(db, baseId, row) : undefined;
+    if (twins === null) return { state: 'unavailable', sources: [] };
+    const sources = twins?.sources ?? Array.from({ length: 4 }, (_, i) => ({ source: identifier(row[`source${i}`]), jobId: identifier(row[`child${i}`]) }))
       .filter((entry): entry is { source: string; jobId: string | undefined } => Boolean(entry.source));
     const round = row.round == null ? undefined : Number(row.round);
     const snapshot: VeChildSnapshot = {
       state: 'ok', sources, priorProgress: Boolean(row.collect_started || sources.length || row.construct_id),
       ...(Number.isFinite(round) ? { round } : {}),
-      ...(row.source4 || row.child4 ? { truncated: true } : {}),
+      ...((twins ? twins.truncated : row.source4 || row.child4) ? { truncated: true } : {}),
     };
     const constructorId = identifier(row.construct_id);
     if (constructorId) {

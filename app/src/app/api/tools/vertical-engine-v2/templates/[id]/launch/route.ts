@@ -20,6 +20,7 @@ import {
   listVeInstantlyCustomTags,
 } from '@/lib/verticalEngineV2/launchClientProvisioning';
 import {
+  parseLaunchInfo,
   type VeLaunchPresetOption,
   type VeMailboxTagOption,
 } from '@/lib/verticalEngineV2/launchHandoff';
@@ -28,6 +29,7 @@ import {
   type VeInstantlyTagMapping,
 } from '@/lib/verticalEngineV2/launchPresets';
 import type { CustomTag } from '@/lib/instantly/types';
+import { attachVeSenderPool } from '@/lib/verticalEngineV2/senderTransport/senderPool';
 import {
   describePortalProjectTerm,
   LAUNCHABLE_PORTAL_PROJECT_STATUSES,
@@ -164,7 +166,7 @@ export async function GET(
 
       const { data: templateRow, error: templateErr } = await supabaseAdmin
         .from('ve_templates')
-        .select('base_id')
+        .select('base_id, launch_info')
         .eq('id', templateId)
         .maybeSingle();
       if (templateErr) return jsonError(templateErr.message, 500);
@@ -397,7 +399,7 @@ export async function GET(
         typeof projectRow.launch_preset_id === 'string' &&
         projectRow.launch_preset_id
       ) {
-        const boundPreview = await buildVeContactDeliveryPreview(
+        const boundPreview = await attachVeSenderPool(supabaseAdmin, supabaseInstantly, await buildVeContactDeliveryPreview(
           supabaseAdmin,
           supabaseInstantly,
           {
@@ -407,7 +409,11 @@ export async function GET(
             targetContacts: projectRow.target_contacts,
             presetId: projectRow.launch_preset_id,
           },
-        );
+        ), {
+          templateId,
+          presetId: projectRow.launch_preset_id,
+          recordedSender: parseLaunchInfo(templateRow.launch_info)?.transport === 'sender',
+        });
         const preview = boundPreview.body.preview;
         if (boundPreview.status === 200 && preview && typeof preview === 'object') {
           deliveryPlan = preview as Record<string, unknown>;
@@ -439,6 +445,8 @@ export async function GET(
         }
       }
 
+      // Способ отправки выбирает специалист (этап 7): доступна ли «Рассылка» —
+      // GET launch-transport; поле launch_transport больше не отдаём.
       return NextResponse.json({
         presets,
         can_create_client: canCreateClient,
@@ -483,6 +491,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         portal_project_id?: unknown;
         expected_portal_period_id?: unknown;
         target_contacts?: unknown;
+        expected_transport?: unknown;
       };
       try {
         body = (await req.json()) as typeof body;
@@ -520,6 +529,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         );
       }
 
+      // Способ отправки из обзора запуска; нет поля — Instantly, как до «Рассылки».
+      const expectedTransport = body?.expected_transport;
+      if (expectedTransport !== undefined && expectedTransport !== 'instantly' && expectedTransport !== 'sender') {
+        return jsonError('Некорректный способ отправки', 400);
+      }
+
       const outcome = await runVeTemplateLaunch({
         portalDb: supabaseAdmin,
         instantlyDb: supabaseInstantly,
@@ -534,6 +549,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         userId,
         locale: 'ru',
         eventPrefix: 'tools.vertical-engine-v2.template.launch',
+        ...(expectedTransport ? { expectedTransport } : {}),
       });
 
       return NextResponse.json(outcome.body, { status: outcome.status });

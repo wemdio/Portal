@@ -8,6 +8,7 @@ import { VePriorityNichesSchema } from '@/lib/verticalEngineV2/priorityNiches';
 import { normalizeWebsiteInput } from '@/lib/verticalEngineV2/websiteUrl';
 import { findInternalLegacyDuplicates } from '@/lib/verticalEngineV2/legacyDuplicateCheck';
 import { VE_AUDIENCE_GENERATION_VERSION } from '@/lib/verticalEngineV2/audienceScope';
+import { readVeSenderMarkets } from '@/lib/verticalEngineV2/senderTransport/transport';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -48,12 +49,15 @@ export async function GET(req: NextRequest) {
         }
       }
 
+      // Рынки, где запуски идут в «Рассылку»; нет таких — поле не отдаём.
+      const senderMarkets = await readVeSenderMarkets(supabaseAdmin);
       return NextResponse.json({
         projects: rows.map((p) => ({
           ...p,
           vertical_count: counts.get(p.id as string) ?? 0,
         })),
         permissions: { can_manage_legacy_links: authed.auth.role === 'admin' },
+        ...(senderMarkets.length ? { launch_transport: senderMarkets } : {}),
       });
     },
   );

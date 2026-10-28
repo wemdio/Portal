@@ -7,6 +7,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { launchMailboxScopesEqual } from '@/lib/verticalEngineV2/launchPortfolio';
+import { senderRemoteStatus, transportOf } from '@/lib/verticalEngineV2/senderTransport/transport';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -183,7 +184,7 @@ export async function PATCH(
 
       const { data: item, error: itemError } = await supabaseAdmin
         .from('ve_launch_queue_items')
-        .select('id, instantly_account_id, mailbox_ids, status')
+        .select('id, instantly_account_id, mailbox_ids, status, transport')
         .eq('id', id)
         .maybeSingle();
       if (itemError) return jsonError(itemError.message, 500, 'VE_LAUNCH_ITEM_READ_FAILED');
@@ -231,8 +232,35 @@ export async function PATCH(
         status: number;
         status_observed_at: string;
       }> = [];
+      // Кампании «Рассылки» живут в нашей базе: их состояние — оттуда, без Instantly.
+      const senderItem = transportOf((item as { transport?: unknown }).transport) === 'sender';
+      if (senderItem) {
+        const ids = campaignRows.map((row) => (typeof row.campaign_id === 'string' ? row.campaign_id : ''));
+        const { data: senderRows, error: senderError } = ids.every(Boolean)
+          ? await supabaseAdmin.from('sender_campaigns').select('id, status, source_kind, scheduled_start_at').in('id', ids)
+          : { data: null, error: { message: 'Campaign id is missing' } };
+        if (senderError) {
+          return jsonError('Не удалось получить состояния кампаний «Рассылки»; слот сохранён.', 502, 'VE_LAUNCH_LIVE_PROOF_FAILED');
+        }
+        const byId = new Map(((senderRows ?? []) as Array<{ id: string; status: string; source_kind: string; scheduled_start_at?: string | null }>)
+          .map((row) => [row.id, row]));
+        for (const campaignId of ids) {
+          const row = byId.get(campaignId);
+          if (!row || row.source_kind !== 've2') {
+            return jsonError('Кампании «Рассылки» этого запуска нет; слот сохранён.', 409, 'VE_LAUNCH_CAMPAIGN_IDENTITY_MISMATCH');
+          }
+          if (row.status === 'running') {
+            return jsonError('Хотя бы одна кампания всё ещё отправляет письма.', 409, 'VE_LAUNCH_CAMPAIGN_STILL_ACTIVE');
+          }
+          // Назначенный запуск «Рассылка» выполнит сама — уже на ящиках, которые здесь сочли бы свободными.
+          if (row.scheduled_start_at) {
+            return jsonError('У кампании назначен запуск в «Рассылке». Отмените его там, затем освобождайте слот.', 409, 'VE_LAUNCH_CAMPAIGN_SCHEDULED');
+          }
+          observations.push({ campaign_id: campaignId, status: senderRemoteStatus(row.status), status_observed_at: observedAt });
+        }
+      }
       try {
-        for (const campaignRow of campaignRows) {
+        for (const campaignRow of senderItem ? [] : campaignRows) {
           const campaignId = typeof campaignRow.campaign_id === 'string'
             ? campaignRow.campaign_id
             : '';

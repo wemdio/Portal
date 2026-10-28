@@ -90,7 +90,7 @@ export function ContactSupplyPanel({ supply }: { supply: ContactSupplyController
     {!plan?.launched ? <>
       <p className={`mt-2 max-w-[70ch] ${HE.muted}`}>
         Покажите заказчику превью и письма. Согласование фиксирует текущую гипотезу, сегменты и условия запуска.
-        Кампании создаются отдельно на паузе, отправка здесь не включается.
+        Кампании создаются отдельно, без отправки.
       </p>
       {!supply.approved ? <div className="mt-3 space-y-3">
         <label className="flex max-w-[70ch] items-start gap-2 text-sm">

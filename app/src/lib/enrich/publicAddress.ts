@@ -235,15 +235,25 @@ function publicOnlyLookup(refused: BlockList | null) {
   };
 }
 
-/** Диспетчеры прямого маршрута по набору отказанных адресов ('' — без него). */
+/** Диспетчеры прямого маршрута по набору отказанных адресов ('' — без него) и режиму TLS. */
 const directDispatchers = new Map<string, Dispatcher>();
 
-/** Один диспетчер на процесс и набор отказов: пул соединений прямого маршрута общий. */
-function publicOnlyDirectDispatcher(refusedKey: string, refused: BlockList | null): Dispatcher {
-  let dispatcher = directDispatchers.get(refusedKey);
+/**
+ * Один диспетчер на процесс, набор отказов и режим: пул соединений прямого
+ * маршрута общий. lenientTls — как у поиска почт (enrich/emailScraper.ts):
+ * сертификат сайта не проверяется, заголовки ответа до 64 КиБ. Сайт с
+ * просроченным сертификатом остаётся сайтом компании, а корпоративные сайты
+ * за Akamai/F5 присылают куки больше 16 КиБ по умолчанию undici, и вся
+ * страница терялась как «fetch failed». Проверка адреса при соединении та же.
+ */
+function publicOnlyDirectDispatcher(refusedKey: string, refused: BlockList | null, lenientTls = false): Dispatcher {
+  const key = `${lenientTls ? 'lenient:' : ''}${refusedKey}`;
+  let dispatcher = directDispatchers.get(key);
   if (!dispatcher) {
-    dispatcher = new Agent({ connect: { lookup: publicOnlyLookup(refused) } });
-    directDispatchers.set(refusedKey, dispatcher);
+    dispatcher = new Agent(lenientTls
+      ? { connect: { lookup: publicOnlyLookup(refused), rejectUnauthorized: false }, maxHeaderSize: 64 * 1024 }
+      : { connect: { lookup: publicOnlyLookup(refused) } });
+    directDispatchers.set(key, dispatcher);
   }
   return dispatcher;
 }
@@ -259,6 +269,8 @@ export function createPublicWebsiteGuard(options: {
   maxRedirects: number;
   allowedPorts?: readonly number[];
   refusedAddresses?: readonly string[];
+  /** Прямой маршрут без проверки сертификата и с заголовками до 64 КиБ (publicOnlyDirectDispatcher). */
+  lenientTls?: boolean;
 }): WebsiteFetchGuard {
   const extra: ExtraRefusals = {
     allowedPorts: options.allowedPorts?.length ? options.allowedPorts : null,
@@ -269,7 +281,7 @@ export function createPublicWebsiteGuard(options: {
     checkUrl: (url) => checkPublicUrl(url, extra),
     maxRedirects: options.maxRedirects,
     allowHttpDowngrade: options.allowHttpDowngrade,
-    directDispatcher: publicOnlyDirectDispatcher(refusedKey, extra.refused),
+    directDispatcher: publicOnlyDirectDispatcher(refusedKey, extra.refused, options.lenientTls === true),
   };
 }
 
@@ -316,7 +328,10 @@ export const US_WEBSITE_MAX_REDIRECTS = 10;
  * резолвера); порт только STANDARD_WEB_PORTS; редирект https → http не
  * проходится (адрес ввёл клиент, а ответ по открытому каналу может подменить
  * любой узел по пути); шагов редиректа не больше `maxRedirects`
- * (US_WEBSITE_MAX_REDIRECTS по умолчанию).
+ * (US_WEBSITE_MAX_REDIRECTS по умолчанию). Прямой маршрут читает сайт с
+ * негодным сертификатом и большими заголовками, как поиск почт (lenientTls):
+ * иначе проверка компании теряла сайт, из которого конструктор потом всё равно
+ * берёт адреса. Ничего, кроме GET страницы, этот маршрут сайту не отправляет.
  */
 export function createUsWebsiteFetchGuard(options: { maxRedirects?: number } = {}): WebsiteFetchGuard {
   return createPublicWebsiteGuard({
@@ -324,5 +339,6 @@ export function createUsWebsiteFetchGuard(options: { maxRedirects?: number } = {
     maxRedirects: options.maxRedirects ?? US_WEBSITE_MAX_REDIRECTS,
     allowedPorts: STANDARD_WEB_PORTS,
     refusedAddresses: OWN_SERVER_ADDRESSES,
+    lenientTls: true,
   });
 }
