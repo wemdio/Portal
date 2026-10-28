@@ -19,6 +19,12 @@ jest.mock('@/lib/supabaseInstantly', () => ({
   },
 }));
 
+// Маршрут с 28.10.2026 сам проверяет сотрудника; здесь проверяется владение
+// кампаниями, поэтому вызывающий — вошедший сотрудник.
+jest.mock('@/lib/toolsApiAuth', () => ({
+  requireInternalToolAuth: async () => ({ auth: { supabase: null, userId: 'staff-user', role: 'manager' } }),
+}));
+
 function makeTakenReq(): NextRequest {
   return new Request('http://x/api/projects/project-target/campaigns?taken=1') as unknown as NextRequest;
 }
