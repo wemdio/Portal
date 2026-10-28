@@ -6,6 +6,7 @@
  * искать. Добавили поле — правим только этот файл.
  */
 
+import { PRODUCT_LABELS, PRODUCTS } from '@/lib/polzaRuOutreach/cascade';
 import { CHAIN_LABELS, CHAIN_TYPES, INDUSTRY_GROUP_LABELS, INDUSTRY_GROUPS } from '@/lib/polzaRuOutreach/types';
 import { MIN_CASE_LEADS, type Rec } from './libraryFilters';
 
@@ -21,6 +22,16 @@ export interface Field {
   options?: Array<[string, string]>;
   hint?: string;
 }
+
+/**
+ * Цепочки (поводы) и продукты каскада: кейс и формулировка разрешаются по
+ * любому из них. Шаблон цепочки с 29.10.2026 пишется на продукт — формулировка
+ * для его писем отмечается продуктом.
+ */
+const CHAIN_AND_PRODUCT_OPTIONS: Array<[string, string]> = [
+  ...CHAIN_TYPES.map((c) => [c, CHAIN_LABELS[c]] as [string, string]),
+  ...PRODUCTS.map((p) => [p, `Продукт: ${PRODUCT_LABELS[p]}`] as [string, string]),
+];
 
 export const STATUS_OPTIONS: Array<[string, string]> = [
   ['draft', 'черновик'],
@@ -81,10 +92,10 @@ export const FIELDS: Record<TableKey, Field[]> = {
     {
       group: 'Подбор',
       key: 'allowed_chains',
-      label: 'В каких цепочках можно',
+      label: 'В каких цепочках и продуктах можно',
       type: 'multi',
-      options: CHAIN_TYPES.map((c) => [c, CHAIN_LABELS[c]] as [string, string]),
-      hint: 'ничего не отмечено — во всех',
+      options: CHAIN_AND_PRODUCT_OPTIONS,
+      hint: 'подходит, если отмечен повод компании или её продукт; ничего не отмечено — во всех',
     },
 
     { group: 'Служебное', key: 'status', label: 'Статус', type: 'select', options: STATUS_OPTIONS },
@@ -99,9 +110,10 @@ export const FIELDS: Record<TableKey, Field[]> = {
     {
       group: 'Утверждение',
       key: 'chain_type',
-      label: 'Цепочка',
+      label: 'Цепочка или продукт',
       type: 'select',
-      options: [['all', 'все цепочки'], ...CHAIN_TYPES.map((c) => [c, CHAIN_LABELS[c]] as [string, string])],
+      options: [['all', 'все цепочки'], ...CHAIN_AND_PRODUCT_OPTIONS],
+      hint: 'шаблон продукта берёт общие и формулировки своего продукта',
     },
     {
       group: 'Утверждение',

@@ -80,7 +80,7 @@ import {
   withLettersDoubt,
   type Doubts,
 } from './doubts';
-import { cascadeHead, cascadeOffer, cascadePool, cascadeSlotFree, type CascadeDecision, type Product } from './cascade';
+import { PRODUCTS, cascadeHead, cascadeOffer, cascadePool, cascadeSlotFree, type CascadeDecision, type Product } from './cascade';
 import { CascadeClaims, loadCascadeIndex, lookupCascade, type CascadeCompany, type CascadeIndex } from './cascadeIndex';
 import { companyBrand, isSuppressed, normalizeDomain, siteUrl } from './company';
 import { findRuCompanyEmail } from './findEmail';
@@ -108,15 +108,14 @@ import type { HhVacancyRef } from './sources/hhPool';
 import { findNewsSignals } from './sources/news';
 import { analyzeSite, type SiteAnalysis } from './sources/siteSignals';
 import {
-  CHAIN_LABELS,
-  CHAIN_TYPES,
   sanitizeRuOutreachConfig,
   STAGES,
   TEMPLATE_VERSION,
-  type ChainType,
+  templateKeyLabel,
   type RuOutreachConfig,
   type Signal,
   type Stage,
+  type TemplateKey,
 } from './types';
 
 /** Целое из env в рамках. Пусто или мусор — значение по умолчанию: NaN в пуле дал бы ноль потоков. */
@@ -142,8 +141,9 @@ function envNumber(name: string, fallback: number, min: number, max: number): nu
  * Лимит строгий: каждый вызов писателя бронирует свою оценку сверху
  * (writerAttemptWorstUsd — около $0.14: 12 000 токенов ответа Gemini 3.1 Pro
  * по $10.8 за миллион и промпт, с наценкой Requesty), а шаблоны офферов волны
- * пишутся разом. Поэтому запас — не меньше первых попыток всех семи офферов
- * (около $1) с четвертью сверху: её съедят строки, чей разбор начался до
+ * пишутся разом. Поэтому запас — не меньше первых попыток всех четырёх
+ * продуктов (около $0.6; шаблон с 29.10.2026 пишется на продукт, а не на
+ * повод) с четвертью сверху: её съедят строки, чей разбор начался до
  * стоп-линии, и гипотезы сегментов. Базовый запас — $1 (env), но не больше
  * пятой части лимита; итог — не больше половины лимита: при маленьком лимите
  * разбору должно что-то остаться, и первых попыток тогда хватит не на все
@@ -155,7 +155,7 @@ const WRITER_RESERVE_MARGIN = 1.25;
 const WRITER_RESERVE_MAX_SHARE = 0.5;
 
 export function writerReserveUsd(limitUsd: number): number {
-  const firstAttempts = CHAIN_TYPES.length * writerAttemptWorstUsd() * WRITER_RESERVE_MARGIN;
+  const firstAttempts = PRODUCTS.length * writerAttemptWorstUsd() * WRITER_RESERVE_MARGIN;
   const base = Math.min(WRITER_RESERVE_USD, limitUsd * WRITER_RESERVE_SHARE);
   return Math.min(limitUsd * WRITER_RESERVE_MAX_SHARE, Math.max(base, firstAttempts));
 }
@@ -926,24 +926,24 @@ async function runJob(
     // проверки не в счёт: писатель отвечает. Считаем попытки записи (attempt
     // шаблона), а не строки: строк у одной попытки много.
     let writerWorks = false;
-    const writerFailures = new Map<ChainType, { error: string; attempts: Set<number> }>();
+    const writerFailures = new Map<TemplateKey, { error: string; attempts: Set<number> }>();
     const noteTemplate = (template: ChainTemplate) => {
       if (template.status === 'ok') {
         writerWorks = true;
         return;
       }
       if (!template.error || writerWorks) return;
-      const seen = writerFailures.get(template.chain) ?? { error: template.error, attempts: new Set<number>() };
+      const seen = writerFailures.get(template.key) ?? { error: template.error, attempts: new Set<number>() };
       seen.error = template.error;
       seen.attempts.add(template.attempt);
-      writerFailures.set(template.chain, seen);
+      writerFailures.set(template.key, seen);
       const failedTwice = [...writerFailures.values()].some((f) => f.attempts.size >= 2);
       if (writerFailures.size >= WRITER_FAIL_OFFERS || failedTwice) {
-        const list = [...writerFailures].map(([chain, f]) => `«${CHAIN_LABELS[chain]}» — ${f.error}`).join('; ');
+        const list = [...writerFailures].map(([key, f]) => `«${templateKeyLabel(key)}» — ${f.error}`).join('; ');
         throw new LlmSilentError(`Gemini не пишет цепочки: ${list}`.slice(0, 1000));
       }
     };
-    // Строки, которые ждут шаблон оффера, не прошедший проверку или не
+    // Строки, которые ждут шаблон продукта, не прошедший проверку или не
     // написанный (очень спорные с TEMPLATE_FAILED). «Переписать цепочку» может
     // сделать их готовыми, поэтому они идут в счёт заказанного числа: иначе
     // запуск докупал бы разбор новых компаний сверх того, что потом можно
@@ -953,9 +953,9 @@ async function runJob(
     // Из них — те, чей шаблон не написан из-за молчания модели: на шаге писем
     // следующей волны (или в конце запуска) шаблон пишется ещё раз, и эти
     // строки собираются заново.
-    const parked = new Map<ChainType, Qualified[]>();
+    const parked = new Map<Product, Qualified[]>();
     const parkedIds = new Set<string>();
-    const retriedChains = new Set<ChainType>();
+    const retriedProducts = new Set<Product>();
     // Ключ ИИ отвергнут или ИИ молчит: запуск уже падает — остальным потокам
     // новых строк не брать.
     let halted = false;
@@ -1450,7 +1450,7 @@ async function runJob(
         revenue,
         employees,
         hasAdPixel: site.hasAdPixel,
-        hasCaseFor: (chain) => Boolean(routeCase(libraries.cases, site.industryGroup, chain)),
+        hasCaseFor: (chain) => Boolean(routeCase(libraries.cases, site.industryGroup, chain, cascadeOffer(chain, signals, c.cascade).product)),
       });
       const marketQuote = vacancy?.marketQuote ?? site.customerQuote ?? null;
       const base = {
@@ -1479,7 +1479,7 @@ async function runJob(
       // следующий шаг каскада, новой — первый по поводу (cascade.ts). Сплита
       // 50/50 на «Автоматизированный аутрич» больше нет.
       const offer = cascadeOffer(route.chain, signals, c.cascade);
-      const caseHit = routeCase(libraries.cases, site.industryGroup, route.chain);
+      const caseHit = routeCase(libraries.cases, site.industryGroup, route.chain, offer.product);
       const score = scoreCompany({
         chain: route.chain,
         primary: route.primary,
@@ -1713,10 +1713,11 @@ async function runJob(
 
     /** Письма строки с занятым местом в лимите готовых. */
     const buildLetters = async (q: Qualified) => {
-      // Шаблон цепочки оффера: пишется, когда до писем дошла первая компания
-      // оффера; остальные ждут тот же промис. Лимит на ИИ до записи шаблона —
-      // BudgetExceededError: строка возвращается в необработанные (safe()).
-      const template = await templates.get(q.route.chain);
+      // Шаблон цепочки продукта: пишется, когда до писем дошла первая компания
+      // продукта; остальные ждут тот же промис. Повод компании подставляется в
+      // шаблон кодом. Лимит на ИИ до записи шаблона — BudgetExceededError:
+      // строка возвращается в необработанные (safe()).
+      const template = await templates.get(q.product);
       lettersStillWanted();
       const scoringDetail = q.doubts.detail.join('; ') || null;
       if (template.status !== 'ok' || !template.letters) {
@@ -1727,9 +1728,9 @@ async function runJob(
         // повтора ещё не было — строка соберётся заново на следующей волне.
         doubtful.count += 1;
         awaiting.count += 1;
-        if (template.error && !retriedChains.has(q.route.chain)) {
+        if (template.error && !retriedProducts.has(q.product)) {
           parkedIds.add(q.id);
-          parked.set(q.route.chain, [...(parked.get(q.route.chain) ?? []), q]);
+          parked.set(q.product, [...(parked.get(q.product) ?? []), q]);
         }
         await updateRow(q.id, {
           ...withLettersDoubt(q.doubts.flags, scoringDetail, 'TEMPLATE_FAILED', templateDoubtText(template)),
@@ -1748,6 +1749,7 @@ async function runJob(
         template.letters,
         {
           chain: q.route.chain,
+          product: q.product,
           brand: q.brand,
           isRouting: q.email.isRouting,
           primary: q.route.primary,
@@ -1888,10 +1890,10 @@ async function runJob(
     const lettersStep = async (fresh: Qualified[]) => {
       const again = templates.retryFailed();
       const retryRows: Qualified[] = [];
-      for (const chain of again) {
-        retriedChains.add(chain);
-        retryRows.push(...(parked.get(chain) ?? []));
-        parked.delete(chain);
+      for (const product of again) {
+        retriedProducts.add(product);
+        retryRows.push(...(parked.get(product) ?? []));
+        parked.delete(product);
       }
       if (again.length) {
         log('info', `job ${jobId}: writing chain templates again after the model did not answer: ${again.join(', ')} (${retryRows.length} rows waiting)`);
@@ -1901,14 +1903,14 @@ async function runJob(
       const rows = [...retryRows, ...fresh].sort((a, b) => b.score.total - a.score.total);
       phase = 'writing_letters';
       await publish(phase, { qualified: fresh.length });
-      // Шаблоны офферов — заранее и все сразу: иначе четыре потока писем ждали
-      // бы писателя по очереди, оффер за оффером. Только офферы строк, которым
-      // хватит мест в лимите готовых, — за лишний оффер не платим. Ошибку
-      // записи увидит строка оффера в finalize.
+      // Шаблоны продуктов — заранее и все сразу: иначе четыре потока писем
+      // ждали бы писателя по очереди, продукт за продуктом. Только продукты
+      // строк, которым хватит мест в лимите готовых, — за лишний не платим.
+      // Ошибку записи увидит строка продукта в finalize.
       if (!halted) {
         const room = Math.max(0, target - totals.ready);
-        for (const chain of new Set(rows.slice(0, room).map((q) => q.route.chain))) {
-          templates.get(chain).catch(() => undefined);
+        for (const product of new Set(rows.slice(0, room).map((q) => q.product))) {
+          templates.get(product).catch(() => undefined);
         }
       }
       await runPool(rows, LETTERS_CONCURRENCY, async (q) => {

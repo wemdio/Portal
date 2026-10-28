@@ -18,7 +18,7 @@
  */
 
 import { formatSignature, type SenderProfile } from './libraries';
-import type { ChainTemplateLetters, ChainType, Letter, QaResult } from './types';
+import type { ChainTemplateLetters, Letter, QaResult, TemplateKey } from './types';
 import {
   LETTER_COUNT,
   TEMPLATE_PLACEHOLDERS,
@@ -131,7 +131,8 @@ export function runQa(input: QaInput): QaResult {
 
 export interface TemplateQaInput {
   letters: ChainTemplateLetters;
-  chain: ChainType;
+  /** Ключ шаблона: продукт каскада или, у старых запусков, цепочка. */
+  key: TemplateKey;
   /** Утверждённые формулировки оффера: цифры в шаблоне — только из них, дословно. */
   claimTexts: string[];
   /**
@@ -175,8 +176,21 @@ const MONTHLY_FLOW = /каждый\s+месяц|ежемесячно/gi;
  */
 const PRIOR_CONTACT =
   /(?<![а-яё])(?:уже|ранее|раньше|с\s+вами)\s+(?:[а-яё]+\s+)?(?:общались|обсуждали|переписывались|созванивались|говорили)|(?<![а-яё])наш(?:ему|его|ей|ем|им|у|а|и)?\s+(?:прошл[а-яё]*\s+|недавн[а-яё]*\s+|последн[а-яё]*\s+)?(?:разговор|созвон|встреч|переписк)/i;
-/** «Гарантий» и «гарантия» — тоже нет: промпт запрещает корень целиком, даже с отрицанием. */
-const TEMPLATE_FORBIDDEN_EXTRA: Array<[RegExp, string]> = [[/гарант/i, 'forbidden:guarantee']];
+/**
+ * Письмо, названное последним, или обещание больше не писать: после паузы
+ * каскад пишет компании со следующим продуктом (спека каскада, решение 10).
+ */
+const FINAL_LETTER =
+  /последн[а-яё]*\s+(?:[а-яё]+\s+)?(?:письм|сообщени)|(?<![а-яё])не\s+(?:по)?беспоко|надоед|больше\s+(?:вам\s+)?не\s+(?:буду\s+)?(?:на|по)?пис/i;
+/**
+ * «Гарантий» и «гарантия» — тоже нет: промпт запрещает корень целиком, даже с
+ * отрицанием. Слов «аутрич», «лидогенерация» и «СДР» получатель не знает (CEO).
+ */
+const TEMPLATE_FORBIDDEN_EXTRA: Array<[RegExp, string]> = [
+  [/гарант/i, 'forbidden:guarantee'],
+  [/аутрич|outreach|лидогенерац|(?<![а-яёa-z])(?:сдр|sdr)(?![а-яёa-z])/i, 'forbidden:jargon'],
+  [FINAL_LETTER, 'forbidden:final_letter'],
+];
 /** Абзацы шаблона — через пустую строку, как у renderTemplate. */
 const PARAGRAPH_BREAK = /\n[ \t]*\n/;
 
@@ -209,7 +223,7 @@ function ownParagraph(text: string, placeholder: string): boolean {
  * формулировки и представление отправителя из него вычитаются — их цифры и
  * слова законны.
  */
-function textChecks(tag: string, text: string, chain: ChainType, writerFree: string[], examples: string[], flags: string[]): void {
+function textChecks(tag: string, text: string, key: TemplateKey, writerFree: string[], examples: string[], flags: string[]): void {
   const own = stripAll(text.replace(ANY_PLACEHOLDER, ' '), writerFree);
   for (const [re, flag] of [...FORBIDDEN, ...TEMPLATE_FORBIDDEN_EXTRA]) {
     if (re.test(own) && !flags.includes(`${tag}:${flag}`)) flags.push(`${tag}:${flag}`);
@@ -218,9 +232,10 @@ function textChecks(tag: string, text: string, chain: ChainType, writerFree: str
   if (digits.length) flags.push(`${tag}:unsupported_number(${digits.join(' ')})`);
   const made = Array.from(new Set((own.replace(MONTHLY_FLOW, ' ').match(FABRICATION) ?? []).map((m) => m.toLowerCase()))).slice(0, 3);
   if (made.length) flags.push(`${tag}:fabrication(${made.join(', ')})`);
-  // Прошлый контакт — только «Возврату»: у остальных офферов разговор в AMO,
-  // если он был, приносит {{повод}}, а текст шаблона идёт всем компаниям.
-  if (chain !== 'reactivation' && PRIOR_CONTACT.test(own)) flags.push(`${tag}:false_prior_contact`);
+  // Прошлый контакт — только «Возврату» старых запусков: у остальных офферов и
+  // у продуктов разговор в AMO, если он был, приносит {{повод}}, а текст
+  // шаблона идёт всем компаниям.
+  if (key !== 'reactivation' && PRIOR_CONTACT.test(own)) flags.push(`${tag}:false_prior_contact`);
   const lower = text.toLowerCase();
   const leaked = examples.find((e) => e.trim() && lower.includes(e.trim().toLowerCase()));
   if (leaked) flags.push(`${tag}:example_leak(${leaked.slice(0, 40)})`);
@@ -235,10 +250,10 @@ function textChecks(tag: string, text: string, chain: ChainType, writerFree: str
 export const TEMPLATE_OWN_TEXT_MAX = 200;
 
 export function runTemplateQa(input: TemplateQaInput): QaResult {
-  const { letters: t, chain } = input;
+  const { letters: t, key } = input;
   const P = TEMPLATE_PLACEHOLDERS;
   const flags: string[] = [];
-  const allowed = new Set<string>(templatePlaceholdersFor(chain));
+  const allowed = new Set<string>(templatePlaceholdersFor(key));
   const writerFree = [...input.claimTexts, ...input.senderTexts];
   const examples = input.exampleTexts ?? [];
 
@@ -252,14 +267,14 @@ export function runTemplateQa(input: TemplateQaInput): QaResult {
     if (CANDIDATE_LIKE_SUBJECT.test(rest)) flags.push('subject_candidate_like');
     if (/[A-ZА-ЯЁ]{6,}/.test(rest.replace(/«[^»]*»/g, ''))) flags.push('subject_caps');
     if (/!/.test(subject)) flags.push('subject_exclamation');
-    textChecks('subject', rest, chain, writerFree, examples, flags);
+    textChecks('subject', rest, key, writerFree, examples, flags);
   }
 
   const bodies: Array<[string, string]> = [
     ['L1', t.bodyDirect],
     ['L1r', t.bodyRouting],
     ['L2', t.letter2],
-    ...(chainUsesCase(chain) ? [['L3c', t.bodyWithCase ?? ''] as [string, string]] : []),
+    ...(chainUsesCase(key) ? [['L3c', t.bodyWithCase ?? ''] as [string, string]] : []),
     ['L3', t.bodyWithoutCase],
     ['L4', t.letter4],
   ];
@@ -300,7 +315,7 @@ export function runTemplateQa(input: TemplateQaInput): QaResult {
     if (questions > 1) flags.push(`${tag}:more_than_one_cta`);
     if ((text.replace(/^Добрый день!/, '').match(/!/g) ?? []).length) flags.push(`${tag}:exclamation`);
     if (/\*\*|__|^#{1,6}\s/m.test(text)) flags.push(`${tag}:markdown`);
-    textChecks(tag, text, chain, writerFree, examples, flags);
+    textChecks(tag, text, key, writerFree, examples, flags);
   }
 
   // Обязательные плейсхолдеры и их места: повод и связка — в
@@ -317,8 +332,8 @@ export function runTemplateQa(input: TemplateQaInput): QaResult {
   for (const [tag, raw] of [['L1', t.bodyDirect], ['L1r', t.bodyRouting]] as const) {
     if (raw.includes(P.opening) && raw.includes(P.bridge) && !bridgeAfterOpening.test(raw)) flags.push(`${tag}:bridge_not_after_opening`);
   }
-  if (chainUsesCase(chain) && !(t.bodyWithCase ?? '').includes(P.case)) flags.push(`L3c:placeholder_missing(${P.case})`);
-  if (chainUsesHypothesis(chain) && !t.bodyWithoutCase.includes(P.hypothesis)) flags.push(`L3:placeholder_missing(${P.hypothesis})`);
+  if (chainUsesCase(key) && !(t.bodyWithCase ?? '').includes(P.case)) flags.push(`L3c:placeholder_missing(${P.case})`);
+  if (chainUsesHypothesis(key) && !t.bodyWithoutCase.includes(P.hypothesis)) flags.push(`L3:placeholder_missing(${P.hypothesis})`);
   for (const [tag, raw] of bodies) {
     if (tag !== 'L1' && tag !== 'L1r' && raw.includes(P.opening)) flags.push(`${tag}:placeholder_misplaced(${P.opening})`);
     if (tag !== 'L1' && tag !== 'L1r' && raw.includes(P.bridge)) flags.push(`${tag}:placeholder_misplaced(${P.bridge})`);
@@ -366,6 +381,8 @@ const TEMPLATE_FLAG_TEXT: Record<string, string> = {
   'forbidden:urgency': 'давление срочностью (корень «срочн» нельзя даже с отрицанием)',
   'forbidden:unique': 'слово «уникальный»',
   'forbidden:guarantee': 'гарантии (корень «гарант» нельзя даже с отрицанием)',
+  'forbidden:jargon': 'слова «аутрич», «outreach», «лидогенерация», «СДР» — получатель их не знает',
+  'forbidden:final_letter': 'письмо названо последним или обещает больше не писать — позже мы напишем с другим предложением',
   'forbidden:scarcity': 'давление дефицитом',
   'forbidden:superlative': 'превосходная степень о себе',
   'forbidden:emoji': 'эмодзи',

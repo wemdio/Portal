@@ -13,6 +13,7 @@
  * размер 10, сайт 5, кейс 5, почта 5. Порог из формы: от него пишем, ниже — пропуск.
  */
 
+import type { Product } from './cascade';
 import type { CaseRecord } from './libraries';
 import type { ChainType, IndustryGroup, Signal, SignalType } from './types';
 
@@ -291,11 +292,22 @@ export function decide(total: number, writeThreshold: number): Decision {
   return total >= writeThreshold ? 'write' : 'skip';
 }
 
-/** Кейс по отраслевой группе; только утверждённые и разрешённые для этой цепочки. */
-export function routeCase(cases: CaseRecord[], group: IndustryGroup | null, chain: ChainType): { record: CaseRecord; reason: string } | null {
+/**
+ * Кейс по отраслевой группе; только утверждённые и разрешённые для этой цепочки
+ * (повода) или продукта каскада: в allowed_chains кейса — поводы и продукты,
+ * пусто — везде.
+ */
+export function routeCase(
+  cases: CaseRecord[],
+  group: IndustryGroup | null,
+  chain: ChainType,
+  product: Product,
+): { record: CaseRecord; reason: string } | null {
   // С 09.10.2026 кейс по отрасли есть и в письме 3 цепочки «найм»
   // (утверждённые тексты); раньше SDR-цепочке его не подбирали.
   if (!group) return null;
-  const hit = cases.find((c) => c.industry_groups.includes(group) && (!c.allowed_chains.length || c.allowed_chains.includes(chain)));
+  const hit = cases.find(
+    (c) => c.industry_groups.includes(group) && (!c.allowed_chains.length || c.allowed_chains.includes(chain) || c.allowed_chains.includes(product)),
+  );
   return hit ? { record: hit, reason: `отраслевая группа «${group}»` } : null;
 }

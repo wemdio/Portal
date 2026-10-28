@@ -3,7 +3,7 @@ import { logError } from '@/lib/loggerServer';
 import { PENDING_STALE_MS } from '@/lib/polzaRuOutreach/letters/templateWriter';
 import { describeTemplateFlag } from '@/lib/polzaRuOutreach/qa';
 import { authed, jsonError } from '@/lib/polzaRuOutreach/routeAuth';
-import { CHAIN_LABELS, type ChainType } from '@/lib/polzaRuOutreach/types';
+import { templateKeyLabel } from '@/lib/polzaRuOutreach/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,10 +12,12 @@ const PAGE = 1000;
 /**
  * Шаблоны цепочек запуска — для блока «Цепочки запуска» на экране: оффер,
  * статус, стоимость, письма шаблона с плейсхолдерами и замечания проверки
- * словами (components/outreach/ChainTemplates.tsx). waiting — сколько
- * компаний оффера ждут цепочку (очень спорные с TEMPLATE_FAILED): их
- * пересоберёт «Переписать цепочку». stale — pending, чей процесс умер: её
- * можно переписать заново.
+ * словами (components/outreach/ChainTemplates.tsx). Оффер — продукт каскада,
+ * у запусков до каскада — цепочка (повод). waiting — сколько компаний оффера
+ * ждут цепочку (очень спорные с TEMPLATE_FAILED): строки с продуктом ждут
+ * шаблон продукта, без продукта — шаблон своей цепочки; их пересоберёт
+ * «Переписать цепочку». stale — pending, чей процесс умер: её можно
+ * переписать заново.
  */
 export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
   const auth = await authed(req);
@@ -37,7 +39,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   for (let from = 0; ; from += PAGE) {
     const { data: rows, error: rowsErr } = await auth.supabase
       .from('polza_ru_outreach_companies')
-      .select('chain_type')
+      .select('chain_type,product')
       .eq('job_id', jobId)
       .eq('row_status', 'doubtful')
       .contains('doubt_flags', ['TEMPLATE_FAILED'])
@@ -45,7 +47,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       .range(from, from + PAGE - 1);
     if (rowsErr) return jsonError(rowsErr.message, 500);
     for (const r of rows ?? []) {
-      const key = String(r.chain_type ?? '');
+      const key = String(r.product ?? r.chain_type ?? '');
       waiting[key] = (waiting[key] ?? 0) + 1;
     }
     if (!rows || rows.length < PAGE) break;
@@ -56,7 +58,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     const flags: string[] = Array.isArray(t.qa_flags) ? t.qa_flags : [];
     return {
       ...t,
-      offer_label: CHAIN_LABELS[t.offer_key as ChainType] ?? t.offer_key,
+      offer_label: templateKeyLabel(String(t.offer_key)),
       // Замечания проверки словами — экран показывает их оператору, а
       // describeTemplateFlag живёт в серверном qa.ts (как у английского аутрича).
       qa_flags_text: flags.map((flag) => describeTemplateFlag(flag)),

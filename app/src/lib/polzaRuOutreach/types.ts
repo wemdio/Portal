@@ -13,6 +13,7 @@
  */
 
 import { sanitizeLlmBudgetUsd } from '@/lib/outreachLlm/types';
+import { PRODUCT_LABELS, isProduct, type Product } from './cascade';
 
 export const RU_OUTREACH_PARSER_TYPE = 'polza_ru_outreach' as const;
 
@@ -29,6 +30,22 @@ export const CHAIN_LABELS: Record<ChainType, string> = {
   automation: 'Автоматизированный аутрич (50/50)',
 };
 
+/**
+ * Ключ шаблона цепочки (polza_chain_templates.offer_key). С 29.10.2026 — продукт
+ * каскада (cascade.ts): шаблон один на продукт, повод подставляет код. У запусков
+ * до каскада ключ — тип цепочки (повод).
+ */
+export type TemplateKey = Product | ChainType;
+
+export function isTemplateKey(key: string): key is TemplateKey {
+  return isProduct(key) || (CHAIN_TYPES as readonly string[]).includes(key);
+}
+
+/** Название оффера для экрана: продукт или, у старых запусков, цепочка. */
+export function templateKeyLabel(key: string): string {
+  return isProduct(key) ? PRODUCT_LABELS[key] : CHAIN_LABELS[key as ChainType] ?? key;
+}
+
 export const LETTER_COUNT = 4;
 /**
  * Версия писем строки (template_version). С 26.09.2026 письма — шаблон цепочки
@@ -36,8 +53,10 @@ export const LETTER_COUNT = 4;
  * компании; прежние детерминированные цепочки (chains_v4) — только его образец.
  * v2 (02.10.2026): связка повода с предложением вместо строки о компании,
  * выгода и модель оплаты в письме 1.
+ * v4 (29.10.2026): шаблон на продукт каскада (СДР, классика РФ/СНГ и за рубеж,
+ * автоаутрич), повод — подстановкой.
  */
-export const TEMPLATE_VERSION = 'offer_templates_v3@2026-10-09';
+export const TEMPLATE_VERSION = 'offer_templates_v4@2026-10-29';
 
 /** Писем в цепочке: во всех цепочках четыре, как у CEO (решение 26.09.2026). */
 export function letterCountFor(_chain: ChainType): number {
@@ -107,7 +126,7 @@ export interface ChainTemplateLetters {
  * Кейс по отрасли подбирается всем цепочкам (router.routeCase). До 09.10.2026
  * у SDR-цепочки кейса не было; в утверждённых текстах он есть и у неё.
  */
-export function chainUsesCase(_chain: ChainType): boolean {
+export function chainUsesCase(_key: TemplateKey): boolean {
   return true;
 }
 
@@ -115,22 +134,26 @@ export function chainUsesCase(_chain: ChainType): boolean {
  * Гипотеза сегментов — наблюдение по сайту в письме 2 у всех цепочек
  * (утверждённые тексты 09.10.2026). До этого её не было у SDR и «Автоматизации».
  */
-export function chainUsesHypothesis(_chain: ChainType): boolean {
+export function chainUsesHypothesis(_key: TemplateKey): boolean {
   return true;
 }
 
-/** Плейсхолдеры, которые может использовать шаблон оффера. */
-export function templatePlaceholdersFor(chain: ChainType): TemplatePlaceholder[] {
+/**
+ * Плейсхолдеры, которые может использовать шаблон оффера. Должность — только у
+ * шаблона цепочки «найм» старых запусков: шаблон продукта идёт компаниям с любым
+ * поводом, а вакансию называет {{повод}}.
+ */
+export function templatePlaceholdersFor(key: TemplateKey): TemplatePlaceholder[] {
   const p = TEMPLATE_PLACEHOLDERS;
   return [
     p.brand,
     p.opening,
     p.bridge,
-    ...(chainUsesCase(chain) ? [p.case] : []),
-    ...(chainUsesHypothesis(chain) ? [p.hypothesis] : []),
+    ...(chainUsesCase(key) ? [p.case] : []),
+    ...(chainUsesHypothesis(key) ? [p.hypothesis] : []),
     // Предмет и должность — из утверждённых текстов (образец писателя с 14.10.2026).
     p.topic,
-    ...(chain === 'hiring' ? [p.position] : []),
+    ...(key === 'hiring' ? [p.position] : []),
     p.signature,
   ];
 }

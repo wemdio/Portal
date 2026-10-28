@@ -15,6 +15,7 @@
  * подстановки (runTemplateQa), но подставленные факты — нет.
  */
 
+import type { Product } from '../cascade';
 import { claimsForChain, formatSignature, type CaseRecord, type OfferClaim, type SenderProfile } from '../libraries';
 import { runQa } from '../qa';
 import {
@@ -126,7 +127,10 @@ export function renderTemplate(template: ChainTemplateLetters, v: TemplateValues
 
 /** Всё о компании, что нужно письмам: из разбора в раннере или из строки журнала («Переписать цепочку»). */
 export interface CompanyLettersInput {
+  /** Повод (тип цепочки): от него фраза-повод и должность. */
   chain: ChainType;
+  /** Что предлагаем (каскад): от него запасная связка и утверждённые формулировки. */
+  product: Product;
   brand: string;
   isRouting: boolean;
   /** Главный повод цепочки (route.primary). */
@@ -204,8 +208,10 @@ export async function composeCompanyLetters(
   const opening = openingSentence(chainInput, input.brand);
   // Связка нужна, только если есть повод и шаблон её ставит (старые шаблоны —
   // нет). У возврата повод — прошлый разговор, связывать нечего: модель не зовём.
+  // У «Автоматизации» старых строк повод — от исходной цепочки.
   const firstBodies = [template.bodyDirect, template.bodyRouting].join('\n');
-  const fallback = fallbackBridge(input.chain, input.baseChain);
+  const occasion = input.chain === 'automation' && input.baseChain ? input.baseChain : input.chain;
+  const fallback = fallbackBridge(occasion, input.product);
   const bridge = opening && fallback && firstBodies.includes(P.bridge)
     ? (await deps.bridge({ chain: input.chain, baseChain: input.baseChain, brand: input.brand, opening, productSummary: input.productSummary })) ?? fallback
     : null;
@@ -246,7 +252,7 @@ export async function composeCompanyLetters(
     ? [{ ...rendered[0], alt_body: altLetter1.body, alt_routing: alt.isRouting }, ...rendered.slice(1)]
     : rendered;
   const text = [...rendered.map((l) => `${l.subject}\n${l.body}`), ...(altLetter1 ? [altLetter1.body] : [])].join('\n');
-  const used = claimsForChain(deps.claims, input.chain).filter((c) => c.claim_text.trim() && text.includes(c.claim_text.trim()));
+  const used = claimsForChain(deps.claims, input.chain, input.product).filter((c) => c.claim_text.trim() && text.includes(c.claim_text.trim()));
   const qaInput = {
     expectedLetters: letterCountFor(input.chain),
     amoStatus: input.amoStatus,

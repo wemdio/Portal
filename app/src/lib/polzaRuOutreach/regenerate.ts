@@ -4,6 +4,10 @@
  * пересборка писем строк, которые этот шаблон ждали (очень спорные с
  * признаком TEMPLATE_FAILED).
  *
+ * Ключ шаблона — продукт каскада (запуски с 29.10.2026): его ждут строки с этим
+ * продуктом и любым поводом. У запусков до каскада ключ — цепочка, и ждут его
+ * строки этой цепочки без продукта.
+ *
  * Работает в роуте, без обхода сайтов: всё, что нужно письмам, лежит в строке
  * журнала (поводы, цитата рынка, кейс, почта). Лимит готовых — тот же, что у
  * запуска: сколько готовых уже есть, столько мест и занято; строки сверх
@@ -37,24 +41,34 @@ import { dropLettersDoubts, lettersQaDoubtText, templateDoubtText, withLettersDo
 import { journalCounts, type JournalCountRow, type JournalCounts } from './funnel';
 import { buildBridge, type BridgeRequest } from './letters/bridge';
 import { buildTopic } from './letters/topic';
+import { isProduct } from './cascade';
 import { buildSegmentsHypothesis, type SegmentsHypothesis } from './letters/chains';
 import { composeCompanyLetters, type CompanyLettersInput } from './letters/renderTemplate';
 import {
   regenerateChainTemplate,
   ROUTE_WRITER_TIMEOUT_MS,
   templateBeingWritten,
+  templateProduct,
   templateStatus,
   writerAttemptWorstUsd,
   type ChainTemplate,
 } from './letters/templateWriter';
 import type { Libraries, SenderProfile } from './libraries';
 import { chainOfSignal } from './router';
-import { TEMPLATE_VERSION, sanitizeRuOutreachConfig, type ChainType, type RuOutreachConfig, type Signal } from './types';
+import {
+  CHAIN_TYPES,
+  TEMPLATE_VERSION,
+  sanitizeRuOutreachConfig,
+  type ChainType,
+  type RuOutreachConfig,
+  type Signal,
+  type TemplateKey,
+} from './types';
 
 const ROWS = 'polza_ru_outreach_companies';
 const PAGE = 1000;
 const WAITING_COLUMNS =
-  'id,chain_type,company_name,company_brand,about_line,is_routing,signals,signal_type,signal_title,signal_date,evidence_quote,source_url,' +
+  'id,chain_type,product,company_name,company_brand,about_line,is_routing,signals,signal_type,signal_title,signal_date,evidence_quote,source_url,' +
   'prior_contact,market_evidence_quote,target_market,fit_reasons,case_id,recipient_email,amo_status,priority_score,doubt_flags,doubt_detail,' +
   'email_type,email_verification,emails';
 const PRODUCT_PREFIX = 'Продукт: ';
@@ -77,6 +91,8 @@ const REBUILD_LOCK_TTL_MS = 300_000;
 interface WaitingRow {
   id: string;
   chain_type: string;
+  /** Продукт каскада; null — строка запуска до каскада. */
+  product: string | null;
   company_name: string;
   company_brand: string | null;
   about_line: string | null;
@@ -128,7 +144,7 @@ export interface RegenerateSummary {
 export type RegenerateOfferResult =
   | { kind: 'missing' }
   /** rebuild — идёт другая пересборка запуска; writing — пишется шаблон оффера (offer). */
-  | { kind: 'busy'; reason: 'rebuild' | 'writing'; offer?: ChainType }
+  | { kind: 'busy'; reason: 'rebuild' | 'writing'; offer?: TemplateKey }
   /**
    * Запуск ещё у воркера: running — идёт (или ждёт воркера); stopping —
    * остановлен, но воркер его ещё доводит и запишет итог.
@@ -149,7 +165,8 @@ export interface RegenerateOfferInput {
   /** Клиент пользователя: RLS пускает только к его запускам. */
   db: SupabaseClient;
   jobId: string;
-  chain: ChainType;
+  /** Ключ шаблона: продукт или, у запусков до каскада, цепочка. */
+  key: TemplateKey;
   /** Сколько готовых компаний нужно запуску (config.limit). */
   target: number;
   libraries: Libraries;
@@ -366,14 +383,14 @@ async function refreshCounts(db: SupabaseClient, jobId: string, target: number):
 
 /* ─────────────────────────── Строки ─────────────────────────── */
 
-async function loadWaitingRows(db: SupabaseClient, jobId: string, chain: ChainType): Promise<WaitingRow[]> {
+async function loadWaitingRows(db: SupabaseClient, jobId: string, key: TemplateKey): Promise<WaitingRow[]> {
   const rows: WaitingRow[] = [];
   for (let from = 0; ; from += PAGE) {
-    const { data, error } = await db
-      .from(ROWS)
-      .select(WAITING_COLUMNS)
-      .eq('job_id', jobId)
-      .eq('chain_type', chain)
+    const base = db.from(ROWS).select(WAITING_COLUMNS).eq('job_id', jobId);
+    // Шаблон продукта ждут строки продукта; шаблон цепочки — строки этой
+    // цепочки без продукта (запуск, начатый до каскада и продолженный после,
+    // держит и те и другие).
+    const { data, error } = await (isProduct(key) ? base.eq('product', key) : base.eq('chain_type', key).is('product', null))
       .eq('row_status', 'doubtful')
       .contains('doubt_flags', ['TEMPLATE_FAILED'])
       .order('id', { ascending: true })
@@ -447,13 +464,21 @@ function mainSignal(row: WaitingRow, signals: Signal[]): Signal | null {
   return best;
 }
 
+function isChainType(value: string | null): value is ChainType {
+  return value !== null && (CHAIN_TYPES as readonly string[]).includes(value);
+}
+
 /**
  * Вход писем из строки журнала — то же, что раннер берёт из разбора.
+ * Повод — цепочка строки, продукт — её продукт; у строки до каскада продукта
+ * нет — берём тот, по которому написан шаблон её цепочки (templateProduct).
  * Исходная цепочка «Автоматизации» — «Возврат», если был разговор в AMO,
  * иначе цепочка главного повода (без повода — «Только профиль»): её выбрал
  * роутер.
  */
-function companyInput(row: WaitingRow, chain: ChainType, libraries: Libraries): CompanyLettersInput {
+function companyInput(row: WaitingRow, key: TemplateKey, libraries: Libraries): CompanyLettersInput {
+  const chain: ChainType = isChainType(row.chain_type) ? row.chain_type : isProduct(key) ? 'icp_only' : key;
+  const product = row.product && isProduct(row.product) ? row.product : templateProduct(key);
   const signals = Array.isArray(row.signals) ? (row.signals as Signal[]) : [];
   const primary = mainSignal(row, signals);
   const prior = row.prior_contact === true;
@@ -461,6 +486,7 @@ function companyInput(row: WaitingRow, chain: ChainType, libraries: Libraries): 
   const product = fitReasons.find((r): r is string => typeof r === 'string' && r.startsWith(PRODUCT_PREFIX));
   return {
     chain,
+    product,
     brand: row.company_brand ?? row.company_name,
     isRouting: row.is_routing === true,
     primary,
@@ -506,7 +532,7 @@ interface RowsOutcome {
  * всё равно не достанется, не собираем.
  */
 async function rebuildRows(input: RebuildInput, template: ChainTemplate, rows: WaitingRow[], readyAtStart: number): Promise<RowsOutcome> {
-  const { db, jobId, chain, libraries, sender, budget, deadlineAt } = input;
+  const { db, jobId, key, libraries, sender, budget, deadlineAt } = input;
   const outcome: RowsOutcome = { promoted: 0, stillDoubtful: 0, limitReached: 0, unfinished: 0 };
   const letters = template.letters;
   if (template.status !== 'ok' || !letters) {
@@ -565,7 +591,7 @@ async function rebuildRows(input: RebuildInput, template: ChainTemplate, rows: W
     const batch = rows.slice(next, next + slots);
     next += batch.length;
     const composed = await mapPool(batch, REBUILD_POOL, (row) =>
-      composeCompanyLetters(letters, companyInput(row, chain, libraries), { sender, claims: libraries.claims, hypothesis, bridge, topic }),
+      composeCompanyLetters(letters, companyInput(row, key, libraries), { sender, claims: libraries.claims, hypothesis, bridge, topic }),
     );
     for (const [i, row] of batch.entries()) {
       const c = composed[i];
@@ -676,17 +702,17 @@ export async function regenerateOfferChain(input: RegenerateOfferInput): Promise
 
 /** Пересборка под отметкой, внутри контекста ИИ запуска. touched.rows — строки менялись, счётчики пересчитать. */
 async function rebuildOffer(input: RebuildInput, touched: { rows: boolean }): Promise<RegenerateOfferResult> {
-  const { db, jobId, chain, libraries, sender, budget } = input;
+  const { db, jobId, key, libraries, sender, budget } = input;
   const spentBefore = budget.spentUsd;
   // Под отметкой: другой шаблон запуска ещё пишется (процесс жив) — ждём,
   // иначе две записи делили бы лимит и расход.
   const writing = await templateBeingWritten(db, jobId);
   if (writing) return { kind: 'busy', reason: 'writing', offer: writing };
-  const status = await templateStatus(db, jobId, chain);
+  const status = await templateStatus(db, jobId, key);
   if (status === null) return { kind: 'missing' };
   // Платить писателю — только если есть кого пересобирать и куда:
   // строки ждут цепочку, а в лимите готовых есть места.
-  const rows = await loadWaitingRows(db, jobId, chain);
+  const rows = await loadWaitingRows(db, jobId, key);
   if (!rows.length) return { kind: 'nothing' };
   const ready = await countReady(db, jobId);
   if (ready >= input.target) return { kind: 'limit', ready };
@@ -699,9 +725,9 @@ async function rebuildOffer(input: RebuildInput, touched: { rows: boolean }): Pr
   }
   const outcome = await regenerateChainTemplate(
     { db, jobId, sender, claims: libraries.claims, writerTimeoutMs: ROUTE_WRITER_TIMEOUT_MS, deadlineAt: input.deadlineAt - REBUILD_RESERVE_MS },
-    chain,
+    key,
   );
-  if (outcome.kind === 'busy') return { kind: 'busy', reason: 'writing', offer: chain };
+  if (outcome.kind === 'busy') return { kind: 'busy', reason: 'writing', offer: key };
   if (outcome.kind === 'missing') return { kind: 'missing' };
   touched.rows = true;
   const counts = await rebuildRows(input, outcome.template, rows, ready);
