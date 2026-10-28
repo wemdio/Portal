@@ -15,6 +15,10 @@ export interface MailboxDto {
   google_account: string | null;
   /** Адрес отправки, за которым закреплён ящик; null — выдаётся автоматически. */
   egress_ip: string | null;
+  /** «Проверять доставку»: ежедневные пробы на контрольные ящики вне рассылок. */
+  seed_watch?: boolean;
+  /** Последняя контрольная проба за неделю по каждому сервису (gmail, yandex, mailru). */
+  seed?: Record<string, { status: string; day: string }> | null;
   email: string;
   display_name: string | null;
   username: string;
@@ -435,6 +439,11 @@ export function deleteMailbox(id: string) {
 /** Завести проверочную отправку с ящика на контрольный адрес. */
 export function startMailboxProbe(id: string) {
   return authFetchJson<{ ok: true }>(`${BASE}/mailboxes/${id}/probe`, { method: 'POST' });
+}
+
+/** «Проверить доставку сейчас»: пробы на контрольные ящики Gmail и Яндекса. */
+export function startSeedCheck(id: string) {
+  return authFetchJson<{ queued: Array<{ provider: string; seedEmail: string }> }>(`${BASE}/mailboxes/${id}/seed-check`, { method: 'POST' });
 }
 
 /** Последняя проверочная отправка ящика с полным разбором заголовков. */
