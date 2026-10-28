@@ -18,7 +18,6 @@ const PAIRS: Array<[string, string]> = [
   ['Мониторинг доменов', 'Domain monitoring'],
   ['Переменные окружения', 'Environment variables'],
   ['Просмотр и редактирование .env файла на сервере.', 'View and edit the server .env file.'],
-  ['История переписок из Atmos\u2011bot: фильтр по чатам и спецам, экспорт в CSV.', 'Atmos-bot conversation history: filter by chats and specialists, CSV export.'],
   ['Управление ботами портала — остановка, запуск, логи.', 'Portal bot management: stop, start, logs.'],
   ['Статус и сроки истечения доменов на Reg.ru.', 'Domain statuses and expiration dates on Reg.ru.'],
 
@@ -1344,8 +1343,7 @@ const PAIRS: Array<[string, string]> = [
   ['История (последние 10)', 'History (last 10)'],
   ['Обновление...', 'Refreshing...'],
 
-  // ── Tools: Atmos Analytics ───────────────────────────────
-  ['Atmos-аналитика', 'Atmos analytics'],
+  // ── Общие: чат, период, выгрузка ─────────────────────────
   ['Чат', 'Chat'],
   ['Выберите чат…', 'Select a chat…'],
   ['С (UTC)', 'From (UTC)'],

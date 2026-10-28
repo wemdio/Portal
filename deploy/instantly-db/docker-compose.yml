@@ -217,6 +217,9 @@ services:
       BACKUP_S3_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY}
       BACKUP_S3_REGION: ${BACKUP_S3_REGION:-ru-1}
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      # 28.10.2026: на сервере копии не держим — облако хранит неделю. Файл
+      # стирается после успешной заливки; не залилось — остаётся до ротации.
+      BACKUP_KEEP_LOCAL: ${BACKUP_KEEP_LOCAL:-0}
       BACKUP_REMOTE_RETENTION_DAYS: ${BACKUP_REMOTE_RETENTION_DAYS:-7}
       BACKUP_PG_DUMP_RETRIES: ${BACKUP_PG_DUMP_RETRIES:-3}
       BACKUP_PG_DUMP_RETRY_PAUSE: ${BACKUP_PG_DUMP_RETRY_PAUSE:-30}

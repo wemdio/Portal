@@ -471,9 +471,6 @@ AI-помощник менеджеру по продажам в Telegram:
 ### 20.3. AI-анализ сделок — воркер `worker-sales-ai-analysis`
 `sales_ai_analysis_jobs` → `sales_ai_deal_analysis` + `sales_ai_evidence`: LLM разбирает переписки и сделки, выносит вердикты с цитатами-доказательствами. Крон `salesAiAnalysisCron`.
 
-### 20.4. Анализатор атмосферы — сервис `atmos-bot`
-Мониторинг тональности в клиентских Telegram-чатах: вебхук собирает сообщения (`tg_atmos_messages`), каждые N минут батч уходит в LLM, при негативе выше порога — алерт в командный чат со ссылкой; периодическая сводка. Управление — в личке бота, только whitelist (`tg_atmos_settings`, `tg_atmos_users`, `tg_atmos_checks`).
-
 ---
 
 # Часть IV. Данные
@@ -825,7 +822,6 @@ Excel-отчёты по внешним платформам: **Coldy** — ав�
 | `instantly-sync-bot` | Python | Ежечасный синк каталога кампаний Instantly → Supabase + сводка в TG |
 | `health-check` | Python | Мониторинг и алерты |
 | `loop-watchdog` | — | Защита от exit-loop контейнеров |
-| `atmos-bot` | Python | Анализ тональности клиентских чатов |
 | `changelog-bot` | Python | Ежедневный дайджест обновлений портала в TG (9:00 МСК) |
 | `backup` | shell + cron | Резервные копии БД |
 | `telegram-bot-api` | — | Локальный Bot API (большие файлы) |
@@ -846,7 +842,6 @@ Excel-отчёты по внешним платформам: **Coldy** — ав�
 | `/api/ai-caller/telegram/*` | Уведомления о звонках, отправка записей; тот же бот — согласование баз (кнопки «Согласовано» / «Пожелания правок») |
 | `/api/tools/tg-transcribe/webhook` | Приём видеосообщений на расшифровку |
 | `worker-leads-report-bot` | Отчёты по лидам подписчикам |
-| `atmos-bot` | Алерты о негативе в клиентских чатах |
 | `changelog-bot` | Дайджест обновлений |
 | `health-check`, `loop-watchdog` | Инфраструктурные алерты |
 
