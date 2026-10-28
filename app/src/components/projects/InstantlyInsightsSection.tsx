@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { authFetch } from '@/lib/authFetch';
 
 /**
  * Read-only campaign-insights panel for a project's Instantly campaigns.
@@ -62,7 +63,7 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
     let alive = true;
     (async () => {
       try {
-        const res = await fetch(`/api/projects/${projectId}/insights`, { credentials: 'include' });
+        const res = await authFetch(`/api/projects/${projectId}/insights`);
         const json = (await res.json()) as { insights: Insights | null };
         if (!alive) return;
         if (!json.insights || json.insights.campaigns.length === 0) { setState('empty'); return; }

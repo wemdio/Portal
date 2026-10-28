@@ -20,18 +20,15 @@ export const maxDuration = 300;
  *   - profiles.auto_pipeline_enabled = true
  *   - client_auto_pipeline_configs.enabled = true
  *
- * Защищён CRON_SECRET (паттерн как в /api/cron/auto-renew). Vercel-планировщик
- * выставляет токен через query-параметр `?secret=...` или заголовок
- * `x-vercel-cron-secret`. Принимаем оба.
+ * Защищён CRON_SECRET (паттерн как в /api/cron/auto-renew): только заголовок
+ * `Authorization: Bearer …` или `x-vercel-cron-secret`. `?secret=` в адресе с
+ * 28.10.2026 не принимаем — секрет из адреса оседает в логах nginx.
  *
  * Schedule: 0 4 * * *  (07:00 МСК = 04:00 UTC).
  */
 export async function GET(req: NextRequest) {
   // 1. Auth.
-  const url = new URL(req.url);
-  const querySecret = url.searchParams.get('secret');
-  const headerSecret = req.headers.get('x-vercel-cron-secret') ?? req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
-  const provided = querySecret ?? headerSecret;
+  const provided = req.headers.get('x-vercel-cron-secret') ?? req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
 
   // Без заданного CRON_SECRET — отказ: /api/cron/* минует проверку входа в
   // middleware, и конвейер мог бы запустить кто угодно.

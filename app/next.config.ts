@@ -71,10 +71,13 @@ const nextConfig: NextConfig = {
   typedRoutes: true,
   experimental: {
     typedRoutes: true,
-    proxyClientMaxBodySize: '600mb',
-    serverActions: {
-      bodySizeLimit: '600mb',
-    },
+    // Тело каждого не-GET запроса Next копирует в память ДО middleware, то есть
+    // ещё до проверки входа. При 600 МБ несколько анонимных POST забивали память
+    // портала (аудит 27.10.2026). Аудио льётся в S3 напрямую (presign), самая
+    // большая загрузка через портал — источник для ИНН, до 80 МБ. Тот же предел
+    // стоит в nginx (client_max_body_size 200m). Server actions в app/src нет —
+    // их лимит не задаём, остаётся дефолт.
+    proxyClientMaxBodySize: '200mb',
     optimizePackageImports: [
       'lucide-react',
       '@phosphor-icons/react',

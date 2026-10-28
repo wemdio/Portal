@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import {
   checkCampaignProjectOwnershipConflicts,
@@ -122,9 +123,11 @@ function normalizeMatchSource(value: unknown): CampaignProjectMatchSource {
 }
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const authed = await requireInternalToolAuth(req);
+  if ('error' in authed) return authed.error;
   const { id: projectId } = await params;
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
@@ -147,6 +150,8 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const authed = await requireInternalToolAuth(req);
+  if ('error' in authed) return authed.error;
   const { id: projectId } = await params;
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 

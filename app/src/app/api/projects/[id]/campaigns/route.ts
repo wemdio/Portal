@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { claimCampaignProjectOwnership } from '@/lib/instantly/campaignProjectOwnership';
 
 export const dynamic = 'force-dynamic';
@@ -130,6 +131,8 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const authed = await requireInternalToolAuth(req);
+  if ('error' in authed) return authed.error;
   const { id: projectId } = await params;
   const wantsTaken = new URL(req.url).searchParams.get('taken') === '1';
   if (!supabaseInstantly) {
@@ -192,6 +195,8 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const authed = await requireInternalToolAuth(req);
+  if ('error' in authed) return authed.error;
   const { id: projectId } = await params;
   if (!supabaseInstantly) {
     return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
@@ -258,6 +263,8 @@ export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const authed = await requireInternalToolAuth(req);
+  if ('error' in authed) return authed.error;
   const { id: projectId } = await params;
   if (!supabaseInstantly) {
     return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });

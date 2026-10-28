@@ -112,19 +112,36 @@ function isClientApiPath(p: string): boolean {
   )
 }
 
-// Cron callers authenticate with CRON_SECRET (query ?secret=, x-vercel-cron-secret
-// header, or Authorization: Bearer <secret>) — not a user JWT. Matches the check
-// used by /api/cron/* handlers so those (and tool collectors triggered by cron)
-// pass the gate without an internal user.
+// Маршруты вне /api/cron, которые дёргают по расписанию с CRON_SECRET; каждый из
+// них сам сверяет секрет. /api/cron/* открыт выше целиком — там проверка в ручке.
+// До 28.10.2026 секрет пускал на ЛЮБОЙ /api и принимался в ?secret= — то есть
+// был ключом ко всему API и оседал в логах nginx (аудит 27.10).
+const CRON_SECRET_PATHS = new Set([
+  '/api/tools/auto-report/campaigns/sync', // instantly-sync-bot, раз в час
+  '/api/tools/client-leads/sync',
+  '/api/instantly/activity/register',
+  '/api/reglament/cleanup-archived',
+  '/api/telegram/agent/pipeline/advance',
+])
+
+// Без node:crypto: middleware может исполняться не в Node.
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  let diff = 0
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  return diff === 0
+}
+
+// Cron callers authenticate with CRON_SECRET in a header (x-vercel-cron-secret or
+// Authorization: Bearer <secret>) — not a user JWT, and only on CRON_SECRET_PATHS.
 function hasValidCronSecret(request: NextRequest): boolean {
   const secret = process.env.CRON_SECRET
-  if (!secret) return false
+  if (!secret || !CRON_SECRET_PATHS.has(request.nextUrl.pathname)) return false
   const provided =
-    request.nextUrl.searchParams.get('secret') ??
     request.headers.get('x-vercel-cron-secret') ??
     request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ??
     null
-  return provided === secret
+  return provided !== null && constantTimeEqual(provided, secret)
 }
 
 /**

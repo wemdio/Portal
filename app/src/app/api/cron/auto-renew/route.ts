@@ -14,11 +14,12 @@ export const dynamic = 'force-dynamic';
  * пинговалка). Основной планировщик в проде — worker/autoRenewCron.ts, он
  * вызывает runAutoRenewBatch напрямую и НЕ ходит через HTTP.
  *
- * Защищён CRON_SECRET. chargeMonthlyRenewal внутри идемпотентен по
+ * Защищён CRON_SECRET в заголовке `Authorization: Bearer …` (с 28.10.2026 не в
+ * `?secret=`: секрет из адреса оседает в логах nginx). chargeMonthlyRenewal внутри идемпотентен по
  * (tariffId, YYYY-MM) — повторный вызов в том же месяце безопасен.
  */
 export async function GET(req: NextRequest) {
-  const secret = new URL(req.url).searchParams.get('secret');
+  const secret = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? null;
   // Без заданного CRON_SECRET — отказ, а не «пускать всех»: /api/cron/* минует
   // проверку входа в middleware, и списание продлений мог бы дёрнуть кто угодно.
   if (!process.env.CRON_SECRET || secret !== process.env.CRON_SECRET) {
