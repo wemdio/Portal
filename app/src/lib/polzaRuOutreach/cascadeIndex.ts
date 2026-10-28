@@ -458,9 +458,36 @@ export function lookupCascade(index: CascadeIndex, domain: string | null, inn: s
   return null;
 }
 
+/**
+ * Какая строка запуска заняла компанию индекса. Компания одна на все свои
+ * домены и ИНН: карточка с доменом и карточка с ИНН той же компании — повтор,
+ * даже если общих ключей у самих карточек нет.
+ */
+export class CascadeClaims {
+  private readonly owner = new Map<CascadeCompany, string>();
+  private readonly companyOf = new Map<string, CascadeCompany>();
+
+  ownerOf(company: CascadeCompany): string | undefined {
+    return this.owner.get(company);
+  }
+
+  hold(company: CascadeCompany, rowId: string): void {
+    this.owner.set(company, rowId);
+    this.companyOf.set(rowId, company);
+  }
+
+  /** Строка отсеяна или возвращена в необработанные — компания свободна. */
+  release(rowId: string): void {
+    const company = this.companyOf.get(rowId);
+    if (!company) return;
+    this.companyOf.delete(rowId);
+    if (this.owner.get(company) === rowId) this.owner.delete(company);
+  }
+}
+
 // ── Загрузка из базы ────────────────────────────────────────────────────────
 
-interface PageResult<T> {
+export interface PageResult<T> {
   data: T[] | null;
   error: { message: string } | null;
 }
@@ -513,8 +540,11 @@ async function runPool<T, R>(items: T[], task: (item: T) => Promise<R>): Promise
   return results;
 }
 
-/** Запрос с `in`-фильтром по пачкам: длинный список в адресе запроса шлюз режет. */
-async function selectByIn<T extends object>(
+/**
+ * Запрос с `in`-фильтром по пачкам: длинный список в адресе запроса шлюз режет.
+ * Страницы — по ключу `key` (`gt` до порядка и лимита в самом запросе), см. pagedAll.
+ */
+export async function selectByIn<T extends object>(
   what: string,
   key: keyof T & string,
   values: string[],

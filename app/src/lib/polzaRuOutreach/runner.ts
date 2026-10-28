@@ -71,7 +71,7 @@ import {
 } from '@/lib/outreachLlm/workerLease';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy, findStrictOutboundDuty, isSdrRoleTitle, type VacancyAnalysis } from './analyze';
-import { cascadeCandidates, collectCandidates, sourceTypeOf, type Candidate, type CascadePool } from './collect';
+import { cascadeCandidates, collectCandidates, loadRecentAttempts, sourceTypeOf, type Candidate, type CascadePool } from './collect';
 import {
   computeDoubts,
   lettersQaDoubtText,
@@ -80,8 +80,8 @@ import {
   withLettersDoubt,
   type Doubts,
 } from './doubts';
-import { cascadeOffer, cascadePool, cascadeSlotFree, type CascadeDecision, type Product } from './cascade';
-import { loadCascadeIndex, lookupCascade, type CascadeIndex } from './cascadeIndex';
+import { cascadeHead, cascadeOffer, cascadePool, cascadeSlotFree, type CascadeDecision, type Product } from './cascade';
+import { CascadeClaims, loadCascadeIndex, lookupCascade, type CascadeCompany, type CascadeIndex } from './cascadeIndex';
 import { companyBrand, isSuppressed, normalizeDomain, siteUrl } from './company';
 import { findRuCompanyEmail } from './findEmail';
 import { journalCounts } from './funnel';
@@ -798,9 +798,13 @@ async function runJob(
     const amo: AmoIndex = await loadAmoIndex(db);
     // Кому уже писали: каскад решает, пора ли предложить следующий продукт, ждать
     // паузу или больше не писать. «Брать уже выгруженные» — без каскада, как раньше.
+    const cascadeNow = new Date();
     const cascade: CascadeIndex | null = config.include_previously_exported
       ? null
-      : await loadCascadeIndex(db, jobId, new Date(), config.cascade_pause_days);
+      : await loadCascadeIndex(db, jobId, cascadeNow, config.cascade_pause_days);
+    // Вернувшиеся, которых недавно уже пробовали (строка не стала готовой): в начало
+    // пула их не ставим — иначе такая компания занимала бы его каждый запуск.
+    const attempted = cascade ? await loadRecentAttempts(db, cascade, jobId, config.cascade_pause_days, cascadeNow) : new Set<CascadeCompany>();
     const collected = await collectCandidates(db, config, amo, maxScan, (message) => log('info', `job ${jobId}: ${message}`));
     const { sourceErrors, skippedRecent } = collected;
     const doneSources = new Set(resumedJournal.map((r) => r.source_record_id).filter((v): v is string => Boolean(v)));
@@ -820,7 +824,11 @@ async function runJob(
       ? cascadeCandidates(cascade, target, {
           sources: sourcePool,
           freshnessDays: config.freshness_days,
-          skip: (company) => Boolean((company.domain && doneDomains.has(company.domain)) || (company.inn && doneInns.has(company.inn))),
+          head: cascadeHead(target),
+          skip: (company) =>
+            attempted.has(company) ||
+            Boolean((company.domain && doneDomains.has(company.domain)) || (company.inn && doneInns.has(company.inn))),
+          now: cascadeNow,
         })
       : { returning: [], fresh: sourcePool };
     const pool = cascadePool(split.fresh, split.returning, target);
@@ -828,7 +836,7 @@ async function runJob(
     const newFrom = new Array<number>(pool.length + 1).fill(0);
     for (let i = pool.length - 1; i >= 0; i -= 1) newFrom[i] = newFrom[i + 1] + (pool[i].cascade ? 0 : 1);
     if (Object.keys(sourceErrors).length) log('warn', `job ${jobId}: source errors`, sourceErrors);
-    log('info', `job ${jobId}: pool=${pool.length} (returning ${split.returning.length}), skipped_recent=${skippedRecent}, target=${target}, sources=${config.sources.join(',')}`);
+    log('info', `job ${jobId}: pool=${pool.length} (returning ${split.returning.length}, recently tried ${attempted.size}), skipped_recent=${skippedRecent}, target=${target}, sources=${config.sources.join(',')}`);
 
     const funnel = Object.fromEntries(STAGES.map((s) => [s, 0])) as Record<Stage, number>;
     const reasons: Record<string, number> = {};
@@ -882,10 +890,16 @@ async function runJob(
     // или ИНН он повторил (уборка после стопа по лимиту).
     const domainOwner = new Map<string, string>();
     const innOwner = new Map<string, string>();
+    // Компания индекса каскада — одна на все свои домены и ИНН: карточка с доменом
+    // и карточка с ИНН той же компании (у каждой ключ, которого нет у другой) — повтор.
+    // Отсеянная строка компанию отпускает: вторая карточка может дойти до готовой.
+    const cascadeClaims = new CascadeClaims();
     for (const r of resumedJournal) {
       if (r.reason_code === 'DUPLICATE_COMPANY') continue;
       if (r.normalized_domain) domainOwner.set(r.normalized_domain, String(r.id));
       if (r.inn) innOwner.set(r.inn, String(r.id));
+      const company = cascade && r.row_status !== 'rejected' ? lookupCascade(cascade, r.normalized_domain, r.inn) : null;
+      if (company) cascadeClaims.hold(company, String(r.id));
     }
     const duplicates: Duplicate[] = [];
     // MX и catch-all доменов для SMTP-проверки почты — один кэш на запуск.
@@ -1037,6 +1051,7 @@ async function runJob(
       // запуске отсеялась бы «повтором» строки, которой в журнале уже нет.
       if (tally.domain && domainOwner.get(tally.domain) === tally.id) domainOwner.delete(tally.domain);
       if (tally.inn && innOwner.get(tally.inn) === tally.id) innOwner.delete(tally.inn);
+      cascadeClaims.release(tally.id);
       tally.stages = [];
       tally.sdr = null;
       tally.chain = null;
@@ -1046,6 +1061,8 @@ async function runJob(
     };
     const finish = async (id: string, r: Rejection, patch: Record<string, unknown> = {}) => {
       reasons[r.reason] = (reasons[r.reason] ?? 0) + 1;
+      // Отсеянная строка готовой не станет — компанию каскада отпускаем (до await).
+      if (r.status === 'rejected') cascadeClaims.release(id);
       await updateRow(id, { ...patch, row_status: r.status, pipeline_stage: r.stage, reason_code: r.reason, reason_detail: r.detail ?? null });
     };
     /**
@@ -1127,9 +1144,16 @@ async function runJob(
       }
       reach(tally, 'company_resolved');
 
-      // Проверка и захват домена/ИНН — без await между ними: параллельные
-      // потоки не займут одну компанию дважды.
-      const owners = [domainOwner.get(domain), c.inn ? innOwner.get(c.inn) : undefined].filter((o): o is string => Boolean(o));
+      // Компания, которой уже писали (по домену или ИНН индекса каскада): одна на
+      // все свои ключи, даже если у этой карточки только часть из них.
+      const known = cascade ? lookupCascade(cascade, domain, c.inn) : null;
+      // Проверка и захват домена/ИНН и компании каскада — без await между ними:
+      // параллельные потоки не займут одну компанию дважды.
+      const owners = [
+        domainOwner.get(domain),
+        c.inn ? innOwner.get(c.inn) : undefined,
+        known ? cascadeClaims.ownerOf(known) : undefined,
+      ].filter((o): o is string => Boolean(o));
       if (owners.length) {
         duplicates.push({ id, tally, owners: Array.from(new Set(owners)) });
         await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'DUPLICATE_COMPANY' });
@@ -1141,15 +1165,14 @@ async function runJob(
         innOwner.set(c.inn, id);
         tally.inn = c.inn;
       }
-      // Компания, которой уже писали (по домену или ИНН): пауза прошла — идёт
-      // дальше со следующим продуктом каскада, иначе ждёт или каскад закрыт.
-      const known = cascade ? lookupCascade(cascade, domain, c.inn) : null;
       if (known) {
+        cascadeClaims.hold(known, id);
+        // Пауза прошла — дальше со следующим продуктом каскада, иначе ждёт или каскад закрыт.
         const decision = known.decision;
         if (decision.kind === 'wait') {
           const until = decision.until.toISOString().slice(0, 10);
-          const detail = known.facts.offered.length ? `пауза до ${until}` : `закреплена за другим запуском до ${until}`;
-          await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'CASCADE_WAIT', detail });
+          const waitDetail = known.facts.offered.length ? `пауза до ${until}` : `закреплена за другим запуском до ${until}`;
+          await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'CASCADE_WAIT', detail: waitDetail });
           return null;
         }
         if (decision.kind === 'closed') {
@@ -1666,7 +1689,7 @@ async function runJob(
       if (slot === 'cap') {
         await finish(q.id, {
           stage: 'sequence_assembled', status: 'rejected', reason: 'CASCADE_CAP',
-          detail: `вернувшимся — не больше ${Math.ceil(target / 2)} из ${target}, пока есть новые компании`,
+          detail: `вернувшимся — не больше ${cascadeHead(target)} из ${target}, пока есть новые компании`,
         }, scoringDoubts(q));
         return;
       }

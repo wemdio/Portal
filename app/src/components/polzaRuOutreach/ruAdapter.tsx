@@ -63,8 +63,12 @@ const EMAIL_VERIFICATION_LABELS: Record<string, string> = {
   unverified: 'проверить не удалось',
 };
 
-/** Короткие имена источников для таблицы и окна шага; полные — SOURCE_LABELS в панели запуска. */
-const SOURCE_SHORT: Record<SourceCode, string> = {
+/**
+ * Короткие имена источников для таблицы и окна шага; полные — SOURCE_LABELS в панели запуска.
+ * 'cascade' — вернувшаяся компания каскада, своего источника у неё нет.
+ */
+const SOURCE_SHORT: Record<SourceCode | 'cascade', string> = {
+  cascade: 'Каскад',
   hh: 'hh.ru',
   direct: 'Директ',
   crm: 'AMO',
@@ -85,7 +89,7 @@ const SOURCE_SHORT: Record<SourceCode, string> = {
 /** Откуда пришла компания: source_type — все её источники через «+» (одна компания — одна карточка). */
 function sourcesOf(row: RuRow): string | null {
   const codes = (row.source_type ?? '').split('+').filter(Boolean);
-  return codes.length ? codes.map((c) => SOURCE_SHORT[c as SourceCode] ?? c).join(' + ') : null;
+  return codes.length ? codes.map((c) => SOURCE_SHORT[c as keyof typeof SOURCE_SHORT] ?? c).join(' + ') : null;
 }
 
 const reasonLabel = (code: string) => REASON_LABELS[code] ?? code;

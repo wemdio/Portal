@@ -7,8 +7,8 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { CascadeReturn } from './cascade';
-import { lookupCascade, type CascadeCompany, type CascadeIndex } from './cascadeIndex';
+import { dueDate, type CascadeReturn } from './cascade';
+import { lookupCascade, selectByIn, type CascadeCompany, type CascadeIndex } from './cascadeIndex';
 import { companyKey, normalizeDomain } from './company';
 import { loadDirectoryCandidates } from './sources/directory';
 import { loadDirectHits } from './sources/direct';
@@ -444,15 +444,99 @@ export async function collectCandidates(
 /** Поводы, которые запуск находит заново (разбор сайта, новости, ФНС): прежние не берём, иначе будет два одинаковых. */
 const RECHECKED_SOURCES: ReadonlySet<SourceCode> = new Set<SourceCode>(['site_news', 'news', 'revenue_growth']);
 
-/** Прежние поводы вернувшейся компании, которые не устарели. */
+/**
+ * Прежние поводы вернувшейся компании, которые не устарели. Повод без даты не
+ * стареет никогда (реклама в Директе висела бы вечно) — не берём; кроме давнего
+ * отказа в AMO: это факт прошлого, а не событие.
+ */
 function priorSignals(company: CascadeCompany, since: number): Signal[] {
   return company.signals.filter((s) => {
     if (RECHECKED_SOURCES.has(s.source)) return false;
-    // Давний отказ в AMO — факт прошлого, а не событие: дата его не старит.
-    if (s.type === 'crm_lost' || !s.date) return true;
+    if (s.type === 'crm_lost') return true;
+    if (!s.date) return false;
     const at = new Date(s.date).getTime();
-    return !Number.isFinite(at) || at >= since;
+    return Number.isFinite(at) && at >= since;
   });
+}
+
+/** Строка прошлого запуска для «недавно уже пробовали»: поля, которые читает recentlyAttempted. */
+export interface AttemptRow {
+  id: string;
+  normalized_domain: string | null;
+  inn: string | null;
+  created_at: string | null;
+  row_status: string | null;
+  reason_code: string | null;
+}
+
+/** Сколько дней помним неудачную попытку вернувшейся компании: потом она снова в начале пула. */
+export const ATTEMPT_MEMORY_DAYS = 14;
+
+/**
+ * Отсев, который не говорит о компании ничего: не дошла очередь (половина запуска,
+ * лимит готовых), пауза или закрытый каскад по индексу того запуска, повтор строки
+ * в запуске, прежнее «уже выгружалась» (до каскада).
+ */
+const NOT_AN_ATTEMPT = new Set(['CASCADE_CAP', 'LIMIT_REACHED', 'CASCADE_WAIT', 'CASCADE_CLOSED', 'DUPLICATE_COMPANY', 'PREVIOUSLY_EXPORTED']);
+
+/**
+ * Вернувшиеся компании, которых недавно уже пробовали: после того, как пауза
+ * прошла, и не раньше ATTEMPT_MEMORY_DAYS дней назад есть их строка, которая не
+ * стала готовой (нет повода, оценка ниже порога, нет почты, не B2B, спорная…).
+ * Без этого компания с такой попыткой навсегда стояла бы первой в индексе и
+ * каждый запуск занимала бы начало пула. Через ATTEMPT_MEMORY_DAYS дней она
+ * снова в очереди.
+ */
+export function recentlyAttempted(index: CascadeIndex, rows: AttemptRow[], pauseDays: number, now: Date): Set<CascadeCompany> {
+  const since = now.getTime() - ATTEMPT_MEMORY_DAYS * 86_400_000;
+  const out = new Set<CascadeCompany>();
+  for (const row of rows) {
+    if (row.row_status === 'ready' || (row.reason_code && NOT_AN_ATTEMPT.has(row.reason_code))) continue;
+    const at = row.created_at ? new Date(row.created_at).getTime() : NaN;
+    if (!Number.isFinite(at) || at < since) continue;
+    // И по домену, и по ИНН: у строки они могут вести к разным компаниям индекса.
+    const companies = [
+      row.normalized_domain ? index.byDomain.get(row.normalized_domain) : undefined,
+      row.inn ? index.byInn.get(row.inn) : undefined,
+    ];
+    for (const company of companies) {
+      if (!company || company.decision.kind !== 'due') continue;
+      const due = dueDate(company.facts, pauseDays);
+      if (due && at > due.getTime()) out.add(company);
+    }
+  }
+  return out;
+}
+
+/**
+ * Строки прошлых запусков (не `excludeJobId`) за ATTEMPT_MEMORY_DAYS дней, не
+ * готовые, по доменам и ИНН вернувшихся компаний — вход recentlyAttempted.
+ */
+export async function loadRecentAttempts(
+  db: SupabaseClient,
+  index: CascadeIndex,
+  excludeJobId: string,
+  pauseDays: number,
+  now: Date,
+): Promise<Set<CascadeCompany>> {
+  const since = new Date(now.getTime() - ATTEMPT_MEMORY_DAYS * 86_400_000).toISOString();
+  const domains = [...new Set(index.due.map((c) => c.domain).filter((d): d is string => Boolean(d)))];
+  const inns = [...new Set(index.due.map((c) => c.inn).filter((i): i is string => Boolean(i)))];
+  const columns = 'id,normalized_domain,inn,created_at,row_status,reason_code';
+  const byKey = async (column: 'normalized_domain' | 'inn', values: string[]) =>
+    selectByIn<AttemptRow>(`attempts by ${column}`, 'id', values, (chunk, after) => {
+      const query = db
+        .from('polza_ru_outreach_companies')
+        .select(columns)
+        .in(column, chunk)
+        .neq('row_status', 'ready')
+        .neq('job_id', excludeJobId)
+        .gte('created_at', since);
+      // 1000 — размер страницы selectByIn (PAGE в cascadeIndex.ts): короче — последняя.
+      return (after === null ? query : query.gt('id', after)).order('id', { ascending: true }).limit(1000);
+    });
+  const rows = [...(await byKey('normalized_domain', domains)), ...(await byKey('inn', inns))];
+  return recentlyAttempted(index, rows, pauseDays, now);
 }
 
 export interface CascadePool {
@@ -464,24 +548,41 @@ export interface CascadePool {
 
 /**
  * Вернувшиеся компании каскада — не больше `limit`, в порядке индекса: раньше
- * всех писали — первыми. Компания, которую нашли и источники запуска, идёт их
- * карточкой — со свежими поводами, вакансиями, сделкой AMO; своих поводов у
- * карточки нет — берём прежние, если не устарели. Остальным карточку собираем
- * по прошлой строке: источник 'cascade', домен, ИНН, название, прежние поводы.
- * `skip` — компания уже в журнале запуска (продолжение после перезапуска).
+ * всех писали — первыми. Остальным карточку собираем по прошлой строке:
+ * источник 'cascade', домен, ИНН, название, прежние поводы.
+ *
+ * Компания, которую нашли и источники запуска: первые `head` вернувшихся (они
+ * встанут в начало пула) идут карточкой источника — со свежими поводами,
+ * вакансиями, сделкой AMO, — она уходит из новых и получает недостающие домен и
+ * ИНН из индекса; своих поводов у неё нет — берём прежние, если не устарели.
+ * Дальше такая карточка остаётся среди новых на своём месте (каскад ей даст
+ * раннер), а своей карточки из индекса компания не получает — две карточки
+ * одной компании не нужны.
+ *
+ * `skip` — компания уже в журнале запуска (продолжение после перезапуска) или её
+ * недавно уже пробовали (recentlyAttempted).
  */
 export function cascadeCandidates(
   index: CascadeIndex,
   limit: number,
-  options: { sources: Candidate[]; freshnessDays: number; skip?: (company: CascadeCompany) => boolean; now?: Date },
+  options: {
+    sources: Candidate[];
+    freshnessDays: number;
+    /** Сколько вернувшихся встанет в начало пула (cascadeHead); по умолчанию — все. */
+    head?: number;
+    skip?: (company: CascadeCompany) => boolean;
+    now?: Date;
+  },
 ): CascadePool {
   const since = (options.now ?? new Date()).getTime() - options.freshnessDays * 86_400_000;
+  const head = options.head ?? limit;
   const found = new Map<CascadeCompany, Candidate>();
   for (const c of options.sources) {
     const company = lookupCascade(index, normalizeDomain(c.website), c.inn);
     if (company?.decision.kind === 'due' && !found.has(company)) found.set(company, c);
   }
   const returning: Candidate[] = [];
+  const pulled = new Set<Candidate>();
   for (const company of index.due) {
     if (returning.length >= limit) break;
     const decision = company.decision;
@@ -489,9 +590,14 @@ export function cascadeCandidates(
     const cascade = { next: decision.next, offered: [...company.facts.offered] };
     const source = found.get(company);
     if (source) {
+      if (returning.length >= head) continue;
       if (!source.signals.length && !source.vacancies.length) source.signals.push(...priorSignals(company, since));
+      // Ключи индекса — карточке: по ним раннер узнает компанию и не пустит вторую её карточку.
+      source.inn ??= company.inn;
+      if (!normalizeDomain(source.website) && company.domain) source.website = `https://${company.domain}`;
       source.cascade = cascade;
       returning.push(source);
+      pulled.add(source);
       continue;
     }
     returning.push({
@@ -514,8 +620,7 @@ export function cascadeCandidates(
       cascade,
     });
   }
-  const taken = new Set(returning);
-  return { returning, fresh: options.sources.filter((c) => !taken.has(c)) };
+  return { returning, fresh: options.sources.filter((c) => !pulled.has(c)) };
 }
 
 /** Источник строки журнала: источники компании через «+», у вернувшейся из каскада — 'cascade'. */

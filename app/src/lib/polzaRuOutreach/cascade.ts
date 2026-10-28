@@ -116,7 +116,12 @@ export function cascadeOffer(chain: ChainType, signals: Signal[], returning?: Ca
  * пуле есть новые кандидаты; новые кончились — недобор добираем вернувшимися.
  */
 export function cascadeSlotFree(returningTaken: number, target: number, newLeft: number): boolean {
-  return newLeft <= 0 || returningTaken < Math.ceil(target / 2);
+  return newLeft <= 0 || returningTaken < cascadeHead(target);
+}
+
+/** Половина заказанного числа (вверх): столько вернувшихся можно взять, пока есть новые. */
+export function cascadeHead(target: number): number {
+  return Math.ceil(target / 2);
 }
 
 /**
@@ -126,7 +131,7 @@ export function cascadeSlotFree(returningTaken: number, target: number, newLeft:
  * 19 тысяч из 42). Хвост нужен, когда новые кончатся.
  */
 export function cascadePool<T>(fresh: T[], returning: T[], target: number): T[] {
-  const head = Math.ceil(target / 2);
+  const head = cascadeHead(target);
   return [...returning.slice(0, head), ...fresh, ...returning.slice(head)];
 }
 
@@ -210,12 +215,21 @@ export function cascadeDecision(f: CascadeFacts, now: Date, pauseDays = 14, late
   if (f.closed) return { kind: 'closed', reason: 'declined' };
   const next = nextStep(f.offered);
   if (next === null) return { kind: 'closed', reason: 'all_offered' };
-  if (f.chainRunning || !isValidDate(f.lastSentAt)) return { kind: 'wait', until: addDays(now, pauseDays) };
+  const until = f.chainRunning ? null : dueDate(f, pauseDays, laterDays);
+  if (!until) return { kind: 'wait', until: addDays(now, pauseDays) };
+  return until.getTime() > now.getTime() ? { kind: 'wait', until } : { kind: 'due', next };
+}
 
+/**
+ * С какого дня компании снова можно писать: позднейший из «последнее письмо +
+ * пауза» и «ответ „позже“ + 90 дней». Нет (или битая) даты письма — null.
+ */
+export function dueDate(f: Pick<CascadeFacts, 'lastSentAt' | 'laterAt'>, pauseDays = 14, laterDays = 90): Date | null {
+  if (!isValidDate(f.lastSentAt)) return null;
   let until = addDays(f.lastSentAt, pauseDays);
   if (isValidDate(f.laterAt)) {
     const laterUntil = addDays(f.laterAt, laterDays);
     if (laterUntil.getTime() > until.getTime()) until = laterUntil;
   }
-  return until.getTime() > now.getTime() ? { kind: 'wait', until } : { kind: 'due', next };
+  return until;
 }
