@@ -8,6 +8,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CascadeReturn } from './cascade';
+import { lookupCascade, type CascadeCompany, type CascadeIndex } from './cascadeIndex';
 import { companyKey, normalizeDomain } from './company';
 import { loadDirectoryCandidates } from './sources/directory';
 import { loadDirectHits } from './sources/direct';
@@ -438,6 +439,88 @@ export async function collectCandidates(
   );
   onLog(`сбор: готово, в пуле ${pool.length} (пропущено по памяти отказов ${merged.length - fresh.length})`);
   return { pool, sourceErrors, skippedRecent: merged.length - fresh.length };
+}
+
+/** Поводы, которые запуск находит заново (разбор сайта, новости, ФНС): прежние не берём, иначе будет два одинаковых. */
+const RECHECKED_SOURCES: ReadonlySet<SourceCode> = new Set<SourceCode>(['site_news', 'news', 'revenue_growth']);
+
+/** Прежние поводы вернувшейся компании, которые не устарели. */
+function priorSignals(company: CascadeCompany, since: number): Signal[] {
+  return company.signals.filter((s) => {
+    if (RECHECKED_SOURCES.has(s.source)) return false;
+    // Давний отказ в AMO — факт прошлого, а не событие: дата его не старит.
+    if (s.type === 'crm_lost' || !s.date) return true;
+    const at = new Date(s.date).getTime();
+    return !Number.isFinite(at) || at >= since;
+  });
+}
+
+export interface CascadePool {
+  /** Вернувшиеся компании: прошла пауза — следующий продукт (Candidate.cascade). */
+  returning: Candidate[];
+  /** Новые кандидаты из источников — без вернувшихся. */
+  fresh: Candidate[];
+}
+
+/**
+ * Вернувшиеся компании каскада — не больше `limit`, в порядке индекса: раньше
+ * всех писали — первыми. Компания, которую нашли и источники запуска, идёт их
+ * карточкой — со свежими поводами, вакансиями, сделкой AMO; своих поводов у
+ * карточки нет — берём прежние, если не устарели. Остальным карточку собираем
+ * по прошлой строке: источник 'cascade', домен, ИНН, название, прежние поводы.
+ * `skip` — компания уже в журнале запуска (продолжение после перезапуска).
+ */
+export function cascadeCandidates(
+  index: CascadeIndex,
+  limit: number,
+  options: { sources: Candidate[]; freshnessDays: number; skip?: (company: CascadeCompany) => boolean; now?: Date },
+): CascadePool {
+  const since = (options.now ?? new Date()).getTime() - options.freshnessDays * 86_400_000;
+  const found = new Map<CascadeCompany, Candidate>();
+  for (const c of options.sources) {
+    const company = lookupCascade(index, normalizeDomain(c.website), c.inn);
+    if (company?.decision.kind === 'due' && !found.has(company)) found.set(company, c);
+  }
+  const returning: Candidate[] = [];
+  for (const company of index.due) {
+    if (returning.length >= limit) break;
+    const decision = company.decision;
+    if (decision.kind !== 'due' || options.skip?.(company)) continue;
+    const cascade = { next: decision.next, offered: [...company.facts.offered] };
+    const source = found.get(company);
+    if (source) {
+      if (!source.signals.length && !source.vacancies.length) source.signals.push(...priorSignals(company, since));
+      source.cascade = cascade;
+      returning.push(source);
+      continue;
+    }
+    returning.push({
+      key: company.domain ? `domain:${company.domain}` : `inn:${company.inn}`,
+      sources: [],
+      sourceRecordId: `cascade:${company.lastRowId}`,
+      sourceUrls: [],
+      // Без названия бренд подтвердится со страницы сайта, как у кандидатов Директа.
+      companyName: company.companyName ?? company.domain ?? '',
+      inn: company.inn,
+      website: company.domain ? `https://${company.domain}` : null,
+      hhEmployerId: null,
+      amo: null,
+      signals: priorSignals(company, since),
+      vacancies: [],
+      vacancyCount: 0,
+      revenue: null,
+      employees: null,
+      knownEmails: [],
+      cascade,
+    });
+  }
+  const taken = new Set(returning);
+  return { returning, fresh: options.sources.filter((c) => !taken.has(c)) };
+}
+
+/** Источник строки журнала: источники компании через «+», у вернувшейся из каскада — 'cascade'. */
+export function sourceTypeOf(c: Candidate): string {
+  return c.sources.length ? c.sources.join('+') : 'cascade';
 }
 
 /**

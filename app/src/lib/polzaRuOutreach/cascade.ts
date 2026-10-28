@@ -110,6 +110,26 @@ export function cascadeOffer(chain: ChainType, signals: Signal[], returning?: Ca
   return { step, product: productFor(step, isAbroad(signals)), cascadeNo: (returning?.offered.length ?? 0) + 1 };
 }
 
+/**
+ * Свободно ли место в запуске вернувшейся компании: вернувшимся — не больше
+ * половины заказанного (`ceil(target / 2)` готовых и занятых письмами), пока в
+ * пуле есть новые кандидаты; новые кончились — недобор добираем вернувшимися.
+ */
+export function cascadeSlotFree(returningTaken: number, target: number, newLeft: number): boolean {
+  return newLeft <= 0 || returningTaken < Math.ceil(target / 2);
+}
+
+/**
+ * Порядок пула запуска: первые `ceil(target / 2)` вернувшихся — до новых, прочие
+ * — после них. В конце пула вернувшиеся почти никогда бы не разбирались: пул в
+ * десятки тысяч, а запуск набирает заказанное, просмотрев его часть (28.10.2026:
+ * 19 тысяч из 42). Хвост нужен, когда новые кончатся.
+ */
+export function cascadePool<T>(fresh: T[], returning: T[], target: number): T[] {
+  const head = Math.ceil(target / 2);
+  return [...returning.slice(0, head), ...fresh, ...returning.slice(head)];
+}
+
 export type ReplyOutcome = 'decline' | 'later' | 'other';
 
 // «Не» — только в начале слова (lookbehind): «вне интересно» отказом не считается.

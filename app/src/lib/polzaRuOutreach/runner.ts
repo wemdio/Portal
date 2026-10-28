@@ -71,7 +71,7 @@ import {
 } from '@/lib/outreachLlm/workerLease';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy, findStrictOutboundDuty, isSdrRoleTitle, type VacancyAnalysis } from './analyze';
-import { collectCandidates, type Candidate } from './collect';
+import { cascadeCandidates, collectCandidates, sourceTypeOf, type Candidate, type CascadePool } from './collect';
 import {
   computeDoubts,
   lettersQaDoubtText,
@@ -80,7 +80,7 @@ import {
   withLettersDoubt,
   type Doubts,
 } from './doubts';
-import { cascadeOffer, type CascadeDecision, type Product } from './cascade';
+import { cascadeOffer, cascadePool, cascadeSlotFree, type CascadeDecision, type Product } from './cascade';
 import { loadCascadeIndex, lookupCascade, type CascadeIndex } from './cascadeIndex';
 import { companyBrand, isSuppressed, normalizeDomain, siteUrl } from './company';
 import { findRuCompanyEmail } from './findEmail';
@@ -509,6 +509,8 @@ interface JournalRow {
   reason_code: string | null;
   chain_type: string | null;
   product: string | null;
+  /** Шаг каскада: больше 1 — вернувшаяся компания. */
+  cascade_no: number | null;
   normalized_domain: string | null;
   inn: string | null;
   doubt_flags: string[] | null;
@@ -530,7 +532,7 @@ async function loadKeptJournal(db: SupabaseClient, jobId: string): Promise<Journ
     // пропустить или повторить строки, и счётчики разошлись бы с журналом.
     const { data, error } = await db
       .from('polza_ru_outreach_companies')
-      .select('id,row_status,pipeline_stage,reason_code,chain_type,product,normalized_domain,inn,doubt_flags,source_record_id')
+      .select('id,row_status,pipeline_stage,reason_code,chain_type,product,cascade_no,normalized_domain,inn,doubt_flags,source_record_id')
       .eq('job_id', jobId)
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -804,7 +806,7 @@ async function runJob(
     const doneSources = new Set(resumedJournal.map((r) => r.source_record_id).filter((v): v is string => Boolean(v)));
     const doneDomains = new Set(resumedJournal.map((r) => r.normalized_domain).filter((v): v is string => Boolean(v)));
     const doneInns = new Set(resumedJournal.map((r) => r.inn).filter((v): v is string => Boolean(v)));
-    const pool = resumedJournal.length
+    const sourcePool = resumedJournal.length
       ? collected.pool.filter((c) => {
           if (c.sourceRecordId && doneSources.has(c.sourceRecordId)) return false;
           const d = normalizeDomain(c.website);
@@ -812,8 +814,21 @@ async function runJob(
           return !(c.inn && doneInns.has(c.inn));
         })
       : collected.pool;
+    // Вернувшиеся компании (прошла пауза каскада) — не больше заказанного числа;
+    // половина из них — в начало пула, остальные — после новых (cascadePool).
+    const split: CascadePool = cascade
+      ? cascadeCandidates(cascade, target, {
+          sources: sourcePool,
+          freshnessDays: config.freshness_days,
+          skip: (company) => Boolean((company.domain && doneDomains.has(company.domain)) || (company.inn && doneInns.has(company.inn))),
+        })
+      : { returning: [], fresh: sourcePool };
+    const pool = cascadePool(split.fresh, split.returning, target);
+    // Сколько новых (не вернувшихся) кандидатов в пуле от позиции i до конца.
+    const newFrom = new Array<number>(pool.length + 1).fill(0);
+    for (let i = pool.length - 1; i >= 0; i -= 1) newFrom[i] = newFrom[i + 1] + (pool[i].cascade ? 0 : 1);
     if (Object.keys(sourceErrors).length) log('warn', `job ${jobId}: source errors`, sourceErrors);
-    log('info', `job ${jobId}: pool=${pool.length}, skipped_recent=${skippedRecent}, target=${target}, sources=${config.sources.join(',')}`);
+    log('info', `job ${jobId}: pool=${pool.length} (returning ${split.returning.length}), skipped_recent=${skippedRecent}, target=${target}, sources=${config.sources.join(',')}`);
 
     const funnel = Object.fromEntries(STAGES.map((s) => [s, 0])) as Record<Stage, number>;
     const reasons: Record<string, number> = {};
@@ -1588,20 +1603,39 @@ async function runJob(
     // места ждёт: место освободится, если письма соседа не выйдут, — в
     // LIMIT_REACHED она уходит, только когда лимит действительно набран (как у
     // английского аутрича).
+    //
+    // Вернувшимся компаниям (каскад) — не больше половины заказанного, пока в
+    // пуле есть новые кандидаты (cascadeSlotFree): иначе строка отсеивается
+    // CASCADE_CAP — готовой она не стала, и следующий запуск возьмёт её снова.
     let lettersInFlight = 0;
     let slotWaiters: Array<() => void> = [];
-    const takeLettersSlot = async (): Promise<boolean> => {
+    const returningRows = {
+      ready: resumedJournal.filter((r) => r.row_status === 'ready' && (r.cascade_no ?? 1) > 1).length,
+      inFlight: 0,
+    };
+    // Новые кандидаты, которые запуск ещё может взять: не начатые, в пределах
+    // потолка просмотра. Новых волн не будет (лимит, сбой, остановка) — их нет.
+    const newLeft = (): number => {
+      if (halted || budgetStop || runAbort.signal.aborted) return 0;
+      const end = Math.min(pool.length, cursor + Math.max(0, maxScan - totals.scanned));
+      return newFrom[cursor] - newFrom[end];
+    };
+    /** ok — место взято; limit — лимит готовых набран; cap — половина запуска уже за вернувшимися. */
+    const takeLettersSlot = async (returning: boolean): Promise<'ok' | 'limit' | 'cap'> => {
       for (;;) {
-        if (totals.ready >= target) return false;
+        if (totals.ready >= target) return 'limit';
+        if (returning && !cascadeSlotFree(returningRows.ready + returningRows.inFlight, target, newLeft())) return 'cap';
         if (totals.ready + lettersInFlight < target) {
           lettersInFlight += 1;
-          return true;
+          if (returning) returningRows.inFlight += 1;
+          return 'ok';
         }
         await new Promise<void>((resolve) => slotWaiters.push(resolve));
       }
     };
-    const releaseLettersSlot = () => {
+    const releaseLettersSlot = (returning: boolean) => {
       lettersInFlight -= 1;
+      if (returning) returningRows.inFlight -= 1;
       const waiting = slotWaiters;
       slotWaiters = [];
       for (const wake of waiting) wake();
@@ -1622,8 +1656,18 @@ async function runJob(
       }
       // Лимит готовых набран — строка оценку прошла, а до писем не дошла: стоит
       // на этапе писем, воронка (funnel.ts) считает её до «Оценки» включительно.
-      if (!(await takeLettersSlot())) {
+      // Так же стоит вернувшаяся, которой не хватило половины запуска.
+      const returning = q.cascadeNo > 1;
+      const slot = await takeLettersSlot(returning);
+      if (slot === 'limit') {
         await finish(q.id, { stage: 'sequence_assembled', status: 'manual_review', reason: 'LIMIT_REACHED', detail: 'лимит готовых компаний уже набран' }, scoringDoubts(q));
+        return;
+      }
+      if (slot === 'cap') {
+        await finish(q.id, {
+          stage: 'sequence_assembled', status: 'rejected', reason: 'CASCADE_CAP',
+          detail: `вернувшимся — не больше ${Math.ceil(target / 2)} из ${target}, пока есть новые компании`,
+        }, scoringDoubts(q));
         return;
       }
       try {
@@ -1640,7 +1684,7 @@ async function runJob(
         }
         throw err;
       } finally {
-        releaseLettersSlot();
+        releaseLettersSlot(returning);
       }
     };
 
@@ -1738,6 +1782,7 @@ async function runJob(
         return;
       }
       totals.ready += 1;
+      if (q.cascadeNo > 1) returningRows.ready += 1;
       reach(q.tally, 'ready');
       // Признаки сомнения — с оценки: у строки, ждавшей шаблон, в базе ещё стоит
       // TEMPLATE_FAILED.
@@ -1873,7 +1918,7 @@ async function runJob(
           .insert(
             chunk.map((c) => ({
               job_id: jobId,
-              source_type: c.sources.join('+'),
+              source_type: sourceTypeOf(c),
               source_record_id: c.sourceRecordId,
               source_url: c.sourceUrls[0] ?? null,
               source_urls: c.sourceUrls,
@@ -2034,7 +2079,7 @@ async function runJob(
     // пишется — его расход часть итога: дожидаемся (запуск пока идёт).
     const settled = await settleCalls(COMPLETED_SETTLE_MS);
     const spend = budget.snapshot({ includeReserved: !settled });
-    log('info', `job ${jobId} done: scanned=${totals.scanned} ready=${totals.ready}/${target} (${stopReason}), llm $${spend.spent_usd}/$${spend.limit_usd} in ${spend.calls} calls`, { reasons, chains, products });
+    log('info', `job ${jobId} done: scanned=${totals.scanned} ready=${totals.ready}/${target} (returning ${returningRows.ready}, ${stopReason}), llm $${spend.spent_usd}/$${spend.limit_usd} in ${spend.calls} calls`, { reasons, chains, products });
     // Тоже только идущему: остановку между проверкой выше и этой записью не перетираем.
     await finishRun({
       status: 'completed',
