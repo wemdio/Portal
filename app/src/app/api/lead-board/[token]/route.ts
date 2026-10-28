@@ -5,6 +5,7 @@ import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { isLeadQuality, LEAD_QUALITY_OPTIONS } from '@/lib/leadBoard/leadQuality';
 import { resolveBoard } from '@/lib/leadBoard/boardResolver';
 import { parseImportDate } from '@/lib/leadBoard/importLeads';
+import { ADDITIONAL_CONTACT_COLUMN_KEYS, isAdditionalContactColumnKey } from '@/lib/leadBoard/boardColumns';
 
 export const dynamic = 'force-dynamic';
 
@@ -132,7 +133,7 @@ export async function PATCH(
   // Строка нужна и для 404, и для merge кастомных полей.
   const { data: row, error: rowErr } = await db
     .from('project_client_lead_board_rows')
-    .select('id, custom')
+    .select('id, custom, updated_at')
     .eq('id', rowId)
     .eq('project_id', projectId) // чужой ряд этим токеном не правится
     .maybeSingle();
@@ -140,6 +141,7 @@ export async function PATCH(
   if (!row) return jsonError('Row not found', 404);
 
   const patch: Record<string, unknown> = {};
+  let customUpdates: Record<string, string | null> | undefined;
   if ('quality' in body) {
     if (body.quality === null || body.quality === '') {
       patch.quality = null; // снятие оценки
@@ -194,19 +196,56 @@ export async function PATCH(
     if (!body.custom || typeof body.custom !== 'object' || Array.isArray(body.custom)) {
       return jsonError('custom must be an object {columnKey: value}', 400);
     }
-    const customKeys = new Set(columnConfig.filter((c) => c.custom).map((c) => c.key));
-    const merged: Record<string, unknown> = { ...((row.custom as Record<string, unknown> | null) ?? {}) };
+    // Reserved contacts are editable inside the single Контакты column even
+    // though they no longer have individual column_config entries.
+    const customKeys = new Set([
+      ...columnConfig.filter((c) => c.custom).map((c) => c.key),
+      ...ADDITIONAL_CONTACT_COLUMN_KEYS,
+    ]);
+    customUpdates = {};
     for (const [k, v] of Object.entries(body.custom as Record<string, unknown>)) {
       if (!customKeys.has(k)) return jsonError(`unknown custom column: ${k}`, 400);
-      if (v === null) delete merged[k];
-      else if (typeof v === 'string') merged[k] = v.slice(0, 500);
+      if (v === null) customUpdates[k] = null;
+      else if (typeof v === 'string') customUpdates[k] = v.slice(0, 500);
       else return jsonError('custom values must be strings or null', 400);
     }
-    patch.custom = merged;
   }
-  if (Object.keys(patch).length === 0) {
+  if (Object.keys(patch).length === 0 && customUpdates === undefined) {
     return jsonError('nothing to update', 400);
   }
+
+  if (customUpdates !== undefined) {
+    // The worker may fill missing contacts concurrently. Merge against the
+    // current version on every retry, retaining unrelated/manual JSONB values.
+    let current = row;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (!current.updated_at) return jsonError('Row version is unavailable; reload and retry', 409);
+      const merged: Record<string, unknown> = {
+        ...((current.custom as Record<string, unknown> | null) ?? {}),
+      };
+      for (const [key, value] of Object.entries(customUpdates)) {
+        // Retain an explicit empty contact as a tombstone: later replies must
+        // not undo a specialist's manual clearing. Other custom keys keep the
+        // existing null-delete semantics.
+        if (value === null && !isAdditionalContactColumnKey(key)) delete merged[key];
+        else merged[key] = value ?? '';
+      }
+      const updatedAt = new Date(Math.max(Date.now(), Date.parse(current.updated_at) + 1)).toISOString();
+      const { data, error } = await db.from('project_client_lead_board_rows')
+        .update({ ...patch, custom: merged, updated_at: updatedAt })
+        .eq('id', rowId).eq('project_id', projectId).eq('updated_at', current.updated_at)
+        .select('id, quality, comment, taken, custom, updated_at').maybeSingle();
+      if (error) return jsonError(error.message, 500);
+      if (data) return NextResponse.json({ ok: true, row: data });
+      const { data: latest, error: latestError } = await db.from('project_client_lead_board_rows')
+        .select('id, custom, updated_at').eq('id', rowId).eq('project_id', projectId).maybeSingle();
+      if (latestError) return jsonError(latestError.message, 500);
+      if (!latest) return jsonError('Row not found', 404);
+      current = latest;
+    }
+    return jsonError('Concurrent edits; reload the row and retry', 409);
+  }
+
   patch.updated_at = new Date().toISOString();
 
   const { data, error } = await db
