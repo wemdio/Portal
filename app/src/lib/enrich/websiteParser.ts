@@ -1864,6 +1864,8 @@ export interface WebsitePage {
    * подставляет, порог полезности решает вызывающий.
    */
   text: string;
+  /** ENG fallback provenance; absent for the existing HTTP reader. */
+  readMethod?: 'browser' | 'tinyfish';
   /** Реальные ссылки страницы; только при явном companyEvidence. */
   companyEvidenceLinks?: Array<{
     url: string;
@@ -2233,9 +2235,12 @@ export async function fetchSinglePage(
     companyEvidence?: boolean;
     /** ENG-only source paragraph ranking; at most 32 bounded words, never facts. */
     companyEvidenceTerms?: string[];
+    /** ENG-only empty successful page recovery. Other readers keep their existing behavior. */
+    engPageFallback?: boolean;
   },
 ): Promise<WebsitePage | null> {
   const url = normalizeUrl(rawUrl);
+  const useFallback = options?.engPageFallback === true && process.env.ENG_BROWSER_ENABLED === '1';
   const outcome = await fetchHtmlOutcomeWithRetry(
     url,
     {
@@ -2247,19 +2252,29 @@ export async function fetchSinglePage(
       guard: options?.guard,
       maxBytes: options?.maxBytes,
     },
-    isStrictRetryable,
+    (result) => isStrictRetryable(result) && !(useFallback
+      && result.kind === 'unusable' && (result.status === 403 || result.status === 429)),
   );
   if (outcome.kind === 'failed') throw new WebsiteNoHtmlError();
   // 3xx без Location (с ним редирект пройден или отклонён) — тело заглушки,
   // а не страница.
   if (outcome.kind !== 'html' || outcome.status < 200 || outcome.status >= 300) return null;
-  if (options?.companyEvidence === true) {
-    return extractCompanyEvidencePage(outcome.html, outcome.url, options.layoutAware, options.companyEvidenceTerms);
+  let html = outcome.html;
+  let finalUrl = outcome.url;
+  let readMethod: WebsitePage['readMethod'];
+  if (useFallback) {
+    const { fetchEngPageFallback } = await import('./engPageFallback');
+    const fallback = await fetchEngPageFallback({ url: finalUrl, companyUrl: url, html, status: outcome.status, signal: options.signal });
+    if (fallback) { html = fallback.html; finalUrl = fallback.url; readMethod = fallback.source; }
   }
-  const text = sanitizeText(extractTextFromHtml(outcome.html, { layoutAware: options?.layoutAware }));
+  if (options?.companyEvidence === true) {
+    return { ...extractCompanyEvidencePage(html, finalUrl, options.layoutAware, options.companyEvidenceTerms), ...(readMethod ? { readMethod } : {}) };
+  }
+  const text = sanitizeText(extractTextFromHtml(html, { layoutAware: options?.layoutAware }));
   return {
-    url: outcome.url,
+    url: finalUrl,
     text: text.length > MAX_TEXT_LENGTH ? text.slice(0, MAX_TEXT_LENGTH).trimEnd() + '…' : text,
+    ...(readMethod ? { readMethod } : {}),
   };
 }
 

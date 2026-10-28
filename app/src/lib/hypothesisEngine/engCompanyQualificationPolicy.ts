@@ -38,13 +38,13 @@ export interface HeEngCollectedCompanyEvidence {
   company: string;
   website: string;
   /** Actual page URLs captured by the constructor, after its same-site redirect checks. */
-  pages: Array<{ url: string; text: string; truncated?: boolean }>;
+  pages: Array<{ url: string; text: string; truncated?: boolean; readMethod?: 'browser' | 'tinyfish' }>;
 }
 
 export interface HeEngCompanyQualificationAudit {
   version: 1;
   /** Exact bounded classifier input, or cited passages when compaction is present. */
-  quotes: Array<{ id: string; url: string; text: string; source: 'constructor_website' | 'website' }>;
+  quotes: Array<{ id: string; url: string; text: string; source: 'constructor_website' | 'website'; readMethod?: 'browser' | 'tinyfish' }>;
   /** New adaptive bases compact finished waves, preserving every decision citation. */
   compaction?: {
     version: 1;

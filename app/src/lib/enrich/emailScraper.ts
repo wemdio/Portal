@@ -940,6 +940,8 @@ type PageFetchResult = {
   refused?: true;
   /** Only requested by the opt-in ENG contact crawl. */
   finalUrl?: string;
+  readMethod?: 'browser' | 'tinyfish';
+  blocked?: true;
 };
 
 async function fetchPage(
@@ -1268,7 +1270,7 @@ export type EngContactDiagnostics = {
     finalUrl?: string;
     kind: EngContactPageKind;
     source: EngContactPageSource;
-    route: 'direct' | 'proxy';
+    route: 'direct' | 'proxy' | 'browser' | 'tinyfish';
     status?: number;
     outcome: 'read' | 'http_error' | 'timeout' | 'network_error' | 'address_refused' | 'non_html' | 'parse_error';
     failure?: EngContactFailure;
@@ -1381,6 +1383,7 @@ async function discoverEngContactPages(html: string, baseUrl: string, ownSite: (
 
 function contactFetchFailure(result: PageFetchResult): EngContactFailure {
   if (result.refused) return 'address_refused';
+  if (result.blocked) return 'http_error';
   if (result.status !== undefined && result.status >= 400) return 'http_error';
   if (result.failure === 'Страница не отдала HTML') return 'non_html';
   if (result.failure === 'Сайт не ответил за отведённое время') return 'timeout';
@@ -1405,7 +1408,7 @@ async function scrapeEngContactEmails(
   const checkedUrls: string[] = [];
   let siteName: string | null = null;
   let description: string | undefined;
-  const websiteEvidencePages: Array<{ url: string; text: string; truncated?: boolean }> = [];
+  const websiteEvidencePages: Array<{ url: string; text: string; truncated?: boolean; readMethod?: 'browser' | 'tinyfish' }> = [];
   let mainFailure: PageFetchFailure | null = null;
   const limits: PageReadLimits | undefined = options.guard || options.maxBytes
     ? { guard: options.guard, maxBytes: options.maxBytes, counts: { refused: 0, capped: 0 } } : undefined;
@@ -1472,10 +1475,25 @@ async function scrapeEngContactEmails(
     } catch {
       result = { html: null, failure: 'Сайт не открылся' };
     }
+    // ENG contact crawl only. A proxy/cache/unknown/blocked response never starts a renderer.
+    if (!dispatcher && cached === undefined && !controller.signal.aborted && process.env.ENG_BROWSER_ENABLED === '1') {
+      try {
+        const { isEngHtmlBlocked } = await import('./engPageFallbackPolicy');
+        if (result.html && isEngHtmlBlocked(result.html)) result = { ...result, html: null, failure: 'Страница закрыта проверкой доступа', blocked: true };
+        const { fetchEngPageFallback } = await import('./engPageFallback');
+        const fallback = await fetchEngPageFallback({ url: result.finalUrl || candidate.url, companyUrl: candidate.url,
+          html: result.html, status: result.status, signal: controller.signal });
+        if (fallback) {
+          // Rendering can remove a footer: retain addresses literally present in the direct response too.
+          if (result.html) for (const email of extractEmailsFromHtmlAdvanced(result.html)) allEmails.add(email);
+          result = { html: fallback.html, finalUrl: fallback.url, failure: null, status: 200, readMethod: fallback.source };
+        }
+      } catch { /* The crawl's deadline preserves results already collected. */ }
+    }
     const page: EngContactDiagnostics['pages'][number] = {
       url: contactDiagnosticUrl(candidate.url),
       ...(result.finalUrl ? { finalUrl: contactDiagnosticUrl(result.finalUrl) } : {}),
-      kind: candidate.kind, source: candidate.source, route: dispatcher ? 'proxy' : 'direct',
+      kind: candidate.kind, source: candidate.source, route: result.readMethod ?? (dispatcher ? 'proxy' : 'direct'),
       ...(result.status !== undefined ? { status: result.status } : {}),
       outcome: 'read', emailsFound: 0,
     };
@@ -1504,7 +1522,8 @@ async function scrapeEngContactEmails(
       readFinalUrls.add(finalKey);
     }
     seen.add(finalKey);
-    options.pageCache?.set(engContactPageKey(finalUrl), result.html);
+    // String-only caches cannot preserve provenance; fallback pages have a typed evidence record instead.
+    if (!result.readMethod) options.pageCache?.set(engContactPageKey(finalUrl), result.html);
     try {
       const emails = extractEmailsFromHtmlAdvanced(result.html);
       for (const email of emails) allEmails.add(email);
@@ -1525,7 +1544,8 @@ async function scrapeEngContactEmails(
     if (options.includeDescription && websiteEvidencePages.length < 3) {
       try {
         const text = (await import('@/lib/enrich/websiteParser')).extractTextFromHtml(result.html);
-        if (text.trim()) websiteEvidencePages.push({ url: finalUrl, text: text.slice(0, 6000), ...(text.length > 6000 ? { truncated: true } : {}) });
+        if (text.trim()) websiteEvidencePages.push({ url: finalUrl, text: text.slice(0, 6000), ...(text.length > 6000 ? { truncated: true } : {}),
+          ...(result.readMethod ? { readMethod: result.readMethod } : {}) });
       } catch { /* Optional evidence must not discard collected addresses. */ }
     }
     if (candidate.depth < 2) {
@@ -1540,7 +1560,7 @@ async function scrapeEngContactEmails(
   };
   const readHome = async (candidate: EngContactCandidate): Promise<PageFetchResult> => {
     let result = await read(candidate);
-    if (PROXY_RETRY_ENABLED && !result.html && result.status !== undefined && PROXY_RETRY_STATUSES.has(result.status) && canFetch()) {
+    if (PROXY_RETRY_ENABLED && process.env.ENG_BROWSER_ENABLED !== '1' && !result.html && result.status !== undefined && PROXY_RETRY_STATUSES.has(result.status) && canFetch()) {
       const release = tryAcquireProxySlot();
       if (release) {
         try {
@@ -1598,6 +1618,11 @@ async function scrapeEngContactEmails(
   try {
     let home: PageFetchResult = { html: null, failure: null };
     if (canFetch()) home = await readHome({ url: root, kind: 'home', source: 'input', priority: 200, depth: 0 });
+    if (process.env.ENG_BROWSER_ENABLED === '1' && (home.blocked || [401, 403, 407, 429, 451].includes(home.status ?? 0))) {
+      mainFailure = home.failure;
+      diagnostics.failure = 'http_error';
+      return finish();
+    }
     const rootUrl = new URL(root);
     if (!home.html && !home.refused && !rootUrl.hostname.startsWith('www.')
       && !/^[\d.]+$|:/.test(rootUrl.hostname) && canFetch()) {
@@ -1653,7 +1678,7 @@ export type ScrapeEmailsResult = {
   /** Opt-in, extracted with the description parser's existing sufficiency rule. */
   description?: string;
   /** ENG contact-first only: actual fetched URLs, before display-description truncation. */
-  websiteEvidencePages?: Array<{ url: string; text: string; truncated?: boolean }>;
+  websiteEvidencePages?: Array<{ url: string; text: string; truncated?: boolean; readMethod?: 'browser' | 'tinyfish' }>;
   /**
    * Почему не удалось прочитать главную страницу: сертификат, 403, таймаут,
    * DNS. null — главная открылась (адресов на сайте может всё равно не быть).

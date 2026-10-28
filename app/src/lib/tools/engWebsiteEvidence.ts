@@ -9,7 +9,7 @@ const EMAIL = /[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}/gu
 const BUILDERS = ['wixsite.com', 'squarespace.com', 'webflow.io', 'tilda.ws', 'weebly.com',
   'wordpress.com', 'godaddysites.com', 'myshopify.com', 'business.site'];
 
-export interface EngWebsiteEvidencePage { url: string; text: string; truncated?: boolean }
+export interface EngWebsiteEvidencePage { url: string; text: string; truncated?: boolean; readMethod?: 'browser' | 'tinyfish' }
 export interface EngWebsiteEvidence {
   version: 1;
   source: 'constructor_website';
@@ -51,7 +51,8 @@ export function buildEngWebsiteEvidence(website: string, input: EngWebsiteEviden
     const cleaned = stripUnstorableJsonChars(page.text.replace(EMAIL, '[email removed]')).trim();
     const text = sliceWholeChars(cleaned, 0, remaining);
     if (text.length < 12) continue;
-    pages.push({ url, text, ...(page.truncated || text.length < cleaned.length ? { truncated: true } : {}) });
+    pages.push({ url, text, ...(page.truncated || text.length < cleaned.length ? { truncated: true } : {}),
+      ...(page.readMethod === 'browser' || page.readMethod === 'tinyfish' ? { readMethod: page.readMethod } : {}) });
     remaining -= text.length;
     if (pages.length >= MAX_PAGES || remaining < 12) break;
   }
@@ -66,7 +67,8 @@ export function readEngWebsiteEvidence(raw: unknown, website: string): EngWebsit
     if (value?.version !== 1 || value.source !== 'constructor_website' || value.website !== cleanUrl(website) ||
         !Array.isArray(value.pages) || value.pages.length > MAX_PAGES || value.pages.some((page) =>
           !page || typeof page.url !== 'string' || typeof page.text !== 'string' ||
-          (page.truncated !== undefined && page.truncated !== true))) return null;
+          (page.truncated !== undefined && page.truncated !== true) ||
+          (page.readMethod !== undefined && page.readMethod !== 'browser' && page.readMethod !== 'tinyfish'))) return null;
     const checked = buildEngWebsiteEvidence(website, value.pages);
     return checked && JSON.stringify(checked) === JSON.stringify(value) ? checked : null;
   } catch { return null; }
