@@ -6,6 +6,7 @@ review instead of replayed after a timeout or process restart.
 """
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import os
@@ -25,6 +26,11 @@ MSK = timezone(timedelta(hours=3))
 LOCK_NAMESPACE = 726462
 DELIVERY_LOCK = 3
 EXPECTED_BOT = "PolzaSiteFeedbackBot"
+BOT_VERIFY_ATTEMPTS = 3
+
+
+class IncomeBotVerificationError(RuntimeError):
+    """Only controlled, token-free reasons may be exposed in a worker alert."""
 
 
 @dataclass(frozen=True)
@@ -142,20 +148,44 @@ def format_manual_income(row: dict) -> str:
     return "\n".join(lines)
 
 
+async def _verify_income_bot(config: IncomeConfig) -> None:
+    # getMe is read-only: even a read timeout is safe to retry. Never apply
+    # these retries to sendMessage, which may already have delivered a payment.
+    async with httpx.AsyncClient(timeout=15) as client:
+        for attempt in range(1, BOT_VERIFY_ATTEMPTS + 1):
+            try:
+                response = await client.get(f"https://api.telegram.org/bot{config.token}/getMe")
+                status = response.status_code
+                if 400 <= status < 500:
+                    # Bad credentials/permissions need attention, not retries.
+                    # A 429 also must not be retried ahead of Telegram's limit.
+                    raise IncomeBotVerificationError(f"Проверка бота оплат отклонена Telegram (HTTP {status})")
+                if status == 200:
+                    data = response.json()
+                    result = data.get("result") if isinstance(data, dict) else None
+                    username = result.get("username") if isinstance(result, dict) else None
+                    if isinstance(data, dict) and data.get("ok") is True and isinstance(username, str) and username:
+                        if username.lower() != EXPECTED_BOT.lower():
+                            raise IncomeBotVerificationError("Токен уведомлений оплат принадлежит другому боту")
+                        return
+                    reason = "некорректный ответ Telegram"
+                else:
+                    reason = f"Telegram HTTP {status}"
+            except (httpx.HTTPError, ValueError) as error:
+                # Exception messages/URLs and Telegram response bodies can
+                # contain the bot token. Only the error class is safe to log.
+                reason = type(error).__name__
+            if attempt == BOT_VERIFY_ATTEMPTS:
+                raise IncomeBotVerificationError(
+                    f"Проверка бота оплат не прошла после {attempt} попыток ({reason})"
+                ) from None
+            print(f"[bank-income] bot verification retry {attempt}/{BOT_VERIFY_ATTEMPTS} ({reason})", flush=True)
+            await asyncio.sleep(attempt)
+
+
 async def prepare_income(conn: asyncpg.Connection, config: IncomeConfig) -> None:
     # Verify the exact named bot before baselining or transmitting financial data.
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get(f"https://api.telegram.org/bot{config.token}/getMe")
-            data = response.json()
-        if not isinstance(data, dict) or response.status_code != 200 or not data.get("ok"):
-            raise ValueError("Telegram отклонил проверку бота оплат")
-        result = data.get("result") or {}
-        if not isinstance(result, dict) or result.get("username", "").lower() != EXPECTED_BOT.lower():
-            raise ValueError("Токен уведомлений оплат принадлежит другому боту")
-    except (httpx.HTTPError, ValueError) as error:
-        # httpx exceptions contain the request URL, hence the secret bot token.
-        raise RuntimeError(f"Проверка бота оплат не прошла ({type(error).__name__})") from None
+    await _verify_income_bot(config)
     await conn.execute(
         """WITH bank_baseline AS (
              INSERT INTO bank_income_notification_state (id, baseline_id)
