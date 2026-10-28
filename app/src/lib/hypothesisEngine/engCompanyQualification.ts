@@ -70,7 +70,7 @@ const AssessmentSchema = z.object({ model: z.string().max(100), status: z.enum([
   explanation: z.string().max(400) });
 const AuditSchema = z.object({ version: z.literal(1),
   quotes: z.array(z.object({ id: z.string().max(200), url: z.string().max(2000), text: z.string().min(12).max(1400),
-    source: z.enum(['constructor_website', 'website']) })).max(MAX_COMPANY_QUOTES),
+    source: z.enum(['constructor_website', 'website']), readMethod: z.enum(['browser', 'tinyfish']).optional() })).max(MAX_COMPANY_QUOTES),
   compaction: z.object({ version: z.literal(1), strategy: z.literal('decision_quotes'),
     originalQuoteCount: z.number().int().min(1).max(MAX_COMPANY_QUOTES),
     originalQuotesSha256: z.string().regex(/^[a-f0-9]{64}$/),
@@ -166,7 +166,7 @@ export function heEngParkedPage(page: Pick<HeFetchedPage, 'url' | 'text'>): bool
   if (/^\/lander\/?$/i.test(url.pathname)) return true;
   return page.text.length <= 2000 && PARKING_TEXT.test(page.text);
 }
-type QualificationPage = { url: string; text: string; evidenceSource?: 'constructor_website' | 'website' };
+type QualificationPage = { url: string; text: string; evidenceSource?: 'constructor_website' | 'website'; readMethod?: 'browser' | 'tinyfish' };
 
 /** Country proof is checked separately. A constructor description never supplies geography. */
 function collectedPages(row: HeEngQualificationRow, evidence: HeEngCollectedCompanyEvidence | undefined, website: string): QualificationPage[] {
@@ -179,7 +179,8 @@ function collectedPages(row: HeEngQualificationRow, evidence: HeEngCollectedComp
       evidence.pages.reduce((sum, page) => sum + page.text.length, 0) > MAX_PAGE_TEXT) return [];
   return evidence.pages.flatMap((page) => {
     const text = stripUnstorableJsonChars(withoutEmails(page.text)).trim();
-    return text ? [{ url: page.url, text, evidenceSource: 'constructor_website' as const }] : [];
+    return text ? [{ url: page.url, text, evidenceSource: 'constructor_website' as const,
+      ...(page.readMethod ? { readMethod: page.readMethod } : {}) }] : [];
   });
 }
 
@@ -378,7 +379,7 @@ function boundedParagraphExcerpts(raw: string): string[] {
 function fitInput(key: string, row: HeEngQualificationRow, website: string, pages: QualificationPage[], scope: HeEngQualificationScope, excerptVersion?: 2): HeEngCompanyFitInput {
   const name = withoutEmails(typeof row.company === 'string' ? row.company : '').slice(0, 300);
   const words = hypothesisWords(scope);
-  const candidates: Array<{ id: string; url: string; text: string; source: 'constructor_website' | 'website'; normalized: string; score: number; order: number }> = [];
+  const candidates: Array<{ id: string; url: string; text: string; source: 'constructor_website' | 'website'; readMethod?: 'browser' | 'tinyfish'; normalized: string; score: number; order: number }> = [];
   for (const [pageIndex, page] of pages.entries()) {
     if (!companySite(page.url, website, typeof row.company === 'string' ? row.company : '')) continue;
     const add = (raw: string) => {
@@ -390,6 +391,7 @@ function fitInput(key: string, row: HeEngQualificationRow, website: string, page
       const boilerplate = /\b(?:privacy policy|cookie policy|all rights reserved|registered office|regulated by|copyright)\b/i.test(text);
       const named = name.length > 2 && text.toLowerCase().includes(name.toLowerCase());
       candidates.push({ id: `p${pageIndex + 1}q${candidates.length + 1}`, url: page.url, text, source: page.evidenceSource ?? 'website',
+        ...(page.readMethod ? { readMethod: page.readMethod } : {}),
         normalized: text.normalize('NFKC').toLocaleLowerCase(),
         score: Math.min(hits, 6) * 5 + Number(substantive) * 12 + Number(named) * 5 - Number(boilerplate) * 15,
         order: candidates.length });
@@ -428,7 +430,8 @@ function fitInput(key: string, row: HeEngQualificationRow, website: string, page
     for (const old of covered) selected.splice(selected.indexOf(old), 1);
     selected.push(item); characters += item.text.length - replacedChars;
   }
-  return { id: key, name, website, quotes: selected.sort((a, b) => a.order - b.order).map(({ id, url, text, source }) => ({ id, url, text, source })) };
+  return { id: key, name, website, quotes: selected.sort((a, b) => a.order - b.order).map(({ id, url, text, source, readMethod }) =>
+    ({ id, url, text, source, ...(readMethod ? { readMethod } : {}) })) };
 }
 
 function unverified(scope: HeEngQualificationScope, key: string, reason: string): HeEngCompanyVerdict {
@@ -548,7 +551,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
   }
   memo.economy = { version: 1, workflow: 'fit_review_v3_single', budget, prepared: {}, proposals: {} };
   const preparedSchema = z.object({ website: z.string().min(1).max(2000), pages: z.array(z.object({ url: z.string().max(2000), text: z.string().max(MAX_PAGE_TEXT),
-    evidenceSource: z.enum(['constructor_website', 'website']).optional() })).max(MAX_PAGES + 3),
+    evidenceSource: z.enum(['constructor_website', 'website']).optional(), readMethod: z.enum(['browser', 'tinyfish']).optional() })).max(MAX_PAGES + 3),
     retryableFailure: z.boolean(), collectedJobId: z.string().uuid().optional(), excerptVersion: z.literal(2).optional(),
     // Present only when a page came from a same-brand domain (companySiteAlias).
     company: z.string().min(1).max(1000).optional(),
@@ -706,7 +709,8 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
       try { site = `https://${new URL(hit.website).host}/`; } catch { continue; }
       if (sameSite(site, website) || companySiteAlias(site, website, company) === null) continue;
       const read = await companyPages(ctx, fetchPage, site, company, scope);
-      return read.pages.length ? { website: site, pages: read.pages.map(({ url, text }) => ({ url, text, evidenceSource: 'website' as const })) } : null;
+      return read.pages.length ? { website: site, pages: read.pages.map(({ url, text, readMethod }) => ({ url, text, evidenceSource: 'website' as const,
+        ...(readMethod ? { readMethod } : {}) })) } : null;
     }
     return null;
   }
@@ -745,7 +749,8 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
           enoughCollectedText(fitInput(key, row, website, reused, scope, 2), scope);
         const read: PageRead = sufficient ? { pages: [], retryableFailure: false, unverifiedRedirect: false }
           : await companyPages(ctx, fetchPage, website, row.company, scope);
-        const pages: QualificationPage[] = [...reused, ...read.pages.map(({ url, text }) => ({ url, text, evidenceSource: 'website' as const }))];
+        const pages: QualificationPage[] = [...reused, ...read.pages.map(({ url, text, readMethod }) => ({ url, text, evidenceSource: 'website' as const,
+          ...(readMethod ? { readMethod } : {}) }))];
         if (!pages.length) {
           const attempts = Math.min(MAX_COMPANY_ATTEMPTS, (memo.attempts![key]?.attempts ?? 0) + 1);
           memo.attempts![key] = { attempts, kind: read.retryableFailure ? 'site_transient' : 'site_unavailable' };

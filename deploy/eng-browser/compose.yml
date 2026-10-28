@@ -1,0 +1,58 @@
+# Standalone preparation only; never started by the existing production compose.
+services:
+  sockets-init:
+    image: ${ENG_BROWSER_BROKER_IMAGE:?Set ENG_BROWSER_BROKER_IMAGE}
+    user: '0:0'
+    entrypoint: ["sh", "-c", "chown 10001:10001 /sockets && chmod 0700 /sockets"]
+    network_mode: none
+    volumes:
+      - browser-sockets:/sockets
+    restart: 'no'
+  eng-browser-broker:
+    image: ${ENG_BROWSER_BROKER_IMAGE:?Set ENG_BROWSER_BROKER_IMAGE}
+    depends_on:
+      sockets-init:
+        condition: service_completed_successfully
+    environment:
+      ENG_BROWSER_TOKEN: ${ENG_BROWSER_TOKEN:?Set ENG_BROWSER_TOKEN}
+    volumes:
+      - browser-sockets:/sockets
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    networks: [portal]
+    restart: unless-stopped
+  eng-browser-runner:
+    image: ${ENG_BROWSER_RUNNER_IMAGE:?Set ENG_BROWSER_RUNNER_IMAGE}
+    depends_on:
+      sockets-init:
+        condition: service_completed_successfully
+    environment:
+      ENG_BROWSER_SANDBOX: network-none-v1
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      HOME: /tmp
+    network_mode: none
+    shm_size: 256m
+    volumes:
+      - browser-sockets:/sockets
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=128m,mode=1777
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./seccomp_profile.json
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 128
+    init: true
+    restart: unless-stopped
+volumes:
+  browser-sockets:
+networks:
+  portal:
+    external: true
+    name: ${ENG_BROWSER_PORTAL_NETWORK:?Set ENG_BROWSER_PORTAL_NETWORK}

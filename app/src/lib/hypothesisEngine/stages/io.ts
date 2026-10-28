@@ -71,6 +71,7 @@ export interface HeFetchedPage {
   url: string;
   /** Текст страницы, ≤3000 символов; пустой — HTML есть, текста нет. */
   text: string;
+  readMethod?: 'browser' | 'tinyfish';
   companyEvidenceLinks?: Array<{ url: string; kind: 'legal' | 'about' | 'contact' | 'locations' | 'services'; priority?: number; label?: string }>;
   companyEvidenceTextTruncated?: boolean;
 }
@@ -554,7 +555,8 @@ export async function defaultFetchPage(
   options?: { companyEvidence?: boolean; companyEvidenceTerms?: string[] },
 ): Promise<HeFetchedPage | null> {
   const normalized = normalizeUrl(url);
-  return withHeDeadline('website page', WEBSITE_PAGE_TIMEOUT_MS, parent, async (signal) => {
+  const fallbackBudget = market === 'us' && options?.companyEvidence === true && process.env.ENG_BROWSER_ENABLED === '1' ? 20_000 : 0;
+  return withHeDeadline('website page', WEBSITE_PAGE_TIMEOUT_MS + fallbackBudget, parent, async (signal) => {
     await gateWebsiteAddress(normalized, signal, market);
     let page: HeFetchedPage | null;
     try {
@@ -565,6 +567,7 @@ export async function defaultFetchPage(
         maxBytes: HE_PAGE_MAX_BYTES,
         ...(market === 'us' ? ENG_WEBSITE_ROUTE : {}),
         ...(options?.companyEvidence === true ? { companyEvidence: true } : {}),
+        ...(market === 'us' && options?.companyEvidence === true ? { engPageFallback: true } : {}),
         ...(market === 'us' && options?.companyEvidence === true && options.companyEvidenceTerms
           ? { companyEvidenceTerms: options.companyEvidenceTerms } : {}),
       });
