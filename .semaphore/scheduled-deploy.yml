@@ -93,10 +93,27 @@ blocks:
               # consumer drain and browser finalization. A stale lock fails safe.
               DEPLOY_LOCK_ID="${SEMAPHORE_WORKFLOW_ID:-manual}-$$-${RANDOM}"
               case "$DEPLOY_LOCK_ID" in *[!a-zA-Z0-9_-]*) echo '[scheduled] Invalid lock owner' >&2; exit 1;; esac
+              DEPLOY_LOCK_RELEASE_ATTEMPTED=0
+              DEPLOY_LOCK_RELEASE_STATUS=1
               release_deploy_lock() {
-                run_ssh "release workflow lock" "if [ \"\$(cat /home/Portal/prod/.scheduled-deploy-lock/owner 2>/dev/null)\" = '$DEPLOY_LOCK_ID' ]; then rm -f /home/Portal/prod/.scheduled-deploy-lock/owner && rmdir /home/Portal/prod/.scheduled-deploy-lock; fi" || echo '[scheduled] Workflow lock cleanup needs attention' >&2
+                # The EXIT fallback must not repeat three exhausted attempts.
+                [ "$DEPLOY_LOCK_RELEASE_ATTEMPTED" = 0 ] || return "$DEPLOY_LOCK_RELEASE_STATUS"
+                DEPLOY_LOCK_RELEASE_ATTEMPTED=1
+                local attempt
+                for attempt in 1 2 3; do
+                  echo "[scheduled] Release workflow lock: attempt ${attempt}/3."
+                  if sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_PORTAL_BASE} ${USER}@${HOST} \
+                    "bash -s -- '$DEPLOY_LOCK_ID'" < .semaphore/release-deploy-lock.sh; then
+                    DEPLOY_LOCK_RELEASE_STATUS=0
+                    return 0
+                  fi
+                  echo "[scheduled] Workflow lock removal not confirmed (${attempt}/3)." >&2
+                  if [ "$attempt" -lt 3 ]; then sleep 2; fi
+                done
+                echo '[scheduled] Workflow lock cleanup failed after 3 attempts; manual review required.' >&2
+                return 1
               }
-              trap release_deploy_lock EXIT
+              trap 'rc=$?; trap - EXIT; release_deploy_lock || echo "[scheduled] Workflow lock cleanup needs attention" >&2; exit "$rc"' EXIT
               run_ssh "acquire workflow lock" "mkdir -p /home/Portal/prod; if mkdir /home/Portal/prod/.scheduled-deploy-lock 2>/dev/null; then printf '%s' '$DEPLOY_LOCK_ID' > /home/Portal/prod/.scheduled-deploy-lock/owner; elif [ \"\$(cat /home/Portal/prod/.scheduled-deploy-lock/owner 2>/dev/null)\" != '$DEPLOY_LOCK_ID' ]; then echo '[scheduled] Another deploy owns the workflow lock' >&2; exit 75; fi"
 
               LAST=""
@@ -131,6 +148,7 @@ blocks:
               }
               if [ "$COMMIT_SHA" = "$LAST" ] && [ -z "$PENDING_AUX" ]; then
                 echo "[scheduled] No new commits on main since last deploy — skipping."
+                release_deploy_lock
                 exit 0
               fi
 
@@ -886,3 +904,5 @@ blocks:
                 echo "[scheduled] Вспомогательная выкладка не завершена. Портал обновлён; незавершённые этапы сохраняются для следующего запуска." >&2
                 exit 1
               fi
+              # Verify cleanup before reporting success; EXIT remains a fallback.
+              release_deploy_lock
