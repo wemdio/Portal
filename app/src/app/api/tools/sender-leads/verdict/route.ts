@@ -37,7 +37,7 @@ export async function GET(req: NextRequest) {
         .limit(1),
       supabaseAdmin
         .from('sender_ai_conversations')
-        .select('state, ai_messages, handoff_contact')
+        .select('state, ai_messages, handoff_contact, summary')
         .eq('recipient_id', recipientId)
         .maybeSingle(),
     ]);
@@ -53,7 +53,7 @@ export async function GET(req: NextRequest) {
         ? { status: last.status, aiReason: last.ai_reason, qualifiedAt: last.qualified_at, tgSentAt: last.tg_sent_at }
         : null,
       aiConversation: conversation
-        ? { state: conversation.state, aiMessages: conversation.ai_messages, handoffContact: conversation.handoff_contact }
+        ? { state: conversation.state, aiMessages: conversation.ai_messages, handoffContact: conversation.handoff_contact, summary: conversation.summary }
         : null,
     };
     return NextResponse.json(body);

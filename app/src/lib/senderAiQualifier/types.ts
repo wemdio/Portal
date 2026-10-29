@@ -3,8 +3,10 @@
  * (docs/superpowers/specs/2026-10-27-auto-outreach-qualifying-ai-design.md).
  */
 
+import type { ReplyAssessment, ObjectionKind, ReplyIntent } from './objections';
+
 /** Состояние разговора ИИ с лидом — строка sender_ai_conversations. */
-export type AiState = 'active' | 'handed_off' | 'no_reply' | 'closed' | 'stopped' | 'failed';
+export type AiState = 'active' | 'handed_off' | 'no_reply' | 'closed' | 'stopped' | 'failed' | 'review';
 
 export type AiFolderKey = 'auto_ru' | 'auto_en';
 
@@ -17,21 +19,23 @@ export interface AiStep {
   relevant: 'yes' | 'no' | 'unclear';
   /** Слоты, телефон или контакт, где и когда обсудить, — как прислал лид. */
   contact: string | null;
-  outcome: 'continue' | 'handoff' | 'close' | 'counter_offer';
+  outcome: 'continue' | 'handoff' | 'close' | 'counter_offer' | 'review';
   /** Текст письма лиду; пустой, если писать не нужно. */
   reply: string;
   /** 1–3 строки для менеджера: кто, что нужно, что прислал. */
   summary: string;
   /** Лид просит больше не писать — отвечать нельзя ни строкой. */
   stopRequested: boolean;
+  assessment?: ReplyAssessment;
 }
 
 /** Что делает движок после хода: решает код, а не модель. */
 export type AiDecision =
-  | { kind: 'handoff'; letter: string; contact: string; summary: string }
+  | { kind: 'handoff'; letter: string | null; contact: string; summary: string }
   | { kind: 'reply'; letter: string }
   | { kind: 'close'; letter: string | null }
-  | { kind: 'no_reply' };
+  | { kind: 'no_reply' }
+  | { kind: 'review'; reason: string };
 
 export interface AiConversationRow {
   recipient_id: string;
@@ -53,6 +57,10 @@ export interface AiConversationRow {
   last_error: string | null;
   started_at: string;
   updated_at: string;
+  last_intent?: ReplyIntent | null;
+  last_objection?: ObjectionKind | null;
+  objection_turns?: number;
+  used_case_ids?: string[];
 }
 
 /** Не больше стольких писем ИИ одному лиду (включая напоминание). */

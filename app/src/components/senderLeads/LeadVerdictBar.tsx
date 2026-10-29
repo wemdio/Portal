@@ -13,6 +13,7 @@ const AI_CONVERSATION: Record<string, string> = {
   closed: 'ИИ закрыл переписку',
   stopped: 'ИИ остановлен',
   failed: 'Сбой ИИ — передан как обычно',
+  review: 'Нужен ответ менеджера',
 };
 
 const AI_STATUS: Record<string, string> = {
@@ -120,6 +121,9 @@ export function LeadVerdictBar({ recipientId, onChange }: { recipientId: string;
         </div>
       </div>
       {aiLine ? <p className="mt-1.5 text-xs text-zinc-600">{aiLine}</p> : null}
+      {data.aiConversation?.state === 'review' && data.aiConversation.summary ? (
+        <p className="mt-1.5 text-xs text-amber-800">{data.aiConversation.summary}</p>
+      ) : null}
       {error ? <p className="mt-1.5 text-xs text-red-600">{error}</p> : null}
     </div>
   );
