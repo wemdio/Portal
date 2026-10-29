@@ -42,6 +42,8 @@ import { journalCounts, type JournalCountRow, type JournalCounts } from './funne
 import { buildBridge, type BridgeRequest } from './letters/bridge';
 import { buildTopic } from './letters/topic';
 import { isProduct } from './cascade';
+import { isReactivation, reactivationAllowance } from './reactivation';
+import { loadReactivationPool } from './reactivationPool';
 import { buildSegmentsHypothesis, type SegmentsHypothesis } from './letters/chains';
 import { composeCompanyLetters, type CompanyLettersInput } from './letters/renderTemplate';
 import {
@@ -68,7 +70,7 @@ import {
 const ROWS = 'polza_ru_outreach_companies';
 const PAGE = 1000;
 const WAITING_COLUMNS =
-  'id,chain_type,product,company_name,company_brand,about_line,is_routing,signals,signal_type,signal_title,signal_date,evidence_quote,source_url,' +
+  'id,chain_type,product,cascade_no,company_name,company_brand,about_line,is_routing,signals,signal_type,signal_title,signal_date,evidence_quote,source_url,' +
   'prior_contact,market_evidence_quote,target_market,fit_reasons,case_id,recipient_email,amo_status,priority_score,doubt_flags,doubt_detail,' +
   'email_type,email_verification,emails';
 const PRODUCT_PREFIX = 'Продукт: ';
@@ -93,6 +95,7 @@ interface WaitingRow {
   chain_type: string;
   /** Продукт каскада; null — строка запуска до каскада. */
   product: string | null;
+  cascade_no: number | null;
   company_name: string;
   company_brand: string | null;
   about_line: string | null;
@@ -585,10 +588,21 @@ async function rebuildRows(input: RebuildInput, template: ChainTemplate, rows: W
   };
 
   let slots = input.target - readyAtStart;
+  const pool = await loadReactivationPool(db);
+  const { count, error } = await db.from(ROWS).select('id', { count: 'exact', head: true })
+    .eq('job_id', jobId).eq('row_status', 'ready').or('prior_contact.eq.true,cascade_no.gt.1');
+  if (error) throw new Error(`Не прочитан состав готовой базы: ${error.message}`);
+  let reactivationReady = count ?? 0;
+  let freshReady = readyAtStart - reactivationReady;
+  // Пересборка шаблона не должна обходить общую квоту раннера.
+  rows = [...rows].sort((a, b) => Number(isReactivation(a)) - Number(isReactivation(b)));
   let next = 0;
   while (next < rows.length && slots > 0) {
     if (deadlineAt - Date.now() < STOP_MARGIN_MS) break;
-    const batch = rows.slice(next, next + slots);
+    const old = isReactivation(rows[next]);
+    const room = old ? Math.min(slots, reactivationAllowance(input.target, freshReady, pool) - reactivationReady) : slots;
+    if (room <= 0) break;
+    const batch = rows.slice(next, next + room).filter((row) => isReactivation(row) === old);
     next += batch.length;
     const composed = await mapPool(batch, REBUILD_POOL, (row) =>
       composeCompanyLetters(letters, companyInput(row, key, libraries), { sender, claims: libraries.claims, hypothesis, bridge, topic }),
@@ -626,6 +640,8 @@ async function rebuildRows(input: RebuildInput, template: ChainTemplate, rows: W
       if (await updateWaitingRow(db, jobId, row.id, { ...base, ...kept, row_status: 'ready', pipeline_stage: 'ready', reason_code: null, reason_detail: null })) {
         slots -= 1;
         outcome.promoted += 1;
+        if (isReactivation(row)) reactivationReady += 1;
+        else freshReady += 1;
       }
     }
   }
