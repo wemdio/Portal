@@ -75,7 +75,6 @@ import { composeCompanyLetters, offerKeyOf } from './renderTemplate';
 import { lookupPdlProfile, normalizeDomain, PDL_COUNTRY_BY_CODE, resolveCompanyDomain } from './resolveDomain';
 import { selectVacancies } from './selectVacancies';
 import { loadSignature } from './settings';
-import { loadEnEmailStopList } from './emailStopList';
 import { buildSiteProfile, type SiteOccasion, type SiteProfile } from './siteProfile';
 import {
   createChainTemplates,
@@ -926,7 +925,6 @@ async function runJob(
     // Подпись писем — из настроек (одна на все запуски), читается один раз:
     // все письма запуска подписаны одинаково, даже если её поменяют посреди.
     const signature = await loadSignature(db);
-    const blockedEmails = await loadEnEmailStopList(db);
     // Шаблоны цепочек запуска: пишутся лениво, один раз на оффер; остановка
     // запуска обрывает писателя.
     const templates = createChainTemplates({ db, jobId, writerTimeoutMs: WORKER_WRITER_TIMEOUT_MS, signal: runAbort.signal });
@@ -1234,7 +1232,7 @@ async function runJob(
       // следующий. Строка отсеивается, только если разрешённых не осталось.
       const allowed: PolzaFoundEmail[] = [];
       for (const item of found.emails) {
-        if (blockedEmails.has(item.email.trim().toLowerCase()) || await isSuppressed(db, item.email)) log('info', `S5 ${domain}: ${item.email} is on the EN or sender stop-list`);
+        if (await isSuppressed(db, item.email)) log('info', `S5 ${domain}: ${item.email} is on the sender stop-list`);
         else allowed.push(item);
       }
       const main = allowed[0];
