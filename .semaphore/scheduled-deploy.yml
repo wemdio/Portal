@@ -369,7 +369,9 @@ blocks:
               }
               # Ранний выход (сбой portal host) не должен обрывать фоновые хосты
               # посреди docker compose up: дожидаемся их и печатаем логи.
-              trap 'rc=$?; wait_sender_hosts; exit $rc' EXIT
+              # Preserve the triggering status even when either cleanup fails;
+              # the later EXIT trap replaces the earlier lock-only trap.
+              trap 'rc=$?; trap - EXIT; wait_sender_hosts || echo "[scheduled] Sender cleanup needs attention" >&2; release_deploy_lock || echo "[scheduled] Workflow lock cleanup needs attention" >&2; exit "$rc"' EXIT
               [ -z "${SENDER_SSH_HOST:-}" ] || SENDER_TARGETS="1"
               for sender_n in 2 3 4 5 6 7 8 9; do
                 eval "sender_candidate=\${SENDER_SSH_HOST_${sender_n}:-}"
