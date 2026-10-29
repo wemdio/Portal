@@ -984,7 +984,7 @@ function HealthBadge({ health }: { health: { score: number | null; sent: number;
   return (
     <span
       className={`rounded-md px-2 py-0.5 text-xs font-medium tabular-nums ${tone}`}
-      title={`За 14 дней: отправлено ${health.sent}, отбоев ${health.bounced}, ошибок отправки ${health.failed}`}
+      title={`За 14 дней в сендере: отправлено ${health.sent}, подтверждённых недоставок ${health.bounced}, ошибок отправки ${health.failed}. Учитываются только отчёты, связанные с отправленным письмом; временные задержки исключены.`}
     >
       {health.score}%
     </span>

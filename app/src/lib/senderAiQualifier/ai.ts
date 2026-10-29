@@ -1,6 +1,7 @@
 import { PRODUCT_LABELS, PRODUCT_PITCH, type Product } from '@/lib/polzaRuOutreach/cascade';
 import { parseAiStep } from './decide';
 import type { AiStep } from './types';
+import { OBJECTION_POLICY } from './objections';
 
 /**
  * Промпт и вызов модели квалифицирующего ИИ. Модель пишет письмо и оценивает
@@ -26,7 +27,7 @@ export function aiQualifierConfig(env: NodeJS.ProcessEnv = process.env): AiQuali
 export interface AiPromptInput {
   /** Запасной язык письма, если по письму лида не понять. */
   language: 'ru' | 'en';
-  /** «Короткое КП» продукта (auto_ru) или папки — единственный источник цен и кейсов. */
+  /** Автоматический контекст из материалов продукта, уточнений и утверждённых кейсов. */
   offerText: string;
   /**
    * Русский автоаутрич (auto_ru): ответ прогревает к разговору с менеджером, а не
@@ -42,6 +43,8 @@ export interface AiPromptInput {
   ccEmail: string | null;
   /** Вся переписка по времени: наши письма и письма лида. */
   history: Array<{ from: 'us' | 'lead'; at: string | null; text: string }>;
+  /** Память разговора; включение новой политики только в наших автоаутричах. */
+  objections?: { turns: number; lastIntent: string | null; lastObjection: string | null; usedCaseIds: string[] };
 }
 
 /** Цель разговора с менеджером по продукту (спека каскада, «Цели писем по продуктам»). */
@@ -125,6 +128,25 @@ function formatHistory(history: AiPromptInput['history']): string {
     .join('\n\n---\n\n');
 }
 
+function objectionSystemPrompt(input: AiPromptInput): string {
+  return `Ты продолжаешь нашу email-переписку от имени отправителя из истории.
+Цель — помочь адресату оценить применимость предложения и дойти до предметной встречи
+с менеджером, если задача ему подходит. ${input.productPitch ?? 'Предлагаем B2B-аутрич и передачу заинтересованных диалогов отделу продаж.'}
+${OBJECTION_POLICY}
+Передача менеджеру — только при явном интересе И присланном приглашении/слоте/контакте
+для обсуждения. Встречу самостоятельно не бронируй.
+relevant — не «письмо по теме», а собственная заинтересованность адресата:
+yes — прямо готов обсуждать предложение или задаёт покупательский вопрос;
+unclear — сомнение, мягкий отказ, непонятное намерение; no — явный отказ/служебное письмо.
+Возражение само по себе не подтверждает заинтересованность. Если вопрос о покупке
+сочетается с сомнением, выбери intent=question и укажи objection отдельно.
+Ответь одним JSON без пояснений:
+{"relevant":"yes|no|unclear","contact":строка или null,
+"outcome":"continue|handoff|close|counter_offer|review","reply":"текст или пустая строка",
+"summary":"кто, препятствие, что ответили, следующий шаг для менеджера",
+"stop_requested":true|false,"assessment":объект из правил выше}.`;
+}
+
 export function buildAiMessages(input: AiPromptInput): Array<{ role: 'system' | 'user'; content: string }> {
   const task = input.mode === 'reminder'
     ? 'Лид молчит после нашего прошлого письма. Напиши одно короткое напоминание к нему (outcome=continue, relevant=unclear).'
@@ -135,12 +157,15 @@ export function buildAiMessages(input: AiPromptInput): Array<{ role: 'system' | 
   const user = [
     `КОРОТКОЕ КП:\n${input.offerText.trim() || '(не заполнено — цен и кейсов не называй)'}`,
     `Запасной язык: ${input.language === 'en' ? 'английский' : 'русский'}. Наших писем от ИИ уже: ${input.aiMessages}.`,
+    ...(input.objections ? [
+      `ПАМЯТЬ: ответов на возражения уже ${input.objections.turns}; последнее намерение ${input.objections.lastIntent ?? 'не определено'}; последнее возражение ${input.objections.lastObjection ?? 'нет'}. Уже использованы кейсы: ${input.objections.usedCaseIds.join(', ') || 'нет'}. Не повторяй их.`,
+    ] : []),
     handoffLine,
     `ПЕРЕПИСКА (по времени):\n${formatHistory(input.history)}`,
     task,
   ].join('\n\n');
   return [
-    { role: 'system', content: input.cascade ? cascadeSystemPrompt(input.productPitch) : legacySystemPrompt() },
+    { role: 'system', content: input.objections ? objectionSystemPrompt(input) : input.cascade ? cascadeSystemPrompt(input.productPitch) : legacySystemPrompt() },
     { role: 'user', content: user },
   ];
 }
@@ -157,7 +182,7 @@ export async function requestAiStep(cfg: AiQualifierConfig, input: AiPromptInput
     body: JSON.stringify({
       model: cfg.model,
       temperature: 0.3,
-      max_tokens: 1500,
+      max_tokens: input.objections ? 2500 : 1500,
       messages: buildAiMessages(input),
     }),
   });
@@ -172,5 +197,8 @@ export async function requestAiStep(cfg: AiQualifierConfig, input: AiPromptInput
   const choice = data.choices?.[0];
   if (choice?.finish_reason === 'length') throw new Error('Ответ модели обрезан по лимиту токенов');
   const content = typeof choice?.message?.content === 'string' ? choice.message.content : '';
-  return parseAiStep(content);
+  const step = parseAiStep(content);
+  if (input.objections && !step.assessment) throw new Error('В ответе ИИ нет оценки намерения адресата');
+  if (step.assessment?.intent === 'stop') step.stopRequested = true;
+  return step;
 }

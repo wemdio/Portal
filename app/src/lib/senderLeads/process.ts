@@ -364,18 +364,28 @@ async function deliverLeads(db: SupabaseClient, tg: LeadTelegramConfig, log: Log
     // передачи — только строка его передачи. Когда разговор кончился (не
     // ответил, закрыт, остановлен, сбой), новые лиды идут прежним путём.
     const { data: conv, error: convError } = await db.from('sender_ai_conversations')
-      .select('state, handoff_reply_id').eq('recipient_id', row.recipient_id).maybeSingle();
+      .select('state, handoff_reply_id, updated_at').eq('recipient_id', row.recipient_id).maybeSingle();
     if (convError) { log('warn', `ТГ: разговор ИИ ${row.recipient_id} не прочитан: ${convError.message}`); continue; }
     if (conv && (conv.state === 'active' || (conv.state === 'handed_off' && conv.handoff_reply_id !== row.reply_id))) {
       await skip('Переписку ведёт ИИ');
       continue;
     }
+    if (conv?.state === 'closed') {
+      const { data: closedReply, error: closedReplyError } = await db.from('sender_replies')
+        .select('received_at,created_at').eq('id', row.reply_id).maybeSingle();
+      if (closedReplyError) { log('warn', `ТГ: время ответа ${row.reply_id} не прочитано: ${closedReplyError.message}`); continue; }
+      if (!closedReply || Date.parse(closedReply.received_at ?? closedReply.created_at) <= Date.parse(conv.updated_at)) {
+        await skip('ИИ закрыл диалог: старый интерес не передаём после отказа или служебного письма');
+        continue;
+      }
+    }
 
     const [{ data: recipient }, { data: alreadySent }] = await Promise.all([
-      db.from('sender_recipients').select('email, name, lead_verdict, lead_verdict_source').eq('id', row.recipient_id).maybeSingle(),
+      db.from('sender_recipients').select('email, name, status, lead_verdict, lead_verdict_source').eq('id', row.recipient_id).maybeSingle(),
       db.from('sender_reply_qualifications').select('reply_id').eq('recipient_id', row.recipient_id).not('tg_sent_at', 'is', null).limit(1),
     ]);
     if (!recipient) { await skip('получатель удалён'); continue; }
+    if (['unsubscribed', 'bounced', 'stopped'].includes(recipient.status)) { await skip('получатель отписан или остановлен'); continue; }
     if (alreadySent?.length) { await skip('по этой переписке в чат уже писали'); continue; }
     if (recipient.lead_verdict_source === 'manual' && recipient.lead_verdict === 'not_lead') {
       await skip('человек отметил «не лид»');

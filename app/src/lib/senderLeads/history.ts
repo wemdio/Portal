@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { PRODUCTS, PRODUCT_SHORT_LABELS } from '@/lib/polzaRuOutreach/cascade';
+import { hasProductKnowledge } from '@/lib/polzaRuOutreach/productKnowledge';
 import {
   AI_OFFER_TEXT_MAX,
   DEFAULT_LEAD_CRITERIA,
@@ -37,6 +38,8 @@ export interface LeadHistoryRowDto {
   /** Оценка ИИ по этому ответу; skipped в историю не попадает. */
   status: 'pending' | 'lead' | 'not_lead' | 'error';
   aiReason: string | null;
+  /** ИИ остановился до отправки: нужен предметный ответ человека. */
+  aiReview?: string | null;
   interestSignals: string[];
   criteriaUsed: boolean;
   attempts: number;
@@ -77,7 +80,7 @@ export interface LeadSettingsDto {
   criteria: string;
   /** Квалифицирующий ИИ ведёт переписку до передачи (только автоаутрич). */
   aiEnabled: boolean;
-  /** «Короткое КП» — единственный источник цен и кейсов для писем ИИ. */
+  /** Необязательное дополнение к автоматически подключённым материалам продукта. */
   aiOfferText: string;
   /** Короткие КП по продуктам каскада (auto_ru); продукта нет — ИИ берёт общее «Короткое КП». */
   aiOfferTexts: ProductTexts;
@@ -110,9 +113,10 @@ export interface ThreadVerdictDto {
   } | null;
   /** Разговор квалифицирующего ИИ по этой переписке, если он был. */
   aiConversation: {
-    state: 'active' | 'handed_off' | 'no_reply' | 'closed' | 'stopped' | 'failed';
+    state: 'active' | 'handed_off' | 'no_reply' | 'closed' | 'stopped' | 'failed' | 'review';
     aiMessages: number;
     handoffContact: string | null;
+    summary?: string | null;
   } | null;
 }
 
@@ -240,7 +244,7 @@ export function parseSettingsInput(
     if (aiOfferText != null && typeof aiOfferText !== 'string') return { ok: false, error: 'aiOfferText — текст' };
     const offer = (aiOfferText ?? '').trim();
     if (offer.length > AI_OFFER_TEXT_MAX) return { ok: false, error: `«Короткое КП» — не длиннее ${AI_OFFER_TEXT_MAX} символов` };
-    if (aiEnabled && !offer) return { ok: false, error: 'Заполните «Короткое КП» — без него ИИ не включается' };
+    if (aiEnabled && !offer && !hasProductKnowledge(folderKey)) return { ok: false, error: 'Заполните «Короткое КП» — без него ИИ не включается' };
     value.ai_enabled = aiEnabled;
     value.ai_offer_text = offer || null;
   }
@@ -400,8 +404,16 @@ export async function loadLeadHistory(
     countMap[f] = res.count ?? 0;
   });
 
+  const rows = ((list.data ?? []) as unknown as ListRow[]).map(toRowDto);
+  if (rows.length) {
+    const { data: reviews, error: reviewError } = await db.from('sender_ai_conversations')
+      .select('recipient_id,summary').eq('state', 'review').in('recipient_id', [...new Set(rows.map((r) => r.recipientId))]);
+    if (reviewError) throw new Error(`sender_ai_conversations review: ${reviewError.message}`);
+    const byRecipient = new Map((reviews ?? []).map((r) => [r.recipient_id, r.summary || 'Нужен ответ менеджера']));
+    for (const row of rows) row.aiReview = byRecipient.get(row.recipientId) ?? null;
+  }
   return {
-    rows: ((list.data ?? []) as unknown as ListRow[]).map(toRowDto),
+    rows,
     total: list.count ?? 0,
     pageSize: HISTORY_PAGE_SIZE,
     counts: countMap,
