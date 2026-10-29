@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { isAuthExpiredError } from '@/lib/authFetch';
+import { normalizeReplyText } from '@/lib/replyPersonalization/normalizeReplyText';
 import type { ClientReplyThread, ThreadMessage, Recipient } from '@/lib/clientCampaignReplies/types';
 
 /**
@@ -80,6 +81,10 @@ function AuthExpiredLink() {
 
 function ThreadMessageCard({ msg }: { msg: ThreadMessage }) {
   const isInbound = msg.direction === 'inbound';
+  // Match the personalization view: plain-text indentation from the provider
+  // must not look like a first-line indent. Only the displayed outbound copy
+  // is normalized; incoming text and the stored/sent message stay untouched.
+  const bodyText = msg.body_text && !isInbound ? normalizeReplyText(msg.body_text) : msg.body_text;
   const directionColor = isInbound ? 'var(--cp-amber)' : 'var(--cp-paper-faint)';
   return (
     <div className="neu-sm px-3 py-2.5">
@@ -154,12 +159,12 @@ function ThreadMessageCard({ msg }: { msg: ThreadMessage }) {
           {msg.subject}
         </p>
       )}
-      {msg.body_text ? (
+      {bodyText ? (
         <pre
           className="text-[11px] whitespace-pre-wrap font-sans leading-relaxed max-h-60 overflow-y-auto"
           style={{ color: 'var(--cp-paper-mute)' }}
         >
-          {msg.body_text}
+          {bodyText}
         </pre>
       ) : (
         <p className="text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
