@@ -84,8 +84,10 @@ const GENERIC_LOCALS = [
   'clients', 'welcome', 'post', 'company', 'main', 'secretary', 'reception', 'priem',
 ];
 
+// Роль остаётся служебной в hr-dv@, support.region@ и buh_1@.
+// Граница после имени роли сохраняет личные адреса вроде prince@ и supporter@.
 const FORBIDDEN_LOCAL =
-  /^(hr|job|jobs|career|careers|rabota|resume|rezume|cv|vacancy|vacancies|kadry|personal|support|help|helpdesk|tech|buh|buhgalteria|accounting|finance|invoice|billing|legal|jurist|urist|privacy|security|abuse|postmaster|webmaster|noreply|no-reply|no_reply|donotreply|mailer-daemon|press|media|pr|smi|tender|tenders|zakupki|snab|snabzhenie|purchase|procurement|unsubscribe|claims|pretenzii)$/;
+  /^(hr|hrd|hrbp|hrdep|hrsupport|hrunit|job|jobs|career|careers|rabota|resume|rezume|cv|vacancy|vacancies|kadr|kadry|personal|recruit|recruiting|recruitment|support|help|helpdesk|tech|buh|buhg|buhgalter|buhgalteria|accountant|accounting|fin|finans|finance|findir|invoice|billing|legal|jurist|urist|privacy|security|abuse|postmaster|webmaster|noreply|no-reply|no_reply|donotreply|mailer-daemon|press|media|pr|smi|tender|tenders|zakupki|snab|snabzhenie|omts|otk|purchase|procurement|unsubscribe|claims|pretenzii)(?:$|[._+-]|\d)/;
 
 const FREE_MAIL_DOMAINS = new Set([
   'gmail.com', 'yandex.ru', 'ya.ru', 'yandex.com', 'mail.ru', 'bk.ru', 'inbox.ru', 'list.ru', 'internet.ru',
