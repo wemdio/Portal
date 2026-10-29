@@ -16,7 +16,7 @@
  */
 
 import type { Product } from '../cascade';
-import { claimsForChain, formatSignature, type CaseRecord, type OfferClaim, type SenderProfile } from '../libraries';
+import { caseAllowedForProduct, claimsForChain, formatSignature, type CaseRecord, type OfferClaim, type SenderProfile } from '../libraries';
 import { runQa } from '../qa';
 import {
   LEGACY_ABOUT_PLACEHOLDER,
@@ -217,7 +217,10 @@ export async function composeCompanyLetters(
       chain: input.chain, baseChain: input.baseChain, product: input.product, brand: input.brand, opening, productSummary: input.productSummary,
     })) ?? fallback
     : null;
-  const caseText = input.caseRecord?.case_text_short.trim() || null;
+  // Повторная проверка нужна для старых строк журнала и ручной пересборки.
+  const selectedCase = input.caseRecord && input.caseRecord.cold_email !== false
+    && caseAllowedForProduct(input.caseRecord, input.product) ? input.caseRecord : null;
+  const caseText = selectedCase?.case_text_short.trim() || null;
   const withCase = Boolean(caseText) && template.bodyWithCase !== null;
   // Гипотезу считаем, только когда она попадёт в письмо и рынок подтверждён:
   // в утверждённых текстах (09.10.2026) — наблюдение по сайту в письме 2
@@ -289,7 +292,7 @@ export async function composeCompanyLetters(
   return {
     letters,
     qa,
-    caseId: withCase ? input.caseRecord?.case_id ?? null : null,
+    caseId: withCase ? selectedCase?.case_id ?? null : null,
     hypothesisText: hypoText,
     claimIds: used.map((c) => c.id),
   };

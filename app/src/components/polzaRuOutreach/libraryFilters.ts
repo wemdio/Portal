@@ -45,8 +45,13 @@ export function leadsOf(rec: Rec): number | null {
  * Кейс утверждён, но в письма не пройдёт: лидов меньше порога или их нет.
  * Черновик сюда не попадает — он и так не участвует в подборе.
  */
+export function isRoleProof(rec: Rec): boolean {
+  const metrics = rec.metrics as { evidence_type?: string } | null | undefined;
+  return metrics?.evidence_type === 'role_contact' && Array.isArray(rec.allowed_chains) && rec.allowed_chains.includes('sdr');
+}
+
 export function isBelowLeadBar(rec: Rec): boolean {
-  if (rec.status !== 'approved') return false;
+  if (rec.status !== 'approved' || isRoleProof(rec)) return false;
   const leads = leadsOf(rec);
   return leads === null || leads < MIN_CASE_LEADS;
 }
