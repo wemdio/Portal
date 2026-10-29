@@ -167,6 +167,18 @@ type LiTask = {
 type LiCampaignLog = { id: number; level: string; message: string; lead_name: string | null; step_index: number | null; created_at: string };
 type CampaignStep = { type?: unknown; message?: unknown; days?: unknown; hours?: unknown };
 
+/** Шаги общения: паузы не считаем, Welcome хранится отдельно от steps. */
+function campaignStepsLabel(campaign: Pick<LiCampaign, 'steps' | 'welcome_message'>): string {
+  const actions = (campaign.steps ?? []).filter((step) => {
+    const type = step && typeof step === 'object' ? (step as CampaignStep).type : null;
+    return type === 'invite' || type === 'message' || type === 'follow_up';
+  }).length;
+  const count = actions + (campaign.welcome_message?.trim() ? 1 : 0);
+  const tail = count % 100;
+  const word = tail >= 11 && tail <= 14 ? 'шагов' : count % 10 === 1 ? 'шаг' : count % 10 >= 2 && count % 10 <= 4 ? 'шага' : 'шагов';
+  return `${count} ${word}`;
+}
+
 const UNLISTED_LEAD_LIST_FILTER = '__unlisted__';
 const UNLISTED_LEAD_LIST_QUERY = '__none';
 
@@ -1666,7 +1678,7 @@ export default function LiOutreachPage() {
                           <div className="min-w-0">
                             <div className="truncate font-semibold text-gray-900">{c.name}</div>
                             <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
-                              <span>{(c.steps ?? []).length} шагов</span>
+                              <span>{campaignStepsLabel(c)}</span>
                               <span>· AI: {c.use_ai ? 'вкл' : 'выкл'}</span>
                               {c.use_custom_invites && (
                                 <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700" title="На шаге 1 берётся персональный текст инвайта каждого контакта из CSV. AI-персонализация для инвайта пропускается.">✎ персональные инвайты</span>

@@ -80,7 +80,9 @@ import {
   withLettersDoubt,
   type Doubts,
 } from './doubts';
-import { PRODUCTS, cascadeHead, cascadeOffer, cascadePool, cascadeSlotFree, type CascadeDecision, type Product } from './cascade';
+import { PRODUCTS, cascadeHead, cascadeOffer, cascadePool, type CascadeDecision, type Product } from './cascade';
+import { isReactivation, reactivationAllowance, reactivationLimit } from './reactivation';
+import { loadReactivationPool } from './reactivationPool';
 import { CascadeClaims, loadCascadeIndex, lookupCascade, type CascadeCompany, type CascadeIndex } from './cascadeIndex';
 import { companyBrand, isSuppressed, normalizeDomain, siteUrl } from './company';
 import { findRuCompanyEmail } from './findEmail';
@@ -380,6 +382,7 @@ interface Qualified {
   /** Что предлагаем (каскад) и номер шага: 1 — новая компания, 2–3 — вернувшаяся. */
   product: Product;
   cascadeNo: number;
+  reactivation: boolean;
   caseHit: { record: CaseRecord; reason: string } | null;
   score: Score;
   marketQuote: string | null;
@@ -511,6 +514,7 @@ interface JournalRow {
   product: string | null;
   /** Шаг каскада: больше 1 — вернувшаяся компания. */
   cascade_no: number | null;
+  prior_contact: boolean | null;
   normalized_domain: string | null;
   inn: string | null;
   doubt_flags: string[] | null;
@@ -532,7 +536,7 @@ async function loadKeptJournal(db: SupabaseClient, jobId: string): Promise<Journ
     // пропустить или повторить строки, и счётчики разошлись бы с журналом.
     const { data, error } = await db
       .from('polza_ru_outreach_companies')
-      .select('id,row_status,pipeline_stage,reason_code,chain_type,product,cascade_no,normalized_domain,inn,doubt_flags,source_record_id')
+      .select('id,row_status,pipeline_stage,reason_code,chain_type,product,cascade_no,prior_contact,normalized_domain,inn,doubt_flags,source_record_id')
       .eq('job_id', jobId)
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -721,6 +725,8 @@ async function runJob(
     if (jobErr || !job) throw new Error(jobErr?.message ?? 'Job not found');
     const config: RuOutreachConfig = sanitizeRuOutreachConfig((job.config ?? {}) as Partial<RuOutreachConfig>);
     const target = config.limit;
+    const reactivationPool = await loadReactivationPool(db);
+    const reactivationMax = reactivationLimit(target, reactivationPool);
     const maxScan = maxCandidatesFor(target);
     const reserveUsd = writerReserveUsd(budget.limitUsd);
     // На разбор новых компаний денег нет: лимит исчерпан или от него, за
@@ -819,7 +825,7 @@ async function runJob(
         })
       : collected.pool;
     // Вернувшиеся компании (прошла пауза каскада) — не больше заказанного числа;
-    // половина из них — в начало пула, остальные — после новых (cascadePool).
+    // до 20% — в начало пула, остальные — после новых (cascadePool).
     const split: CascadePool = cascade
       ? cascadeCandidates(cascade, target, {
           sources: sourcePool,
@@ -832,9 +838,6 @@ async function runJob(
         })
       : { returning: [], fresh: sourcePool };
     const pool = cascadePool(split.fresh, split.returning, target);
-    // Сколько новых (не вернувшихся) кандидатов в пуле от позиции i до конца.
-    const newFrom = new Array<number>(pool.length + 1).fill(0);
-    for (let i = pool.length - 1; i >= 0; i -= 1) newFrom[i] = newFrom[i + 1] + (pool[i].cascade ? 0 : 1);
     if (Object.keys(sourceErrors).length) log('warn', `job ${jobId}: source errors`, sourceErrors);
     log('info', `job ${jobId}: pool=${pool.length} (returning ${split.returning.length}, recently tried ${attempted.size}), skipped_recent=${skippedRecent}, target=${target}, sources=${config.sources.join(',')}`);
 
@@ -885,6 +888,11 @@ async function runJob(
       totals.scanned = resumedJournal.length;
       totals.ready = prior.ready;
     }
+    const reactivationRows = {
+      ready: resumedJournal.filter((r) => r.row_status === 'ready' && isReactivation(r)).length,
+      awaiting: resumedJournal.filter((r) => r.row_status === 'doubtful' && r.doubt_flags?.includes('TEMPLATE_FAILED') && isReactivation(r)).length,
+      inFlight: 0,
+    };
     // Дедуп запуска: какая строка заняла домен и какая — ИНН. Строка,
     // возвращённая в необработанные, их освобождает; повтор помнит, чей домен
     // или ИНН он повторил (уборка после стопа по лимиту).
@@ -1006,6 +1014,7 @@ async function runJob(
     const detail = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
       wave: waveNo, target, pool: pool.length, skipped_recent: skippedRecent, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, products, sdr,
       offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count,
+      reactivation: { ready: reactivationRows.ready, limit: reactivationMax, new_target: target - reactivationMax },
       // С бронями идущих запросов — как baseDetail; итог запуска пишет факт.
       llm: budget.snapshot({ includeReserved: true }),
       awaiting_templates: awaiting.count,
@@ -1186,6 +1195,10 @@ async function runJob(
       // Почта — до ИИ: компания без рабочего адреса не стоит разбора. Возврату
       // берём контакт из AMO без поиска и проверки — с ним уже был разговор.
       const reactivation = Boolean(amoRec && amoRec.status === 'lost' && amoRec.priorContact);
+      if ((reactivation || (c.cascade?.offered.length ?? 0) > 0) && reactivationRows.ready >= reactivationMax) {
+        await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'CASCADE_CAP', detail: 'общая квота реактивации заполнена; добираем новые компании' });
+        return null;
+      }
       const pages: SitePageCache = new Map();
       let foundEmails: Array<Omit<RowEmail, 'emails'>>;
       // Серия «не удалось проверить» дошла до порога — строку дописываем, запуск валим.
@@ -1553,7 +1566,7 @@ async function runJob(
       reach(tally, 'scored');
       return {
         id, tally, domain, brand, amo: amoRec, email, site, vacancy, signals, route, product: offer.product, cascadeNo: offer.cascadeNo,
-        caseHit, score, marketQuote, doubts,
+        caseHit, score, marketQuote, doubts, reactivation: reactivation || offer.cascadeNo > 1,
       };
     };
 
@@ -1627,38 +1640,29 @@ async function runJob(
     // LIMIT_REACHED она уходит, только когда лимит действительно набран (как у
     // английского аутрича).
     //
-    // Вернувшимся компаниям (каскад) — не больше половины заказанного, пока в
-    // пуле есть новые кандидаты (cascadeSlotFree): иначе строка отсеивается
-    // CASCADE_CAP — готовой она не стала, и следующий запуск возьмёт её снова.
+    // Старые контакты AMO и возвраты каскада — одна квота 20%. Сначала
+    // подтверждаем новые компании: на каждые четыре готовых новых — одна
+    // реактивация. Нехватка новых и остановка сбора потолок не снимают.
     let lettersInFlight = 0;
     let slotWaiters: Array<() => void> = [];
-    const returningRows = {
-      ready: resumedJournal.filter((r) => r.row_status === 'ready' && (r.cascade_no ?? 1) > 1).length,
-      inFlight: 0,
-    };
-    // Новые кандидаты, которые запуск ещё может взять: не начатые, в пределах
-    // потолка просмотра. Новых волн не будет (лимит, сбой, остановка) — их нет.
-    const newLeft = (): number => {
-      if (halted || budgetStop || runAbort.signal.aborted) return 0;
-      const end = Math.min(pool.length, cursor + Math.max(0, maxScan - totals.scanned));
-      return newFrom[cursor] - newFrom[end];
-    };
-    /** ok — место взято; limit — лимит готовых набран; cap — половина запуска уже за вернувшимися. */
-    const takeLettersSlot = async (returning: boolean): Promise<'ok' | 'limit' | 'cap'> => {
+    const deferredReactivation = new Map<string, Qualified>();
+    /** ok — место взято; limit — запуск заполнен; cap — пока нет места в квоте реактивации. */
+    const takeLettersSlot = async (reactivation: boolean): Promise<'ok' | 'limit' | 'cap'> => {
       for (;;) {
         if (totals.ready >= target) return 'limit';
-        if (returning && !cascadeSlotFree(returningRows.ready + returningRows.inFlight, target, newLeft())) return 'cap';
+        const allowed = reactivationAllowance(target, totals.ready - reactivationRows.ready, reactivationPool);
+        if (reactivation && reactivationRows.ready + reactivationRows.awaiting + reactivationRows.inFlight >= allowed) return 'cap';
         if (totals.ready + lettersInFlight < target) {
           lettersInFlight += 1;
-          if (returning) returningRows.inFlight += 1;
+          if (reactivation) reactivationRows.inFlight += 1;
           return 'ok';
         }
         await new Promise<void>((resolve) => slotWaiters.push(resolve));
       }
     };
-    const releaseLettersSlot = (returning: boolean) => {
+    const releaseLettersSlot = (reactivation: boolean) => {
       lettersInFlight -= 1;
-      if (returning) returningRows.inFlight -= 1;
+      if (reactivation) reactivationRows.inFlight -= 1;
       const waiting = slotWaiters;
       slotWaiters = [];
       for (const wake of waiting) wake();
@@ -1676,20 +1680,25 @@ async function runJob(
       if (retry) {
         awaiting.count -= 1;
         doubtful.count -= 1;
+        if (q.reactivation) reactivationRows.awaiting -= 1;
       }
       // Лимит готовых набран — строка оценку прошла, а до писем не дошла: стоит
       // на этапе писем, воронка (funnel.ts) считает её до «Оценки» включительно.
-      // Так же стоит вернувшаяся, которой не хватило половины запуска.
-      const returning = q.cascadeNo > 1;
-      const slot = await takeLettersSlot(returning);
+      const slot = await takeLettersSlot(q.reactivation);
       if (slot === 'limit') {
         await finish(q.id, { stage: 'sequence_assembled', status: 'manual_review', reason: 'LIMIT_REACHED', detail: 'лимит готовых компаний уже набран' }, scoringDoubts(q));
         return;
       }
       if (slot === 'cap') {
+        // Разбор оплачен: придерживаем до следующей волны новых компаний,
+        // вместо окончательного отсева или повторной оплаты разбора.
+        if (reactivationRows.ready + reactivationRows.awaiting < reactivationMax) {
+          deferredReactivation.set(q.id, q);
+          return;
+        }
         await finish(q.id, {
           stage: 'sequence_assembled', status: 'rejected', reason: 'CASCADE_CAP',
-          detail: `вернувшимся — не больше ${cascadeHead(target)} из ${target}, пока есть новые компании`,
+          detail: `реактивации AMO и каскада вместе — не больше 20% готовых компаний (до ${reactivationMax} из ${target})`,
         }, scoringDoubts(q));
         return;
       }
@@ -1703,11 +1712,12 @@ async function runJob(
           budgetStop = true;
           awaiting.count += 1;
           doubtful.count += 1;
+          if (q.reactivation) reactivationRows.awaiting += 1;
           return;
         }
         throw err;
       } finally {
-        releaseLettersSlot(returning);
+        releaseLettersSlot(q.reactivation);
       }
     };
 
@@ -1728,6 +1738,7 @@ async function runJob(
         // повтора ещё не было — строка соберётся заново на следующей волне.
         doubtful.count += 1;
         awaiting.count += 1;
+        if (q.reactivation) reactivationRows.awaiting += 1;
         if (template.error && !retriedProducts.has(q.product)) {
           parkedIds.add(q.id);
           parked.set(q.product, [...(parked.get(q.product) ?? []), q]);
@@ -1807,7 +1818,7 @@ async function runJob(
         return;
       }
       totals.ready += 1;
-      if (q.cascadeNo > 1) returningRows.ready += 1;
+      if (q.reactivation) reactivationRows.ready += 1;
       reach(q.tally, 'ready');
       // Признаки сомнения — с оценки: у строки, ждавшей шаблон, в базе ещё стоит
       // TEMPLATE_FAILED.
@@ -1901,6 +1912,8 @@ async function runJob(
       // При равной оценке — сначала ждавшие с прошлой волны: они раньше в пуле
       // и уже разобраны (сортировка устойчивая).
       const rows = [...retryRows, ...fresh].sort((a, b) => b.score.total - a.score.total);
+      for (const q of rows) if (q.reactivation) deferredReactivation.set(q.id, q);
+      const newRows = rows.filter((q) => !q.reactivation);
       phase = 'writing_letters';
       await publish(phase, { qualified: fresh.length });
       // Шаблоны продуктов — заранее и все сразу: иначе четыре потока писем
@@ -1909,15 +1922,27 @@ async function runJob(
       // Ошибку записи увидит строка продукта в finalize.
       if (!halted) {
         const room = Math.max(0, target - totals.ready);
-        for (const product of new Set(rows.slice(0, room).map((q) => q.product))) {
+        for (const product of new Set(newRows.slice(0, room).map((q) => q.product))) {
           templates.get(product).catch(() => undefined);
         }
       }
-      await runPool(rows, LETTERS_CONCURRENCY, async (q) => {
+      const write = async (q: Qualified) => {
         if (halted) return;
         await ensureNotCancelled();
+        deferredReactivation.delete(q.id);
         await safe(q.id, q.tally, () => finalize(q));
-      });
+      };
+      // Новые первыми подтверждают свои 80%; затем дозаполняем реактивацией.
+      // Кандидаты без места в квоте ждут следующих волн, а не вытесняют новые.
+      await runPool(newRows, LETTERS_CONCURRENCY, write);
+      const oldRows = [...deferredReactivation.values()].sort((a, b) => b.score.total - a.score.total);
+      const oldRoom = Math.max(0, reactivationAllowance(target, totals.ready - reactivationRows.ready, reactivationPool) - reactivationRows.ready - reactivationRows.awaiting);
+      if (!halted) {
+        for (const product of new Set(oldRows.slice(0, oldRoom).map((q) => q.product))) {
+          templates.get(product).catch(() => undefined);
+        }
+      }
+      await runPool(oldRows, LETTERS_CONCURRENCY, write);
     };
 
     // Волна: запись в журнал, почта и сразу разбор ИИ у каждой компании (без
@@ -2069,6 +2094,14 @@ async function runJob(
 
     // Пока добегала последняя волна, запуск могли остановить — не перетираем «Остановлено».
     await ensureNotCancelled();
+    // Новых волн больше нет: неподтверждённые места не заполняем старыми.
+    for (const q of deferredReactivation.values()) {
+      await finish(q.id, {
+        stage: 'sequence_assembled', status: 'rejected', reason: 'CASCADE_CAP',
+        detail: 'для реактивации нужны четыре готовые новые компании на одну старую; общий потолок — 20%',
+      }, scoringDoubts(q));
+    }
+    deferredReactivation.clear();
     if (budgetStop) {
       // Строки, до которых из-за лимита не дошли или которые он прервал, — не
       // отсев и не ошибка. Среди них и прошедшие почту, но не успевшие к
@@ -2104,7 +2137,7 @@ async function runJob(
     // пишется — его расход часть итога: дожидаемся (запуск пока идёт).
     const settled = await settleCalls(COMPLETED_SETTLE_MS);
     const spend = budget.snapshot({ includeReserved: !settled });
-    log('info', `job ${jobId} done: scanned=${totals.scanned} ready=${totals.ready}/${target} (returning ${returningRows.ready}, ${stopReason}), llm $${spend.spent_usd}/$${spend.limit_usd} in ${spend.calls} calls`, { reasons, chains, products });
+    log('info', `job ${jobId} done: scanned=${totals.scanned} ready=${totals.ready}/${target} (reactivation ${reactivationRows.ready}/${reactivationMax}, ${stopReason}), llm $${spend.spent_usd}/$${spend.limit_usd} in ${spend.calls} calls`, { reasons, chains, products });
     // Тоже только идущему: остановку между проверкой выше и этой записью не перетираем.
     await finishRun({
       status: 'completed',

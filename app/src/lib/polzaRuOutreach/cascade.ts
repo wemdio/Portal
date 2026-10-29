@@ -7,6 +7,7 @@
  */
 
 import type { ChainType, Signal } from './types';
+import { reactivationLimit } from './reactivation';
 
 /** Шаги круга: по ним считается «что предложено» и «что дальше». */
 export const CASCADE_STEPS = ['sdr', 'classic', 'auto'] as const;
@@ -142,22 +143,13 @@ export function cascadeOffer(chain: ChainType, signals: Signal[], returning?: Ca
   return { step, product: productFor(step, isAbroad(signals)), cascadeNo: (returning?.offered.length ?? 0) + 1 };
 }
 
-/**
- * Свободно ли место в запуске вернувшейся компании: вернувшимся — не больше
- * половины заказанного (`ceil(target / 2)` готовых и занятых письмами), пока в
- * пуле есть новые кандидаты; новые кончились — недобор добираем вернувшимися.
- */
-export function cascadeSlotFree(returningTaken: number, target: number, newLeft: number): boolean {
-  return newLeft <= 0 || returningTaken < cascadeHead(target);
-}
-
-/** Половина заказанного числа (вверх): столько вернувшихся можно взять, пока есть новые. */
+/** В начало пула ставим кандидатов не больше общей квоты реактивации (20%). */
 export function cascadeHead(target: number): number {
-  return Math.ceil(target / 2);
+  return reactivationLimit(target);
 }
 
 /**
- * Порядок пула запуска: первые `ceil(target / 2)` вернувшихся — до новых, прочие
+ * Порядок пула запуска: первые `floor(target / 5)` вернувшихся — до новых, прочие
  * — после них. В конце пула вернувшиеся почти никогда бы не разбирались: пул в
  * десятки тысяч, а запуск набирает заказанное, просмотрев его часть (28.10.2026:
  * 19 тысяч из 42). Хвост нужен, когда новые кончатся.

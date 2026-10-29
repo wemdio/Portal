@@ -341,7 +341,7 @@ export const REASON_LABELS: Record<string, string> = {
   PREVIOUSLY_EXPORTED: 'Уже выгружалась раньше',
   CASCADE_WAIT: 'Ждёт паузу каскада',
   CASCADE_CLOSED: 'Каскад закрыт',
-  CASCADE_CAP: 'Половина запуска уже за вернувшимися',
+  CASCADE_CAP: 'Достигнут лимит реактивации — не больше 20%',
   DOMAIN_NOT_FOUND: 'Не найден сайт компании',
   SITE_UNREACHABLE: 'Сайт компании не открылся',
   LLM_FAILED: 'ИИ не ответил (сбой модели или ключа)',

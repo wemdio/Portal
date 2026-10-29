@@ -1,4 +1,5 @@
 import { zonedParts } from '@/lib/sender/sendWindow';
+import { reactivationLimit } from '@/lib/polzaRuOutreach/reactivation';
 
 /**
  * Арифметика автодобора без обращений к базе
@@ -18,17 +19,25 @@ export interface AutofillPlan {
   needed: boolean;
   /** Сколько готовых компаний заказать у запуска. */
   target: number;
+  /** Только RU: план новых компаний и общий потолок реактивации. */
+  newTarget?: number;
+  reactivationTarget?: number;
 }
 
 /** perDay — новых компаний в день (сумма «новых в день» ящиков папки), remaining — компаний без первого письма. */
-export function planAutofill(input: { perDay: number; remaining: number }): AutofillPlan {
+export function planAutofill(input: { perDay: number; remaining: number; reactivationRemaining?: number }): AutofillPlan {
   const perDay = Math.max(0, Math.floor(input.perDay));
   const remaining = Math.max(0, Math.floor(input.remaining));
   if (perDay === 0) return { daysLeft: null, needed: false, target: 0 };
+  const target = Math.min(AUTOFILL_MAX_TARGET, perDay * AUTOFILL_TARGET_DAYS);
+  const reactivationTarget = input.reactivationRemaining === undefined ? undefined : reactivationLimit(target, {
+    remaining, reactivation: Math.max(0, Math.floor(input.reactivationRemaining)),
+  });
   return {
     daysLeft: remaining / perDay,
     needed: remaining < perDay * AUTOFILL_TRIGGER_DAYS,
-    target: Math.min(AUTOFILL_MAX_TARGET, perDay * AUTOFILL_TARGET_DAYS),
+    target,
+    ...(reactivationTarget === undefined ? {} : { newTarget: target - reactivationTarget, reactivationTarget }),
   };
 }
 
