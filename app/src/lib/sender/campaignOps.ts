@@ -22,6 +22,7 @@ import { SCHEDULED_START_CLAIM_MARK, type CampaignSourceKind } from './types';
 import { MAX_VARIANTS } from './variants';
 import { readVe2SendingSwitch, VE2_SENDING_STOPPED_CODE, ve2SendingRefusal } from './ve2SendingSwitch';
 import { syncCampaignTagMailboxes } from './campaignTags';
+import { loadEnEmailStopList } from '@/lib/polzaOutreach/emailStopList';
 
 /**
  * Операции над кампанией «Рассылки»: создание, шаги цепочки, заливка базы и
@@ -333,9 +334,12 @@ export interface ImportRecipientsResult {
  * — ошибка, а не пустой список: иначе при сбое базы (в том числе 414 на
  * длинном адресе запроса) адреса из стоп-листа молча уехали бы в кампанию.
  */
-async function loadSuppressedEmails(emails: string[], campaignId: string): Promise<Set<string>> {
+async function loadSuppressedEmails(emails: string[], campaignId: string, sourceKind?: string | null): Promise<Set<string>> {
   const db = requireDb();
-  const suppressed = new Set<string>();
+  // Проверка повторяется при заливке: готовая база могла быть собрана раньше,
+  // чем адрес добавили в стоп-лист. RU, ручные кампании и Движок его не читают.
+  const enBlocked = sourceKind === 'polza_en' ? await loadEnEmailStopList(db) : new Set<string>();
+  const suppressed = new Set(emails.filter(email => enBlocked.has(email)));
   for (const part of chunkForInFilter(emails)) {
     const [global, own] = await Promise.all([
       db.from('sender_suppressions').select('email').in('email', part),
@@ -381,7 +385,7 @@ export async function importRecipients(
 
   const { data: campaign } = await db
     .from('sender_campaigns')
-    .select('id, status, client_user_id, project_id')
+    .select('id, status, client_user_id, project_id, source_kind')
     .eq('id', campaignId)
     .maybeSingle();
   if (!campaign) throw new SenderOpError('Кампания не найдена', 404);
@@ -437,7 +441,7 @@ export async function importRecipients(
 
   // Стоп-лист — до любых записей: не прочитался он — замена базы не должна
   // успеть стереть старую.
-  const suppressed = await loadSuppressedEmails(recipients.map((recipient) => recipient.email), campaignId);
+  const suppressed = await loadSuppressedEmails(recipients.map((recipient) => recipient.email), campaignId, campaign.source_kind);
 
   // Стоп-листы клиента и проекта — так же до записей и так же строго: не
   // прочитали — база не заливается, иначе письмо ушло бы тому, кому клиент
