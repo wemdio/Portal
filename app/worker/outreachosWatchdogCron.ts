@@ -18,6 +18,8 @@
  *     с неё (`outreachosCron.js --resume=<id>`, та же строка прогона);
  *   - точки нет → закрываем как failed и, если сутки ещё можно спасти,
  *     перезапускаем день (`outreachosCron.js --anchor=<started_at>`).
+ *   - временный сбой HH, отмеченный ДО конструктора → через 15 мин повторяем
+ *     исходное окно поиска; failed-строку атомарно забирает только один сторож.
  * Прогон идёт дочерним процессом outreachosCron.js, и сторож ждёт его: следующий
  * тик увидит в /proc и прогон, и сторожа.
  *
@@ -91,7 +93,7 @@ async function main(): Promise<number> {
   }
   const { data: todayData, error: todayErr } = await db
     .from('outreachos_pipeline_runs')
-    .select('id, status, error_message')
+    .select('id, status, error_message, started_at, finished_at, base_job_id, valid_contacts, appended, appended_b')
     .gte('started_at', mskMidnightIso(now));
   if (todayErr) {
     log('error', `не удалось прочитать сегодняшние прогоны: ${todayErr.message}`);
@@ -174,6 +176,24 @@ async function main(): Promise<number> {
   }
 
   if (decision.restart) {
+    if (decision.retryFailedRun) {
+      const failed = decision.retryFailedRun;
+      // A delayed HH retry is a NEW run. Claim the failed row atomically before
+      // spawning it; unlike checkpoint resumes it has no checkpoint CAS.
+      const { data, error } = await db
+        .from('outreachos_pipeline_runs')
+        .update({ error_message: `${WATCHDOG_REAP_PREFIX} HH retry claimed; ${failed.error_message}` })
+        .eq('id', failed.id)
+        .eq('status', 'failed')
+        .eq('error_message', failed.error_message)
+        .select('id');
+      if (error || data?.length !== 1) {
+        log(error ? 'error' : 'info', error
+          ? `не удалось забрать повтор HH: ${error.message}`
+          : 'повтор HH уже забрал другой сторож или прогон изменился');
+        return error ? 1 : 0;
+      }
+    }
     await alert('автоперезапуск дневного прогона', decision.reason, {
       date: mskParts(now).dateKey,
       runs_today: todayRuns.length,
