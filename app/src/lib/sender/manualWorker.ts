@@ -42,6 +42,8 @@ interface ManualRow {
   handoff?: Record<string, unknown> | null;
   /** Письмо квалифицирующего ИИ (lib/senderAiQualifier): перепроверка перед SMTP, повтора нет. */
   by_ai?: boolean;
+  /** На какой входящий подготовлен ответ: новое письмо отменяет старый черновик. */
+  ai_reply_id?: string | null;
   created_at?: string;
 }
 
@@ -96,20 +98,28 @@ export async function processManualMessages(opts: { egressIp: string; log?: Log;
     if (message.by_ai) {
       // Пока письмо ИИ ждало отправки, лид мог отписаться, оператор — ответить
       // или поставить метку: тогда ИИ молчит.
-      const [recipient, conversation, operator, suppression] = await Promise.all([
+      const [recipient, conversation, operator, suppression, latest] = await Promise.all([
         db.from('sender_recipients').select('status, lead_verdict_source').eq('id', message.recipient_id!).maybeSingle(),
-        db.from('sender_ai_conversations').select('state').eq('recipient_id', message.recipient_id!).maybeSingle(),
+        db.from('sender_ai_conversations').select('state,folder_key').eq('recipient_id', message.recipient_id!).maybeSingle(),
         db.from('sender_manual_messages').select('id').eq('recipient_id', message.recipient_id!)
           .is('agency_handoff_id', null).is('handoff', null).eq('by_ai', false).limit(1),
         db.from('sender_suppressions').select('email').eq('email', message.to_email).limit(1),
+        message.ai_reply_id
+          ? db.from('sender_ai_latest_replies').select('id').eq('recipient_id', message.recipient_id!).maybeSingle()
+          : Promise.resolve({ data: null, error: null }),
       ]);
+      const folder = conversation.data?.folder_key
+        ? await db.from('sender_folders').select('ai_enabled,leads_enabled,leads_telegram').eq('key', conversation.data.folder_key).maybeSingle()
+        : null;
       const r = recipient.data;
-      const blocked = recipient.error || conversation.error || operator.error || suppression.error || !r ||
+      const blocked = recipient.error || conversation.error || operator.error || suppression.error || latest.error || folder?.error || !r ||
+        !folder?.data?.ai_enabled || !folder.data.leads_enabled || !folder.data.leads_telegram ||
+        (message.ai_reply_id && latest.data?.id !== message.ai_reply_id) ||
         ['unsubscribed', 'bounced', 'stopped'].includes(r.status) || r.lead_verdict_source === 'manual' ||
-        conversation.data?.state === 'stopped' || operator.data?.length || suppression.data?.length;
+        !conversation.data || ['stopped', 'review', 'failed'].includes(conversation.data.state) || operator.data?.length || suppression.data?.length;
       if (blocked) {
         await db.from('sender_manual_messages').update({ status: 'failed',
-          error: `${AI_LETTER_CANCELLED}: переписка остановлена, отписка, ручная метка или ответ оператора`, updated_at: nowIso }).eq('id', message.id);
+          error: `${AI_LETTER_CANCELLED}: настройки, новое письмо, остановка, отписка, ручная метка или ответ оператора`, updated_at: nowIso }).eq('id', message.id);
         continue;
       }
     }

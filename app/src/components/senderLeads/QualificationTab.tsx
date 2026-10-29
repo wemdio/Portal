@@ -332,8 +332,8 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
                 className="mt-0.5 h-4 w-4 cursor-pointer rounded border-zinc-300"
               />
               <span>
-                <span className="block text-sm font-medium text-zinc-900">ИИ ведёт переписку до передачи</span>
-                <span className="block text-xs text-zinc-500">В чат и AMO — только подтвердившие и приславшие слоты или телефон.</span>
+                <span className="block text-sm font-medium text-zinc-900">ИИ отвечает на вопросы и возражения</span>
+                <span className="block text-xs text-zinc-500">Только новые ответы после включения. До двух ответов на возражения; при просьбе не писать — остановка. В чат и AMO — подтвердившие интерес и приславшие контакт для обсуждения.</span>
               </span>
             </label>
             <div>
@@ -645,6 +645,7 @@ export function QualificationTab({ folderKey }: { folderKey: string }) {
                   </div>
 
                   {explanation ? <p className="text-sm text-zinc-600">{explanation}</p> : null}
+                  {row.aiReview ? <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">Нужен ответ менеджера: {row.aiReview}</p> : null}
 
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">

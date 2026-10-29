@@ -11,8 +11,9 @@ import { stripQuoted } from '@/lib/senderLeads/telegram';
 import type { Log } from '@/lib/senderLeads/process';
 import { aiQualifierConfig, productPitchOf, requestAiStep, type AiPromptInput } from './ai';
 import { hasOpenAmoDeal } from './amo';
-import { closeReasonOf, decideStep, reminderDueAt, replyDueAt } from './decide';
-import { AI_LETTER_CANCELLED, MAX_AI_ATTEMPTS, MAX_AI_LETTERS, type AiConversationRow, type AiFolderKey, type AiState } from './types';
+import { closeReasonOf, decideStep, parseAiStep, reminderDueAt, replyDueAt } from './decide';
+import { loadEnCases } from '@/lib/polzaOutreach/caseRouter';
+import { AI_LETTER_CANCELLED, MAX_AI_ATTEMPTS, MAX_AI_LETTERS, type AiConversationRow, type AiFolderKey, type AiState, type AiStep } from './types';
 
 /**
  * Движок квалифицирующего ИИ: запускает разговор по ответу с интересом и
@@ -135,19 +136,34 @@ async function loadProductOfferTexts(db: SupabaseClient, folderId: string, log: 
  * «Короткое КП» и описание предложения для промпта. Русский автоаутрич (auto_ru):
  * текст того продукта, который предлагали этому получателю, а если его нет —
  * общее «Короткое КП» папки; прогрев к встрече — и для строк до каскада (продукта
- * нет). Английский автоаутрич — как раньше, без обращения к продуктам. Сбой чтения
+ * нет). EN получает утверждённые английские кейсы зарубежной классики. Сбой чтения
  * продукта получателя — исключение: ход повторится, а не уйдёт с КП не того продукта.
  */
+export interface AiOfferContext extends Pick<AiPromptInput, 'offerText' | 'cascade' | 'productPitch'> {
+  caseIds: string[];
+}
+
 export async function offerContextFor(
   db: SupabaseClient,
   folder: { id: string; key: string; ai_offer_text: string | null },
   recipientId: string,
   log: Log,
-): Promise<Pick<AiPromptInput, 'offerText' | 'cascade' | 'productPitch'>> {
+): Promise<AiOfferContext> {
   const general = folder.ai_offer_text ?? '';
-  if (folder.key !== 'auto_ru') return { offerText: general, cascade: false, productPitch: null };
+  if (folder.key !== 'auto_ru') {
+    // Английские ответы используют ту же утверждённую библиотеку, что EN-письма,
+    // с проверкой продукта. Не подменяем зарубежный результат русским переводом.
+    const [english, productCases] = await Promise.all([loadEnCases(db), loadCases(db)]);
+    const allowed = new Set(productCases.filter((c) => caseAllowedForProduct(c, 'classic_abroad')).map((c) => c.case_id));
+    const cases = english.filter((c) => allowed.has(c.caseId)).slice(0, 12);
+    return {
+      offerText: [general, cases.length ? 'APPROVED CASES (choose at most one matching the recipient\'s business and market):' : '',
+        ...cases.map((c) => `[case_id=${c.caseId}; segments=${c.groups.join(',')}] ${c.snippet}`)].filter(Boolean).join('\n'),
+      caseIds: cases.map((c) => c.caseId), cascade: false, productPitch: null,
+    };
+  }
   const offered = await loadRecipientProduct(db, recipientId, { includeLegacy: true });
-  if (!offered) return { offerText: general, cascade: true, productPitch: null };
+  if (!offered) return { offerText: general, cascade: true, productPitch: null, caseIds: [] };
   const own = (await loadProductOfferTexts(db, folder.id, log))[offered.product];
   const text = typeof own === 'string' ? own.trim() : '';
   const cases = (await loadCases(db)).filter((c) => caseAllowedForProduct(c, offered.product))
@@ -163,10 +179,10 @@ export async function offerContextFor(
   const selected = [...diverse, ...cases.filter((c) => !diverse.includes(c))].slice(0, 8);
   const proof = selected.length ? [
     'ПРОВЕРЕННЫЕ КЕЙСЫ ЭТОГО ПРОДУКТА:',
-    ...selected.map((c) => `- ${c.case_text_short.trim()}`),
+    ...selected.map((c) => `- [case_id=${c.case_id}; отрасли=${c.industry_groups.join(',')}] ${c.case_text_short.trim()}`),
     'По вопросу клиента выбери максимум один подходящий пример и передай его в 1–2 предложениях. Не повторяй уже приведённый пример без необходимости. Сохрани роль и фактический исход: запрос подробностей не равен встрече, встреча не равна продаже; отказ и отложенный контакт не выдавай за успех. Не обещай повторить цифры у клиента. Доказательства выхода на роль получены в клиентских кампаниях Polza; отдельный канал этих кампаний не приписывай ручной SDR-услуге.',
   ].join('\n') : '';
-  return { offerText: [text || general, proof].filter(Boolean).join('\n\n'), cascade: true, productPitch: productPitchOf(offered.product) };
+  return { offerText: [text || general, proof].filter(Boolean).join('\n\n'), cascade: true, productPitch: productPitchOf(offered.product), caseIds: selected.map((c) => c.case_id) };
 }
 
 /** Ответил ли оператор с портала: ручное письмо, не автопередача, не передача клиенту и не ИИ. */
@@ -188,9 +204,9 @@ async function loadRecipient(db: SupabaseClient, recipientId: string): Promise<R
 /** Переписка для модели и для цитаты в письме: наши письма, письма лида и ответы с портала. */
 export async function loadConversationHistory(db: SupabaseClient, recipientId: string): Promise<AiPromptInput['history']> {
   const [messages, replies, manual] = await Promise.all([
-    db.from('sender_messages').select('body, sent_at').eq('recipient_id', recipientId).eq('status', 'sent').order('sent_at').limit(50),
-    db.from('sender_replies').select('body, received_at, created_at').eq('recipient_id', recipientId).eq('kind', 'human').order('created_at').limit(50),
-    db.from('sender_manual_messages').select('body, sent_at').eq('recipient_id', recipientId).eq('status', 'sent').order('sent_at').limit(50),
+    db.from('sender_messages').select('body, sent_at').eq('recipient_id', recipientId).eq('status', 'sent').order('sent_at', { ascending: false }).limit(50),
+    db.from('sender_replies').select('body, received_at, created_at').eq('recipient_id', recipientId).eq('kind', 'human').order('created_at', { ascending: false }).limit(50),
+    db.from('sender_manual_messages').select('body, sent_at').eq('recipient_id', recipientId).eq('status', 'sent').order('sent_at', { ascending: false }).limit(50),
   ]);
   for (const r of [messages, replies, manual]) if (r.error) throw new Error(`история переписки: ${r.error.message}`);
   const clip = (text: string | null) => (stripQuoted(text ?? '') || (text ?? '').trim()).slice(0, MAX_HISTORY_TEXT);
@@ -202,7 +218,7 @@ export async function loadConversationHistory(db: SupabaseClient, recipientId: s
   return items.filter((m) => m.text).sort((a, b) => Date.parse(a.at ?? '') - Date.parse(b.at ?? ''));
 }
 
-/** Ответы с интересом в папках с ИИ → новые разговоры. Не подошёл — лид идёт прежним путём. */
+/** Новые ответы, включая возражения, без переименования отказа в лид. */
 async function startConversations(
   db: SupabaseClient, folders: Map<string, FolderRow>, campaignFolder: Map<string, string>,
 ): Promise<number> {
@@ -211,12 +227,11 @@ async function startConversations(
     .map(([campaignId]) => campaignId);
   if (!campaignIds.length) return 0;
 
-  const { data, error } = await db.from('sender_reply_qualifications')
+  const { data, error } = await db.from('sender_ai_intake_queue')
     .select('reply_id, recipient_id, campaign_id, qualified_at')
-    .eq('status', 'lead').is('tg_sent_at', null).lt('tg_attempts', 5)
     .in('campaign_id', campaignIds)
     .order('qualified_at').limit(BATCH);
-  if (error) throw new Error(`sender_reply_qualifications: ${error.message}`);
+  if (error) throw new Error(`sender_ai_intake_queue (проверьте миграцию возражений): ${error.message}`);
 
   let started = 0;
   for (const row of (data ?? []) as Array<{ reply_id: string; recipient_id: string; campaign_id: string; qualified_at: string | null }>) {
@@ -235,14 +250,16 @@ async function startConversations(
     if (CLOSED_RECIPIENT.includes(recipient.status) || recipient.lead_verdict_source === 'manual') continue;
     if (await hasOperatorMessage(db, row.recipient_id)) continue;
     const r = reply.data as ReplyRow;
-    if (await hasOpenAmoDeal(db, r.from_email || recipient.email)) continue;
+    const openDeal = await hasOpenAmoDeal(db, r.from_email || recipient.email);
 
     const { error: insertError } = await db.from('sender_ai_conversations').upsert({
       recipient_id: row.recipient_id,
       campaign_id: row.campaign_id,
       folder_key: folder.key,
       trigger_reply_id: row.reply_id,
-      next_action_at: replyDueAt(replyAt(r), windowOf(folder)).toISOString(),
+      state: openDeal ? 'stopped' : 'active',
+      last_error: openDeal ? 'Уже есть открытая сделка AMO, диалог ведёт менеджер' : null,
+      next_action_at: openDeal ? null : replyDueAt(replyAt(r), windowOf(folder)).toISOString(),
     }, { onConflict: 'recipient_id', ignoreDuplicates: true });
     if (insertError) throw new Error(`sender_ai_conversations insert: ${insertError.message}`);
     started += 1;
@@ -280,6 +297,7 @@ async function enqueueAiLetter(db: SupabaseClient, input: LetterInput): Promise<
   const { error } = await db.from('sender_manual_messages').upsert({
     id: letterId(input.conv, input.replyTo.id),
     by_ai: true,
+    ai_reply_id: input.replyTo.id,
     status: 'queued',
     campaign_id: input.conv.campaign_id,
     recipient_id: input.conv.recipient_id,
@@ -332,10 +350,54 @@ interface StepContext {
   log: Log;
 }
 
+/** Сохраняем wire-формат: повтор проходит тот же строгий разбор, что ответ модели. */
+function modelJsonOf(step: AiStep): Record<string, unknown> {
+  const a = step.assessment;
+  return {
+    relevant: step.relevant, contact: step.contact, outcome: step.outcome,
+    reply: step.reply, summary: step.summary, stop_requested: step.stopRequested,
+    ...(a ? { assessment: { ...a, case_id: a.caseId } } : {}),
+  };
+}
+
+async function savedStep(
+  db: SupabaseClient, conv: AiConversationRow, replyId: string, mode: AiPromptInput['mode'],
+  generate: () => Promise<AiStep>,
+): Promise<{ id: string; step: AiStep }> {
+  const id = letterId(conv, replyId);
+  const read = async () => {
+    const { data, error } = await db.from('sender_ai_turns').select('step_json').eq('id', id).maybeSingle();
+    if (error) throw new Error(`sender_ai_turns: ${error.message}`);
+    return data;
+  };
+  let row = await read();
+  if (!row) {
+    const generated = await generate();
+    const { error } = await db.from('sender_ai_turns').upsert({
+      id, recipient_id: conv.recipient_id, reply_id: replyId, mode,
+      step_json: modelJsonOf(generated), decision: 'pending',
+    }, { onConflict: 'id', ignoreDuplicates: true });
+    if (error) throw new Error(`sender_ai_turns insert: ${error.message}`);
+    row = await read();
+  }
+  if (!row) throw new Error('Ход ИИ не сохранился');
+  const step = parseAiStep(JSON.stringify(row.step_json));
+  if (step.assessment?.intent === 'stop') step.stopRequested = true;
+  return { id, step };
+}
+
 /** Один ход разговора; если делать пока нечего — только переносит срок. */
 async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx: StepContext): Promise<void> {
   const { folder, newest, recipient, log } = ctx;
   const now = new Date();
+  // Коллега может ответить со своей основной почты прямо в CC, вне портала.
+  // Это не новая реплика покупателя (такое встречалось в архиве ENagency).
+  const ourAddresses = new Set([recipient.sender_mailboxes?.email ?? '', ...ctx.ccEmails].map((e) => e.trim().toLowerCase()));
+  if (newest?.from_email && ourAddresses.has(newest.from_email.trim().toLowerCase())) {
+    await finish(db, conv, 'stopped', 'В переписку включился наш коллега со своей почты');
+    await releaseToManagers(db, conv);
+    return;
+  }
   const planNext = async (due: Date) => {
     if (!conv.next_action_at || Date.parse(conv.next_action_at) !== due.getTime()) {
       await patchConversation(db, conv.recipient_id, { next_action_at: due.toISOString() });
@@ -350,7 +412,9 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
     due = replyDueAt(replyAt(newest!), windowOf(folder));
   } else if (conv.last_ai_sent_at) {
     due = reminderDueAt(new Date(conv.last_ai_sent_at), folder.timezone);
-    if (conv.reminder_sent || conv.ai_messages >= MAX_AI_LETTERS) {
+    // После возражения молчание не является приглашением продолжать давление.
+    if (conv.reminder_sent || conv.ai_messages >= MAX_AI_LETTERS
+      || conv.last_intent === 'objection' || conv.last_intent === 'soft_decline') {
       if (now >= due) await finish(db, conv, 'no_reply', null);
       else await planNext(due);
       return;
@@ -374,7 +438,7 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
   if (hasNew) {
     const { data: q, error } = await db.from('sender_reply_qualifications').select('status').eq('reply_id', newest!.id).maybeSingle();
     if (error) throw new Error(`sender_reply_qualifications: ${error.message}`);
-    if (!q || q.status === 'pending') return;
+    if (!q || !['lead', 'not_lead'].includes(q.status)) return;
   }
   if (!newest) {
     await finish(db, conv, 'stopped', 'письмо лида не найдено');
@@ -383,7 +447,8 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
 
   const cfg = aiQualifierConfig();
   if (!cfg) throw new Error('Ключ ИИ не настроен (SENDER_AI_QUALIFIER_API_KEY / SENDER_LEADS_AI_API_KEY)');
-  const history = await loadConversationHistory(db, conv.recipient_id);
+  const history = (await loadConversationHistory(db, conv.recipient_id))
+    .filter((m) => m.from !== 'lead' || Date.parse(m.at ?? '') <= replyAt(newest).getTime());
   const ownMailbox = recipient.sender_mailboxes?.email?.toLowerCase() ?? '';
   const leadAddress = (newest.from_email || recipient.email).toLowerCase();
   const cc = ctx.ccEmails.filter((e) => e.toLowerCase() !== ownMailbox && e.toLowerCase() !== leadAddress);
@@ -391,12 +456,39 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
     ? recipient.reply_language
     : (conv.folder_key === 'auto_en' ? 'en' : 'ru');
 
-  const step = await requestAiStep(cfg, {
+  const offer = await offerContextFor(db, folder, conv.recipient_id, log);
+  const memory = {
+    turns: conv.objection_turns ?? 0, lastIntent: conv.last_intent ?? null,
+    lastObjection: conv.last_objection ?? null, usedCaseIds: conv.used_case_ids ?? [],
+  };
+  const { id: turnId, step } = await savedStep(db, conv, newest.id, mode, () => requestAiStep(cfg, {
     language, mode, history, aiMessages: conv.ai_messages,
-    ...await offerContextFor(db, folder, conv.recipient_id, log), ccEmail: cc[0] ?? null,
+    ...offer, ccEmail: cc[0] ?? null, objections: memory,
+  }));
+  const decision = decideStep(step, {
+    aiMessages: conv.ai_messages, stopRequested: step.stopRequested,
+    objections: {
+      ...memory, lastLeadText: stripQuoted(newest.body ?? '') || (newest.body ?? '').trim(), caseIds: offer.caseIds,
+    },
   });
-  const decision = decideStep(step, { aiMessages: conv.ai_messages, stopRequested: step.stopRequested });
-  const processed = { last_reply_id: newest.id, attempts: 0 };
+  const { error: turnError } = await db.from('sender_ai_turns').update({ decision: decision.kind }).eq('id', turnId);
+  if (turnError) throw new Error(`sender_ai_turns decision: ${turnError.message}`);
+  const a = step.assessment;
+  const sends = 'letter' in decision && Boolean(decision.letter);
+  const processed = {
+    last_reply_id: newest.id, attempts: 0,
+    last_intent: a?.intent ?? null, last_objection: a?.objection ?? null,
+    objection_turns: memory.turns + (sends && (a?.intent === 'objection' || a?.intent === 'soft_decline') ? 1 : 0),
+    used_case_ids: sends && a?.caseId ? [...new Set([...memory.usedCaseIds, a.caseId])] : memory.usedCaseIds,
+  };
+
+  if (decision.kind === 'review') {
+    await patchConversation(db, conv.recipient_id, {
+      ...processed, state: 'review', next_action_at: null, last_error: null,
+      summary: decision.reason.slice(0, 2000),
+    });
+    return;
+  }
 
   if (decision.kind === 'no_reply') {
     // Лимит писем исчерпан, а лид ответил: его новое письмо уходит менеджерам
@@ -423,6 +515,7 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
     await patchConversation(db, conv.recipient_id, {
       ...processed, state: 'closed', close_reason: closeReasonOf(step), summary: step.summary || null,
       next_action_at: null, last_error: null,
+      ai_messages: conv.ai_messages + (decision.letter ? 1 : 0),
     });
     ctx.result.closed += 1;
     return;
@@ -435,13 +528,14 @@ async function stepConversation(db: SupabaseClient, conv: AiConversationRow, ctx
       .update({ status: 'lead', ai_reason: reason.slice(0, 2000), tg_attempts: 0, tg_error: null, updated_at: now.toISOString() })
       .eq('reply_id', newest.id);
     if (error) throw new Error(`sender_reply_qualifications: ${error.message}`);
-    await enqueueAiLetter(db, { conv, recipient, replyTo: newest, text: decision.letter, cc, history });
+    if (decision.letter) await enqueueAiLetter(db, { conv, recipient, replyTo: newest, text: decision.letter, cc, history });
     await patchConversation(db, conv.recipient_id, {
       ...processed, state: 'handed_off', handoff_reply_id: newest.id, handoff_contact: decision.contact,
-      summary: decision.summary || null, ai_messages: conv.ai_messages + 1, last_ai_sent_at: now.toISOString(),
+      summary: decision.summary || null, ai_messages: conv.ai_messages + (decision.letter ? 1 : 0),
+      last_ai_sent_at: decision.letter ? now.toISOString() : conv.last_ai_sent_at,
       next_action_at: null, last_error: null,
     });
-    ctx.result.letters += 1;
+    if (decision.letter) ctx.result.letters += 1;
     ctx.result.handedOff += 1;
     return;
   }
@@ -463,7 +557,10 @@ async function newestReplies(db: SupabaseClient, recipientIds: string[]): Promis
     if (error) throw new Error(`sender_replies: ${error.message}`);
     for (const r of (data ?? []) as ReplyRow[]) {
       const prev = out.get(r.recipient_id);
-      if (!prev || replyAt(r) > replyAt(prev)) out.set(r.recipient_id, r);
+      const newer = !prev || replyAt(r).getTime() > replyAt(prev).getTime()
+        || (replyAt(r).getTime() === replyAt(prev).getTime()
+          && (r.created_at > prev.created_at || (r.created_at === prev.created_at && r.id > prev.id)));
+      if (newer) out.set(r.recipient_id, r);
     }
   }
   return out;

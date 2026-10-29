@@ -4,7 +4,7 @@ import { loadConversationHistory, offerContextFor } from '@/lib/senderAiQualifie
 import { createWorkerLogger, requireSupabaseAdmin } from './_shared';
 
 /**
- * Холостой прогон квалифицирующего ИИ по последним лидам автоаутрича: что ИИ
+ * Холостой прогон квалифицирующего ИИ по последним ответам автоаутрича: что ИИ
  * ответил бы на первое письмо лида. Ничего не пишет в базу, писем не шлёт.
  * Запуск на 139:
  *   docker exec portal-worker-sender-leads node /app/workers/senderAiQualifierDryRunCli.js 10
@@ -13,6 +13,9 @@ const log = createWorkerLogger('sender-ai-qualifier-dry-run');
 
 async function main(): Promise<void> {
   const limit = Math.min(Math.max(Number(process.argv[2]) || 10, 1), 50);
+  const replyArg = process.argv.indexOf('--reply-id');
+  const replyId = replyArg >= 0 ? process.argv[replyArg + 1] : null;
+  if (replyArg >= 0 && !/^[0-9a-f-]{36}$/i.test(replyId ?? '')) throw new Error('--reply-id: укажите UUID входящего письма');
   const db = requireSupabaseAdmin(log);
   const cfg = aiQualifierConfig();
   if (!cfg) throw new Error('Ключ ИИ не настроен (SENDER_AI_QUALIFIER_API_KEY / SENDER_LEADS_AI_API_KEY)');
@@ -26,10 +29,11 @@ async function main(): Promise<void> {
   if (campaignError) throw new Error(campaignError.message);
   const folderOf = new Map((campaigns ?? []).map((c) => [c.id as string, folderById.get(c.folder_id as string)!]));
 
-  const { data: rows, error } = await db.from('sender_reply_qualifications')
+  let query = db.from('sender_reply_qualifications')
     .select('reply_id, recipient_id, campaign_id, qualified_at')
-    .eq('status', 'lead').in('campaign_id', [...folderOf.keys()])
-    .order('qualified_at', { ascending: false }).limit(limit);
+    .in('status', ['lead', 'not_lead']).in('campaign_id', [...folderOf.keys()]);
+  if (replyId) query = query.eq('reply_id', replyId);
+  const { data: rows, error } = await query.order('qualified_at', { ascending: false }).limit(limit);
   if (error) throw new Error(error.message);
 
   console.log(`Модель ${cfg.model}. Лидов к прогону: ${rows?.length ?? 0}\n`);
@@ -46,15 +50,22 @@ async function main(): Promise<void> {
       ? recipient.reply_language
       : (folder.key === 'auto_en' ? 'en' : 'ru');
     try {
+      const offer = await offerContextFor(db, folder, row.recipient_id as string, log);
+      const memory = { turns: 0, lastIntent: null, lastObjection: null, usedCaseIds: [] as string[] };
       const step = await requestAiStep(cfg, {
         language, mode: 'reply', aiMessages: 0, history, ccEmail: 'manager@example.com',
-        ...await offerContextFor(db, folder, row.recipient_id as string, log),
+        ...offer, objections: memory,
       });
-      const decision = decideStep(step, { aiMessages: 0, stopRequested: false });
+      const decision = decideStep(step, {
+        aiMessages: 0, stopRequested: step.stopRequested,
+        objections: { ...memory, lastLeadText: history.filter((m) => m.from === 'lead').at(-1)?.text ?? '', caseIds: offer.caseIds },
+      });
       const lead = history.filter((m) => m.from === 'lead').at(-1)?.text.slice(0, 300) ?? '';
       console.log(`=== ${folder.key} · ${recipient?.email ?? row.recipient_id} → ${decision.kind}`);
       console.log(`Лид: ${lead}`);
       console.log(`relevant=${step.relevant} contact=${step.contact ?? '—'}`);
+      console.log(`Намерение=${step.assessment?.intent ?? '—'}; возражение=${step.assessment?.objection ?? '—'}; кейс=${step.assessment?.caseId ?? '—'}`);
+      if (decision.kind === 'review') console.log(`Нужен ответ менеджера: ${decision.reason}`);
       if ('letter' in decision && decision.letter) console.log(`Письмо ИИ:\n${decision.letter}`);
       console.log(`Для менеджера: ${step.summary}\n`);
     } catch (err) {

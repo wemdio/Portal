@@ -37,6 +37,8 @@ export interface LeadHistoryRowDto {
   /** Оценка ИИ по этому ответу; skipped в историю не попадает. */
   status: 'pending' | 'lead' | 'not_lead' | 'error';
   aiReason: string | null;
+  /** ИИ остановился до отправки: нужен предметный ответ человека. */
+  aiReview?: string | null;
   interestSignals: string[];
   criteriaUsed: boolean;
   attempts: number;
@@ -110,9 +112,10 @@ export interface ThreadVerdictDto {
   } | null;
   /** Разговор квалифицирующего ИИ по этой переписке, если он был. */
   aiConversation: {
-    state: 'active' | 'handed_off' | 'no_reply' | 'closed' | 'stopped' | 'failed';
+    state: 'active' | 'handed_off' | 'no_reply' | 'closed' | 'stopped' | 'failed' | 'review';
     aiMessages: number;
     handoffContact: string | null;
+    summary?: string | null;
   } | null;
 }
 
@@ -400,8 +403,16 @@ export async function loadLeadHistory(
     countMap[f] = res.count ?? 0;
   });
 
+  const rows = ((list.data ?? []) as unknown as ListRow[]).map(toRowDto);
+  if (rows.length) {
+    const { data: reviews, error: reviewError } = await db.from('sender_ai_conversations')
+      .select('recipient_id,summary').eq('state', 'review').in('recipient_id', [...new Set(rows.map((r) => r.recipientId))]);
+    if (reviewError) throw new Error(`sender_ai_conversations review: ${reviewError.message}`);
+    const byRecipient = new Map((reviews ?? []).map((r) => [r.recipient_id, r.summary || 'Нужен ответ менеджера']));
+    for (const row of rows) row.aiReview = byRecipient.get(row.recipientId) ?? null;
+  }
   return {
-    rows: ((list.data ?? []) as unknown as ListRow[]).map(toRowDto),
+    rows,
     total: list.count ?? 0,
     pageSize: HISTORY_PAGE_SIZE,
     counts: countMap,
