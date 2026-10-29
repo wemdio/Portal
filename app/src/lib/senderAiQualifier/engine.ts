@@ -13,6 +13,7 @@ import { aiQualifierConfig, productPitchOf, requestAiStep, type AiPromptInput } 
 import { hasOpenAmoDeal } from './amo';
 import { closeReasonOf, decideStep, parseAiStep, reminderDueAt, replyDueAt } from './decide';
 import { loadEnCases } from '@/lib/polzaOutreach/caseRouter';
+import { productKnowledgeText } from '@/lib/polzaRuOutreach/productKnowledge';
 import { AI_LETTER_CANCELLED, MAX_AI_ATTEMPTS, MAX_AI_LETTERS, type AiConversationRow, type AiFolderKey, type AiState, type AiStep } from './types';
 
 /**
@@ -118,7 +119,7 @@ async function loadAiFolders(db: SupabaseClient): Promise<{ folders: Map<string,
  * Короткие КП по продуктам папки (`sender_folders.ai_offer_texts`). Читаются отдельно
  * от общего запроса папок: до миграции каскада колонки нет, и общий запрос уронил бы
  * весь круг ИИ, в том числе английский автоаутрич. Любой сбой — пусто и предупреждение:
- * ход идёт с общим «Коротким КП» папки.
+ * ход идёт с материалами продукта и общими необязательными указаниями.
  */
 async function loadProductOfferTexts(db: SupabaseClient, folderId: string, log: Log): Promise<Record<string, unknown>> {
   try {
@@ -127,16 +128,15 @@ async function loadProductOfferTexts(db: SupabaseClient, folderId: string, log: 
     const texts = (data as { ai_offer_texts?: unknown } | null)?.ai_offer_texts;
     return texts && typeof texts === 'object' && !Array.isArray(texts) ? texts as Record<string, unknown> : {};
   } catch (err) {
-    log('warn', `ИИ-квалификатор: короткие КП по продуктам папки ${folderId} не прочитаны, берём общее: ${errorText(err)}`);
+    log('warn', `ИИ-квалификатор: уточнения по продуктам папки ${folderId} не прочитаны, используем согласованные материалы: ${errorText(err)}`);
     return {};
   }
 }
 
 /**
- * «Короткое КП» и описание предложения для промпта. Русский автоаутрич (auto_ru):
- * текст того продукта, который предлагали этому получателю, а если его нет —
- * общее «Короткое КП» папки; прогрев к встрече — и для строк до каскада (продукта
- * нет). EN получает утверждённые английские кейсы зарубежной классики. Сбой чтения
+ * Материалы предложенного продукта подключаются автоматически. Ручные поля —
+ * необязательные дополнения, они не заменяют условия и ограничения презентаций.
+ * EN получает зарубежную классику и утверждённые английские кейсы. Сбой чтения
  * продукта получателя — исключение: ход повторится, а не уйдёт с КП не того продукта.
  */
 export interface AiOfferContext extends Pick<AiPromptInput, 'offerText' | 'cascade' | 'productPitch'> {
@@ -157,13 +157,16 @@ export async function offerContextFor(
     const allowed = new Set(productCases.filter((c) => caseAllowedForProduct(c, 'classic_abroad')).map((c) => c.case_id));
     const cases = english.filter((c) => allowed.has(c.caseId)).slice(0, 12);
     return {
-      offerText: [general, cases.length ? 'APPROVED CASES (choose at most one matching the recipient\'s business and market):' : '',
+      offerText: [productKnowledgeText('classic_abroad', 'en'), general ? `ADDITIONAL NOTES (do not override product boundaries above):\n${general}` : '', cases.length ? 'APPROVED CASES (choose at most one matching the recipient\'s business and market):' : '',
         ...cases.map((c) => `[case_id=${c.caseId}; segments=${c.groups.join(',')}] ${c.snippet}`)].filter(Boolean).join('\n'),
       caseIds: cases.map((c) => c.caseId), cascade: false, productPitch: null,
     };
   }
   const offered = await loadRecipientProduct(db, recipientId, { includeLegacy: true });
-  if (!offered) return { offerText: general, cascade: true, productPitch: null, caseIds: [] };
+  if (!offered) return {
+    offerText: ['Продукт получателя не установлен: не выбирай его по догадке, не называй тарифы и гарантии. Если без этого нельзя ответить по существу — outcome=review.', general].filter(Boolean).join('\n'),
+    cascade: true, productPitch: null, caseIds: [],
+  };
   const own = (await loadProductOfferTexts(db, folder.id, log))[offered.product];
   const text = typeof own === 'string' ? own.trim() : '';
   const cases = (await loadCases(db)).filter((c) => caseAllowedForProduct(c, offered.product))
@@ -182,7 +185,11 @@ export async function offerContextFor(
     ...selected.map((c) => `- [case_id=${c.case_id}; отрасли=${c.industry_groups.join(',')}] ${c.case_text_short.trim()}`),
     'По вопросу клиента выбери максимум один подходящий пример и передай его в 1–2 предложениях. Не повторяй уже приведённый пример без необходимости. Сохрани роль и фактический исход: запрос подробностей не равен встрече, встреча не равна продаже; отказ и отложенный контакт не выдавай за успех. Не обещай повторить цифры у клиента. Доказательства выхода на роль получены в клиентских кампаниях Polza; отдельный канал этих кампаний не приписывай ручной SDR-услуге.',
   ].join('\n') : '';
-  return { offerText: [text || general, proof].filter(Boolean).join('\n\n'), cascade: true, productPitch: productPitchOf(offered.product), caseIds: selected.map((c) => c.case_id) };
+  const notes = [general, text].filter(Boolean).join('\n');
+  return {
+    offerText: [productKnowledgeText(offered.product), notes ? `ДОПОЛНЕНИЯ (не отменяют границы продукта выше):\n${notes}` : '', proof].filter(Boolean).join('\n\n'),
+    cascade: true, productPitch: productPitchOf(offered.product), caseIds: selected.map((c) => c.case_id),
+  };
 }
 
 /** Ответил ли оператор с портала: ручное письмо, не автопередача, не передача клиенту и не ИИ. */

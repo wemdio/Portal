@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { PRODUCTS, PRODUCT_SHORT_LABELS } from '@/lib/polzaRuOutreach/cascade';
+import { hasProductKnowledge } from '@/lib/polzaRuOutreach/productKnowledge';
 import {
   AI_OFFER_TEXT_MAX,
   DEFAULT_LEAD_CRITERIA,
@@ -79,7 +80,7 @@ export interface LeadSettingsDto {
   criteria: string;
   /** Квалифицирующий ИИ ведёт переписку до передачи (только автоаутрич). */
   aiEnabled: boolean;
-  /** «Короткое КП» — единственный источник цен и кейсов для писем ИИ. */
+  /** Необязательное дополнение к автоматически подключённым материалам продукта. */
   aiOfferText: string;
   /** Короткие КП по продуктам каскада (auto_ru); продукта нет — ИИ берёт общее «Короткое КП». */
   aiOfferTexts: ProductTexts;
@@ -243,7 +244,7 @@ export function parseSettingsInput(
     if (aiOfferText != null && typeof aiOfferText !== 'string') return { ok: false, error: 'aiOfferText — текст' };
     const offer = (aiOfferText ?? '').trim();
     if (offer.length > AI_OFFER_TEXT_MAX) return { ok: false, error: `«Короткое КП» — не длиннее ${AI_OFFER_TEXT_MAX} символов` };
-    if (aiEnabled && !offer) return { ok: false, error: 'Заполните «Короткое КП» — без него ИИ не включается' };
+    if (aiEnabled && !offer && !hasProductKnowledge(folderKey)) return { ok: false, error: 'Заполните «Короткое КП» — без него ИИ не включается' };
     value.ai_enabled = aiEnabled;
     value.ai_offer_text = offer || null;
   }

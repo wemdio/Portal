@@ -339,7 +339,7 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
             <div>
               <div className="flex items-baseline justify-between gap-3">
                 <label htmlFor={`ai-offer-${folderKey}`} className="text-sm font-medium text-zinc-900">
-                  Короткое КП
+                  Дополнительные указания (необязательно)
                 </label>
                 <span className={`text-xs ${aiOfferText.trim().length > AI_OFFER_TEXT_MAX ? 'text-red-600' : 'text-zinc-400'}`}>
                   {aiOfferText.trim().length} / {AI_OFFER_TEXT_MAX}
@@ -353,11 +353,11 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
                   touch();
                 }}
                 rows={4}
-                placeholder="Что делаем, ориентир цены, кейс"
+                placeholder="Дополнения к согласованным материалам: например, актуальные ограничения кампании"
                 className="mt-1.5 w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
               />
               <p className="mt-1 text-xs text-zinc-500">
-                {productFolder ? 'Запасное: если у продукта ниже нет своего КП.' : 'Цены и кейсы ИИ берёт только отсюда.'}
+                Сведения о продукте уже подключены из переданных материалов, кейсы — из библиотеки. Повторно заполнять их не нужно.
               </p>
             </div>
 
@@ -366,11 +366,11 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
                 <div>
                   <h3
                     className="text-sm font-semibold text-zinc-900"
-                    title="Текст нужен ИИ в переписке, ссылка идёт менеджеру в сообщении о лиде. Нет текста продукта — ИИ берёт общее «Короткое КП», нет ссылки — строки «КП» в сообщении не будет."
+                    title="Материалы каждого продукта подключены автоматически. Здесь можно добавить уточнения и ссылку для менеджера."
                   >
-                    КП по продуктам
+                    Уточнения и ссылки по продуктам
                   </h3>
-                  <p className="text-xs text-zinc-500">Пусто — берётся общее «Короткое КП», ссылка не показывается.</p>
+                  <p className="text-xs text-zinc-500">Все поля необязательные. Пустое поле не отключает знания из презентации соответствующего продукта.</p>
                 </div>
                 {PRODUCTS.map((product) => {
                   const text = productOffers[product];
@@ -392,7 +392,7 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
                           touch();
                         }}
                         rows={3}
-                        placeholder="Короткое КП этого продукта: что делаем, ориентир цены, кейс"
+                        placeholder="Необязательное уточнение по этому продукту"
                         className="w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
                       />
                       <div>

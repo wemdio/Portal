@@ -27,7 +27,7 @@ export function aiQualifierConfig(env: NodeJS.ProcessEnv = process.env): AiQuali
 export interface AiPromptInput {
   /** Запасной язык письма, если по письму лида не понять. */
   language: 'ru' | 'en';
-  /** «Короткое КП» продукта (auto_ru) или папки — единственный источник цен и кейсов. */
+  /** Автоматический контекст из материалов продукта, уточнений и утверждённых кейсов. */
   offerText: string;
   /**
    * Русский автоаутрич (auto_ru): ответ прогревает к разговору с менеджером, а не

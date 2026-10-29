@@ -72,7 +72,7 @@ async function main(): Promise<void> {
       console.log(`=== ${folder.key} · ${recipient?.email ?? row.recipient_id} → ошибка: ${err instanceof Error ? err.message : String(err)}\n`);
     }
   }
-  if (folders?.some((f) => !f.ai_offer_text)) console.log('Внимание: у папки без «Короткого КП» ИИ пишет без цен и кейсов.');
+  console.log('Продуктовые материалы подключаются автоматически; ручные поля — необязательные дополнения.');
 }
 
 main().then(() => process.exit(0)).catch((err) => {
