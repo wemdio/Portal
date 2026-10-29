@@ -9,6 +9,7 @@
 
 import { createHash } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { isProduct, type Product } from './cascade';
 
 export interface SenderProfile {
   id: string;
@@ -23,7 +24,8 @@ export interface SenderProfile {
 /**
  * Кейс идёт в письмо, только если лидов в нём от этого числа (решение
  * 24.09.2026): слабый кейс в письме работает против нас. Кейс без числа
- * лидов не идёт тоже.
+ * лидов не идёт тоже. Отдельное SDR-доказательство выхода на роль
+ * подтверждается ответом в журнале, а не этим порогом.
  */
 export const MIN_CASE_LEADS = 8;
 
@@ -33,6 +35,17 @@ export interface CaseRecord {
   industry_groups: string[];
   allowed_chains: string[];
   case_text_short: string;
+  /** Выход на роль подтверждается ответом, а не количеством лидов кампании. */
+  evidence_type?: 'campaign_result' | 'role_contact';
+  /** Отказы и отложенные контакты доступны для разбора в диалоге, не холодного письма. */
+  cold_email?: boolean;
+}
+
+/** Продукт имеет приоритет над поводом. Старые кейсы без разметки — классика. */
+export function caseAllowedForProduct(record: CaseRecord, product: Product): boolean {
+  const products = record.allowed_chains.filter(isProduct);
+  if (products.length) return products.includes(product);
+  return record.evidence_type !== 'role_contact' && (product === 'classic' || product === 'classic_abroad');
 }
 
 export interface OfferClaim {
@@ -55,6 +68,27 @@ function isActive(expiresAt: unknown, now: number): boolean {
   return Number.isFinite(t) && t > now;
 }
 
+/** Одна библиотека для писем и ответов ИИ; подтверждение SDR не выдаём за 8 лидов. */
+export async function loadCases(db: SupabaseClient): Promise<CaseRecord[]> {
+  const { data, error } = await db.from('polza_ru_cases').select('*')
+    .eq('status', 'approved').eq('legal_publication_approved', true).order('case_id');
+  if (error) throw new Error(`cases load failed: ${error.message}`);
+  const now = Date.now();
+  return (data ?? []).filter((c) => {
+    const role = c.metrics?.evidence_type === 'role_contact' && c.allowed_chains?.includes('sdr');
+    return typeof c.case_text_short === 'string' && Boolean(c.case_text_short.trim())
+      && isActive(c.expires_at, now) && (role || (typeof c.leads_count === 'number' && c.leads_count >= MIN_CASE_LEADS));
+  }).map((c) => ({
+    case_id: String(c.case_id),
+    public_name: String(c.public_name),
+    industry_groups: (c.industry_groups ?? []) as string[],
+    allowed_chains: (c.allowed_chains ?? []) as string[],
+    case_text_short: String(c.case_text_short),
+    evidence_type: c.metrics?.evidence_type === 'role_contact' ? 'role_contact' : 'campaign_result',
+    cold_email: c.metrics?.cold_email !== false,
+  }));
+}
+
 export async function loadLibraries(db: SupabaseClient, senderId: string | null): Promise<Libraries> {
   const now = Date.now();
 
@@ -67,13 +101,7 @@ export async function loadLibraries(db: SupabaseClient, senderId: string | null)
     (senders ?? [])[0] ??
     null;
 
-  const { data: cases, error: casesErr } = await db
-    .from('polza_ru_cases')
-    .select('*')
-    .eq('status', 'approved')
-    .eq('legal_publication_approved', true)
-    .gte('leads_count', MIN_CASE_LEADS);
-  if (casesErr) throw new Error(`cases load failed: ${casesErr.message}`);
+  const cases = await loadCases(db);
 
   const { data: claims, error: claimsErr } = await db
     .from('polza_ru_offer_claims')
@@ -99,15 +127,7 @@ export async function loadLibraries(db: SupabaseClient, senderId: string | null)
           telegram: sender.telegram ?? null,
         }
       : null,
-    cases: (cases ?? [])
-      .filter((c) => isActive(c.expires_at, now))
-      .map((c) => ({
-        case_id: String(c.case_id),
-        public_name: String(c.public_name),
-        industry_groups: (c.industry_groups ?? []) as string[],
-        allowed_chains: (c.allowed_chains ?? []) as string[],
-        case_text_short: String(c.case_text_short),
-      })),
+    cases,
     claims: activeClaims.map((c) => ({
       id: String(c.id),
       chain_type: String(c.chain_type),

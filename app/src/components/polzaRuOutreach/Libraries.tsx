@@ -12,6 +12,7 @@ import {
   MIN_CASE_LEADS,
   applyListQuery,
   isBelowLeadBar,
+  isRoleProof,
   leadsOf,
   paginate,
   type ListQuery,
@@ -170,7 +171,7 @@ function LibrarySection({
                     <span className="truncate text-sm font-medium text-gray-900">{meta.primary(r) || '—'}</span>
                     {r.case_id ? <span className="font-mono text-xs text-gray-500">{String(r.case_id)}</span> : null}
                     <Badge tone={r.status === 'approved' || r.status === 'active' ? 'ok' : 'muted'}>{statusLabel(table, r.status)}</Badge>
-                    {meta.isCases && <Badge tone="muted">{leads === null ? 'лиды не указаны' : `${leads} лидов`}</Badge>}
+                    {meta.isCases && <Badge tone="muted">{isRoleProof(r) ? 'выход на роль' : leads === null ? 'лиды не указаны' : `${leads} лидов`}</Badge>}
                     {belowBar && <Badge tone="warn">в письма не идёт: меньше {MIN_CASE_LEADS} лидов</Badge>}
                     {r.is_default ? <Badge tone="muted">по умолчанию</Badge> : null}
                     {r.expires_at ? <span className="text-xs text-gray-500">до {fmtDate(String(r.expires_at))}</span> : null}

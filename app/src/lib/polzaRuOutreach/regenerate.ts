@@ -55,13 +55,15 @@ import {
   writerAttemptWorstUsd,
   type ChainTemplate,
 } from './letters/templateWriter';
-import type { Libraries, SenderProfile } from './libraries';
-import { chainOfSignal } from './router';
+import { caseAllowedForProduct, type Libraries, type SenderProfile } from './libraries';
+import { chainOfSignal, routeCase } from './router';
 import {
   CHAIN_TYPES,
+  INDUSTRY_GROUPS,
   TEMPLATE_VERSION,
   sanitizeRuOutreachConfig,
   type ChainType,
+  type IndustryGroup,
   type RuOutreachConfig,
   type Signal,
   type TemplateKey,
@@ -487,6 +489,12 @@ function companyInput(row: WaitingRow, key: TemplateKey, libraries: Libraries): 
   const prior = row.prior_contact === true;
   const fitReasons = Array.isArray(row.fit_reasons) ? row.fit_reasons : [];
   const productLine = fitReasons.find((r): r is string => typeof r === 'string' && r.startsWith(PRODUCT_PREFIX));
+  const industryLine = fitReasons.find((r): r is string => typeof r === 'string' && r.startsWith('Отрасль: '));
+  const group = industryLine?.slice('Отрасль: '.length);
+  const industry = group && (INDUSTRY_GROUPS as readonly string[]).includes(group) ? group as IndustryGroup : null;
+  const storedCase = row.case_id ? libraries.cases.find((c) => c.case_id === row.case_id) : null;
+  const caseRecord = storedCase && storedCase.cold_email !== false && caseAllowedForProduct(storedCase, product)
+    ? storedCase : routeCase(libraries.cases, industry, chain, product)?.record ?? null;
   return {
     chain,
     product,
@@ -499,7 +507,7 @@ function companyInput(row: WaitingRow, key: TemplateKey, libraries: Libraries): 
     marketQuote: row.market_evidence_quote,
     productSummary: productLine ? productLine.slice(PRODUCT_PREFIX.length) : null,
     targetMarket: row.target_market,
-    caseRecord: row.case_id ? libraries.cases.find((c) => c.case_id === row.case_id) ?? null : null,
+    caseRecord,
     recipientEmail: row.recipient_email ?? '',
     amoStatus: row.amo_status,
     // Оба варианта письма 1 пересобираются вместе: второй нужен, если среди

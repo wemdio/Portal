@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { buildMessageId } from '@/lib/mail/message';
 import { loadRecipientProduct } from '@/lib/polzaRuOutreach/rowProduct';
+import { caseAllowedForProduct, loadCases } from '@/lib/polzaRuOutreach/libraries';
 import { withHistory } from '@/lib/agencyLeadHandoff/process';
 import { loadHandoffSettings } from '@/lib/agencyLeadHandoff/settings';
 import { isWithinWindow, nextWindowSlot, type SendWindow } from '@/lib/sender/sendWindow';
@@ -145,11 +146,27 @@ export async function offerContextFor(
 ): Promise<Pick<AiPromptInput, 'offerText' | 'cascade' | 'productPitch'>> {
   const general = folder.ai_offer_text ?? '';
   if (folder.key !== 'auto_ru') return { offerText: general, cascade: false, productPitch: null };
-  const offered = await loadRecipientProduct(db, recipientId);
+  const offered = await loadRecipientProduct(db, recipientId, { includeLegacy: true });
   if (!offered) return { offerText: general, cascade: true, productPitch: null };
   const own = (await loadProductOfferTexts(db, folder.id, log))[offered.product];
   const text = typeof own === 'string' ? own.trim() : '';
-  return { offerText: text || general, cascade: true, productPitch: productPitchOf(offered.product) };
+  const cases = (await loadCases(db)).filter((c) => caseAllowedForProduct(c, offered.product))
+    .sort((a, b) => Number(b.cold_email !== false) - Number(a.cold_email !== false));
+  // По одному примеру отрасли, затем дополнительные: один первый сектор не занимает весь контекст.
+  const groups = new Set<string>();
+  const diverse = cases.filter((c) => {
+    const key = c.industry_groups[0] ?? c.case_id;
+    if (groups.has(key)) return false;
+    groups.add(key);
+    return true;
+  });
+  const selected = [...diverse, ...cases.filter((c) => !diverse.includes(c))].slice(0, 8);
+  const proof = selected.length ? [
+    'ПРОВЕРЕННЫЕ КЕЙСЫ ЭТОГО ПРОДУКТА:',
+    ...selected.map((c) => `- ${c.case_text_short.trim()}`),
+    'По вопросу клиента выбери максимум один подходящий пример и передай его в 1–2 предложениях. Не повторяй уже приведённый пример без необходимости. Сохрани роль и фактический исход: запрос подробностей не равен встрече, встреча не равна продаже; отказ и отложенный контакт не выдавай за успех. Не обещай повторить цифры у клиента. Доказательства выхода на роль получены в клиентских кампаниях Polza; отдельный канал этих кампаний не приписывай ручной SDR-услуге.',
+  ].join('\n') : '';
+  return { offerText: [text || general, proof].filter(Boolean).join('\n\n'), cascade: true, productPitch: productPitchOf(offered.product) };
 }
 
 /** Ответил ли оператор с портала: ручное письмо, не автопередача, не передача клиенту и не ИИ. */

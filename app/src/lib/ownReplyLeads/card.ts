@@ -1,4 +1,5 @@
 import { extractAuthoredReplyText, getBodyText, type ThreadContext } from '@/lib/instantly/leadQualifier';
+import { isEnAgencyCampaign } from '@/lib/instantly/ownAgencyCampaign';
 import { isFreeProvider } from '@/lib/emailValidation/shared';
 import { stripQuoted } from '@/lib/senderLeads/telegram';
 
@@ -132,6 +133,6 @@ export function buildOwnReplyTgMessage(input: OwnReplyTgInput): string {
   if (reply) lines.push('', '<b>Ответ:</b>', `<pre>${escapeHtml(clip(reply, REPLY_PREVIEW_MAX))}</pre>`);
   if (input.aiReason) lines.push('', `<b>ИИ:</b> ${escapeHtml(clip(input.aiReason, REASON_MAX))}`);
   if (input.leadUrl) lines.push('', `🔗 <a href="${escapeHtml(input.leadUrl)}">Сделка в AMO</a>`);
-  lines.push('', '@u_obt');
+  if (isEnAgencyCampaign(input.campaignName)) lines.push('', '@u_obt');
   return lines.join('\n');
 }

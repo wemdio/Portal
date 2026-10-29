@@ -79,7 +79,7 @@ export const FIELDS: Record<TableKey, Field[]> = {
       key: 'leads_count',
       label: 'Сколько лидов дал кейс',
       type: 'text',
-      hint: `в письма идут только кейсы от ${MIN_CASE_LEADS} лидов; пусто — кейс не используется`,
+      hint: `результаты кампаний — от ${MIN_CASE_LEADS} лидов; у SDR-доказательства выхода на роль число лидов не требуется`,
     },
     {
       group: 'Подбор',
@@ -95,7 +95,7 @@ export const FIELDS: Record<TableKey, Field[]> = {
       label: 'В каких цепочках и продуктах можно',
       type: 'multi',
       options: CHAIN_AND_PRODUCT_OPTIONS,
-      hint: 'подходит, если отмечен повод компании или её продукт; ничего не отмечено — во всех',
+      hint: 'если указан продукт, кейс используется только для него; без продукта — классика. SDR-доказательства не подменяют кейсы классики или автоаутрича',
     },
 
     { group: 'Служебное', key: 'status', label: 'Статус', type: 'select', options: STATUS_OPTIONS },
