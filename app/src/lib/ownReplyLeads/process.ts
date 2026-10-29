@@ -18,6 +18,7 @@ import { AmoHttpError, type AmoClient } from '@/lib/crm/amoClient';
 import { processCrmQueue, type CrmDealSpec, type CrmQueueRow } from '@/lib/crm/dealQueue';
 import { senderLeadsAi, type Log, type SenderLeadsAi } from '@/lib/senderLeads/process';
 import { leadTelegramConfig, sendLeadMessage, type LeadTelegramConfig } from '@/lib/senderLeads/telegram';
+import { applyOwnRuReplyPolicy } from './qualification';
 import {
   buildOwnReplyCard,
   buildOwnReplyTgMessage,
@@ -318,7 +319,7 @@ async function qualifyOne(
       return 'wait';
     }
     const leadCriteria = criteriaForCampaign(criteria, row.campaign_name);
-    const verdict = await qualifyReply(row.campaign_id, row.lead_email, row.thread_id, {
+    const aiVerdict = await qualifyReply(row.campaign_id, row.lead_email, row.thread_id, {
       apiKey: ai.apiKey,
       ...(ai.model ? { model: ai.model } : {}),
       // Пустая строка, а не null: при null квалификатор искал бы бриф кампании.
@@ -327,6 +328,7 @@ async function qualifyOne(
       prefetchedContext: ctx,
       maxRetries: 1,
     }, 'main');
+    const verdict = applyOwnRuReplyPolicy(row.campaign_name, ctx, aiVerdict);
     // Сначала задача в AMO, потом отметка «лид»: упадёт вставка — строка
     // останется pending и повторится, а лид не потеряется.
     if (verdict.isLead) await enqueuePush(db, row, ctx, log);
@@ -556,9 +558,10 @@ export async function dryRunOwnReplies(instantlyDb: SupabaseClient, criteria: Ow
     try {
       const ctx = await fetchThreadContext(r.campaign_id, r.lead_email, r.thread_id, 'main', { consumer: CONSUMER, requestPriority: 'bulk' });
       if (!ctx || ctx.historyFetchFailed) { out.push({ ...base, verdict: 'error', reason: 'переписка не прочиталась' }); continue; }
-      const v = await qualifyReply(r.campaign_id, r.lead_email, r.thread_id, {
+      const aiVerdict = await qualifyReply(r.campaign_id, r.lead_email, r.thread_id, {
         apiKey: ai.apiKey, ...(ai.model ? { model: ai.model } : {}), briefText: '', leadCriteria: criteriaForCampaign(criteria, campaigns.get(r.campaign_id)), prefetchedContext: ctx, maxRetries: 1,
       }, 'main');
+      const v = applyOwnRuReplyPolicy(campaigns.get(r.campaign_id), ctx, aiVerdict);
       out.push({ ...base, verdict: v.isLead ? 'lead' : 'not_lead', reason: (v.reason ?? '').slice(0, 300) });
     } catch (err) {
       log('warn', `dry-run ${r.email_id}: ${errorText(err)}`);
