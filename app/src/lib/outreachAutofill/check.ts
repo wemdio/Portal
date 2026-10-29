@@ -58,18 +58,20 @@ interface FolderState {
   remaining: number;
   weekdays: number[];
   timezone: string;
+  reactivationRemaining?: number;
 }
 
 async function loadFolderState(lang: AutofillLang): Promise<FolderState | null> {
   const { data, error } = await db().rpc('outreach_autofill_folder_state', { p_folder_key: AUTOFILL_FOLDER_KEY[lang] });
   if (error) throw new Error(`состояние папки не прочитано: ${error.message}`);
   if (!data) return null;
-  const raw = data as { per_day?: unknown; remaining?: unknown; send_weekdays?: unknown; timezone?: unknown };
+  const raw = data as { per_day?: unknown; remaining?: unknown; reactivation_remaining?: unknown; send_weekdays?: unknown; timezone?: unknown };
   return {
     perDay: Number(raw.per_day ?? 0),
     remaining: Number(raw.remaining ?? 0),
     weekdays: Array.isArray(raw.send_weekdays) ? raw.send_weekdays.map(Number) : [1, 2, 3, 4, 5],
     timezone: typeof raw.timezone === 'string' && raw.timezone ? raw.timezone : 'Europe/Moscow',
+    ...(lang === 'ru' ? { reactivationRemaining: Number(raw.reactivation_remaining ?? raw.remaining ?? 0) } : {}),
   };
 }
 
@@ -259,7 +261,8 @@ async function checkBase(lang: AutofillLang, now: Date, log: Log): Promise<void>
     last_job_target: plan.target,
     last_job_handled: false,
   });
-  log('info', `Автодобор ${lang}: в базе ${folder.remaining} при ${folder.perDay}/день — запущен сбор на ${plan.target} (${job.id})`);
+  const mix = plan.newTarget === undefined ? '' : `, новых не меньше ${plan.newTarget}, реактивации не больше ${plan.reactivationTarget}`;
+  log('info', `Автодобор ${lang}: в базе ${folder.remaining} при ${folder.perDay}/день — запущен сбор на ${plan.target}${mix} (${job.id})`);
 }
 
 /** Тик воркера: разбор автосборов и, в часы проверки, проверка базы. Не бросает. */
