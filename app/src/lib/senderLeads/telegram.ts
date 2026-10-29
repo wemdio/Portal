@@ -1,4 +1,5 @@
 import { editMessageText, sendMessage } from '@/lib/tgBot/telegramClient';
+import { LEAD_DATE_FIRST_ATTRIBUTION, LEAD_DATED_ATTRIBUTION, LEAD_MONTH_FIRST_ATTRIBUTION } from '@/lib/instantly/leadReplyHtml';
 
 /**
  * Лид «Рассылки» → общий ТГ-чат продаж.
@@ -44,16 +45,28 @@ export function clip(text: string, max: number): string {
 
 /** Ответ без процитированной переписки: в чате нужен сам ответ, а не наше письмо под ним. */
 export function stripQuoted(body: string): string {
-  const lines = body.replace(/\r\n?/g, '\n').split('\n');
+  const lines = body.replace(/\r\n?/g, '\n').trim().split('\n');
   const cut = lines.findIndex((line) => {
     const t = line.trim();
     return t.startsWith('>')
       || /^On\b.*\bwrote:$/i.test(t)
-      || /написал(а)?:$/i.test(t)
+      || /(?:написал|писал|пишет)(?:а|\(а\))?:$/i.test(t)
+      || LEAD_DATED_ATTRIBUTION.test(t)
+      || LEAD_DATE_FIRST_ATTRIBUTION.test(t)
+      || LEAD_MONTH_FIRST_ATTRIBUTION.test(t)
       || /^-{2,}\s*Original Message/i.test(t)
       || /^From:\s/i.test(t);
   });
-  return (cut > 0 ? lines.slice(0, cut) : lines).join('\n').trim();
+  if (cut > 0) return lines.slice(0, cut).join('\n').trim();
+  if (cut === 0) {
+    // Клиент может ответить под цитатой: заголовок «Егор писал(а) …»
+    // и строки с «>» — история, ответ идёт после последней из них.
+    let lastQuoted = -1;
+    lines.forEach((line, index) => { if (line.trim().startsWith('>')) lastQuoted = index; });
+    const below = lastQuoted >= 0 ? lines.slice(lastQuoted + 1).join('\n').trim() : '';
+    if (below) return below;
+  }
+  return lines.join('\n').trim();
 }
 
 export interface LeadMessageInput {
