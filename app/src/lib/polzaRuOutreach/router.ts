@@ -14,7 +14,7 @@
  */
 
 import type { Product } from './cascade';
-import type { CaseRecord } from './libraries';
+import { caseAllowedForProduct, type CaseRecord } from './libraries';
 import type { ChainType, IndustryGroup, Signal, SignalType } from './types';
 
 const DAY = 86_400_000;
@@ -303,11 +303,10 @@ export function routeCase(
   chain: ChainType,
   product: Product,
 ): { record: CaseRecord; reason: string } | null {
-  // С 09.10.2026 кейс по отрасли есть и в письме 3 цепочки «найм»
-  // (утверждённые тексты); раньше SDR-цепочке его не подбирали.
-  if (!group) return null;
-  const hit = cases.find(
-    (c) => c.industry_groups.includes(group) && (!c.allowed_chains.length || c.allowed_chains.includes(chain) || c.allowed_chains.includes(product)),
-  );
-  return hit ? { record: hit, reason: `отраслевая группа «${group}»` } : null;
+  const eligible = cases.filter((c) => c.cold_email !== false && caseAllowedForProduct(c, product)
+    && (!c.allowed_chains.length || c.allowed_chains.includes(chain) || c.allowed_chains.includes(product)));
+  const hit = (group ? eligible.find((c) => c.industry_groups.includes(group)) : null)
+    // SDR доказывает выход на роль; для него допустим проверенный пример из другой отрасли.
+    ?? (product === 'sdr' ? eligible.find((c) => c.evidence_type === 'role_contact') : null);
+  return hit ? { record: hit, reason: product === 'sdr' ? 'подтверждённый выход на роль' : `отраслевая группа «${group}»` } : null;
 }
