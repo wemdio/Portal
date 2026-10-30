@@ -14,7 +14,7 @@ const MAX_METADATA_BYTES = 128 * 1024;
 const MAX_HTML_CHARS = 500_000;
 const TIMEOUT_MS = 15_000;
 const METADATA_TIMEOUT_MS = 4_000;
-const DAILY_REMOTE_LIMIT = 800;
+const DAILY_REMOTE_LIMIT = 1000;
 const CHALLENGE = /(?:captcha|access denied|checking your browser|verify (?:that )?you are human|just a moment|security challenge|cloudflare ray id|automated (?:access|requests)|bot detection|login required)/i;
 
 export interface EngTinyfishFallbackInput {

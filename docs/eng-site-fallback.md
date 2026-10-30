@@ -64,7 +64,7 @@ stable `ENG_TINYFISH_ACCOUNT_ID` shared by all Portal workers using the account.
 Before every Fetch, the reader makes two bounded, read-only API calls: the
 wallet must report exactly one USD per-URL Fetch meter at a zero rate, with a
 rate timestamp at most five minutes old; the current UTC day's Fetch usage
-must be below 800 operations. Unknown, stale, duplicate, nonzero or unavailable
+must be below 1,000 operations. Unknown, stale, duplicate, nonzero or unavailable
 metadata closes the fallback without a Fetch. The observed rate is not a
 contractual guarantee that the provider cannot change pricing between calls.
 
@@ -76,10 +76,13 @@ live rate check and usage cap meaningful safeguards rather than a guarantee.
 
 Deploy the matching `eng_tinyfish_budget` migration through the normal release
 process before enabling. Its transactional Postgres gate reserves one URL per
-attempt and limits this Portal account identifier to 800 URLs per rolling 24h
-and 120 per rolling minute, below published limits. Reservations are not
+attempt and limits this Portal account identifier to 1,000 URLs per rolling 24h
+and 120 per rolling minute. The daily ceiling matches the published free quota;
+the minute ceiling remains below the provider's limit. Reservations are not
 refunded on failures or unknown outcomes. Missing credentials, migration, DB,
 invalid account configuration, budget exhaustion or timeouts all fail closed.
+The 1,000-URL ceiling requires `20261030_0001_eng_tinyfish_daily_limit.sql`;
+it preserves reservations recorded before the upgrade.
 The provider usage count is an additional conservative check, not an atomic
 account-wide cap: other clients can consume the account concurrently, and
 provider usage may lag. Prefer reserving this account for Portal use.
@@ -93,6 +96,10 @@ same company-site boundary. TinyFish documents blocking private destinations,
 but its remote DNS and redirect resolution are outside Portal's direct control.
 HTTP calls have a bounded time and body size and no retries. A provider error or
 limit does not fail the original collection or convert a refusal into evidence.
+At quota exhaustion, the reader keeps the existing HTTP/browser result and
+continues the collection without TinyFish. It does not switch to paid requests
+or retry previously skipped pages automatically. New eligible page reads may
+use TinyFish again once both quota checks allow it.
 
 ## Search comparison, 29 October 2026
 
