@@ -108,7 +108,7 @@ export function decideStep(step: AiStep, ctx: {
         return { kind: 'close', letter: null };
       }
       // Отказ с номером в подписи не становится подтверждённым интересом.
-      if ((step.relevant === 'yes' && step.contact) || step.outcome === 'handoff') {
+      if ((step.relevant === 'yes' && looksLikeContact(step.contact)) || step.outcome === 'handoff') {
         return { kind: 'review', reason: 'Возражение противоречит подтверждённому интересу' };
       }
     }

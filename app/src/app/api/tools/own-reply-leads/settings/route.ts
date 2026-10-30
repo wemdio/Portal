@@ -38,12 +38,14 @@ export async function PUT(req: NextRequest) {
       .eq('id', 1);
     if (error) return jsonError(error.message, 500);
 
-    // Включение заводит сделки в AMO — кто и когда, должно быть в журнале.
+    // Включение заводит сделки и может отправлять письма — кто и когда, должно быть в журнале.
     await logAudit(
       'own.reply.leads.settings.updated',
       `Наши кампании: квалификация и сделки в AMO ${parsed.value.enabled ? 'включены' : 'выключены'}`,
       {
         enabled: parsed.value.enabled,
+        aiEnabledRu: parsed.value.aiEnabledRu ?? prev.aiEnabledRu,
+        aiEnabledEn: parsed.value.aiEnabledEn ?? prev.aiEnabledEn,
         criteriaRuLength: parsed.value.criteriaRu?.length ?? null,
         criteriaEnLength: parsed.value.criteriaEn?.length ?? null,
       },

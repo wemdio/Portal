@@ -22,6 +22,8 @@ export interface OwnHistoryRowDto {
   lastError: string | null;
   attempts: number;
   handoffNote: string | null;
+  aiReply: { status: string; decision: string | null; reason: string | null; sentAt: string | null } | null;
+  aiReplyStatus: string | null;
   crm: {
     status: 'pending' | 'sent' | 'failed';
     action: 'created' | 'note_added' | null;
@@ -58,7 +60,7 @@ export async function loadOwnHistory(db: Db, filter: OwnHistoryFilter, page: num
 
   let q = db
     .from('own_reply_qualifications')
-    .select('email_id, campaign_name, lead_email, reply_subject, reply_preview, reply_timestamp, status, ai_reason, last_error, attempts, handoff_note')
+    .select('email_id, campaign_name, lead_email, reply_subject, reply_preview, reply_timestamp, status, ai_reason, last_error, attempts, handoff_note, ai_reply_status')
     .order('reply_timestamp', { ascending: false, nullsFirst: false })
     .range((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE - 1);
   if (filter !== 'all') q = q.eq('status', filter);
@@ -67,11 +69,18 @@ export async function loadOwnHistory(db: Db, filter: OwnHistoryFilter, page: num
   const quals = (data ?? []) as Array<{
     email_id: string; campaign_name: string; lead_email: string; reply_subject: string | null; reply_preview: string | null;
     reply_timestamp: string | null; status: OwnHistoryRowDto['status']; ai_reason: string | null; last_error: string | null;
-    attempts: number; handoff_note: string | null;
+    attempts: number; handoff_note: string | null; ai_reply_status: string | null;
   }>;
 
   const pushes = new Map<string, OwnHistoryRowDto['crm']>();
+  const aiReplies = new Map<string, NonNullable<OwnHistoryRowDto['aiReply']>>();
   if (quals.length) {
+    const { data: turns, error: turnError } = await db.from('own_reply_ai_turns')
+      .select('email_id, status, decision, reason, sent_at').in('email_id', quals.map((r) => r.email_id));
+    if (turnError) throw new Error(turnError.message);
+    for (const t of turns ?? []) aiReplies.set(t.email_id, {
+      status: t.status, decision: t.decision, reason: t.reason, sentAt: t.sent_at,
+    });
     const { data: pushRows, error: pushError } = await db
       .from('own_reply_crm_pushes')
       .select('qualification_id, status, action, lead_url, amo_lead_name, error_message, tg_sent_at, tg_error, created_at')
@@ -103,6 +112,8 @@ export async function loadOwnHistory(db: Db, filter: OwnHistoryFilter, page: num
       lastError: r.last_error,
       attempts: r.attempts,
       handoffNote: r.handoff_note,
+      aiReply: aiReplies.get(r.email_id) ?? null,
+      aiReplyStatus: r.ai_reply_status,
       crm: pushes.get(r.email_id) ?? null,
     })),
     counts,

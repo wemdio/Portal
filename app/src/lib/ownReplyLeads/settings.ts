@@ -21,6 +21,10 @@ export interface OwnReplySettings {
   cursorAt: string | null;
   cursorId: string | null;
   criteria: OwnLeadCriteria;
+  aiEnabledRu: boolean;
+  aiEnabledEn: boolean;
+  aiEnabledAtRu: string | null;
+  aiEnabledAtEn: string | null;
 }
 
 interface SettingsRow {
@@ -30,9 +34,13 @@ interface SettingsRow {
   inbox_cursor_id: string | null;
   lead_criteria_ru: string | null;
   lead_criteria_en: string | null;
+  ai_enabled_ru: boolean;
+  ai_enabled_en: boolean;
+  ai_enabled_at_ru: string | null;
+  ai_enabled_at_en: string | null;
 }
 
-const COLUMNS = 'enabled, enabled_at, inbox_cursor_at, inbox_cursor_id, lead_criteria_ru, lead_criteria_en';
+const COLUMNS = 'enabled, enabled_at, inbox_cursor_at, inbox_cursor_id, lead_criteria_ru, lead_criteria_en, ai_enabled_ru, ai_enabled_en, ai_enabled_at_ru, ai_enabled_at_en';
 
 function cleanCriteria(value: string | null | undefined): string | null {
   const text = value?.trim() ?? '';
@@ -49,6 +57,8 @@ export async function loadOwnReplySettings(db: Pick<SupabaseClient, 'from'>): Pr
     cursorAt: row?.inbox_cursor_at ?? null,
     cursorId: row?.inbox_cursor_id ?? null,
     criteria: { ru: cleanCriteria(row?.lead_criteria_ru), en: cleanCriteria(row?.lead_criteria_en) },
+    aiEnabledRu: Boolean(row?.ai_enabled_ru), aiEnabledEn: Boolean(row?.ai_enabled_en),
+    aiEnabledAtRu: row?.ai_enabled_at_ru ?? null, aiEnabledAtEn: row?.ai_enabled_at_en ?? null,
   };
 }
 
@@ -84,10 +94,12 @@ export interface OwnReplySettingsDto {
   enabledAt: string | null;
   criteriaRu: string;
   criteriaEn: string;
+  aiEnabledRu: boolean;
+  aiEnabledEn: boolean;
 }
 
 export function ownReplySettingsDto(s: OwnReplySettings): OwnReplySettingsDto {
-  return { enabled: s.enabled, enabledAt: s.enabledAt, criteriaRu: s.criteria.ru ?? '', criteriaEn: s.criteria.en ?? '' };
+  return { enabled: s.enabled, enabledAt: s.enabledAt, criteriaRu: s.criteria.ru ?? '', criteriaEn: s.criteria.en ?? '', aiEnabledRu: s.aiEnabledRu, aiEnabledEn: s.aiEnabledEn };
 }
 
 export interface OwnReplySettingsInput {
@@ -95,13 +107,15 @@ export interface OwnReplySettingsInput {
   /** undefined — не менять; '' — очистить (общие правила квалификатора). */
   criteriaRu?: string;
   criteriaEn?: string;
+  aiEnabledRu?: boolean;
+  aiEnabledEn?: boolean;
 }
 
 export function parseOwnReplySettingsInput(body: unknown):
   | { ok: true; value: OwnReplySettingsInput }
   | { ok: false; error: string } {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: 'Невалидный JSON' };
-  const { enabled, criteriaRu, criteriaEn } = body as Record<string, unknown>;
+  const { enabled, criteriaRu, criteriaEn, aiEnabledRu, aiEnabledEn } = body as Record<string, unknown>;
   if (typeof enabled !== 'boolean') return { ok: false, error: 'enabled — да/нет' };
   const value: OwnReplySettingsInput = { enabled };
   for (const [key, raw] of [['criteriaRu', criteriaRu], ['criteriaEn', criteriaEn]] as const) {
@@ -110,6 +124,10 @@ export function parseOwnReplySettingsInput(body: unknown):
     if (raw.trim().length > LEAD_CRITERIA_MAX) return { ok: false, error: `Что считать лидом — не длиннее ${LEAD_CRITERIA_MAX} символов` };
     value[key] = raw.trim();
   }
+  if (aiEnabledRu !== undefined && typeof aiEnabledRu !== 'boolean') return { ok: false, error: 'ИИ RU — да/нет' };
+  if (aiEnabledEn !== undefined && typeof aiEnabledEn !== 'boolean') return { ok: false, error: 'ИИ EN — да/нет' };
+  if (aiEnabledRu !== undefined) value.aiEnabledRu = aiEnabledRu;
+  if (aiEnabledEn !== undefined) value.aiEnabledEn = aiEnabledEn;
   return { ok: true, value };
 }
 
@@ -130,6 +148,14 @@ export function ownReplySettingsPatch(
   };
   if (input.criteriaRu !== undefined) patch.lead_criteria_ru = input.criteriaRu || null;
   if (input.criteriaEn !== undefined) patch.lead_criteria_en = input.criteriaEn || null;
+  if (input.aiEnabledRu !== undefined) {
+    patch.ai_enabled_ru = input.aiEnabledRu;
+    if (input.aiEnabledRu && !prev.aiEnabledRu) patch.ai_enabled_at_ru = nowIso;
+  }
+  if (input.aiEnabledEn !== undefined) {
+    patch.ai_enabled_en = input.aiEnabledEn;
+    if (input.aiEnabledEn && !prev.aiEnabledEn) patch.ai_enabled_at_en = nowIso;
+  }
   if (input.enabled && !prev.enabled) {
     patch.enabled_at = nowIso;
     patch.inbox_cursor_at = nowIso;
