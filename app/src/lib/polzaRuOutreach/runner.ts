@@ -62,6 +62,7 @@ import {
 } from '@/lib/outreachLlm/context';
 import { pruneSiteAnalysisCache } from '@/lib/outreachLlm/siteAnalysisCache';
 import { outreachRunStopReason, type OutreachRunStopReason } from '@/lib/outreachLlm/runLimit';
+import { persistCandidateChunk } from '@/lib/outreachLlm/persistCandidates';
 import {
   JobOwner,
   JobStatusReader,
@@ -1963,9 +1964,7 @@ async function runJob(
       const ids: string[] = [];
       for (let i = 0; i < wave.length; i += DB_CHUNK) {
         const chunk = wave.slice(i, i + DB_CHUNK);
-        const { data, error } = await db
-          .from('polza_ru_outreach_companies')
-          .insert(
+        const chunkIds = await persistCandidateChunk(db, 'polza_ru_outreach_companies',
             chunk.map((c) => ({
               job_id: jobId,
               source_type: sourceTypeOf(c),
@@ -1980,10 +1979,11 @@ async function runJob(
               row_status: 'processing',
               pipeline_stage: 'candidates_loaded',
             })),
-          )
-          .select('id');
-        if (error) throw new Error(`journal insert failed: ${error.message}`);
-        for (const r of data ?? []) ids.push(String(r.id));
+          {
+            beforeAttempt: ensureNotCancelled,
+            onRetry: (attempt, delay, message) => log('warn', `job ${jobId}: кандидаты — БД временно недоступна, попытка ${attempt}/5 через ${delay} мс: ${message}`),
+          });
+        ids.push(...chunkIds);
       }
       totals.scanned += wave.length;
       const size: SizeIndex = await loadSizeByInn(db, wave.map((c) => c.inn).filter((x): x is string => Boolean(x)));

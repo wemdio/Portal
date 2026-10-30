@@ -55,6 +55,7 @@ import {
 } from '@/lib/outreachLlm/context';
 import { pruneSiteAnalysisCache } from '@/lib/outreachLlm/siteAnalysisCache';
 import { outreachRunStopReason, type OutreachRunStopReason } from '@/lib/outreachLlm/runLimit';
+import { persistCandidateChunk } from '@/lib/outreachLlm/persistCandidates';
 import {
   JobOwner,
   JobStatusReader,
@@ -1620,9 +1621,7 @@ async function runJob(
 
       const ids: string[] = [];
       for (let i = 0; i < wave.length; i += DB_CHUNK) {
-        const { data, error } = await db
-          .from('polza_outreach_companies')
-          .insert(
+        const chunkIds = await persistCandidateChunk(db, 'polza_outreach_companies',
             wave.slice(i, i + DB_CHUNK).map((c) => ({
               job_id: jobId,
               source_type: c.vacancy && c.yc ? 'hiring+yc' : c.vacancy ? 'hiring' : c.yc ? 'yc' : 'directory',
@@ -1635,10 +1634,11 @@ async function runJob(
               status: 'discovered',
               stage: ST.s1Selected,
             })),
-          )
-          .select('id');
-        if (error) throw new Error(`polza outreach S1 insert failed: ${error.message}`);
-        for (const r of data ?? []) ids.push(String(r.id));
+          {
+            beforeAttempt: ensureNotCancelled,
+            onRetry: (attempt, delay, message) => log('warn', `job ${jobId}: S1 БД временно недоступна, попытка ${attempt}/5 через ${delay} мс: ${message}`),
+          });
+        ids.push(...chunkIds);
       }
       totals.vacancies += wave.length;
       phase = 'finding_emails';
