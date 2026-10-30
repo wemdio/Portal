@@ -5,6 +5,7 @@ import { sameCompanySiteBoundary } from './companySiteAlias';
 import { createUsWebsiteFetchGuard, isPublicIpAddress } from './publicAddress';
 import { reserveEngTinyfishUrl } from './engTinyfishBudget';
 import { isEngHtmlBlocked } from './engPageFallbackPolicy';
+import { parseEngTinyfishAccounts } from './engTinyfishAccounts';
 
 const ENDPOINT = 'https://api.fetch.tinyfish.ai';
 const WALLET_ENDPOINT = 'https://agent.tinyfish.ai/v1/wallet';
@@ -31,14 +32,6 @@ export interface EngTinyfishFallbackResult {
   html: string;
   /** Provider-extracted DOM, scripts and styles stripped; not native response bytes. */
   source: 'tinyfish';
-}
-
-/** Optional, disabled by default; live price and quota checks happen separately. */
-function config(): { key: string; accountId: string } | null {
-  if (process.env.ENG_TINYFISH_ENABLED !== '1') return null;
-  const key = process.env.TINYFISH_API_KEY?.trim() ?? '';
-  const accountId = process.env.ENG_TINYFISH_ACCOUNT_ID?.trim() ?? '';
-  return key && /^[a-zA-Z0-9._-]{1,80}$/.test(accountId) ? { key, accountId } : null;
 }
 
 function urlOf(raw: string): URL | null {
@@ -105,7 +98,10 @@ async function readBounded(response: Response, signal: AbortSignal, maxBytes = M
 
 /** Read-only checks. Provider usage may lag and may not include all other
  * clients of an organisation; the shared local reservation remains mandatory. */
-async function freePreflight(key: string, signal: AbortSignal): Promise<string | null> {
+type FreePreflight = { kind: 'ready'; day: string } | { kind: 'daily_exhausted' | 'unavailable' };
+
+async function freePreflight(key: string, signal: AbortSignal): Promise<FreePreflight> {
+  const unavailable: FreePreflight = { kind: 'unavailable' };
   const day = new Date().toISOString().slice(0, 10);
   const usageUrl = new URL(USAGE_ENDPOINT);
   usageUrl.searchParams.set('start_after', `${day}T00:00:00Z`);
@@ -120,31 +116,32 @@ async function freePreflight(key: string, signal: AbortSignal): Promise<string |
   try {
     const [wallet, usage] = await Promise.all([read(WALLET_ENDPOINT), read(usageUrl.href)]);
     signal.throwIfAborted();
-    if (!wallet || typeof wallet !== 'object' || !usage || typeof usage !== 'object') return null;
+    if (!wallet || typeof wallet !== 'object' || !usage || typeof usage !== 'object') return unavailable;
     const rates = (wallet as { rates?: unknown }).rates;
-    if (!rates || typeof rates !== 'object') return null;
+    if (!rates || typeof rates !== 'object') return unavailable;
     const { meters, as_of: asOf } = rates as { meters?: unknown; as_of?: unknown };
-    if (!Array.isArray(meters) || typeof asOf !== 'string') return null;
+    if (!Array.isArray(meters) || typeof asOf !== 'string') return unavailable;
     const timestamp = Date.parse(asOf);
     const ageMs = Date.now() - timestamp;
-    if (!Number.isFinite(timestamp) || ageMs > 300_000 || ageMs < -60_000) return null;
+    if (!Number.isFinite(timestamp) || ageMs > 300_000 || ageMs < -60_000) return unavailable;
     const fetchMeters = meters.filter((meter: unknown) => meter && typeof meter === 'object' && (meter as { label?: unknown }).label === 'TinyFish Fetch');
-    if (fetchMeters.length !== 1) return null;
+    if (fetchMeters.length !== 1) return unavailable;
     const meter = fetchMeters[0] as { currency?: unknown; per?: unknown; unit_amount?: unknown };
-    if (meter.currency !== 'USD' || meter.per !== 'url' || typeof meter.unit_amount !== 'string' || !/^0(?:\.0{1,6})?$/.test(meter.unit_amount)) return null;
+    if (meter.currency !== 'USD' || meter.per !== 'url' || typeof meter.unit_amount !== 'string' || !/^0(?:\.0{1,6})?$/.test(meter.unit_amount)) return unavailable;
     const total = (usage as { total?: unknown }).total;
-    if (typeof total !== 'number' || !Number.isSafeInteger(total) || total < 0 || total >= DAILY_REMOTE_LIMIT) return null;
-    return new Date().toISOString().slice(0, 10) === day ? day : null;
-  } catch { signal.throwIfAborted(); return null; }
+    if (typeof total !== 'number' || !Number.isSafeInteger(total) || total < 0
+      || new Date().toISOString().slice(0, 10) !== day) return unavailable;
+    return total >= DAILY_REMOTE_LIMIT ? { kind: 'daily_exhausted' } : { kind: 'ready', day };
+  } catch { signal.throwIfAborted(); return unavailable; }
 }
 
-/** Caller must retain the real typed outcome of both prior attempts. No retry
- * on blocks, uncertain results, failure, limit exhaustion or provider errors. */
+/** Advance through an approved account pool only on confirmed daily exhaustion.
+ * Never retry a Fetch on another key after a block, error or uncertain outcome. */
 export async function fetchEngTinyfishFallback(input: EngTinyfishFallbackInput): Promise<EngTinyfishFallbackResult | null> {
   input.signal?.throwIfAborted();
   if (input.directOutcome !== 'empty_success' || !['empty_success', 'unavailable'].includes(input.browserOutcome)) return null;
-  const settings = config();
-  if (!settings) return null;
+  const accounts = parseEngTinyfishAccounts(process.env);
+  if (!accounts) return null;
   const requested = urlOf(input.url);
   const company = urlOf(input.companyUrl);
   if (!requested || !company || !sameCompanySiteBoundary(requested.href, company.href)) return null;
@@ -155,31 +152,37 @@ export async function fetchEngTinyfishFallback(input: EngTinyfishFallbackInput):
   try {
     input.signal?.throwIfAborted();
     if (!await publicUrl(requested, controller.signal)) return null;
-    const preflightDay = await freePreflight(settings.key, controller.signal);
-    if (!preflightDay) return null;
-    if (!await reserveEngTinyfishUrl(settings.accountId, controller.signal)) return null;
-    if (new Date().toISOString().slice(0, 10) !== preflightDay) return null;
-    const response = await fetch(ENDPOINT, {
-      method: 'POST', redirect: 'error', signal: controller.signal,
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': settings.key },
-      body: JSON.stringify({ urls: [requested.href], format: 'html', include_selectors: ['body'], ttl: 0, per_url_timeout_ms: 10_000 }),
-    });
-    if (!response.ok) {
-      void response.body?.cancel().catch(() => {});
-      return null;
+    for (const settings of accounts) {
+      const preflight = await freePreflight(settings.key, controller.signal);
+      if (preflight.kind === 'daily_exhausted') continue;
+      if (preflight.kind !== 'ready') return null;
+      const reservation = await reserveEngTinyfishUrl(settings.accountId, controller.signal);
+      if (reservation === 'daily_exhausted') continue;
+      if (reservation !== 'granted') return null;
+      if (new Date().toISOString().slice(0, 10) !== preflight.day) return null;
+      const response = await fetch(ENDPOINT, {
+        method: 'POST', redirect: 'error', signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': settings.key },
+        body: JSON.stringify({ urls: [requested.href], format: 'html', include_selectors: ['body'], ttl: 0, per_url_timeout_ms: 10_000 }),
+      });
+      if (!response.ok) {
+        void response.body?.cancel().catch(() => {});
+        return null;
+      }
+      const body = await readBounded(response, controller.signal);
+      if (!body) return null;
+      const data = JSON.parse(body) as { results?: Array<{ url?: unknown; final_url?: unknown; format?: unknown; text?: unknown }>; errors?: unknown[] };
+      if (!Array.isArray(data.results) || data.results.length !== 1 || !Array.isArray(data.errors) || data.errors.length) return null;
+      const result = data.results[0];
+      if (result.url !== requested.href || result.format !== 'html' || typeof result.final_url !== 'string' ||
+          typeof result.text !== 'string' || !result.text.trim() || result.text.length > MAX_HTML_CHARS ||
+          CHALLENGE.test(result.text) || isEngHtmlBlocked(result.text)) return null;
+      const finalUrl = urlOf(result.final_url);
+      if (!finalUrl || !sameCompanySiteBoundary(finalUrl.href, company.href) || !await publicUrl(finalUrl, controller.signal)) return null;
+      input.signal?.throwIfAborted();
+      return { url: finalUrl.href, html: result.text, source: 'tinyfish' };
     }
-    const body = await readBounded(response, controller.signal);
-    if (!body) return null;
-    const data = JSON.parse(body) as { results?: Array<{ url?: unknown; final_url?: unknown; format?: unknown; text?: unknown }>; errors?: unknown[] };
-    if (!Array.isArray(data.results) || data.results.length !== 1 || !Array.isArray(data.errors) || data.errors.length) return null;
-    const result = data.results[0];
-    if (result.url !== requested.href || result.format !== 'html' || typeof result.final_url !== 'string' ||
-        typeof result.text !== 'string' || !result.text.trim() || result.text.length > MAX_HTML_CHARS ||
-        CHALLENGE.test(result.text) || isEngHtmlBlocked(result.text)) return null;
-    const finalUrl = urlOf(result.final_url);
-    if (!finalUrl || !sameCompanySiteBoundary(finalUrl.href, company.href) || !await publicUrl(finalUrl, controller.signal)) return null;
-    input.signal?.throwIfAborted();
-    return { url: finalUrl.href, html: result.text, source: 'tinyfish' };
+    return null;
   } catch { input.signal?.throwIfAborted(); return null; }
   finally { clearTimeout(timer); input.signal?.removeEventListener('abort', abort); }
 }

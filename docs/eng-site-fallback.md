@@ -101,6 +101,53 @@ continues the collection without TinyFish. It does not switch to paid requests
 or retry previously skipped pages automatically. New eligible page reads may
 use TinyFish again once both quota checks allow it.
 
+### Provider-approved account pool
+
+An optional ordered pool supports accounts whose combined free use the provider
+has approved. The existing `TINYFISH_API_KEY` and `ENG_TINYFISH_ACCOUNT_ID` remain
+the first account. Without `ENG_TINYFISH_POOL_ENABLED=1`, only that account is used.
+To enable additional accounts, set this secret environment variable on every
+consumer with the same ordered list:
+
+```text
+ENG_TINYFISH_POOL_ENABLED=1
+ENG_TINYFISH_EXTRA_ACCOUNTS_JSON='[{"accountId":"tinyfish-secondary","key":"<secondary-api-key>"}]'
+```
+
+The JSON contains **additional** accounts only: one active key per distinct
+provider quota account, up to 19 additional accounts. Keep each `accountId`
+stable across key changes, releases and workers. Multiple keys for the same
+account do not create additional quota. Wallet metadata does not expose account
+identity, so the operator must ensure this mapping is correct. Duplicate IDs,
+duplicate keys, malformed JSON, missing keys or an explicitly invalid pool
+disable TinyFish rather than silently reverting to the first account. Secrets
+must stay outside Git and logs. A local protected JSON file may be used to
+prepare the list; its contents must then be supplied as the environment value,
+not as a filename.
+
+Apply `20261030_0002_eng_tinyfish_pool_budget.sql` before releasing the updated
+reader, even for single-account configuration. It preserves prior reservations
+and seeds a shared minute ledger from existing recent requests. Updated readers
+require budget RPC version 2; a missing migration disables TinyFish. Older
+readers still understand the RPC's `granted` field and use the same shared gate.
+Roll out the migration and readers with the pool disabled first. Drain older
+workers and let their in-flight RPCs finish before separately enabling the pool:
+an RPC already executing the previous function body may outlive the migration.
+Single-connection quota checks do not certify a mixed-version rollout.
+Each account retains 1,000 reservations per rolling 24 hours; **all accounts and
+workers together** share 120 reservations per rolling minute.
+
+The reader advances to the next account only when valid, current zero-price
+metadata confirms the first account's daily quota is exhausted, or the shared
+RPC explicitly refuses that account's daily quota. A shared minute limit,
+authentication failure, nonzero/unknown price, metadata error or ambiguous
+response stops TinyFish for that page. Once a Fetch is attempted, it is never
+repeated with another key, including after HTTP 429, timeout, challenge or empty
+content. One 15-second deadline covers the entire pool, not each account.
+When every account is exhausted, the existing HTTP/browser result is retained
+and the collection continues. Future eligible reads reconsider the accounts;
+previously skipped pages are not retried automatically.
+
 ## Search comparison, 29 October 2026
 
 Five exploratory public queries about the English-language insurance market
