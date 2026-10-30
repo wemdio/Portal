@@ -2,7 +2,7 @@ import 'server-only';
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-import { isProduct, legacyStepOf, type Product } from './cascade';
+import { firstStepFor, isProduct, legacyStepOf, type Product } from './cascade';
 import { CHAIN_TYPES, type ChainType } from './types';
 
 /**
@@ -50,7 +50,10 @@ export async function loadRecipientProduct(
   const row = found as { product: string | null; cascade_no: number | null; chain_type: string | null } | null;
   if (!row) return null;
   if (!row.product && options.includeLegacy && row.chain_type && (CHAIN_TYPES as readonly string[]).includes(row.chain_type)) {
-    return { product: legacyStepOf(row.chain_type as ChainType), cascadeNo: null };
+    // В старых строках `ad_budget` первое письмо уже предлагало автоаутрич.
+    // Не подмешиваем к ответу условия классики только из-за пустого product.
+    const chain = row.chain_type as ChainType;
+    return { product: chain === 'ad_budget' ? firstStepFor(chain) : legacyStepOf(chain), cascadeNo: null };
   }
   if (!row.product || !isProduct(row.product)) return null;
   const no = row.cascade_no;

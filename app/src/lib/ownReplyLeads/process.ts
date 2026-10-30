@@ -1,8 +1,16 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { getLeadsByEmail } from '@/lib/instantly/client';
+import { getLeadsByEmail, replyToEmail } from '@/lib/instantly/client';
 import { readInstantlyEmailReadDeferral } from '@/lib/instantly/emailReadDeferral';
-import { fetchThreadContext, qualifyReply, type ThreadContext } from '@/lib/instantly/leadQualifier';
-import { isOwnAgencyCampaign } from '@/lib/instantly/ownAgencyCampaign';
+import { extractAuthoredReplyText, fetchThreadContext, getBodyText, qualifyReply, type ThreadContext } from '@/lib/instantly/leadQualifier';
+import { isEnAgencyCampaign, isOwnAgencyCampaign } from '@/lib/instantly/ownAgencyCampaign';
+import { classifyCompleteAuthoredServiceReply, isCompleteServiceReceipt } from '@/lib/instantly/machineReplyTemplates';
+import { textToReplyHtml } from '@/lib/clientCampaignReplies/bodyHtml';
+import { aiQualifierConfig, requestAiStep } from '@/lib/senderAiQualifier/ai';
+import { decideStep } from '@/lib/senderAiQualifier/decide';
+import { MAX_AI_LETTERS, REPLY_DELAY_MS, type AiDecision } from '@/lib/senderAiQualifier/types';
+import { caseAllowedForProduct, loadCases } from '@/lib/polzaRuOutreach/libraries';
+import { loadEnCases } from '@/lib/polzaOutreach/caseRouter';
+import { rankCaseMatches } from '@/lib/outreachLlm/caseMatching';
 import { isFreeProvider } from '@/lib/emailValidation/shared';
 import {
   POLZA_CAMPAIGN_FIELD_ID,
@@ -64,6 +72,7 @@ const DEFERRAL_MIN_DELAY_MS = 2 * 60_000;
 const DEFERRAL_MAX_DELAY_MS = 30 * 60_000;
 const TG_BATCH = 20;
 const CONSUMER = 'own_reply_leads';
+const AI_CONSUMER = 'own_reply_ai';
 
 export interface OwnReplyPassResult {
   claimed: number;
@@ -354,6 +363,231 @@ async function qualifyOne(
   }
 }
 
+/** Отдельный диалог для обычных кампаний Instantly. Одно входящее — не больше одного письма ИИ. */
+async function processOwnAiReplies(db: SupabaseClient, settings: OwnReplySettings, log: Log): Promise<void> {
+  const languages = [
+    { enabled: settings.aiEnabledRu, since: settings.aiEnabledAtRu, en: false },
+    { enabled: settings.aiEnabledEn, since: settings.aiEnabledAtEn, en: true },
+  ];
+  for (const lang of languages) {
+    if (!settings.enabled || !lang.enabled || !lang.since) continue;
+    let query = db.from('own_reply_qualifications')
+      .select('email_id, campaign_id, campaign_name, lead_email, thread_id, reply_preview, reply_timestamp, status, ai_reply_attempts')
+      .in('status', ['lead', 'not_lead']).is('ai_reply_status', null)
+      .gte('reply_timestamp', lang.since).lte('ai_reply_next_attempt_at', new Date().toISOString())
+      .order('reply_timestamp').limit(10);
+    query = lang.en ? query.ilike('campaign_name', 'ENagency%') : query.not('campaign_name', 'ilike', 'ENagency%');
+    const { data, error } = await query;
+    if (error) throw new Error(`own_reply_qualifications AI intake: ${error.message}`);
+    for (const row of (data ?? []) as Array<QualRow & { reply_timestamp: string; status: string; ai_reply_attempts: number }>) {
+      try {
+        await processOwnAiReply(db, row, lang.en, log);
+      } catch (err) {
+        const attempts = row.ai_reply_attempts + 1;
+        const final = attempts >= 3;
+        const { error: patchError } = await db.from('own_reply_qualifications').update({
+          ai_reply_attempts: attempts, ai_reply_status: final ? 'review' : null,
+          ai_reply_next_attempt_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+        }).eq('email_id', row.email_id);
+        if (patchError) log('error', `Наши кампании: не сохранилась ошибка ИИ ${row.email_id}: ${patchError.message}`);
+        log('warn', `Наши кампании: ИИ для ${row.email_id}: ${errorText(err)}`);
+      }
+    }
+  }
+}
+
+async function finishOwnAiRow(db: SupabaseClient, emailId: string): Promise<void> {
+  const { error } = await db.from('own_reply_qualifications').update({ ai_reply_status: 'done' }).eq('email_id', emailId);
+  if (error) throw new Error(`own_reply_qualifications AI done: ${error.message}`);
+}
+
+/** Кампания даёт только приблизительный сегмент; схожесть конкретной компании не утверждаем. */
+async function ownCaseContext(db: SupabaseClient, campaignName: string, en: boolean): Promise<{ text: string; ids: string[] }> {
+  const context = { business: campaignName, key: campaignName };
+  if (en) {
+    const cases = await loadEnCases(db);
+    const matches = rankCaseMatches(cases.map((c) => ({ ...c, id: c.caseId, text: c.snippet })), null, context, 3);
+    const showcase = matches.length ? null : cases.sort((a, b) => (b.leadsCount ?? 0) - (a.leadsCount ?? 0))[0] ?? null;
+    const selected = matches.length ? matches.map((m) => m.record) : showcase ? [showcase] : [];
+    return { ids: selected.map((c) => c.caseId), text: selected.length ? [
+      'APPROVED CASES. Campaign name indicates only a broad segment, not verified company fit. Use at most one case if relevant; never claim a Russian result proves international performance.',
+      ...(showcase ? ['No close campaign-segment match; this is an example from another industry. Say so explicitly.'] : []),
+      ...selected.map((c) => `[case_id=${c.caseId}; ${c.crossMarket ? 'Russian-client example' : 'international product example'}] ${c.snippet}${c.url ? ` Source: ${c.url}` : ''}`),
+    ].join('\n') : '' };
+  }
+  const cases = (await loadCases(db)).filter((c) => caseAllowedForProduct(c, 'classic') && c.cold_email !== false);
+  const matches = rankCaseMatches(cases.map((c) => ({ ...c, id: c.case_id, groups: c.industry_groups,
+    text: c.case_text_short, profiles: c.match_profiles })), null, context, 3);
+  const showcase = matches.length ? null : cases.sort((a, b) => (b.leads_count ?? 0) - (a.leads_count ?? 0))[0] ?? null;
+  const selected = matches.length ? matches.map((m) => m.record) : showcase ? [showcase] : [];
+  return { ids: selected.map((c) => c.case_id), text: selected.length ? [
+    'ПРОВЕРЕННЫЕ КЕЙСЫ. Название кампании даёт лишь широкий сегмент, не доказательство сходства конкретной компании. Используй максимум один кейс, только если помогает ответить.',
+    ...(showcase ? ['Близкого совпадения по сегменту нет: это пример другой отрасли, прямо обозначь отличие.'] : []),
+    ...selected.map((c) => `[case_id=${c.case_id}] ${c.case_text_short}${c.case_url ? ` Источник: ${c.case_url}` : ''}`),
+  ].join('\n') : '' };
+}
+
+async function processOwnAiReply(
+  db: SupabaseClient, row: QualRow & { reply_timestamp: string; status: string }, en: boolean, log: Log,
+): Promise<void> {
+  const { data: existing, error: existingError } = await db.from('own_reply_ai_turns').select('status, reply_text, decision')
+    .eq('email_id', row.email_id).maybeSingle();
+  if (existingError) throw new Error(`own_reply_ai_turns: ${existingError.message}`);
+  if (existing && existing.status !== 'pending') { await finishOwnAiRow(db, row.email_id); return; }
+
+  // Пять минут паузы: квалификатор и отписки должны успеть обновиться первыми.
+  if (Date.now() < Date.parse(row.reply_timestamp) + REPLY_DELAY_MS) return;
+  let ctx: ThreadContext | null;
+  try {
+    ctx = await fetchThreadContext(row.campaign_id, row.lead_email, row.thread_id, 'main',
+      { consumer: AI_CONSUMER, requestPriority: 'bulk' });
+  } catch (err) {
+    if (readInstantlyEmailReadDeferral(err)) return;
+    throw err;
+  }
+  if (!ctx || ctx.historyFetchFailed) return;
+  const messages = messagesFromContext(ctx);
+  const last = messages.at(-1);
+  const original = ctx.replyEmail;
+  const sender = original.eaccount ?? '';
+  const authored = extractAuthoredReplyText(getBodyText(original.body)).trim();
+  const stopRequested = /\b(?:unsubscribe|remove me|stop emailing)\b|(?:больше\s+не\s+пишите|удалите\s+меня|исключите\s+из\s+рассылки|не\s+пишите)/iu.test(authored);
+  const from = (original.from_address_email ?? '').trim().toLowerCase();
+  const { data: operator, error: operatorError } = await db.from('reply_personalization_drafts').select('id')
+    .eq('campaign_id', row.campaign_id).eq('lead_email', row.lead_email).eq('status', 'sent')
+    .gte('sent_at', row.reply_timestamp).limit(1);
+  if (operatorError) throw new Error(`reply_personalization_drafts: ${operatorError.message}`);
+  // Письмо уже сменилось, коллега ответил или исходное не привязалось к треду.
+  const stale = stopRequested || Boolean(operator?.length) || original.id !== row.email_id || last?.role !== 'lead'
+    || !authored || !ctx.lastOutbound || !sender
+    || (original.campaign_id && original.campaign_id !== row.campaign_id)
+    || from === sender.trim().toLowerCase()
+    || from.endsWith('@polzaagency.ru')
+    || (ctx.campaignOutboundMailboxes ?? []).includes(from)
+    || classifyCompleteAuthoredServiceReply(authored, original.subject ?? '') !== null
+    || isCompleteServiceReceipt(from, authored);
+  if (stale) {
+    const { error } = await db.from('own_reply_ai_turns').upsert({
+      email_id: row.email_id, campaign_id: row.campaign_id, lead_email: row.lead_email,
+      status: 'skipped', reason: stopRequested ? 'Адресат попросил больше не писать' : 'Появился новый ответ, служебное письмо или ответ оператора; автоматическое письмо отменено',
+    }, { onConflict: 'email_id', ignoreDuplicates: true });
+    if (error) throw new Error(error.message);
+    await finishOwnAiRow(db, row.email_id);
+    return;
+  }
+
+  const { data: previous, error: previousError } = await db.from('own_reply_ai_turns')
+    .select('status, intent, objection, case_id').eq('campaign_id', row.campaign_id).eq('lead_email', row.lead_email)
+    .neq('email_id', row.email_id).order('created_at', { ascending: false }).limit(10);
+  if (previousError) throw new Error(previousError.message);
+  const sent = (previous ?? []).filter((p) => p.status === 'sent');
+  if ((previous ?? []).some((p) => p.status === 'review' || p.status === 'sending')) {
+    const { error } = await db.from('own_reply_ai_turns').upsert({
+      email_id: row.email_id, campaign_id: row.campaign_id, lead_email: row.lead_email,
+      status: 'review', reason: 'Предыдущий ход передан менеджеру или отправка не подтверждена',
+    }, { onConflict: 'email_id', ignoreDuplicates: true });
+    if (error) throw new Error(error.message);
+    await finishOwnAiRow(db, row.email_id);
+    return;
+  }
+  if (sent.length >= MAX_AI_LETTERS) {
+    const { error } = await db.from('own_reply_ai_turns').upsert({
+      email_id: row.email_id, campaign_id: row.campaign_id, lead_email: row.lead_email,
+      status: 'review', reason: 'Лимит автоматических писем исчерпан; нужен менеджер',
+    }, { onConflict: 'email_id', ignoreDuplicates: true });
+    if (error) throw new Error(error.message);
+    await finishOwnAiRow(db, row.email_id);
+    return;
+  }
+
+  let turn = existing;
+  if (!turn) {
+    const cfg = aiQualifierConfig();
+    if (!cfg) throw new Error('Ключ ИИ не настроен');
+    const lastSent = sent[0] as { intent: string | null; objection: string | null } | undefined;
+    const memory = { turns: sent.filter((p) => p.intent === 'objection' || p.intent === 'soft_decline').length,
+      lastIntent: lastSent?.intent ?? null, lastObjection: lastSent?.objection ?? null,
+      usedCaseIds: sent.map((p) => p.case_id).filter((id): id is string => Boolean(id)) };
+    const proof = await ownCaseContext(db, row.campaign_name, en);
+    const offerText = en
+      ? 'APPROVED SCOPE: Polza researches B2B buyers and decision makers, builds and verifies prospect lists, prepares personalized email outreach, qualifies replies and hands interested conversations to sales. The fit, markets, lead criteria, pricing and timeline are discussed with a manager. Do not promise a specific result, payment model or case numbers. Do not claim to know this company or its buyers beyond the thread; explain how we would verify its segments. Use the actual offer in the thread when describing this campaign.'
+      : 'ПОДТВЕРЖДЁННЫЙ ОБЪЁМ: Polza изучает B2B-продукт и покупателей, выбирает сегменты, собирает и проверяет базу ЛПР, готовит персонализированные письма, квалифицирует ответы и передаёт предметный интерес в продажи. Применимость к рынку адресата, критерий лида, стоимость, сроки и формат оплаты обсудит менеджер. Не обещай конкретные результаты, условия или цифры кейсов. Не утверждай, что уже изучили конкретную компанию и её покупателей, если этого нет в переписке; объясни, как проверим сегменты. Отвечая, опирайся на предложение в нашей переписке.';
+    const step = await requestAiStep(cfg, {
+      language: en ? 'en' : 'ru', offerText: [offerText, proof.text].filter(Boolean).join('\n\n'), cascade: false, productPitch: null,
+      mode: 'reply', aiMessages: sent.length, ccEmail: null,
+      history: messages.slice(-20).map((m) => ({ from: m.role, at: m.timestamp, text: m.text.slice(0, 3000) })),
+      objections: memory,
+    });
+    const decision: AiDecision = decideStep(step, { aiMessages: sent.length, stopRequested: step.stopRequested,
+      objections: { ...memory, lastLeadText: authored, caseIds: proof.ids } });
+    if (decision.kind === 'handoff' && row.status !== 'lead') {
+      await enqueuePush(db, row, ctx, log);
+      await markQual(db, row.email_id, {
+        status: 'lead', ai_reason: 'ИИ подтвердил интерес и контакт для обсуждения',
+        qualified_at: new Date().toISOString(),
+      });
+    }
+    const status = 'letter' in decision && decision.letter ? 'pending'
+      : decision.kind === 'review' || decision.kind === 'handoff' ? 'review' : 'closed';
+    const { error } = await db.from('own_reply_ai_turns').upsert({
+      email_id: row.email_id, campaign_id: row.campaign_id, lead_email: row.lead_email,
+      status, decision: decision.kind, intent: step.assessment?.intent ?? null,
+      objection: step.assessment?.objection ?? null, case_id: step.assessment?.caseId ?? null,
+      reply_text: 'letter' in decision ? decision.letter : null,
+      reason: decision.kind === 'review' ? decision.reason : step.summary,
+    }, { onConflict: 'email_id', ignoreDuplicates: true });
+    if (error) throw new Error(`own_reply_ai_turns insert: ${error.message}`);
+    const { data: saved, error: readError } = await db.from('own_reply_ai_turns')
+      .select('status, reply_text, decision').eq('email_id', row.email_id).maybeSingle();
+    if (readError || !saved) throw new Error(`own_reply_ai_turns saved: ${readError?.message ?? 'нет строки'}`);
+    turn = saved;
+  }
+  if (turn.status !== 'pending' || !turn.reply_text) { await finishOwnAiRow(db, row.email_id); return; }
+
+  const current = await fetchThreadContext(row.campaign_id, row.lead_email, row.thread_id, 'main',
+    { consumer: AI_CONSUMER, requestPriority: 'bulk' });
+  if (!current || current.historyFetchFailed) return;
+  const { data: recentOperator, error: recentOperatorError } = await db.from('reply_personalization_drafts').select('id')
+    .eq('campaign_id', row.campaign_id).eq('lead_email', row.lead_email).eq('status', 'sent')
+    .gte('sent_at', row.reply_timestamp).limit(1);
+  if (recentOperatorError) throw new Error(`reply_personalization_drafts recheck: ${recentOperatorError.message}`);
+  if (current.replyEmail.id !== row.email_id || messagesFromContext(current).at(-1)?.role !== 'lead' || recentOperator?.length) {
+    const { error } = await db.from('own_reply_ai_turns').update({ status: 'skipped',
+      reason: 'Переписка продолжилась до отправки; письмо ИИ отменено' })
+      .eq('email_id', row.email_id).eq('status', 'pending');
+    if (error) throw new Error(error.message);
+    await finishOwnAiRow(db, row.email_id);
+    return;
+  }
+
+  // Атомарный claim до внешнего POST. При сомнительной ошибке отправки остаётся
+  // sending: повтор без проверки исходящих мог бы отправить дубль.
+  const { data: claimed, error: claimError } = await db.from('own_reply_ai_turns')
+    .update({ status: 'sending', updated_at: new Date().toISOString() })
+    .eq('email_id', row.email_id).eq('status', 'pending').select('email_id');
+  if (claimError) throw new Error(`own_reply_ai_turns claim: ${claimError.message}`);
+  if (!claimed?.length) return;
+  const text = turn.reply_text;
+  try {
+    await replyToEmail({ reply_to_uuid: original.id, eaccount: sender,
+      subject: /^re:/i.test(original.subject ?? '') ? original.subject! : `Re: ${original.subject ?? ''}`,
+      body: { text, html: textToReplyHtml(text) },
+    }, { accountId: 'main', consumer: AI_CONSUMER, retryRateLimits: false,
+      timeoutMs: 20_000, timeoutIncludesBody: true });
+  } catch (err) {
+    await db.from('own_reply_ai_turns').update({ reason: `Отправка не подтверждена; проверьте исходящие: ${errorText(err)}` })
+      .eq('email_id', row.email_id);
+    await finishOwnAiRow(db, row.email_id);
+    return;
+  }
+  const { error: sentError } = await db.from('own_reply_ai_turns')
+    .update({ status: 'sent', sent_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .eq('email_id', row.email_id).eq('status', 'sending');
+  if (sentError) throw new Error(`own_reply_ai_turns sent: ${sentError.message}`);
+  await finishOwnAiRow(db, row.email_id);
+  log('info', `Наши кампании: ИИ ответил ${row.lead_email} (${isEnAgencyCampaign(row.campaign_name) ? 'EN' : 'RU'})`);
+}
+
 // ── AMO ─────────────────────────────────────────────────────────────────────
 
 interface PushRow extends CrmQueueRow {
@@ -519,6 +753,10 @@ export async function runOwnReplyLeadsPass(db: SupabaseClient, instantlyDb: Supa
     } catch (err) {
       log('error', `Наши кампании: сбор и оценка ответов — ${errorText(err)}`);
     }
+  }
+  if (settings.enabled && (settings.aiEnabledRu || settings.aiEnabledEn)) {
+    try { await processOwnAiReplies(db, settings, log); }
+    catch (err) { log('error', `Наши кампании: диалоговый ИИ — ${errorText(err)}`); }
   }
   result.pushed = await processPushes(db, log);
   const tg = leadTelegramConfig();

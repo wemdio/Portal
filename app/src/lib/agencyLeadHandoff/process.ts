@@ -2,7 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { getEmail, listEmails, replyToEmail } from '@/lib/instantly/client';
 import { getBodyText } from '@/lib/instantly/leadQualifier';
 import { readInstantlyEmailReadDeferral } from '@/lib/instantly/emailReadDeferral';
-import { isOwnAgencyCampaign } from '@/lib/instantly/ownAgencyCampaign';
+import { isEnAgencyCampaign, isOwnAgencyCampaign } from '@/lib/instantly/ownAgencyCampaign';
 import { computeReplyAllCc, mergeCcLists } from '@/lib/clientCampaignReplies/participants';
 import { textToReplyHtml } from '@/lib/clientCampaignReplies/bodyHtml';
 import { buildMessageId } from '@/lib/mail/message';
@@ -120,12 +120,19 @@ async function sendInstantly(db: SupabaseClient, row: HandoffRow, settings: Agen
     q = { campaign_id: data.instantly_campaign_id, lead_email: data.lead_email };
   } else {
     const { data, error } = await db.from('own_reply_qualifications')
-      .select('status, campaign_id, campaign_name, lead_email, thread_id').eq('email_id', row.source_id).maybeSingle();
+      .select('status, campaign_id, campaign_name, lead_email, thread_id, reply_timestamp').eq('email_id', row.source_id).maybeSingle();
     if (error) throw new Error(error.message);
-    const { data: own, error: ownError } = await db.from('own_reply_lead_settings').select('enabled').eq('id', 1).maybeSingle();
+    const { data: own, error: ownError } = await db.from('own_reply_lead_settings')
+      .select('enabled, ai_enabled_ru, ai_enabled_en, ai_enabled_at_ru, ai_enabled_at_en').eq('id', 1).maybeSingle();
     if (ownError) throw new Error(ownError.message);
     if (!own?.enabled || data?.status !== 'lead' || !isOwnAgencyCampaign(data.campaign_name) || norm(data.lead_email) !== norm(row.lead_email)) {
       throw new SkipHandoff('Квалификация выключена или лид снят с обработки');
+    }
+    const en = isEnAgencyCampaign(data.campaign_name);
+    const aiEnabled = en ? own.ai_enabled_en : own.ai_enabled_ru;
+    const aiSince = en ? own.ai_enabled_at_en : own.ai_enabled_at_ru;
+    if (aiEnabled && aiSince && data.reply_timestamp && data.reply_timestamp >= aiSince) {
+      throw new SkipHandoff('Диалог ведёт ИИ; повторное письмо передачи отменено');
     }
     q = data;
   }
