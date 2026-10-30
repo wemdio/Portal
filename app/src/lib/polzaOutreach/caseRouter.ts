@@ -4,7 +4,7 @@
  * Библиотека общая с «Нашим автоаутричем» (polza_ru_cases): кейс попадает в
  * английское письмо, только если он утверждён, клиент разрешил публикацию,
  * срок не истёк и у него есть английский текст. Подбор — по отраслевой
- * группе; нет совпадения — письмо 3 без кейса, «похожий» не притягиваем.
+ * группе; нет совпадения — проверенный пример из другой сферы.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -20,6 +20,8 @@ export interface EnCase {
   groups: string[];
   profiles?: string[];
   crossMarket?: boolean;
+  leadsCount?: number | null;
+  showcase?: boolean;
 }
 
 export async function loadEnCases(db: SupabaseClient): Promise<EnCase[]> {
@@ -44,6 +46,7 @@ export async function loadEnCases(db: SupabaseClient): Promise<EnCase[]> {
       groups: (c.industry_groups ?? []) as string[],
       profiles: Array.isArray(c.metrics?.outreach_profiles) ? c.metrics.outreach_profiles.filter((p: unknown) => typeof p === 'string') : [],
       crossMarket: c.metrics?.cross_market_reference === true,
+      leadsCount: typeof c.leads_count === 'number' ? c.leads_count : null,
     }));
 }
 
@@ -57,12 +60,16 @@ export async function loadEnCases(db: SupabaseClient): Promise<EnCase[]> {
 export function routeEnCase(cases: EnCase[], group: IndustryGroup | null, key = '', context?: CaseMatchContext): { record: EnCase; reason: string } | null {
   if (context) {
     const match = rankCaseMatches(cases.map((c) => ({ ...c, id: c.caseId, text: c.snippet })), group, { ...context, key }, 1)[0];
-    return match ? { record: match.record, reason: match.reason } : null;
+    if (match) return { record: match.record, reason: match.reason };
   }
-  if (!group) return null;
-  const hits = cases.filter((c) => c.groups.includes(group)).sort((a, b) => a.caseId.localeCompare(b.caseId));
-  if (!hits.length) return null;
+  const hits = group && !context ? cases.filter((c) => c.groups.includes(group)).sort((a, b) => a.caseId.localeCompare(b.caseId)) : [];
+  const foreign = cases.filter((c) => c.crossMarket !== true);
+  const showcase = (foreign.length ? foreign : cases).slice().sort((a, b) =>
+    (b.leadsCount ?? 0) - (a.leadsCount ?? 0) || a.caseId.localeCompare(b.caseId));
+  const candidates = hits.length ? hits : showcase;
+  if (!candidates.length) return null;
   let h = 0;
   for (const ch of key.toLowerCase()) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return { record: hits[h % hits.length], reason: `industry group: ${group}` };
+  if (hits.length) return { record: hits[h % hits.length], reason: `industry group: ${group}` };
+  return { record: { ...candidates[h % Math.min(3, candidates.length)], showcase: true }, reason: 'example from another industry' };
 }

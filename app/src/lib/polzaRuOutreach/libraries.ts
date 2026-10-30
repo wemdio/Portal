@@ -42,6 +42,9 @@ export interface CaseRecord {
   match_profiles?: string[];
   case_url?: string | null;
   cross_market_reference?: boolean;
+  leads_count?: number | null;
+  /** Запасной пример из другой сферы: нельзя выдавать за отраслевое совпадение. */
+  showcase?: boolean;
 }
 
 /** Продукт имеет приоритет над поводом. Старые кейсы без разметки — классика. */
@@ -92,6 +95,7 @@ export async function loadCases(db: SupabaseClient): Promise<CaseRecord[]> {
     match_profiles: Array.isArray(c.metrics?.outreach_profiles) ? c.metrics.outreach_profiles.filter((p: unknown) => typeof p === 'string') : [],
     case_url: typeof c.case_url === 'string' ? c.case_url : null,
     cross_market_reference: c.metrics?.cross_market_reference === true,
+    leads_count: typeof c.leads_count === 'number' ? c.leads_count : null,
   }));
 }
 

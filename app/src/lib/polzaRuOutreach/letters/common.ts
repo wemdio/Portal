@@ -43,7 +43,7 @@ export function claim(ctx: LetterContext, key: string): OfferClaim | null {
 }
 
 export function caseBlock(ctx: LetterContext): string | null {
-  return ctx.caseRecord ? `Для примера: ${ctx.caseRecord.case_text_short.trim()}` : null;
+  return ctx.caseRecord ? `${ctx.caseRecord.showcase ? 'Для примера из другой сферы' : 'Для примера'}: ${ctx.caseRecord.case_text_short.trim()}` : null;
 }
 
 /** Абзацы без пустых блоков: условная переменная без данных удаляется целиком. */

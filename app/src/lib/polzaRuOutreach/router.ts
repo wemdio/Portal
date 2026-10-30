@@ -309,10 +309,20 @@ export function routeCase(
     && (!c.allowed_chains.length || c.allowed_chains.includes(chain) || c.allowed_chains.includes(product)));
   if (context && product !== 'sdr') {
     const match = rankCaseMatches(eligible.map((c) => ({ ...c, id: c.case_id, groups: c.industry_groups, text: c.case_text_short, profiles: c.match_profiles })), group, context, 1)[0];
-    return match ? { record: match.record, reason: match.reason } : null;
+    if (match) return { record: match.record, reason: match.reason };
   }
   const hit = (group ? eligible.find((c) => c.industry_groups.includes(group)) : null)
     // SDR доказывает выход на роль; для него допустим проверенный пример из другой отрасли.
     ?? (product === 'sdr' ? eligible.find((c) => c.evidence_type === 'role_contact') : null);
-  return hit ? { record: hit, reason: product === 'sdr' ? 'подтверждённый выход на роль' : `отраслевая группа «${group}»` } : null;
+  if (hit && (!context || product === 'sdr')) return { record: hit, reason: product === 'sdr' ? 'подтверждённый выход на роль' : `отраслевая группа «${group}»` };
+  // При отсутствии близкого бизнеса показываем сильный результат того же продукта.
+  // Для зарубежной классики сначала берём реальные зарубежные кампании.
+  const foreign = product === 'classic_abroad' ? eligible.filter((c) => c.allowed_chains.includes('classic_abroad')) : [];
+  const showcase = (foreign.length ? foreign : eligible).sort((a, b) =>
+    (b.leads_count ?? 0) - (a.leads_count ?? 0) || a.case_id.localeCompare(b.case_id));
+  if (!showcase.length) return null;
+  let hash = 0;
+  for (const ch of (context?.key ?? '').toLowerCase()) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  const record = showcase[hash % Math.min(3, showcase.length)];
+  return { record: { ...record, showcase: true }, reason: 'пример из другой сферы' };
 }
