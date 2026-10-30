@@ -31,8 +31,10 @@ Successful pages keep their actual final HTTPS URL. `readMethod: browser` or
 `readMethod: tinyfish` is retained in qualification checkpoints/audit quotes
 and constructor website evidence. Contact diagnostics record the reader in
 `route`. String-only page caches are not used to disguise fallback HTML as a
-direct response. Ordinary RU readers and callers without the ENG opt-in keep
-their existing behavior.
+direct response. Callers without an explicit opt-in keep their existing
+behavior. Internal RU v2 has a separate browser/deficit-only TinyFish opt-in
+and account; see [RU website fallback](ru-site-fallback.md). ENG behavior and
+account selection remain independent.
 
 When the ENG browser feature is enabled, the ENG readers also stop their old
 proxy retry on HTTP 403/429; the contact crawl stops on an initial access wall.

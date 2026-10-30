@@ -28,17 +28,17 @@ async function checkedUrl(raw: string, signal: AbortSignal): Promise<boolean> {
 }
 
 /** The endpoint is operator configuration, never a URL supplied by a company. */
-async function browserRead(url: string, signal: AbortSignal): Promise<BrowserRead> {
+async function browserRead(url: string, signal: AbortSignal, locale: 'en' | 'ru'): Promise<BrowserRead> {
   const endpoint = process.env.ENG_BROWSER_URL?.trim();
   const token = process.env.ENG_BROWSER_TOKEN?.trim();
-  if (process.env.ENG_BROWSER_ENABLED !== '1' || !endpoint || !token) return { kind: 'disabled' };
+  if (process.env[locale === 'ru' ? 'RU_BROWSER_ENABLED' : 'ENG_BROWSER_ENABLED'] !== '1' || !endpoint || !token) return { kind: 'disabled' };
   try {
     const base = new URL(endpoint);
     if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash) return { kind: 'refused' };
     const response = await fetch(new URL('/render', base), {
       method: 'POST', redirect: 'error', signal,
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ url, timeoutMs: 12_000 }),
+      body: JSON.stringify({ url, timeoutMs: 12_000, ...(locale === 'ru' ? { locale } : {}) }),
     });
     const reader = response.body?.getReader();
     if (!reader) return { kind: 'refused' };
@@ -55,6 +55,9 @@ async function browserRead(url: string, signal: AbortSignal): Promise<BrowserRea
     const data: unknown = JSON.parse(Buffer.concat(parts).toString('utf8'));
     if (!data || typeof data !== 'object') return { kind: 'refused' };
     const body = data as Record<string, unknown>;
+    // An older broker must not silently ignore the RU locale, including when
+    // reporting busy: that would incorrectly admit an external RU rescue.
+    if (locale === 'ru' && body.locale !== 'ru') return { kind: 'refused' };
     if (!response.ok) {
       if (body.error === 'blocked') return { kind: 'blocked' };
       // Only confirmed admission failures or an observed upstream 5xx can escalate.
@@ -75,8 +78,10 @@ async function browserRead(url: string, signal: AbortSignal): Promise<BrowserRea
 /** Called only for a successful empty direct response, never on a blocked or unknown result. */
 export async function fetchEngPageFallback(input: {
   url: string; companyUrl: string; html: string | null; status?: number; signal?: AbortSignal;
+  locale?: 'en' | 'ru'; ruDeficit?: boolean;
 }): Promise<EngFallbackPage | null> {
-  if (process.env.ENG_BROWSER_ENABLED !== '1' || !isEngFallbackCandidate(input)) return null;
+  const locale = input.locale === 'ru' ? 'ru' : 'en';
+  if (process.env[locale === 'ru' ? 'RU_BROWSER_ENABLED' : 'ENG_BROWSER_ENABLED'] !== '1' || !isEngFallbackCandidate(input)) return null;
   const timeout = AbortSignal.timeout(TIMEOUT_MS);
   const signal = input.signal ? AbortSignal.any([input.signal, timeout]) : timeout;
   let rendered: EngFallbackPage | null = null;
@@ -85,7 +90,7 @@ export async function fetchEngPageFallback(input: {
     // A foreign empty destination must not become its own company boundary.
     if (!input.url.startsWith('https:') || !sameCompanySiteBoundary(input.url, input.companyUrl)
       || !await checkedUrl(input.url, signal)) return null;
-    const browser = await browserRead(input.url, signal);
+    const browser = await browserRead(input.url, signal, locale);
     if (browser.kind === 'disabled' || browser.kind === 'blocked' || browser.kind === 'refused') return null;
     const allowed = async (page: EngFallbackPage) => page.url.startsWith('https:')
       && sameCompanySiteBoundary(page.url, input.companyUrl) && await checkedUrl(page.url, signal);
@@ -94,10 +99,12 @@ export async function fetchEngPageFallback(input: {
       if (isEngHtmlImprovement(input.html!, browser.page.html)) rendered = browser.page;
       if (rendered && !isEngFallbackCandidate({ status: 200, html: rendered.html })) return rendered;
     }
+    if (locale === 'ru' && input.ruDeficit !== true) return rendered;
     signal.throwIfAborted();
     const { fetchEngTinyfishFallback } = await import('./engTinyfishFallback');
     const tinyfish = await fetchEngTinyfishFallback({ url: input.url, companyUrl: input.companyUrl,
-      directOutcome: 'empty_success', browserOutcome: browser.kind === 'page' ? 'empty_success' : 'unavailable', signal });
+      directOutcome: 'empty_success', browserOutcome: browser.kind === 'page' ? 'empty_success' : 'unavailable',
+      ...(locale === 'ru' ? { locale, ruDeficit: true } : {}), signal });
     return tinyfish && await allowed(tinyfish) && !isEngHtmlBlocked(tinyfish.html)
       && isEngHtmlImprovement(rendered?.html ?? input.html!, tinyfish.html) ? tinyfish
       : rendered;

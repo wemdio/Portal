@@ -6,6 +6,15 @@ Scheduled releases set `ENG_BROWSER_URL` to the unique candidate alias `http://p
 
 The broker follows redirects manually using the existing ENG URL guard and its DNS-checked direct dispatcher, reads only GET requests, and limits each resource to 1 MiB, each session to 5 MiB and 20 resources. The default session deadline is 12 seconds, capped at 20. The runner executes Chromium with its sandbox enabled and fulfills requests only through the broker's Unix socket. It blocks WebSocket, service workers and non-GET requests; image, media and font resources are skipped. Fresh browser contexts isolate sessions. There is one browser session at a time. After the document loads, the runner waits for a one-second network quiet period, up to eight seconds; requests still in flight yield terminal `incomplete` and no DOM. The broker independently refuses a result while any resource request is in flight. Only Access-Control-Allow-Origin, Access-Control-Allow-Methods and Access-Control-Expose-Headers response headers are forwarded; cookies and credentials are not. Since the request Origin header is not forwarded, sites that dynamically set CORS by Origin may not render completely.
 
+RU v2 callers may explicitly send `"locale": "ru"`; omitted locale remains
+English. The broker pins that value to its session and `/verify`; the runner
+uses `ru-RU` and the broker uses Russian Accept-Language. Both verify the echo.
+Valid admitted request failures, including `busy` before session creation,
+also echo the validated locale. RU consumers refuse older responses without
+the echo. Capacity and isolation are shared unchanged with ENG. Release both
+images before enabling `RU_BROWSER_ENABLED`; separate deficit/account controls
+are described in [RU website fallback](../../docs/ru-site-fallback.md).
+
 Build images locally from the repository root (no production action):
 
 ```sh

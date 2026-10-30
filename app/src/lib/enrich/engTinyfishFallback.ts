@@ -5,7 +5,7 @@ import { sameCompanySiteBoundary } from './companySiteAlias';
 import { createUsWebsiteFetchGuard, isPublicIpAddress } from './publicAddress';
 import { reserveEngTinyfishUrl } from './engTinyfishBudget';
 import { isEngHtmlBlocked } from './engPageFallbackPolicy';
-import { parseEngTinyfishAccounts } from './engTinyfishAccounts';
+import { parseEngTinyfishAccounts, parseRuTinyfishAccounts } from './engTinyfishAccounts';
 
 const ENDPOINT = 'https://api.fetch.tinyfish.ai';
 const WALLET_ENDPOINT = 'https://agent.tinyfish.ai/v1/wallet';
@@ -25,6 +25,9 @@ export interface EngTinyfishFallbackInput {
   directOutcome: 'empty_success';
   /** An actual browser attempt; blocked and refused outcomes are ineligible. */
   browserOutcome: 'empty_success' | 'unavailable';
+  /** RU is an explicit, separately metered deficit recovery, never the default. */
+  locale?: 'en' | 'ru';
+  ruDeficit?: boolean;
   signal?: AbortSignal;
 }
 export interface EngTinyfishFallbackResult {
@@ -140,7 +143,9 @@ async function freePreflight(key: string, signal: AbortSignal): Promise<FreePref
 export async function fetchEngTinyfishFallback(input: EngTinyfishFallbackInput): Promise<EngTinyfishFallbackResult | null> {
   input.signal?.throwIfAborted();
   if (input.directOutcome !== 'empty_success' || !['empty_success', 'unavailable'].includes(input.browserOutcome)) return null;
-  const accounts = parseEngTinyfishAccounts(process.env);
+  const ru = input.locale === 'ru';
+  if (ru && input.ruDeficit !== true) return null;
+  const accounts = ru ? parseRuTinyfishAccounts(process.env) : parseEngTinyfishAccounts(process.env);
   if (!accounts) return null;
   const requested = urlOf(input.url);
   const company = urlOf(input.companyUrl);

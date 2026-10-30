@@ -567,6 +567,8 @@ export interface StepFindEmailsOptions extends EngContactDiagnosticOptions {
   siteTimeoutMs?: number;
   /** Reuse a sufficient homepage description; short/empty pages still use enrich. */
   reuseWebsiteDescription?: boolean;
+  /** Explicit RU vertical opt-in; never derived from locale or missing email. */
+  ruPageFallback?: { tinyfish: boolean };
   /**
    * Локаль джобы (job.locale конструктора баз, пробрасывает worker).
    * При 'en': колонка scrape-результата — «Found Email» (вместо
@@ -934,6 +936,8 @@ export async function stepFindEmails(
         maxPages: options?.maxPages ?? 5,
         stopAtFirstUsableEmail,
         locale,
+        ...(locale === 'ru' && options?.ruPageFallback
+          ? { ruPageFallback: { tinyfish: options.ruPageFallback.tinyfish === true } } : {}),
         ...(contactDiagnosticsEnabled ? { contactPageStrategy: 'eng_contact_first' as const } : {}),
         ...(contactDiagnosticsEnabled && companyIdx >= 0 && body[item.i][companyIdx]?.trim()
           ? { companyName: body[item.i][companyIdx].trim() } : {}),
