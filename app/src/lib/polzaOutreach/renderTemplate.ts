@@ -181,7 +181,9 @@ export function composeCompanyLetters(template: PolzaChainTemplateLetters, input
   const triggers = input.triggers.map((t) => ({ ...t, title: tidy(t.title) }));
   const caseHit = input.caseHit ? { ...input.caseHit, snippet: tidy(input.caseHit.snippet), segment: tidy(input.caseHit.segment) } : null;
   const primary = primaryTrigger(triggers);
-  const pain = input.painLine ? tidy(input.painLine) : fallbackPain(company, primary);
+  const painLine = input.painLine ? tidy(input.painLine) : fallbackPain(company, primary);
+  // Сайт подтверждает продукт и аудиторию, но не внутреннюю проблему продаж.
+  const pain = painLine ? `My guess: ${painLine}` : '';
   const isRouting = input.emailType === 'generic_company';
   const values: TemplateValues = {
     company,
