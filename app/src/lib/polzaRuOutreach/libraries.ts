@@ -39,6 +39,8 @@ export interface CaseRecord {
   evidence_type?: 'campaign_result' | 'role_contact';
   /** Отказы и отложенные контакты доступны для разбора в диалоге, не холодного письма. */
   cold_email?: boolean;
+  match_profiles?: string[];
+  case_url?: string | null;
 }
 
 /** Продукт имеет приоритет над поводом. Старые кейсы без разметки — классика. */
@@ -86,6 +88,8 @@ export async function loadCases(db: SupabaseClient): Promise<CaseRecord[]> {
     case_text_short: String(c.case_text_short),
     evidence_type: c.metrics?.evidence_type === 'role_contact' ? 'role_contact' : 'campaign_result',
     cold_email: c.metrics?.cold_email !== false,
+    match_profiles: Array.isArray(c.metrics?.outreach_profiles) ? c.metrics.outreach_profiles.filter((p: unknown) => typeof p === 'string') : [],
+    case_url: typeof c.case_url === 'string' ? c.case_url : null,
   }));
 }
 

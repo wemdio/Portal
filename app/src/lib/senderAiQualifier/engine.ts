@@ -14,6 +14,7 @@ import { hasOpenAmoDeal } from './amo';
 import { closeReasonOf, decideStep, parseAiStep, reminderDueAt, replyDueAt } from './decide';
 import { loadEnCases } from '@/lib/polzaOutreach/caseRouter';
 import { productKnowledgeText } from '@/lib/polzaRuOutreach/productKnowledge';
+import { rankCaseMatches, type CaseMatchContext } from '@/lib/outreachLlm/caseMatching';
 import { AI_LETTER_CANCELLED, MAX_AI_ATTEMPTS, MAX_AI_LETTERS, type AiConversationRow, type AiFolderKey, type AiState, type AiStep } from './types';
 
 /**
@@ -143,6 +144,25 @@ export interface AiOfferContext extends Pick<AiPromptInput, 'offerText' | 'casca
   caseIds: string[];
 }
 
+async function recipientCaseContext(db: SupabaseClient, recipientId: string, folderKey: string): Promise<CaseMatchContext & { group: string | null }> {
+  const { data, error } = await db.from('sender_recipients').select('group_key,sender_campaigns(source_kind)').eq('id', recipientId).maybeSingle();
+  if (error) throw new Error(`case context recipient: ${error.message}`);
+  const campaign = Array.isArray(data?.sender_campaigns) ? data.sender_campaigns[0] : data?.sender_campaigns;
+  const expected = folderKey === 'auto_ru' ? 'polza_ru' : 'polza_en';
+  const empty = { business: null, customers: null, group: null };
+  if (!data || campaign?.source_kind !== expected || !/^[0-9a-f-]{36}$/i.test(data.group_key ?? '')) return empty;
+  if (folderKey === 'auto_ru') {
+    const { data: row, error: e } = await db.from('polza_ru_outreach_companies').select('fit_reasons,target_market,normalized_domain').eq('id', data.group_key).maybeSingle();
+    if (e) throw new Error(`case context RU: ${e.message}`);
+    const reasons: string[] = Array.isArray(row?.fit_reasons) ? row.fit_reasons.filter((r: unknown) => typeof r === 'string') : [];
+    return { business: reasons.find((r) => r.startsWith('Продукт: '))?.slice(9) ?? null,
+      customers: row?.target_market ?? null, group: reasons.find((r) => r.startsWith('Отрасль: '))?.slice(9) ?? null, key: row?.normalized_domain ?? '' };
+  }
+  const { data: row, error: e } = await db.from('polza_outreach_companies').select('company_context,normalized_domain').eq('id', data.group_key).maybeSingle();
+  if (e) throw new Error(`case context EN: ${e.message}`);
+  return { business: row?.company_context ?? null, group: null, key: row?.normalized_domain ?? '' };
+}
+
 export async function offerContextFor(
   db: SupabaseClient,
   folder: { id: string; key: string; ai_offer_text: string | null },
@@ -150,15 +170,16 @@ export async function offerContextFor(
   log: Log,
 ): Promise<AiOfferContext> {
   const general = folder.ai_offer_text ?? '';
+  const context = await recipientCaseContext(db, recipientId, folder.key);
   if (folder.key !== 'auto_ru') {
     // Английские ответы используют ту же утверждённую библиотеку, что EN-письма,
     // с проверкой продукта. Не подменяем зарубежный результат русским переводом.
     const [english, productCases] = await Promise.all([loadEnCases(db), loadCases(db)]);
     const allowed = new Set(productCases.filter((c) => caseAllowedForProduct(c, 'classic_abroad')).map((c) => c.case_id));
-    const cases = english.filter((c) => allowed.has(c.caseId)).slice(0, 12);
+    const cases = rankCaseMatches(english.filter((c) => allowed.has(c.caseId)).map((c) => ({ ...c, id: c.caseId, text: c.snippet })), context.group, context, 2).map((c) => c.record);
     return {
       offerText: [productKnowledgeText('classic_abroad', 'en'), general ? `ADDITIONAL NOTES (do not override product boundaries above):\n${general}` : '', cases.length ? 'APPROVED CASES (choose at most one matching the recipient\'s business and market):' : '',
-        ...cases.map((c) => `[case_id=${c.caseId}; segments=${c.groups.join(',')}] ${c.snippet}`)].filter(Boolean).join('\n'),
+        ...cases.map((c) => `[case_id=${c.caseId}; segments=${c.groups.join(',')}] ${c.snippet}${c.url ? ` Source: ${c.url}` : ''}`)].filter(Boolean).join('\n'),
       caseIds: cases.map((c) => c.caseId), cascade: false, productPitch: null,
     };
   }
@@ -171,18 +192,11 @@ export async function offerContextFor(
   const text = typeof own === 'string' ? own.trim() : '';
   const cases = (await loadCases(db)).filter((c) => caseAllowedForProduct(c, offered.product))
     .sort((a, b) => Number(b.cold_email !== false) - Number(a.cold_email !== false));
-  // По одному примеру отрасли, затем дополнительные: один первый сектор не занимает весь контекст.
-  const groups = new Set<string>();
-  const diverse = cases.filter((c) => {
-    const key = c.industry_groups[0] ?? c.case_id;
-    if (groups.has(key)) return false;
-    groups.add(key);
-    return true;
-  });
-  const selected = [...diverse, ...cases.filter((c) => !diverse.includes(c))].slice(0, 8);
+  const selected = offered.product === 'sdr' ? cases.slice(0, 3)
+    : rankCaseMatches(cases.map((c) => ({ ...c, id: c.case_id, groups: c.industry_groups, text: c.case_text_short, profiles: c.match_profiles })), context.group, context, 2).map((c) => c.record);
   const proof = selected.length ? [
     'ПРОВЕРЕННЫЕ КЕЙСЫ ЭТОГО ПРОДУКТА:',
-    ...selected.map((c) => `- [case_id=${c.case_id}; отрасли=${c.industry_groups.join(',')}] ${c.case_text_short.trim()}`),
+    ...selected.map((c) => `- [case_id=${c.case_id}; отрасли=${c.industry_groups.join(',')}] ${c.case_text_short.trim()}${c.case_url ? ` Источник: ${c.case_url}` : ''}`),
     'По вопросу клиента выбери максимум один подходящий пример и передай его в 1–2 предложениях. Не повторяй уже приведённый пример без необходимости. Сохрани роль и фактический исход: запрос подробностей не равен встрече, встреча не равна продаже; отказ и отложенный контакт не выдавай за успех. Не обещай повторить цифры у клиента. Доказательства выхода на роль получены в клиентских кампаниях Polza; отдельный канал этих кампаний не приписывай ручной SDR-услуге.',
   ].join('\n') : '';
   const notes = [general, text].filter(Boolean).join('\n');

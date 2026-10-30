@@ -1453,6 +1453,7 @@ async function runJob(
         }
       }
 
+      const caseContext = { business: site.productSummary, customers: site.customerQuote, key: domain };
       const route = routeChain({
         signals,
         reactivation,
@@ -1462,7 +1463,7 @@ async function runJob(
         revenue,
         employees,
         hasAdPixel: site.hasAdPixel,
-        hasCaseFor: (chain) => Boolean(routeCase(libraries.cases, site.industryGroup, chain, cascadeOffer(chain, signals, c.cascade).product)),
+        hasCaseFor: (chain) => Boolean(routeCase(libraries.cases, site.industryGroup, chain, cascadeOffer(chain, signals, c.cascade).product, caseContext)),
       });
       const marketQuote = vacancy?.marketQuote ?? site.customerQuote ?? null;
       const base = {
@@ -1491,7 +1492,7 @@ async function runJob(
       // следующий шаг каскада, новой — первый по поводу (cascade.ts). Сплита
       // 50/50 на «Автоматизированный аутрич» больше нет.
       const offer = cascadeOffer(route.chain, signals, c.cascade);
-      const caseHit = routeCase(libraries.cases, site.industryGroup, route.chain, offer.product);
+      const caseHit = routeCase(libraries.cases, site.industryGroup, route.chain, offer.product, caseContext);
       const score = scoreCompany({
         chain: route.chain,
         primary: route.primary,

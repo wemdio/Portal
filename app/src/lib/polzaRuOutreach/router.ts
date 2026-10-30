@@ -14,6 +14,7 @@
  */
 
 import type { Product } from './cascade';
+import { rankCaseMatches, type CaseMatchContext } from '@/lib/outreachLlm/caseMatching';
 import { caseAllowedForProduct, type CaseRecord } from './libraries';
 import type { ChainType, IndustryGroup, Signal, SignalType } from './types';
 
@@ -302,9 +303,14 @@ export function routeCase(
   group: IndustryGroup | null,
   chain: ChainType,
   product: Product,
+  context?: CaseMatchContext,
 ): { record: CaseRecord; reason: string } | null {
   const eligible = cases.filter((c) => c.cold_email !== false && caseAllowedForProduct(c, product)
     && (!c.allowed_chains.length || c.allowed_chains.includes(chain) || c.allowed_chains.includes(product)));
+  if (context && product !== 'sdr') {
+    const match = rankCaseMatches(eligible.map((c) => ({ ...c, id: c.case_id, groups: c.industry_groups, text: c.case_text_short, profiles: c.match_profiles })), group, context, 1)[0];
+    return match ? { record: match.record, reason: match.reason } : null;
+  }
   const hit = (group ? eligible.find((c) => c.industry_groups.includes(group)) : null)
     // SDR доказывает выход на роль; для него допустим проверенный пример из другой отрасли.
     ?? (product === 'sdr' ? eligible.find((c) => c.evidence_type === 'role_contact') : null);

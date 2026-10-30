@@ -494,7 +494,10 @@ function companyInput(row: WaitingRow, key: TemplateKey, libraries: Libraries): 
   const industry = group && (INDUSTRY_GROUPS as readonly string[]).includes(group) ? group as IndustryGroup : null;
   const storedCase = row.case_id ? libraries.cases.find((c) => c.case_id === row.case_id) : null;
   const caseRecord = storedCase && storedCase.cold_email !== false && caseAllowedForProduct(storedCase, product)
-    ? storedCase : routeCase(libraries.cases, industry, chain, product)?.record ?? null;
+    ? storedCase : routeCase(libraries.cases, industry, chain, product, {
+      business: productLine ? productLine.slice(PRODUCT_PREFIX.length) : null,
+      customers: row.target_market, key: row.company_name,
+    })?.record ?? null;
   return {
     chain,
     product,

@@ -1408,7 +1408,7 @@ async function runJob(
       });
       const status = leadStatus(score.total, thresholds);
       const primary = primaryTrigger(triggers);
-      const routed = routeEnCase(cases, site.industryGroup, domain);
+      const routed = routeEnCase(cases, site.industryGroup, domain, { business: site.companyContext, customers: site.icpQuote });
       const patch = {
         ...common,
         primary_trigger: primary?.type ?? null,
