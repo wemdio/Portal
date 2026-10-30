@@ -1847,6 +1847,11 @@ async function scrapeLegacyEmails(
       try {
         const { isEngHtmlBlocked } = await import('./engPageFallbackPolicy');
         if ([401, 403, 407, 429, 451].includes(result.status ?? 0) || result.html && isEngHtmlBlocked(result.html)) {
+          // A public page can embed a CAPTCHA in its contact form. Preserve
+          // addresses already present in a successful direct response, as the
+          // legacy RU reader did, without rendering or publishing wall HTML as
+          // company evidence. Status refusals never contribute addresses.
+          if (result.html && result.status !== undefined && result.status >= 200 && result.status < 300) processPage(result.html);
           result = { ...result, html: null, blocked: true, failure: 'Страница закрыта проверкой доступа' };
           accessBlocked = true;
         } else if (!result.html || filterJunkEmails(extractEmailsFromHtmlAdvanced(result.html)).length === 0) {

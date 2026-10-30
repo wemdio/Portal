@@ -139,6 +139,7 @@ import {
 import { veSavedRelevanceScope } from '../collectionRecovery';
 import { addVeKnownWebsiteSource, VE_KNOWN_ADULT_WEBSITES, VE_KNOWN_WEBSITE_CATALOG, veKnownWebsiteAudienceEligible, type VeKnownWebsiteSourceReceipt } from '../knownWebsiteDirectory';
 import { cleanVeCompanyNames, type VeCompanyNameCheckpoint } from '../companyNameCleanup';
+import { retainVeFreeWebsiteSearch, VE_FREE_WEBSITE_SEARCH_FIELD } from '../freeWebsiteSearch';
 import { buildVeRuRescueQueries, readVeRuWebsiteRescue, selectVeRuWebsiteRescueRows, veRuWebsiteRescueReason, type VeRuWebsiteRescue } from '../ruWebsiteRescue';
 import { readVeRuDiscoveredCompany, veRuDiscoveryHome } from '../ruWebsiteDiscovery';
 import { claimVeRuWebsiteRescue } from '../ruWebsiteRescueClaim';
@@ -4665,6 +4666,18 @@ async function checkCollectedRelevance(args: {
     // so bounded follow-up work rotates through the whole saved reserve.
     return clean;
   });
+  if (market === 'ru') {
+    // The constructor's public grid intentionally omits private metadata.
+    // Restore the free-only cost boundary for these exact companies on every
+    // saved review too, without disabling configured search for other rows.
+    storedRows = retainVeFreeWebsiteSearch(storedRows, [
+      ...(Array.isArray(base.data) ? base.data : []),
+      ...readVeRelevanceReserve(info.relevance_reserve),
+      ...readVeRelevanceSourceRows(info.relevance_reserve),
+      ...(args.evidenceRows ?? []),
+      ...(info.ru_website_rescue?.rows ?? []).map((row) => ({ ...row, [VE_FREE_WEBSITE_SEARCH_FIELD]: true })),
+    ]);
+  }
   if (finalEmailStatuses) {
     storedRows = storedRows.map((r, i) => {
       const st = finalEmailStatuses[i];
@@ -5340,12 +5353,12 @@ async function resumeRuWebsiteRescue(
   // Never upgrade partial/unvalidated output because an optional reader failed.
   const complete = rescue.rows.length === 0 || (!!imported && imported.emailStatuses.every((status) => status !== null));
   const keys = await loadOtherBaseExclusionKeys(ctx, job.project_id, base.id, base.hypothesis_id);
-  const rows: VeUnifiedRow[] = [];
+  const rows: Array<VeUnifiedRow & Record<typeof VE_FREE_WEBSITE_SEARCH_FIELD, true>> = [];
   const statuses: Array<string | null> = [];
   if (complete && imported) imported.rows.forEach((row, index) => {
     if (!allowedByProject(ctx, row)) return;
     const pruned = pruneBaseRowAgainstExclusion(keys, row);
-    if (pruned) { rows.push(pruned); statuses.push(imported.emailStatuses[index]); }
+    if (pruned) { rows.push({ ...pruned, [VE_FREE_WEBSITE_SEARCH_FIELD]: true }); statuses.push(imported.emailStatuses[index]); }
   });
   const gate = rows.length ? await checkCollectedRelevance({ ctx, job, base, info,
     finalRows: rows, finalEmailStatuses: statuses, market, usage,
@@ -5354,7 +5367,7 @@ async function resumeRuWebsiteRescue(
   rescue.outcome = !complete ? 'constructor_unavailable' : gate && !gate.relevanceCoverageComplete ? 'gates_incomplete' : 'complete';
   info.relevance_reserve = { ...info.relevance_reserve, version: 1, rows: readVeRelevanceReserve(info.relevance_reserve),
     source_rows: mergeVeRelevanceRows(readVeRelevanceSourceRows(info.relevance_reserve),
-      rescue.rows.map((row) => ({ ...row, _ve_source_candidate: true }))) };
+      rescue.rows.map((row) => ({ ...row, _ve_source_candidate: true, [VE_FREE_WEBSITE_SEARCH_FIELD]: true }))) };
   // This phase is saved atomically by completeTargetRound before name calls.
   // A crash resumes those gates, never a second constructor/Fetch wave.
   stageLog(ctx, `[base_collect] резерв сайтов завершён: ${rows.length} проверенных email-строк; исходный бюджет сбора сохранён`);
@@ -5828,7 +5841,9 @@ async function completeTargetRound(args: {
     info.relevance_review_requested = true;
   } else {
     delete info.relevance_review_requested;
-    if (reviewOnly && !args.validationError && cleaned.summary.status === 'complete'
+    // An optional RU rescue may leave uncertain contacts in reserve, but it
+    // must not turn the saved ordinary continuation into a review-only stop.
+    if (reviewOnly && !rescueOnly && !args.validationError && cleaned.summary.status === 'complete'
       && targetRows < progress.ready_target && reviewablePending) {
       next = { ...progress, ready_rows: targetRows, candidates_processed: stats.rows_total, status: 'limited',
         reason: 'Уточнение сохранённых контактов завершено. Неопределённые контакты остались в резерве; новый сбор в этой операции не запускается.' };
@@ -5978,7 +5993,7 @@ async function completeTargetRound(args: {
     info.adaptive_collection!.note = 'Новые партии из источников с подтверждённо низким выходом отложены.';
     info.target_progress = next;
   }
-  if (next.status !== 'limited' || !economicHold) delete next.stop_cause;
+  if (!rescueOnly && (next.status !== 'limited' || !economicHold)) delete next.stop_cause;
   // Правило узкого рынка уже расширило срез или завершило базу в этом раунде.
   let marketDecided = economicHold;
   if (info.estimate) {
@@ -6128,7 +6143,9 @@ async function completeTargetRound(args: {
         : 'Доступные официальные сайты платформ проверены. Проверенные контакты сохранены; это не оценка всего рынка.' };
     info.target_progress = next;
   }
-  const rescueReason = !info.ru_website_rescue && base.hypothesis_id ? veRuWebsiteRescueReason({
+  // A source/geography repair deliberately froze its allowed acquisition
+  // scope. The optional reserve must not introduce a global source beside it.
+  const rescueReason = !info.ru_website_rescue && base.hypothesis_id && !boundedSourceContinuation(info) ? veRuWebsiteRescueReason({
     market: ctx.market ?? '',
     enabled: process.env.RU_BROWSER_ENABLED === '1' && process.env.RU_TINYFISH_ENABLED === '1'
       && !!process.env.RU_TINYFISH_API_KEY?.trim() && /^[a-zA-Z0-9._-]{1,80}$/.test(process.env.RU_TINYFISH_ACCOUNT_ID?.trim() ?? ''),
