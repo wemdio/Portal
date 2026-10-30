@@ -352,7 +352,7 @@ function followupProblem(t: Trigger | null): string {
  * company, we helped a custom software development team».
  */
 export function caseSentence(c: EnCase): string {
-  return `One example: we helped ${c.snippet}.`;
+  return `One example from our work${c.crossMarket ? ' with a Russian client' : ''}${c.showcase ? ' in another industry' : ''}: ${c.snippet}.`;
 }
 
 /**

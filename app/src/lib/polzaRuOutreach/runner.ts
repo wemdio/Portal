@@ -61,6 +61,8 @@ import {
   type OutreachLlmBudgetSnapshot,
 } from '@/lib/outreachLlm/context';
 import { pruneSiteAnalysisCache } from '@/lib/outreachLlm/siteAnalysisCache';
+import { outreachRunStopReason, type OutreachRunStopReason } from '@/lib/outreachLlm/runLimit';
+import { persistCandidateChunk } from '@/lib/outreachLlm/persistCandidates';
 import {
   JobOwner,
   JobStatusReader,
@@ -253,8 +255,6 @@ function log(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
  */
 /** Сколько кандидатов просматриваем за запуск (потолок, решение 14.10.2026). */
 export const MAX_SCAN_PER_RUN = 100_000;
-/** Предел времени запуска: дальше — штатная остановка, готовое сохраняется. */
-export const MAX_RUN_MS = 3 * 60 * 60 * 1000;
 
 export function maxCandidatesFor(target: number): number {
   // 14.10.2026: «просят 1000 — тянем, пока не наберём» — потолок 50 000 (было 20 000).
@@ -753,10 +753,11 @@ async function runJob(
     // Только идущему: статус остановки не перетираем (запуск, остановленный
     // после захвата, заново не начинается — ensureNotCancelled ниже).
     // Продолжение после перезапуска воркера (деплой) не сбрасывает начало
-    // запуска: от него считается предел в 3 часа.
+    // запуска: от него считается общий для RU/EN предел в 6 часов.
     const resuming = Boolean(previousDetail) && Boolean(job.started_at);
+    const runStartedAt = resuming ? new Date(String(job.started_at)).getTime() : Date.now();
     await setRunningProgress({
-      ...(resuming ? {} : { started_at: new Date().toISOString() }),
+      ...(resuming ? {} : { started_at: new Date(runStartedAt).toISOString() }),
       error_message: null,
       progress_stage: 'loading_sources',
       progress_percent: 1,
@@ -917,15 +918,14 @@ async function runJob(
     let processed = 0;
     // Шаг волны, который сейчас идёт, — для progress_stage.
     let phase = 'finding_emails';
-    // Лимит на ИИ исчерпан или от него остался только запас под шаблоны:
+    // Достигнут предел времени или от ИИ остался только запас под шаблоны:
     // новые строки и волны не начинаем, запуск завершится штатно. Строки,
     // которые лимит остановил, уберём из журнала. Запас тратит только
     // писатель — у уже разобранных компаний будут письма.
-    let budgetStop = false;
-    const runStartedAt = resuming && job.started_at ? new Date(String(job.started_at)).getTime() : Date.now();
-    const stopForBudget = (): boolean => {
-      if (!analysisBudgetLeft() || Date.now() - runStartedAt > MAX_RUN_MS) budgetStop = true;
-      return budgetStop;
+    let limitStop: OutreachRunStopReason | null = null;
+    const stopForLimits = (): boolean => {
+      limitStop ??= outreachRunStopReason(runStartedAt, analysisBudgetLeft());
+      return limitStop !== null;
     };
     // Предохранитель «писатель молчит»: ни одного написанного шаблона, а
     // модель не ответила на WRITER_FAIL_OFFERS офферах — или на одном, но и в
@@ -1454,6 +1454,7 @@ async function runJob(
         }
       }
 
+      const caseContext = { business: site.productSummary, customers: site.customerQuote, key: domain };
       const route = routeChain({
         signals,
         reactivation,
@@ -1463,7 +1464,7 @@ async function runJob(
         revenue,
         employees,
         hasAdPixel: site.hasAdPixel,
-        hasCaseFor: (chain) => Boolean(routeCase(libraries.cases, site.industryGroup, chain, cascadeOffer(chain, signals, c.cascade).product)),
+        hasCaseFor: (chain) => Boolean(routeCase(libraries.cases, site.industryGroup, chain, cascadeOffer(chain, signals, c.cascade).product, caseContext)),
       });
       const marketQuote = vacancy?.marketQuote ?? site.customerQuote ?? null;
       const base = {
@@ -1492,7 +1493,7 @@ async function runJob(
       // следующий шаг каскада, новой — первый по поводу (cascade.ts). Сплита
       // 50/50 на «Автоматизированный аутрич» больше нет.
       const offer = cascadeOffer(route.chain, signals, c.cascade);
-      const caseHit = routeCase(libraries.cases, site.industryGroup, route.chain, offer.product);
+      const caseHit = routeCase(libraries.cases, site.industryGroup, route.chain, offer.product, caseContext);
       const score = scoreCompany({
         chain: route.chain,
         primary: route.primary,
@@ -1709,7 +1710,7 @@ async function runJob(
         // менялась и по-прежнему ждёт шаблон — оставляем её так, а не в
         // необработанные (её разбор оплачен, «Переписать цепочку» её поднимет).
         if (retry && err instanceof BudgetExceededError) {
-          budgetStop = true;
+          limitStop ??= 'budget';
           awaiting.count += 1;
           doubtful.count += 1;
           if (q.reactivation) reactivationRows.awaiting += 1;
@@ -1840,7 +1841,7 @@ async function runJob(
           // Лимит на ИИ: строка не отсеяна и не сломана — она не обработана.
           // Вклад в счётчики вычитаем, саму строку в конце уберём из журнала
           // вместе с остальными необработанными.
-          budgetStop = true;
+          limitStop ??= 'budget';
           await returnToPool(id, tally);
           return;
         }
@@ -1963,9 +1964,7 @@ async function runJob(
       const ids: string[] = [];
       for (let i = 0; i < wave.length; i += DB_CHUNK) {
         const chunk = wave.slice(i, i + DB_CHUNK);
-        const { data, error } = await db
-          .from('polza_ru_outreach_companies')
-          .insert(
+        const chunkIds = await persistCandidateChunk(db, 'polza_ru_outreach_companies',
             chunk.map((c) => ({
               job_id: jobId,
               source_type: sourceTypeOf(c),
@@ -1980,10 +1979,11 @@ async function runJob(
               row_status: 'processing',
               pipeline_stage: 'candidates_loaded',
             })),
-          )
-          .select('id');
-        if (error) throw new Error(`journal insert failed: ${error.message}`);
-        for (const r of data ?? []) ids.push(String(r.id));
+          {
+            beforeAttempt: ensureNotCancelled,
+            onRetry: (attempt, delay, message) => log('warn', `job ${jobId}: кандидаты — БД временно недоступна, попытка ${attempt}/5 через ${delay} мс: ${message}`),
+          });
+        ids.push(...chunkIds);
       }
       totals.scanned += wave.length;
       const size: SizeIndex = await loadSizeByInn(db, wave.map((c) => c.inn).filter((x): x is string => Boolean(x)));
@@ -2001,7 +2001,7 @@ async function runJob(
       const qualified: Qualified[] = [];
       const company = async ({ c, id }: { c: Candidate; id: string }) => {
         const p = await emailGate.run(async () => {
-          if (halted) return null;
+          if (halted || stopForLimits()) return null;
           await ensureNotCancelled();
           const tally = newTally(id);
           const out: { prepared: Prepared | null } = { prepared: null };
@@ -2013,8 +2013,8 @@ async function runJob(
         if (!p) return;
         await aiGate.run(async () => {
           if (halted) return;
-          if (stopForBudget()) {
-            // Лимит на ИИ исчерпан (или остался только запас под шаблоны) —
+          if (stopForLimits()) {
+            // Лимит времени или ИИ достигнут (либо остался запас под шаблоны) —
             // разбор не начинаем. Почту строка прошла, но этот шаг бесплатный, а
             // без разбора она ни отсеяна, ни готова: возвращаем в необработанные,
             // как строку, которую лимит прервал (в конце уйдёт из журнала,
@@ -2051,7 +2051,7 @@ async function runJob(
     const failure: { err: unknown; set: boolean } = { err: null, set: false };
     for (;;) {
       if (failure.set) throw failure.err;
-      if (halted || stopForBudget() || runAbort.signal.aborted) {
+      if (halted || stopForLimits() || runAbort.signal.aborted) {
         if (!running.size) break;
       } else if (running.size < MAX_WAVES_IN_FLIGHT && emailGate.waiting < EMAIL_CONCURRENCY) {
         const want = Math.min(
@@ -2102,7 +2102,7 @@ async function runJob(
       }, scoringDoubts(q));
     }
     deferredReactivation.clear();
-    if (budgetStop) {
+    if (limitStop) {
       // Строки, до которых из-за лимита не дошли или которые он прервал, — не
       // отсев и не ошибка. Среди них и прошедшие почту, но не успевшие к
       // разбору ИИ: почта бесплатна и готовой строку не делает. Убираем их из
@@ -2127,7 +2127,7 @@ async function runJob(
     // stop_reason_base — причина, какой она была бы без ждущих (null — волны
     // шли бы дальше): если после «Переписать цепочку» ждущих не хватит до
     // заказанного, экран покажет её (regenerate.ts).
-    const baseReason = budgetStop ? 'budget' : cursor >= pool.length ? 'pool_exhausted' : totals.scanned >= maxScan ? 'scan_limit' : null;
+    const baseReason = limitStop ?? (cursor >= pool.length ? 'pool_exhausted' : totals.scanned >= maxScan ? 'scan_limit' : null);
     const stopReason = totals.ready >= target
       ? 'target_reached'
       : totals.ready + awaiting.count >= target

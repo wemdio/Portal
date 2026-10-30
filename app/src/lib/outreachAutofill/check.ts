@@ -38,7 +38,8 @@ const ACTIVE_JOB_STATUSES = ['pending', 'running'];
 const NOTHING_READY_PREFIX = 'В запуске пока нет готовых';
 
 const STOP_REASON_TEXT: Record<string, string> = {
-  budget: 'кончился бюджет на ИИ',
+  budget: 'достигнут лимит расходов на ИИ для этого запуска',
+  time_limit: 'достигнут лимит времени запуска — 6 часов',
   pool_exhausted: 'кончились подходящие компании',
   scan_limit: 'просмотрен потолок кандидатов',
   awaiting_templates: 'часть компаний ждёт цепочку писем',

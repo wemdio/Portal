@@ -62,7 +62,7 @@ import {
 const ROWS = 'polza_outreach_companies';
 const PAGE = 1000;
 const WAITING_COLUMNS =
-  'id,company_name,brand_name,pain_line,trigger_list,recommended_case,segments,email_type,lead_score,' +
+  'id,company_name,brand_name,pain_line,trigger_list,recommended_case,case_reason,segments,email_type,lead_score,' +
   'selected_company_email,email_verification,emails';
 /** review_reason строк, ждущих шаблон: код и подробность («template_failed: …»). */
 const TEMPLATE_FAILED_LIKE = 'template_failed%';
@@ -77,6 +77,7 @@ interface WaitingRow {
   pain_line: string | null;
   trigger_list: unknown;
   recommended_case: string | null;
+  case_reason: string | null;
   segments: unknown;
   email_type: string | null;
   lead_score: number | null;
@@ -236,7 +237,10 @@ function companyInput(row: WaitingRow, cases: EnCase[]): CompanyLettersInput {
     painLine: row.pain_line,
     triggers,
     // Кейс — только утверждённый сейчас: отозванный после запуска в письмо не идёт.
-    caseHit: row.recommended_case ? cases.find((c) => c.caseId === row.recommended_case) ?? null : null,
+    caseHit: row.recommended_case ? (() => {
+      const record = cases.find((c) => c.caseId === row.recommended_case);
+      return record ? { ...record, showcase: row.case_reason === 'example from another industry' } : null;
+    })() : null,
     segments,
     emailType: row.email_type,
     // Оба варианта письма 1 пересобираются вместе: второй нужен, если среди

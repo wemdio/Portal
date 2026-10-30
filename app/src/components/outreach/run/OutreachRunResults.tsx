@@ -126,6 +126,11 @@ export function OutreachRunResults<Row extends { id: string }, Config, Job exten
           Остановлен: достигнут лимит на ИИ. Готовые компании сохранены — чтобы добрать остальные, повторите запуск с большим лимитом.
         </div>
       ) : null}
+      {jobStatus && summary.stopReason === 'time_limit' ? (
+        <div className="rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
+          Остановлен: достигнут лимит времени запуска — 6 часов. Готовые компании сохранены.
+        </div>
+      ) : null}
       {jobStatus && summary.stopReason === 'awaiting_templates' ? (
         <div className="rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
           Набрано вместе с компаниями, которые ждут цепочку{summary.awaitingTemplates ? ` (${summary.awaitingTemplates})` : ''} — перепишите цепочку в

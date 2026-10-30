@@ -220,7 +220,7 @@ export async function composeCompanyLetters(
   // Повторная проверка нужна для старых строк журнала и ручной пересборки.
   const selectedCase = input.caseRecord && input.caseRecord.cold_email !== false
     && caseAllowedForProduct(input.caseRecord, input.product) ? input.caseRecord : null;
-  const caseText = selectedCase?.case_text_short.trim() || null;
+  const caseText = selectedCase ? `${selectedCase.showcase ? 'в другой сфере ' : ''}${selectedCase.case_text_short.trim()}` : null;
   const withCase = Boolean(caseText) && template.bodyWithCase !== null;
   // Гипотезу считаем, только когда она попадёт в письмо и рынок подтверждён:
   // в утверждённых текстах (09.10.2026) — наблюдение по сайту в письме 2

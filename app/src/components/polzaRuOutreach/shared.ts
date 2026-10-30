@@ -32,7 +32,7 @@ export interface RuJob {
     ready?: number;
     target?: number;
     /**
-     * target_reached | pool_exhausted | scan_limit | budget (кончился лимит на ИИ) |
+     * target_reached | pool_exhausted | scan_limit | budget (кончился лимит на ИИ) | time_limit |
      * awaiting_templates (заказанное набрано вместе с компаниями, которые ждут цепочку оффера).
      */
     stop_reason?: string;

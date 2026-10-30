@@ -73,7 +73,7 @@ const ROWS = 'polza_ru_outreach_companies';
 const PAGE = 1000;
 const WAITING_COLUMNS =
   'id,chain_type,product,cascade_no,company_name,company_brand,about_line,is_routing,signals,signal_type,signal_title,signal_date,evidence_quote,source_url,' +
-  'prior_contact,market_evidence_quote,target_market,fit_reasons,case_id,recipient_email,amo_status,priority_score,doubt_flags,doubt_detail,' +
+  'prior_contact,market_evidence_quote,target_market,fit_reasons,case_id,case_match_reason,recipient_email,amo_status,priority_score,doubt_flags,doubt_detail,' +
   'email_type,email_verification,emails';
 const PRODUCT_PREFIX = 'Продукт: ';
 /** Письма строк собираются по четыре сразу: гипотеза — сетевой вызов. */
@@ -113,6 +113,7 @@ interface WaitingRow {
   target_market: string | null;
   fit_reasons: unknown;
   case_id: string | null;
+  case_match_reason: string | null;
   recipient_email: string | null;
   amo_status: string | null;
   priority_score: number | null;
@@ -494,7 +495,10 @@ function companyInput(row: WaitingRow, key: TemplateKey, libraries: Libraries): 
   const industry = group && (INDUSTRY_GROUPS as readonly string[]).includes(group) ? group as IndustryGroup : null;
   const storedCase = row.case_id ? libraries.cases.find((c) => c.case_id === row.case_id) : null;
   const caseRecord = storedCase && storedCase.cold_email !== false && caseAllowedForProduct(storedCase, product)
-    ? storedCase : routeCase(libraries.cases, industry, chain, product)?.record ?? null;
+    ? { ...storedCase, showcase: row.case_match_reason === 'пример из другой сферы' } : routeCase(libraries.cases, industry, chain, product, {
+      business: productLine ? productLine.slice(PRODUCT_PREFIX.length) : null,
+      customers: row.target_market, key: row.company_name,
+    })?.record ?? null;
   return {
     chain,
     product,

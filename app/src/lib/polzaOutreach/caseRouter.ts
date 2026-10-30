@@ -4,11 +4,13 @@
  * Библиотека общая с «Нашим автоаутричем» (polza_ru_cases): кейс попадает в
  * английское письмо, только если он утверждён, клиент разрешил публикацию,
  * срок не истёк и у него есть английский текст. Подбор — по отраслевой
- * группе; нет совпадения — письмо 3 без кейса, «похожий» не притягиваем.
+ * группе; нет совпадения — проверенный пример из другой сферы.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { IndustryGroup } from '@/lib/polzaRuOutreach/types';
+import { caseAllowedForProduct, MIN_CASE_LEADS } from '@/lib/polzaRuOutreach/libraries';
+import { rankCaseMatches, type CaseMatchContext } from '@/lib/outreachLlm/caseMatching';
 
 export interface EnCase {
   caseId: string;
@@ -16,12 +18,16 @@ export interface EnCase {
   snippet: string;
   url: string | null;
   groups: string[];
+  profiles?: string[];
+  crossMarket?: boolean;
+  leadsCount?: number | null;
+  showcase?: boolean;
 }
 
 export async function loadEnCases(db: SupabaseClient): Promise<EnCase[]> {
   const { data, error } = await db
     .from('polza_ru_cases')
-    .select('case_id,case_text_en,case_segment_en,case_url,industry_groups,expires_at')
+    .select('case_id,case_text_en,case_segment_en,case_url,industry_groups,expires_at,allowed_chains,leads_count,metrics')
     .eq('status', 'approved')
     .eq('legal_publication_approved', true)
     .not('case_text_en', 'is', null);
@@ -30,12 +36,17 @@ export async function loadEnCases(db: SupabaseClient): Promise<EnCase[]> {
   return (data ?? [])
     .filter((c) => !c.expires_at || new Date(String(c.expires_at)).getTime() > now)
     .filter((c) => String(c.case_text_en ?? '').trim())
+    .filter((c) => c.metrics?.cold_email !== false && (c.metrics?.public_project === true || (typeof c.leads_count === 'number' && c.leads_count >= MIN_CASE_LEADS)))
+    .filter((c) => c.metrics?.cross_market_reference === true || caseAllowedForProduct({ case_id: c.case_id, public_name: '', industry_groups: c.industry_groups ?? [], allowed_chains: c.allowed_chains ?? [], case_text_short: c.case_text_en }, 'classic_abroad'))
     .map((c) => ({
       caseId: String(c.case_id),
       segment: String(c.case_segment_en ?? 'B2B'),
       snippet: String(c.case_text_en).trim().replace(/[.\s]+$/, ''),
       url: c.case_url ? String(c.case_url) : null,
       groups: (c.industry_groups ?? []) as string[],
+      profiles: Array.isArray(c.metrics?.outreach_profiles) ? c.metrics.outreach_profiles.filter((p: unknown) => typeof p === 'string') : [],
+      crossMarket: c.metrics?.cross_market_reference === true,
+      leadsCount: typeof c.leads_count === 'number' ? c.leads_count : null,
     }));
 }
 
@@ -46,11 +57,19 @@ export async function loadEnCases(db: SupabaseClient): Promise<EnCase[]> {
  * среди подходящих по домену компании — устойчиво (у компании всегда один и
  * тот же) и вразнобой между компаниями.
  */
-export function routeEnCase(cases: EnCase[], group: IndustryGroup | null, key = ''): { record: EnCase; reason: string } | null {
-  if (!group) return null;
-  const hits = cases.filter((c) => c.groups.includes(group)).sort((a, b) => a.caseId.localeCompare(b.caseId));
-  if (!hits.length) return null;
+export function routeEnCase(cases: EnCase[], group: IndustryGroup | null, key = '', context?: CaseMatchContext): { record: EnCase; reason: string } | null {
+  if (context) {
+    const match = rankCaseMatches(cases.map((c) => ({ ...c, id: c.caseId, text: c.snippet })), group, { ...context, key }, 1)[0];
+    if (match) return { record: match.record, reason: match.reason };
+  }
+  const hits = group && !context ? cases.filter((c) => c.groups.includes(group)).sort((a, b) => a.caseId.localeCompare(b.caseId)) : [];
+  const foreign = cases.filter((c) => c.crossMarket !== true);
+  const showcase = (foreign.length ? foreign : cases).slice().sort((a, b) =>
+    (b.leadsCount ?? 0) - (a.leadsCount ?? 0) || a.caseId.localeCompare(b.caseId));
+  const candidates = hits.length ? hits : showcase;
+  if (!candidates.length) return null;
   let h = 0;
   for (const ch of key.toLowerCase()) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return { record: hits[h % hits.length], reason: `industry group: ${group}` };
+  if (hits.length) return { record: hits[h % hits.length], reason: `industry group: ${group}` };
+  return { record: { ...candidates[h % Math.min(3, candidates.length)], showcase: true }, reason: 'example from another industry' };
 }
