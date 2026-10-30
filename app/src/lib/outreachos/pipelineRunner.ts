@@ -37,7 +37,7 @@
 import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
-import { findNewHhEmployers, deriveDomain, type HhEmployer } from '@/lib/jobs/hhAutoParser';
+import { findNewHhEmployers, deriveDomain, HhTransientRequestError, type HhEmployer } from '@/lib/jobs/hhAutoParser';
 import { ensureArchiveSinkJob, buildHhArchiveSinkCallback, getUserIdByEmail } from '@/lib/parsers/hhArchiveSink';
 import { appendLeadsToClientCampaign, fetchExistingCampaignEmails } from '@/lib/clientLaunch/appendLeads';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
@@ -45,6 +45,7 @@ import { getLatestTwoGisSnapshotId } from '@/lib/twoGis/repository';
 import { normalizeTwoGisFilters } from '@/lib/twoGis/query';
 import { toTwoGisRubricGroups } from '@/lib/twoGis/rubricGroups';
 import { loadOutreachOsConfig, type OutreachOsConfig } from './config';
+import { retryableHhFailureMessage } from './watchdogPolicy';
 import { buildExcludePatterns } from './excludePatterns';
 import { isOutreachOsB2cCompany } from './excludeB2c';
 import {
@@ -666,26 +667,37 @@ async function runHhPhase(ctx: RunContext): Promise<HhPhase> {
   const sinkJobId = sinkOwnerId ? await ensureArchiveSinkJob(sinkOwnerId) : null;
   const onVacancies = buildHhArchiveSinkCallback(sinkJobId);
 
-  // Перезапуск убитого прогона берёт то же окно HH, что и он: иначе вакансии
+  // Перезапуск прогона берёт то же окно HH, что и он: иначе вакансии
   // между его стартом и перезапуском выпали бы из обоих дней.
   const windowEnd = ctx.anchorStartedAt ? Date.parse(ctx.anchorStartedAt) : Date.now();
   const since = new Date(windowEnd - config.window_hours * 3600_000);
   if (ctx.anchorStartedAt) {
-    log(`Перезапуск убитого прогона: HH с окна прежнего старта, с ${since.toISOString()}`);
+    log(`Перезапуск прогона: HH с прежнего окна, с ${since.toISOString()}`);
   }
   const seen = await loadRecentlySeen();
-  const employers = await findNewHhEmployers({
-    since,
-    area: config.area,
-    industries: config.industries.length > 0 ? config.industries : undefined,
-    excludePatterns: buildExcludePatterns(config.extra_exclude),
-    maxEmployees: config.max_employees ?? undefined,
-    limit: config.daily_limit,
-    exhaustive: true,
-    skipEmployerIds: seen.ids,
-    log: (m) => log(`[hh] ${m}`),
-    onVacancies,
-  });
+  let employers: HhEmployer[];
+  try {
+    employers = await findNewHhEmployers({
+      since,
+      until: new Date(windowEnd),
+      area: config.area,
+      industries: config.industries.length > 0 ? config.industries : undefined,
+      excludePatterns: buildExcludePatterns(config.extra_exclude),
+      maxEmployees: config.max_employees ?? undefined,
+      limit: config.daily_limit,
+      exhaustive: true,
+      skipEmployerIds: seen.ids,
+      log: (m) => log(`[hh] ${m}`),
+      onVacancies,
+    });
+  } catch (err) {
+    // This boundary is before constructor/seen/upload. No other failure gets a
+    // watchdog retry marker, even if it happens to contain an HH error message.
+    if (err instanceof HhTransientRequestError) {
+      throw new Error(retryableHhFailureMessage(new Date(windowEnd), err.message));
+    }
+    throw err;
+  }
   log(`HH вернул ${employers.length} работодателей (после ICP-фильтра)`);
 
   // 3b. Структурный B2C/ИП-отсев по названию+домену (excludeB2c.ts): школы,

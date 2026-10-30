@@ -29,11 +29,23 @@
  *        — limit: общий cap, остановка пагинации.
  */
 
+import type { Dispatcher } from 'undici';
+
 const HH_API_BASE = 'https://api.hh.ru';
 const USER_AGENT = 'PortalBot/1.0 (sergey@wemd.io)';
 const REQUEST_GAP_MS = 250;
 const MAX_PAGES = 20;
 const PAGE_SIZE = 100;
+const REQUEST_TIMEOUT_MS = 20_000;
+const RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 20_000];
+
+/** Only exhausted transient requests may trigger a safe OutreachOS HH-phase retry. */
+export class HhTransientRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HhTransientRequestError';
+  }
+}
 
 // HH API: OAuth Bearer (HH_ACCESS_TOKEN) ОБЯЗАТЕЛЕН, но его НЕ достаточно с
 // зарубежного IP — HH всё равно отдаёт 403 (geo-блок). Поэтому ходим через
@@ -45,6 +57,8 @@ const PAGE_SIZE = 100;
 export interface HhAutoParserConfig {
   /** Only include vacancies published at or after this moment. */
   since: Date;
+  /** Fixed end of an exhaustive search, including a watchdog retry of the same window. */
+  until?: Date;
   /** HH area id. Default 113 (Russia). */
   area?: string;
   /** Optional industry ids — when set, parser iterates one search per industry. */
@@ -145,60 +159,87 @@ function buildHeaders(): Record<string, string> {
 
 // HH блокирует зарубежные IP (403) даже с валидным токеном — ходим через
 // RU-прокси (тот же PROXY_URLS, что и рабочий админский/клиентский hhParser).
-// undici импортируем ЛЕНИВО: статический import ломал jest («TextDecoder is
-// not defined»). Берём первый прокси из PROXY_URLS (JSON-массив) или HH_PROXY_URL.
-function firstProxyUrl(): string | null {
+// Агент импортируем лениво: статический undici ломал jest («TextDecoder is
+// not defined»). После сбоя следующая попытка идёт через другую ноду.
+function proxyUrls(): string[] {
   if (process.env.PROXY_URLS) {
     try {
       const arr = JSON.parse(process.env.PROXY_URLS);
-      if (Array.isArray(arr) && arr.length > 0 && typeof arr[0] === 'string') {
-        return arr[0].trim();
+      if (Array.isArray(arr)) {
+        const urls = [...new Set(arr.filter((v): v is string => typeof v === 'string').map((v) => v.trim()).filter(Boolean))];
+        if (urls.length > 0) return urls;
       }
     } catch {
       /* malformed PROXY_URLS — игнорируем */
     }
   }
-  return process.env.HH_PROXY_URL?.trim() || null;
+  const fallback = process.env.HH_PROXY_URL?.trim();
+  return fallback ? [fallback] : [];
 }
 
-let cachedDispatcher: { value: unknown } | null = null;
-async function getProxyDispatcher(): Promise<unknown> {
-  if (cachedDispatcher) return cachedDispatcher.value;
-  const url = firstProxyUrl();
-  if (!url) {
-    cachedDispatcher = { value: null };
-    return null;
-  }
-  try {
-    const { ProxyAgent } = await import('undici');
-    cachedDispatcher = { value: new ProxyAgent(url) as unknown };
-  } catch {
-    cachedDispatcher = { value: null };
-  }
-  return cachedDispatcher.value;
+const dispatchers = new Map<string, Dispatcher>();
+let proxyIndex = 0;
+async function getProxyDispatcher(url: string): Promise<Dispatcher> {
+  const cached = dispatchers.get(url);
+  if (cached) return cached;
+  const { createBoundedProxyAgent } = await import('@/lib/enrich/boundedProxyAgent');
+  const dispatcher = createBoundedProxyAgent(url, { tunnelTimeoutMs: 10_000 });
+  dispatchers.set(url, dispatcher);
+  return dispatcher;
 }
 
-async function fetchJson<T>(url: string): Promise<T | null> {
-  try {
-    const dispatcher = await getProxyDispatcher();
-    const init: RequestInit & { dispatcher?: unknown } = { headers: buildHeaders() };
-    if (dispatcher) init.dispatcher = dispatcher;
-    const res = await fetch(url, init);
-    if (!res.ok) {
-      // Полезный сигнал для отладки — HH 403 (geo-блок) или 429 (rate-limit)
-      // должны быть видны в логе, а не теряться молча.
-      if (res.status === 403 || res.status === 429) {
-        console.warn(
-          `[hhAutoParser] HH returned ${res.status} for ${url}${dispatcher ? '' : ' — прокси не настроен (PROXY_URLS пуст)'}`,
-        );
+/** Log error types/codes, never messages that can contain proxy credentials or tokens. */
+function transportErrorCodes(error: unknown): string {
+  const codes: string[] = [];
+  const pending: unknown[] = [error];
+  for (let i = 0; i < pending.length && i < 6; i++) {
+    const current = pending[i];
+    if (!current || typeof current !== 'object') continue;
+    const { name, code, cause, errors } = current as { name?: unknown; code?: unknown; cause?: unknown; errors?: unknown };
+    if (typeof name === 'string' && /^(?:TypeError|Error|AbortError|TimeoutError|AggregateError)$/.test(name)) codes.push(name);
+    if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(code)) codes.push(code);
+    if (cause) pending.push(cause);
+    if (Array.isArray(errors)) pending.push(...errors.slice(0, 2));
+  }
+  return [...new Set(codes)].join(' / ') || 'transport error';
+}
+
+async function fetchJson<T>(url: string, strict = false): Promise<T | null> {
+  const proxies = proxyUrls();
+  let failure = '';
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    const selectedProxy = proxies.length > 0 ? proxyIndex % proxies.length : 0;
+    const proxyUrl = proxies[selectedProxy];
+    try {
+      const dispatcher = proxyUrl ? await getProxyDispatcher(proxyUrl) : undefined;
+      const res = await fetch(url, {
+        headers: buildHeaders(),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        ...(dispatcher ? { dispatcher } : {}),
+      } as RequestInit & { dispatcher?: Dispatcher });
+      if (res.ok) return (await res.json()) as T;
+      await res.body?.cancel().catch(() => {});
+      failure = `HTTP ${res.status}`;
+      // 401/400/404 will not be repaired by another proxy or a delayed daily run.
+      if (![403, 408, 425, 429].includes(res.status) && res.status < 500) {
+        console.warn(`[hhAutoParser] ${failure} for ${url}`);
+        return null;
       }
-      return null;
+    } catch (err) {
+      failure = transportErrorCodes(err);
+      if (proxyUrl) {
+        const dispatcher = dispatchers.get(proxyUrl);
+        dispatchers.delete(proxyUrl);
+        await dispatcher?.destroy().catch(() => {});
+      }
     }
-    return (await res.json()) as T;
-  } catch (err) {
-    console.warn(`[hhAutoParser] fetch error for ${url}:`, err instanceof Error ? err.message : err);
-    return null;
+    console.warn(`[hhAutoParser] attempt ${attempt + 1}/${RETRY_DELAYS_MS.length + 1}, ` +
+      `${proxyUrl ? `proxy ${selectedProxy + 1}/${proxies.length}` : 'direct'}: ${failure} for ${url}`);
+    if (proxies.length > 1) proxyIndex = (selectedProxy + 1) % proxies.length;
+    if (attempt < RETRY_DELAYS_MS.length) await sleep(RETRY_DELAYS_MS[attempt]);
   }
+  if (strict) throw new HhTransientRequestError(`HH request failed after retries (${failure}): ${url}`);
+  return null;
 }
 
 interface HhVacancyResponse {
@@ -345,11 +386,8 @@ async function searchVacancyPages(
 }
 
 async function fetchVacancyPage(url: string, exhaustive: boolean): Promise<HhVacancyResponse | null> {
-  for (let attempt = 1; attempt <= (exhaustive ? 3 : 1); attempt++) {
-    const data = await fetchJson<HhVacancyResponse>(url);
-    if (data?.items && (!exhaustive || typeof data.found === 'number')) return data;
-    if (attempt < 3 && exhaustive) await sleep(attempt * 1000);
-  }
+  const data = await fetchJson<HhVacancyResponse>(url, exhaustive);
+  if (data?.items && (!exhaustive || typeof data.found === 'number')) return data;
   if (exhaustive) throw new Error(`HH vacancy search failed after retries: ${url}`);
   return null;
 }
@@ -389,9 +427,9 @@ async function searchCompleteVacancyWindow(
   return searchVacancyPages(windowParams, log, onVacancies, firstPage, true);
 }
 
-/** Pull /employers/{id} details for one candidate. Returns null on HH error. */
-async function fetchEmployerDetails(empId: string): Promise<HhEmployerResponse | null> {
-  return fetchJson<HhEmployerResponse>(`${HH_API_BASE}/employers/${empId}`);
+/** Strict searches also abort on exhausted transient employer requests instead of losing candidates. */
+async function fetchEmployerDetails(empId: string, strict: boolean): Promise<HhEmployerResponse | null> {
+  return fetchJson<HhEmployerResponse>(`${HH_API_BASE}/employers/${empId}`, strict);
 }
 
 function parseEmployeeCount(raw: string | undefined | null): number | null {
@@ -418,7 +456,7 @@ export async function findNewHhEmployers(
   const log = config.log ?? (() => undefined);
   const area = config.area ?? '113';
   const since = formatDateFrom(config.since);
-  const until = new Date();
+  const until = config.until ?? new Date();
 
   log(`HH: collecting vacancies since ${since}, area=${area}`);
 
@@ -479,7 +517,7 @@ export async function findNewHhEmployers(
   let skippedNoSite = 0;
 
   for (const c of toEnrich) {
-    const details = await fetchEmployerDetails(c.id);
+    const details = await fetchEmployerDetails(c.id, config.exhaustive === true);
     await sleep(REQUEST_GAP_MS);
 
     if (!details) continue;

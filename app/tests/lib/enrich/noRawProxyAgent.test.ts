@@ -22,7 +22,6 @@ const LEGACY: Record<string, number> = {
   'src/app/api/ai-caller/calls/[id]/recording/route.ts': 2,
   'src/lib/elevenlabs-convai.ts': 2,
   'src/lib/habrCareer/parser.ts': 2,
-  'src/lib/jobs/hhAutoParser.ts': 2,
   'src/lib/parsers/searchScraper.ts': 1,
   'src/lib/parsers/sourceCompanyExtractor.ts': 1,
 };
