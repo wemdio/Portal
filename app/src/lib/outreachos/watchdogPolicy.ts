@@ -22,6 +22,8 @@
  * лишний объём в кампаниях: только окно 05:30–14:00 МСК, только если сегодня
  * нет успешного прогона и нет прогона, упавшего по своей причине, не больше
  * MAX_RUNS_PER_DAY строк за сутки и не после исчерпанных продолжений.
+ * Исключение — отмеченный runner'ом временный сбой HH ДО конструктора: его
+ * повторяем через 15 мин с теми же границами поиска, атомарно забрав failed-строку.
  *
  * Время считаем явно в Europe/Moscow: контейнеры живут с TZ=UTC.
  */
@@ -36,6 +38,13 @@ export const MAX_RESUME_ATTEMPTS = 3;
 export const RESTART_WINDOW_MSK = { fromMinutes: 5 * 60 + 30, toMinutes: 14 * 60 };
 /** Префикс error_message закрытых сторожем строк: «убит извне», а не ошибка прогона. */
 export const WATCHDOG_REAP_PREFIX = 'watchdog:';
+/** Only the HH-call boundary may emit this marker, before constructor/seen/upload. */
+export const HH_RETRYABLE_FAILURE_PREFIX = 'hh-transient-before-constructor:';
+export const HH_RETRY_COOLDOWN_MS = 15 * 60_000;
+
+export function retryableHhFailureMessage(windowEnd: Date, detail: string): string {
+  return `${HH_RETRYABLE_FAILURE_PREFIX} ${windowEnd.toISOString()} ${detail}`;
+}
 
 export interface MskParts {
   /** Минуты от полуночи по Москве. */
@@ -73,6 +82,27 @@ export interface WatchdogTodayRun {
   id: string;
   status: string;
   error_message: string | null;
+  started_at?: string;
+  finished_at?: string | null;
+  base_job_id?: string | null;
+  valid_contacts?: number | null;
+  appended?: number | null;
+  appended_b?: number | null;
+}
+
+function retryableHhAnchor(row: WatchdogTodayRun, now: Date): string | null {
+  if (row.status !== 'failed' || row.base_job_id !== null || row.valid_contacts !== null) return null;
+  // Missing fields fail closed; a failure after any campaign delivery is never retried here.
+  if (![row.appended, row.appended_b].every((v) => v === null || v === 0)) return null;
+  const message = row.error_message ?? '';
+  if (!message.startsWith(`${HH_RETRYABLE_FAILURE_PREFIX} `)) return null;
+  const anchor = message.slice(HH_RETRYABLE_FAILURE_PREFIX.length + 1).split(' ', 1)[0];
+  const start = Date.parse(row.started_at ?? '');
+  const end = Date.parse(row.finished_at ?? '');
+  const anchorMs = Date.parse(anchor);
+  if (![start, end, anchorMs].every(Number.isFinite) || anchorMs > end || end < start || end > now.getTime()) return null;
+  const today = mskParts(now).dateKey;
+  return mskParts(new Date(anchorMs)).dateKey === today && mskParts(new Date(start)).dateKey === today ? anchor : null;
 }
 
 export interface WatchdogInput {
@@ -96,8 +126,10 @@ export interface WatchdogDecision {
   resume: WatchdogRunningRun | null;
   /** Запускать ли день заново. */
   restart: boolean;
-  /** started_at убитого сегодняшнего прогона: перезапуск берёт HH с того же окна. */
+  /** End of the original HH window: a restart must not shift either search boundary. */
   restartAnchor: string | null;
+  /** CAS-claim this failed row before spawning a fresh run, so two ticks cannot retry it twice. */
+  retryFailedRun?: { id: string; error_message: string };
   /** Человекочитаемое объяснение — в лог и в TG-алерт. */
   reason: string;
 }
@@ -159,8 +191,12 @@ export function decideWatchdogAction(input: WatchdogInput): WatchdogDecision {
   const reapedIds = new Set(reap.map((row) => row.id));
   const otherToday = input.todayRuns.filter((row) => !reapedIds.has(row.id));
   const completedToday = otherToday.filter((row) => row.status === 'completed').length;
+  const hhFailures = otherToday
+    .filter((row) => retryableHhAnchor(row, input.now) !== null)
+    .sort((a, b) => Date.parse(b.finished_at!) - Date.parse(a.finished_at!));
+  const hhFailure = hhFailures[0];
   const failedOnItsOwn = otherToday.filter(
-    (row) => row.status === 'failed' && !(row.error_message ?? '').startsWith(WATCHDOG_REAP_PREFIX),
+    (row) => row.status === 'failed' && !(row.error_message ?? '').startsWith(WATCHDOG_REAP_PREFIX) && !hhFailures.includes(row),
   ).length;
   const reapedToday = reap
     .filter(startedToday)
@@ -178,7 +214,8 @@ export function decideWatchdogAction(input: WatchdogInput): WatchdogDecision {
   if (failedOnItsOwn > 0) blockers.push('сегодняшний прогон упал по своей причине');
   if (input.todayRuns.length >= MAX_RUNS_PER_DAY) blockers.push(`лимит ${MAX_RUNS_PER_DAY} прогонов в сутки исчерпан`);
   if (exhausted) blockers.push(`продолжения исчерпаны (${MAX_RESUME_ATTEMPTS})`);
-  if (reapedToday.length === 0 && input.todayRuns.length > 0) blockers.push('сегодняшний прогон не убит');
+  if (hhFailure && nowMs - Date.parse(hhFailure.finished_at!) < HH_RETRY_COOLDOWN_MS) blockers.push('после сбоя HH ещё не прошло 15 мин');
+  if (!hhFailure && reapedToday.length === 0 && input.todayRuns.length > 0) blockers.push('сегодняшний прогон не убит');
 
   if (blockers.length > 0) {
     return { reap, resume: null, restart: false, restartAnchor: null, reason: `${reapNote}; перезапуск не делаем: ${blockers.join(', ')}` };
@@ -187,8 +224,11 @@ export function decideWatchdogAction(input: WatchdogInput): WatchdogDecision {
     reap,
     resume: null,
     restart: true,
-    restartAnchor: reapedToday[0]?.started_at ?? null,
-    reason: reapedToday.length > 0
+    restartAnchor: hhFailure ? retryableHhAnchor(hhFailure, input.now) : reapedToday[0]?.started_at ?? null,
+    ...(hhFailure ? { retryFailedRun: { id: hhFailure.id, error_message: hhFailure.error_message! } } : {}),
+    reason: hhFailure
+      ? `${reapNote}; временный сбой HH до конструктора — повторяем прежнее окно поиска`
+      : reapedToday.length > 0
       ? `${reapNote}; продолжать не с чего — перезапускаем день`
       : 'сегодня нет ни одного прогона и процесса нет (крон не отработал?) — запускаем день',
   };

@@ -224,7 +224,13 @@ function phoneInLine(line: string, signature: boolean): string | null {
     if (digits.length < 10 && !framed) continue;
     const formatted = value.startsWith('+') || /[()]/.test(value) || /\d[ .-]\d/.test(value);
     const russianFull = /^[78]\d{10}$/.test(digits);
-    if (!framed && !formatted && !russianFull) continue;
+    // A greeting followed by one national-format number is a complete contact
+    // reply, not arbitrary numeric prose. Keep the leading zero as supplied;
+    // neither the country nor an international prefix can be inferred here.
+    const greetingPhoneRow = candidates.length === 1 && (russianFull || /^0[1-9]\d{8}$/.test(value)) &&
+      /^(?:добрый\s+(?:день|вечер)|доброе\s+утро|здравствуйте)[,.!]?[ \t]*$/iu.test(before) &&
+      /^[ \t]*[.!]?[ \t]*$/u.test(after);
+    if (!framed && !formatted && !russianFull && !greetingPhoneRow) continue;
     const residue = (line.slice(0, start) + line.slice(end))
       .replace(/[:;,|/()<>.]/g, ' ').replace(/^[\s-]+|[\s-]+$/g, '').trim();
     // Contact directories can contain email + phone + name (department).
@@ -233,11 +239,6 @@ function phoneInLine(line: string, signature: boolean): string | null {
     const contactName = (line.slice(0, start) + line.slice(end))
       .replace(/\S+@\S+/gu, '').replace(/\([^)]*(?:\)|$)/gu, '')
       .replace(/[:;,|/<>.]/gu, ' ').trim();
-    // A terse authored reply can be just a greeting and one full phone.
-    // Do not broaden this to arbitrary prose, identifiers or quoted history.
-    const greetingPhoneRow = candidates.length === 1 && russianFull &&
-      /^(?:добрый\s+(?:день|вечер)|доброе\s+утро|здравствуйте)[,.!]?[ \t]*$/iu.test(before) &&
-      /^[ \t]*[.!]?[ \t]*$/u.test(after);
     // Complete contact instructions can put the messenger after the number,
     // or separate "напишите" from it with politeness/personal pronouns.
     // Keep these anchored and single-number: "номер" alone also labels IDs.
@@ -249,7 +250,15 @@ function phoneInLine(line: string, signature: boolean): string | null {
       (/^на\s*$/iu.test(contactBefore) && /^\s*в\s+(?:тг|telegram|максе|max)[.!]?\s*$/iu.test(after)) ||
       (/^напишите(?:,?\s*пожалуйста,?)?(?:\s+мне)?\s+в\s+(?:максе|мах|max|тг|телеграм(?:е)?|telegram)\s*$/iu.test(contactBefore) && /^[\s.!]*$/u.test(after))
     );
-    if (!signature && !framed && !onlyPhoneRow && !greetingPhoneRow && !explicitPhoneReplyRow && residue && !isPersonName(residue) && !signatureNameInLine(contactName)) continue;
+    // Keep these contact instructions whole and anchored. A messenger word
+    // elsewhere in a sentence must not turn an order/registry ID into a phone.
+    const directContactReplyRow = candidates.length === 1 && (
+      ((russianFull || (value.startsWith('+') && digits.length >= 10)) &&
+        /^можно(?:\s+и)?\s+по\s+(?:ватсапу|вотсапу|ватсап|вотсап|whatsapp)\s*:?\s*$/iu.test(contactBefore) && /^[\s.!]*$/u.test(after)) ||
+      (russianFull && /^(?:отлично[.!]\s*)?(?:можете\s+)?напомнить\s+на\s+личный(?:\s+номер)?\s*:\s*$/iu.test(contactBefore) &&
+        /^\s*[.!]?\s*(?:(?:телеграмм?|telegram)\s*\/\s*(?:ватсап|вотцап|вотсап|whatsapp)\s+привязаны[.!]?\s*)?$/iu.test(after))
+    );
+    if (!signature && !framed && !onlyPhoneRow && !greetingPhoneRow && !explicitPhoneReplyRow && !directContactReplyRow && residue && !isPersonName(residue) && !signatureNameInLine(contactName)) continue;
     phones.push(value);
   }
   return joinLeadPhones(phones);
