@@ -14,14 +14,14 @@ export interface MatchableCase {
 
 const PROFILES: Record<string, RegExp> = {
   software_development: /заказн.{0,25}разработ|разработк.{0,25}(?:по(?:\s|$)|программ|сайт)|custom software|software development|development (?:agency|team)|outsourc/i,
-  workflow_software: /автоматизац.{0,35}(?:бизнес|процесс)|crm|bpmn|business process|workflow|service management|тоир|1с|1c/i,
+  workflow_software: /автоматизац.{0,35}(?:бизнес|процесс)|crm|bpmn|business process|workflow|service management|тоир|1с|1c|проверк.{0,20}контрагент|business verification/i,
   healthcare_ai: /(?:медицин|врач|клиник|medical|clinical|doctor|healthcare).{0,50}(?:ии|ai|ассистент)|(?:ии|ai).{0,50}(?:медицин|врач|medical|clinical|healthcare)/i,
   content_ai: /(?:генерац|generat).{0,35}(?:видео|video|контент|content)|(?:видео|video).{0,35}(?:генерац|generat)/i,
   ai_agents: /ии.?агент|ai agents?|ai automation/i,
   marketing_analytics: /сквозн.{0,15}аналитик|маркетингов.{0,20}(?:отч[её]т|аналитик)|marketing (?:analytics|reporting)|marketplace analytics/i,
   hr_recruitment: /рекрутингов.{0,20}агент|кадров.{0,15}агент|подбор.{0,25}(?:персонал|специалист)|recruitment (?:agency|services)|staffing/i,
   hr_software: /hr.?tech|hr.?платформ|hr automation|отпуск|vacation|leave management|кадров.{0,15}автоматизац|работ.{0,20}исполнител/i,
-  employee_benefits: /бенефит|корпоративн.{0,20}(?:фитнес|льгот|благополуч)|employee benefits|corporate fitness|employee wellbeing/i,
+  employee_benefits: /бенефит|корпоративн.{0,20}(?:фитнес|льгот|благополуч)|поддержк.{0,15}сотрудник|employee benefits|corporate fitness|employee wellbeing/i,
   fintech_payments: /плат[её]ж|выплат|payroll|payments?|cross.border|эквайринг/i,
   reputation: /репутаци|reputation|отзыв|reviews? removal/i,
   marketing_services: /seo|маркетингов.{0,15}агент|digital.?агент|рекламн.{0,15}агент|marketing agency|digital agency|pr agency|брендинг|branding|дизайн.?студи/i,
@@ -41,6 +41,11 @@ const PROFILES: Record<string, RegExp> = {
   seasonal_decor: /новогодн.{0,15}(?:ел|ёл|оформлен)|хвойн.{0,15}композиц|christmas decor|christmas trees/i,
   event_software: /(?:платформ|platform|software).{0,35}(?:мероприяти|event management)|event management (?:software|saas)/i,
   fleet_software: /автопарк|fleet management|fleet maintenance|ремонт.{0,20}авто/i,
+  legal_services: /патентн|интеллектуальн.{0,15}прав|юридическ.{0,20}услуг|patent (?:bureau|law)|b2b legal/i,
+  ad_network: /рекламн.{0,15}сет|издател|ad network|publisher network/i,
+  video_production: /видеопродакшн|видеопроизвод|video production/i,
+  hvac_equipment: /климатическ.{0,15}оборудован|вентиляционн.{0,15}оборудован|hvac|climate equipment/i,
+  corporate_finance: /корпоративн.{0,15}финанс|corporate finance|инвестиционн.{0,20}продукт/i,
 };
 
 function words(value: string): Set<string> {

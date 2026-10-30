@@ -19,6 +19,7 @@ export interface EnCase {
   url: string | null;
   groups: string[];
   profiles?: string[];
+  crossMarket?: boolean;
 }
 
 export async function loadEnCases(db: SupabaseClient): Promise<EnCase[]> {
@@ -33,8 +34,8 @@ export async function loadEnCases(db: SupabaseClient): Promise<EnCase[]> {
   return (data ?? [])
     .filter((c) => !c.expires_at || new Date(String(c.expires_at)).getTime() > now)
     .filter((c) => String(c.case_text_en ?? '').trim())
-    .filter((c) => c.metrics?.cold_email !== false && typeof c.leads_count === 'number' && c.leads_count >= MIN_CASE_LEADS)
-    .filter((c) => caseAllowedForProduct({ case_id: c.case_id, public_name: '', industry_groups: c.industry_groups ?? [], allowed_chains: c.allowed_chains ?? [], case_text_short: c.case_text_en }, 'classic_abroad'))
+    .filter((c) => c.metrics?.cold_email !== false && (c.metrics?.public_project === true || (typeof c.leads_count === 'number' && c.leads_count >= MIN_CASE_LEADS)))
+    .filter((c) => c.metrics?.cross_market_reference === true || caseAllowedForProduct({ case_id: c.case_id, public_name: '', industry_groups: c.industry_groups ?? [], allowed_chains: c.allowed_chains ?? [], case_text_short: c.case_text_en }, 'classic_abroad'))
     .map((c) => ({
       caseId: String(c.case_id),
       segment: String(c.case_segment_en ?? 'B2B'),
@@ -42,6 +43,7 @@ export async function loadEnCases(db: SupabaseClient): Promise<EnCase[]> {
       url: c.case_url ? String(c.case_url) : null,
       groups: (c.industry_groups ?? []) as string[],
       profiles: Array.isArray(c.metrics?.outreach_profiles) ? c.metrics.outreach_profiles.filter((p: unknown) => typeof p === 'string') : [],
+      crossMarket: c.metrics?.cross_market_reference === true,
     }));
 }
 

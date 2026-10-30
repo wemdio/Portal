@@ -41,6 +41,7 @@ export interface CaseRecord {
   cold_email?: boolean;
   match_profiles?: string[];
   case_url?: string | null;
+  cross_market_reference?: boolean;
 }
 
 /** Продукт имеет приоритет над поводом. Старые кейсы без разметки — классика. */
@@ -79,7 +80,7 @@ export async function loadCases(db: SupabaseClient): Promise<CaseRecord[]> {
   return (data ?? []).filter((c) => {
     const role = c.metrics?.evidence_type === 'role_contact' && c.allowed_chains?.includes('sdr');
     return typeof c.case_text_short === 'string' && Boolean(c.case_text_short.trim())
-      && isActive(c.expires_at, now) && (role || (typeof c.leads_count === 'number' && c.leads_count >= MIN_CASE_LEADS));
+      && isActive(c.expires_at, now) && (role || c.metrics?.public_project === true || (typeof c.leads_count === 'number' && c.leads_count >= MIN_CASE_LEADS));
   }).map((c) => ({
     case_id: String(c.case_id),
     public_name: String(c.public_name),
@@ -90,6 +91,7 @@ export async function loadCases(db: SupabaseClient): Promise<CaseRecord[]> {
     cold_email: c.metrics?.cold_email !== false,
     match_profiles: Array.isArray(c.metrics?.outreach_profiles) ? c.metrics.outreach_profiles.filter((p: unknown) => typeof p === 'string') : [],
     case_url: typeof c.case_url === 'string' ? c.case_url : null,
+    cross_market_reference: c.metrics?.cross_market_reference === true,
   }));
 }
 

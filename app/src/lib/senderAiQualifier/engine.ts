@@ -175,11 +175,13 @@ export async function offerContextFor(
     // Английские ответы используют ту же утверждённую библиотеку, что EN-письма,
     // с проверкой продукта. Не подменяем зарубежный результат русским переводом.
     const [english, productCases] = await Promise.all([loadEnCases(db), loadCases(db)]);
-    const allowed = new Set(productCases.filter((c) => caseAllowedForProduct(c, 'classic_abroad')).map((c) => c.case_id));
-    const cases = rankCaseMatches(english.filter((c) => allowed.has(c.caseId)).map((c) => ({ ...c, id: c.caseId, text: c.snippet })), context.group, context, 2).map((c) => c.record);
+    const allowed = new Set(productCases.filter((c) => caseAllowedForProduct(c, 'classic_abroad') || c.cross_market_reference).map((c) => c.case_id));
+    const matches = rankCaseMatches(english.filter((c) => allowed.has(c.caseId)).map((c) => ({ ...c, id: c.caseId, text: c.snippet })), context.group, context, 999);
+    const cases = matches.slice(0, 3).map((c) => c.record);
+    const sameBusinessCount = matches.filter((m) => m.reason.startsWith('business match:')).length;
     return {
-      offerText: [productKnowledgeText('classic_abroad', 'en'), general ? `ADDITIONAL NOTES (do not override product boundaries above):\n${general}` : '', cases.length ? 'APPROVED CASES (choose at most one matching the recipient\'s business and market):' : '',
-        ...cases.map((c) => `[case_id=${c.caseId}; segments=${c.groups.join(',')}] ${c.snippet}${c.url ? ` Source: ${c.url}` : ''}`)].filter(Boolean).join('\n'),
+      offerText: [productKnowledgeText('classic_abroad', 'en'), general ? `ADDITIONAL NOTES (do not override product boundaries above):\n${general}` : '', sameBusinessCount >= 2 ? `${sameBusinessCount} approved case examples match the recipient's business type. Mention the count only as a count of comparable projects, never as foreign-market proof.` : '', cases.length ? 'APPROVED CASES (usually choose one, at most two if a comparison helps; Russian-client examples are not international outcome proof):' : '',
+        ...cases.map((c) => `[case_id=${c.caseId}; segments=${c.groups.join(',')}; ${c.crossMarket ? 'Russian-client example, foreign-market outcome unproven' : 'approved international product example'}] ${c.snippet}${c.url ? ` Source: ${c.url}` : ''}`)].filter(Boolean).join('\n'),
       caseIds: cases.map((c) => c.caseId), cascade: false, productPitch: null,
     };
   }
@@ -192,12 +194,14 @@ export async function offerContextFor(
   const text = typeof own === 'string' ? own.trim() : '';
   const cases = (await loadCases(db)).filter((c) => caseAllowedForProduct(c, offered.product))
     .sort((a, b) => Number(b.cold_email !== false) - Number(a.cold_email !== false));
-  const selected = offered.product === 'sdr' ? cases.slice(0, 3)
-    : rankCaseMatches(cases.map((c) => ({ ...c, id: c.case_id, groups: c.industry_groups, text: c.case_text_short, profiles: c.match_profiles })), context.group, context, 2).map((c) => c.record);
+  const matches = offered.product === 'sdr' ? [] : rankCaseMatches(cases.map((c) => ({ ...c, id: c.case_id, groups: c.industry_groups, text: c.case_text_short, profiles: c.match_profiles })), context.group, context, 999);
+  const selected = offered.product === 'sdr' ? cases.slice(0, 3) : matches.slice(0, 3).map((c) => c.record);
+  const sameBusinessCount = new Set(matches.filter((m) => m.reason.startsWith('business match:')).map((m) => m.record.public_name.toLowerCase())).size;
   const proof = selected.length ? [
     'ПРОВЕРЕННЫЕ КЕЙСЫ ЭТОГО ПРОДУКТА:',
+    ...(sameBusinessCount >= 2 ? [`В библиотеке ${sameBusinessCount} опубликованных кейсов с совпадением типа бизнеса адресата. Это число проектов, не обещание результатов или доказательство всех рынков.`] : []),
     ...selected.map((c) => `- [case_id=${c.case_id}; отрасли=${c.industry_groups.join(',')}] ${c.case_text_short.trim()}${c.case_url ? ` Источник: ${c.case_url}` : ''}`),
-    'По вопросу клиента выбери максимум один подходящий пример и передай его в 1–2 предложениях. Не повторяй уже приведённый пример без необходимости. Сохрани роль и фактический исход: запрос подробностей не равен встрече, встреча не равна продаже; отказ и отложенный контакт не выдавай за успех. Не обещай повторить цифры у клиента. Доказательства выхода на роль получены в клиентских кампаниях Polza; отдельный канал этих кампаний не приписывай ручной SDR-услуге.',
+    'По вопросу клиента обычно выбери один пример; если сравнение действительно помогает, можно два. Число кейсов называй только из точного подсчёта выше. Не повторяй уже приведённый пример без необходимости. Сохрани канал, роль и фактический исход: запрос подробностей не равен встрече, встреча не равна продаже; отказ и отложенный контакт не выдавай за успех. Не обещай повторить цифры у клиента. Доказательства выхода на роль получены в клиентских кампаниях Polza; отдельный канал этих кампаний не приписывай ручной SDR-услуге.',
   ].join('\n') : '';
   const notes = [general, text].filter(Boolean).join('\n');
   return {
