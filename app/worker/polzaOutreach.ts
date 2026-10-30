@@ -93,7 +93,7 @@ async function pollOnce(): Promise<boolean> {
   let claimedAny = false;
   for (const slot of SLOTS) {
     if (slot.active) continue;
-    const jobId = await claimParserJob(log, slot.parserType);
+    const jobId = await claimParserJob(log, slot.parserType, { preserveStartedAt: true });
     if (!jobId) continue;
     claimedAny = true;
     slot.active = true;

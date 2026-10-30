@@ -23,12 +23,16 @@ export async function recoverRunningParserJobs(
   return data?.length ?? 0;
 }
 
-export async function claimParserJob(log: WorkerLogger, parserType: string): Promise<string | null> {
+export async function claimParserJob(
+  log: WorkerLogger,
+  parserType: string,
+  options: { preserveStartedAt?: boolean } = {},
+): Promise<string | null> {
   const db = requireSupabaseAdmin(log);
 
   const { data: pending } = await db
     .from('parser_jobs')
-    .select('id')
+    .select('id,started_at')
     .eq('status', 'pending')
     .eq('parser_type', parserType)
     .order('created_at', { ascending: true })
@@ -39,7 +43,10 @@ export async function claimParserJob(log: WorkerLogger, parserType: string): Pro
 
   const { data: claimed } = await db
     .from('parser_jobs')
-    .update({ status: 'running', started_at: new Date().toISOString() })
+    .update({
+      status: 'running',
+      started_at: options.preserveStartedAt && pending.started_at ? pending.started_at : new Date().toISOString(),
+    })
     .eq('id', pending.id)
     .eq('status', 'pending')
     .select('id')

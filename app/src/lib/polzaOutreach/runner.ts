@@ -54,6 +54,7 @@ import {
   type OutreachLlmBudgetSnapshot,
 } from '@/lib/outreachLlm/context';
 import { pruneSiteAnalysisCache } from '@/lib/outreachLlm/siteAnalysisCache';
+import { outreachRunStopReason, type OutreachRunStopReason } from '@/lib/outreachLlm/runLimit';
 import {
   JobOwner,
   JobStatusReader,
@@ -856,7 +857,7 @@ async function runJob(
   });
 
   try {
-    const { data: job, error: jobErr } = await db.from('parser_jobs').select('config,status').eq('id', jobId).single();
+    const { data: job, error: jobErr } = await db.from('parser_jobs').select('config,status,started_at').eq('id', jobId).single();
     if (jobErr || !job) throw new Error(jobErr?.message ?? 'Job not found');
 
     const config: PolzaOutreachConfig = sanitizePolzaOutreachConfig((job.config ?? {}) as Partial<PolzaOutreachConfig>);
@@ -884,8 +885,11 @@ async function runJob(
 
     // Только идущему: статус остановки не перетираем (запуск, остановленный
     // после захвата, заново не начинается — ensureNotCancelled ниже).
+    // Продолжение после перезапуска воркера не начинает новые шесть часов.
+    const resuming = Boolean(previousDetail) && Boolean(job.started_at);
+    const runStartedAt = resuming ? new Date(String(job.started_at)).getTime() : Date.now();
     await setRunningProgress({
-      started_at: new Date().toISOString(),
+      ...(resuming ? {} : { started_at: new Date(runStartedAt).toISOString() }),
       error_message: null,
       progress_stage: 'selecting_vacancies',
       progress_percent: 1,
@@ -995,13 +999,13 @@ async function runJob(
     let processed = 0;
     // Шаг волны, который сейчас идёт, — для progress_stage.
     let phase = 'finding_emails';
-    // Лимит на ИИ исчерпан или от него остался только запас под писателя:
+    // Достигнут предел времени или от ИИ остался только запас под писателя:
     // новые строки и волны не начинаем, запуск завершится штатно. Строки,
     // которые лимит остановил, уберём из журнала.
-    let budgetStop = false;
-    const stopForBudget = (): boolean => {
-      if (!analysisBudgetLeft(budget)) budgetStop = true;
-      return budgetStop;
+    let limitStop: OutreachRunStopReason | null = null;
+    const stopForLimits = (): boolean => {
+      limitStop ??= outreachRunStopReason(runStartedAt, analysisBudgetLeft(budget));
+      return limitStop !== null;
     };
     // Ключ ИИ отвергнут, ИИ или проверка почт молчат: запуск уже падает —
     // остальным потокам новых строк не брать и прогресс не публиковать.
@@ -1536,7 +1540,7 @@ async function runJob(
         await finalize(q);
       } catch (err) {
         if (!(err instanceof BudgetExceededError)) throw err;
-        budgetStop = true;
+        limitStop ??= 'budget';
         awaitingTemplate += 1;
       }
     };
@@ -1554,7 +1558,7 @@ async function runJob(
         }
         if (err instanceof BudgetExceededError) {
           // Лимит на ИИ: строка не отсеяна и не сломана — она не обработана.
-          budgetStop = true;
+          limitStop ??= 'budget';
           await returnToPool(id, tally);
           return;
         }
@@ -1601,10 +1605,7 @@ async function runJob(
 
     // Компании, ждущие цепочку, уже занимают место в лимите готовых: докупать
     // за них разбор новых компаний незачем — «Переписать цепочку» доведёт их.
-    while (totals.ready + awaitingTemplate < target && totals.vacancies < maxCandidates && (cursor < pool.length || (await refillPool()))) {
-      // Лимит на ИИ исчерпан — новую волну не начинаем: её строкам нужен разбор.
-      // Внутри волны шаг почты ИИ не тратит, поэтому лимит в нём не кончается.
-      if (stopForBudget()) break;
+    while (totals.ready + awaitingTemplate < target && totals.vacancies < maxCandidates && !stopForLimits() && (cursor < pool.length || (await refillPool()))) {
       await ensureNotCancelled();
       waveNo += 1;
       const want = Math.min(
@@ -1612,7 +1613,8 @@ async function runJob(
         maxCandidates - totals.vacancies,
       );
       // Волна неполная — до неё подгружаем справочник, не дробя работу мелкими шагами.
-      while (pool.length - cursor < want && (await refillPool())) { /* порция добавлена */ }
+      while (pool.length - cursor < want && !stopForLimits() && (await refillPool())) { /* порция добавлена */ }
+      if (stopForLimits()) break;
       const wave = pool.slice(cursor, cursor + want);
       cursor += wave.length;
 
@@ -1646,7 +1648,7 @@ async function runJob(
       // Шаг 1 (бесплатно): домен, отсевы, повторы, почта, стоп-лист — у всей волны.
       const prepared: Prepared[] = [];
       await runPool(wave.map((c, i) => ({ c, id: ids[i] })).filter((x) => x.id), EMAIL_CONCURRENCY, async ({ c, id }) => {
-        if (halted) return;
+        if (halted || stopForLimits()) return;
         await ensureNotCancelled();
         const tally = newTally(id);
         await safely(id, tally, async () => {
@@ -1661,8 +1663,8 @@ async function runJob(
       await publish(phase, { with_email: prepared.length });
       await runPool(prepared, ENRICH_CONCURRENCY, async (p) => {
         if (halted) return;
-        if (stopForBudget()) {
-          // Лимит на ИИ исчерпан — разбор не начинаем. Почту строка прошла, но
+        if (stopForLimits()) {
+          // Лимит времени или ИИ достигнут — разбор не начинаем. Почту строка прошла, но
           // этот шаг бесплатный, а без разбора она ни отсеяна, ни готова:
           // возвращаем в необработанные, как строку, которую лимит прервал
           // (в конце уйдёт из журнала, повторный запуск возьмёт её заново).
@@ -1720,7 +1722,7 @@ async function runJob(
 
     // Пока добегала последняя волна, запуск могли остановить — не перетираем «Stopped by user».
     await ensureNotCancelled();
-    if (budgetStop) {
+    if (limitStop) {
       // Строки, до которых из-за лимита не дошли или которые он прервал, — не
       // отсев и не ошибка. Среди них и прошедшие почту, но не успевшие к
       // разбору ИИ: почта бесплатна и готовой строку не делает. Убираем их из
@@ -1749,9 +1751,8 @@ async function runJob(
     // шли бы дальше): если после «Переписать цепочку» ждущих не хватит до
     // заказанного (часть писем не пройдёт гарды), экран покажет её
     // (regenerate.ts), а не устаревшее «ждут цепочку».
-    const baseReason = budgetStop
-      ? 'budget'
-      : cursor >= pool.length ? 'pool_exhausted' : totals.vacancies >= maxCandidates ? 'scan_limit' : null;
+    const baseReason = limitStop
+      ?? (cursor >= pool.length ? 'pool_exhausted' : totals.vacancies >= maxCandidates ? 'scan_limit' : null);
     const stopReason = totals.ready >= target
       ? 'target_reached'
       : totals.ready + awaitingTemplate >= target
