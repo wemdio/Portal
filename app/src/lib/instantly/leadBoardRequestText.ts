@@ -1,4 +1,4 @@
-import { load } from 'cheerio';
+import { load, type CheerioAPI } from 'cheerio';
 import { extractAuthoredReplyText, getBodyText } from './leadQualifier';
 import { LEAD_DATED_ATTRIBUTION, LEAD_DATE_FIRST_ATTRIBUTION, LEAD_MONTH_FIRST_ATTRIBUTION, LEAD_MANUAL_QUOTE_ATTRIBUTION, LEAD_QUOTE_BLOCKS, removeLeadReplyQuotes } from './leadReplyHtml';
 import { stripLeadReplyContactSignature } from './leadReplyContacts';
@@ -10,6 +10,42 @@ const GREETING = /^(?:добрый\s+(?:день|вечер)|здравству�
 // Display evidence only: a short authored date is still text, regardless of
 // whether qualification ultimately treats it as deferred interest.
 const SHORT_DATED_REPLY = /^после\s+\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+\d{4}(?:\s+года)?)?[.!]?\s*$/imu;
+
+/** Gmail can wrap a complete new reply in quote classes. Rescue only matching,
+ * history-free alternatives whose sole attribution is actually a greeting.
+ * This is board display evidence, never a generic quote/plaintext fallback. */
+function selfContainedGmailReply($: CheerioAPI, text: string): string | null {
+  if (!text.trim()) return null;
+  const quotes = $(LEAD_QUOTE_BLOCKS);
+  if (quotes.length !== 1 || !quotes.is('.gmail_quote.gmail_quote_container')) return null;
+  const attribution = quotes.find('.gmail_attr');
+  if (attribution.length !== 1 || $('.gmail_attr').length !== 1 ||
+    $('.moz-cite-prefix, #divRplyFwdMsg, #stopSpelling, .OutlookMessageHeader, .gmail_signature').length) return null;
+  const firstContent = quotes.contents().toArray().find((node) => $(node).text().trim());
+  if (firstContent !== attribution[0]) return null;
+  const rawGreeting = attribution.text().trim();
+  if (/[\r\n]/u.test(rawGreeting)) return null;
+  const greeting = rawGreeting.replace(/\s+/gu, ' ');
+  if (!GREETING.test(greeting)) return null;
+  const addressee = greeting.replace(/^(?:добрый\s+(?:день|вечер)|здравствуйте|hello|hi)/iu, '');
+  if (!/^[!,. ]*(?:[А-ЯЁA-Z][а-яёa-z’'-]*(?:[ \t]+[А-ЯЁA-Z][а-яёa-z’'-]*){0,2})?[!,. ]*$/u.test(addressee)) return null;
+
+  const outside = $('body').clone();
+  outside.find(LEAD_QUOTE_BLOCKS).remove();
+  if (outside.text().trim()) return null;
+  const visible = getBodyText({ html: quotes.html() ?? '' });
+  const normalize = (value: string) => value.replace(/\s+/gu, ' ').trim();
+  if (normalize(visible) !== normalize(text)) return null;
+  // Even a matching text alternative can be old history. Keep every actual
+  // attribution/envelope/signature boundary, rather than deleting it to match.
+  if (/^\s*(?:>|(?:from|to|subject|sent|от|от\s+кого|кому|тема|дата):|[-_=—–]{2,}[^\n]*(?:forward|пересыл|исходн))/imu.test(visible)) return null;
+  const cleaned = cleanRequestText(text);
+  if (!cleaned || normalize(cleaned) !== normalize(text)) return null;
+  const content = quotes.clone();
+  content.find('.gmail_attr').remove();
+  if (!/\p{L}{2}/u.test(content.text())) return null;
+  return cleaned;
+}
 
 /** Board-only projection. Never replace the original email used for contacts,
  * qualification or handoff context with this cleaned text. No AI paraphrasing. */
@@ -28,6 +64,8 @@ export function leadBoardRequestText(body: Email['body']): string | null {
       // With explicit closed quote blocks, HTML preserves authorship better
       // than a flattened text alternative, including inline/bottom replies.
       if (text.trim() && !quotes.length) return cleanRequestText(text);
+      const selfContainedReply = selfContainedGmailReply($, text);
+      if (selfContainedReply) return selfContainedReply;
       removeLeadReplyQuotes($);
       // Unlike a closed quote, these markers start unwrapped old history. Keep
       // the terminal boundary: deleting just the label would expose old prose.

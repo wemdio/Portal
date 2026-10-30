@@ -305,7 +305,15 @@ export function isContactRequestOnly(text: string): boolean {
 
 export function isAutoReplyOrUnsubscribe(text: string): boolean {
   if (!text) return false;
-  if (EXPLICIT_UNSUBSCRIBE_PATTERN.test(text) || hasStructuredAutoReplyMarker(text)) {
+  // A provider footer can accompany a live human reply (e.g. GetCourse).
+  // This instruction addressed to the reader and its adjacent link are not
+  // the author's request to unsubscribe. Remove only this known boilerplate
+  // for this check; keep other opt-out markers and the full reply for AI.
+  const unsubscribeText = text.replace(
+    /(?:если\s+вы\s+не\s+хотите\s+получать\s+письма\s+от\s+нас,\s*)?вы\s+можете\s+отписаться(?:\s*[\[(<]?https?:\/\/[^\s<>\])]+[\])>]?)?/giu,
+    '',
+  );
+  if (EXPLICIT_UNSUBSCRIBE_PATTERN.test(unsubscribeText) || hasStructuredAutoReplyMarker(text)) {
     return true;
   }
 
