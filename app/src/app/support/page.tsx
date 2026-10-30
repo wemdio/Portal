@@ -12,7 +12,7 @@
  * global bell counter reflects the change after refreshNotifications().
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import { Send, Loader2, AlertCircle, MessageSquare } from 'lucide-react';
@@ -97,6 +97,31 @@ export default function AdminSupportPage() {
   const [sendError, setSendError] = useState<string | null>(null);
 
   const listEndRef = useRef<HTMLDivElement | null>(null);
+  const replyInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const showReplyInput = !!selectedId && !!detail && !detailError;
+
+  useLayoutEffect(() => {
+    const input = replyInputRef.current;
+    if (!input || !showReplyInput) return;
+
+    const resize = () => {
+      // Reset first so deleting text or sending a reply also shrinks the field.
+      input.style.height = 'auto';
+      const borderHeight = input.offsetHeight - input.clientHeight;
+      input.style.height = `${input.scrollHeight + borderHeight}px`;
+    };
+    resize();
+
+    // Reflow wrapped text when the viewport or sidebar changes the field width.
+    let width = input.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (input.clientWidth === width) return;
+      width = input.clientWidth;
+      resize();
+    });
+    observer.observe(input);
+    return () => observer.disconnect();
+  }, [draft, showReplyInput]);
 
   const fetchThreads = useCallback(async () => {
     try {
@@ -348,7 +373,7 @@ export default function AdminSupportPage() {
             </div>
           ) : detail ? (
             <>
-              <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-3">
+              <div className="shrink-0 px-4 py-3 border-b border-gray-100 flex items-center gap-3">
                 <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gray-100 text-[12px] font-bold text-gray-700 shrink-0">
                   {clientLabel(detail.client).slice(0, 1).toUpperCase()}
                 </div>
@@ -370,7 +395,7 @@ export default function AdminSupportPage() {
                 )}
               </div>
 
-              <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 space-y-3">
                 {detail.messages.length === 0 ? (
                   <div className="text-center text-xs text-gray-400 py-12">
                     {locale === 'en' ? 'No messages yet' : 'Сообщений пока нет'}
@@ -381,7 +406,7 @@ export default function AdminSupportPage() {
                 <div ref={listEndRef} />
               </div>
 
-              <div className="border-t border-gray-100 p-3">
+              <div className="shrink-0 border-t border-gray-100 p-3">
                 {sendError && (
                   <div className="flex items-center gap-2 mb-2 text-xs text-red-600">
                     <AlertCircle className="h-3.5 w-3.5 shrink-0" />
@@ -390,6 +415,7 @@ export default function AdminSupportPage() {
                 )}
                 <div className="flex items-end gap-2">
                   <textarea
+                    ref={replyInputRef}
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
                     onKeyDown={(e) => {
@@ -403,9 +429,10 @@ export default function AdminSupportPage() {
                         ? 'Reply to client… (Ctrl/⌘ + Enter)'
                         : 'Ответ клиенту… (Ctrl/⌘ + Enter)'
                     }
-                    rows={2}
+                    rows={5}
                     maxLength={SUPPORT_MESSAGE_MAX_LEN}
-                    className="flex-1 resize-none rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-blue-400 focus:ring-1 focus:ring-blue-200 focus:outline-none"
+                    aria-label={locale === 'en' ? 'Reply to client' : 'Ответ клиенту'}
+                    className="min-w-0 flex-1 min-h-[138px] max-h-[min(40dvh,360px)] resize-none overflow-y-auto rounded-lg border border-gray-200 px-3 py-2 text-sm leading-6 focus:border-blue-400 focus:ring-1 focus:ring-blue-200 focus:outline-none"
                   />
                   <button
                     type="button"
