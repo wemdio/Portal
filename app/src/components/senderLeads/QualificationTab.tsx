@@ -150,6 +150,7 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
 
   const [ownLoaded, setOwnLoaded] = useState<OwnReplySettingsDto | null>(null);
   const [ownEnabled, setOwnEnabled] = useState(false);
+  const [ownAiEnabled, setOwnAiEnabled] = useState(false);
   // Правило наших кампаний Instantly того же языка, что и папка: auto_en → ENagency, иначе N. Polza.
   const ownIsEn = folderKey === 'auto_en';
   const ownCampaignLabel = ownIsEn ? 'ENagency' : 'N. Polza';
@@ -169,6 +170,7 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
   const applyOwn = (settings: OwnReplySettingsDto, isEn: boolean) => {
     setOwnLoaded(settings);
     setOwnEnabled(settings.enabled);
+    setOwnAiEnabled(isEn ? settings.aiEnabledEn : settings.aiEnabledRu);
     setOwnCriteria(isEn ? settings.criteriaEn : settings.criteriaRu);
   };
 
@@ -199,8 +201,9 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
       || (productFolder && (productFieldsChanged(productOffers, loaded.aiOfferTexts ?? {})
         || productFieldsChanged(productLinks, loaded.kpLinks ?? {}))));
   const ownLoadedCriteria = ownLoaded ? (ownIsEn ? ownLoaded.criteriaEn : ownLoaded.criteriaRu) : '';
+  const ownLoadedAi = ownLoaded ? (ownIsEn ? ownLoaded.aiEnabledEn : ownLoaded.aiEnabledRu) : false;
   const ownDirty = ownLoaded !== null
-    && (ownEnabled !== ownLoaded.enabled || ownCriteria.trim() !== ownLoadedCriteria.trim());
+    && (ownEnabled !== ownLoaded.enabled || ownAiEnabled !== ownLoadedAi || ownCriteria.trim() !== ownLoadedCriteria.trim());
   const dirty = folderDirty || ownDirty;
   const tooLong = criteria.trim().length > LEAD_CRITERIA_MAX
     || aiOfferText.trim().length > AI_OFFER_TEXT_MAX
@@ -225,8 +228,8 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
           : null,
         ownDirty
           ? saveOwnSettings(ownIsEn
-            ? { enabled: ownEnabled, criteriaEn: ownCriteria.trim() }
-            : { enabled: ownEnabled, criteriaRu: ownCriteria.trim() })
+            ? { enabled: ownEnabled, criteriaEn: ownCriteria.trim(), aiEnabledEn: ownAiEnabled }
+            : { enabled: ownEnabled, criteriaRu: ownCriteria.trim(), aiEnabledRu: ownAiEnabled })
           : null,
       ]);
       if (folderRes) apply(folderRes);
@@ -440,6 +443,15 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
                     ? `Включено с ${new Date(ownLoaded.enabledAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} — оцениваются ответы после этого.`
                     : 'Оцениваются только ответы, пришедшие после включения.'}
                 </span>
+              </span>
+            </label>
+            <label className="flex cursor-pointer items-start gap-3">
+              <input type="checkbox" checked={ownAiEnabled} disabled={!ownEnabled}
+                onChange={(e) => { setOwnAiEnabled(e.target.checked); touch(); }}
+                className="mt-0.5 h-4 w-4 cursor-pointer rounded border-zinc-300" />
+              <span>
+                <span className="block text-sm font-medium text-zinc-900">ИИ отвечает на вопросы и возражения</span>
+                <span className="block text-xs text-zinc-500">Только новые ответы {ownCampaignLabel}. При интересе приглашает на звонок; сложные ответы помечает для менеджера.</span>
               </span>
             </label>
             <div>

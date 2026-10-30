@@ -211,8 +211,12 @@ export async function offerContextFor(
     'По вопросу клиента выбери максимум один пример на ответ, если он помогает ответить. Число кейсов называй только из точного подсчёта выше. Не повторяй уже приведённый пример без необходимости. Сохрани канал, роль и фактический исход: запрос подробностей не равен встрече, встреча не равна продаже; отказ и отложенный контакт не выдавай за успех. Не обещай повторить цифры у клиента. Доказательства выхода на роль получены в клиентских кампаниях Polza; отдельный канал этих кампаний не приписывай ручной SDR-услуге.',
   ].join('\n') : '';
   const notes = [general, text].filter(Boolean).join('\n');
+  const legacyAuto = offered.product === 'auto' && offered.cascadeNo === null;
+  const productText = legacyAuto
+    ? 'СОГЛАСОВАННЫЙ ОБЪЁМ: автоаутрич помогает найти подходящие B2B-компании, подготовить и отправить персонализированные письма и передать заинтересованные ответы в продажи. В старой цепочке условия запуска могли отличаться: не подтверждай цену, срок, модель оплаты и гарантию по старому письму. Применимый формат менеджер обсудит на звонке 20–30 минут.'
+    : productKnowledgeText(offered.product);
   return {
-    offerText: [productKnowledgeText(offered.product), notes ? `ДОПОЛНЕНИЯ (не отменяют границы продукта выше):\n${notes}` : '', proof].filter(Boolean).join('\n\n'),
+    offerText: [productText, notes ? `ДОПОЛНЕНИЯ (не отменяют границы продукта выше):\n${notes}` : '', proof].filter(Boolean).join('\n\n'),
     cascade: true, productPitch: productPitchOf(offered.product), caseIds: selected.map((c) => c.case_id),
   };
 }

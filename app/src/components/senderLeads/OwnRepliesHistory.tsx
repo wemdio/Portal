@@ -144,6 +144,10 @@ export function OwnRepliesHistory() {
                     <p className="line-clamp-3 whitespace-pre-wrap break-words text-sm text-zinc-700">{row.replyPreview || 'Текста нет'}</p>
                   </div>
                   {explanation ? <p className="text-sm text-zinc-600">{explanation}</p> : null}
+                  {row.aiReply ? (
+                    <p className="text-xs text-zinc-600">Ответ ИИ: {row.aiReply.status === 'sent' ? 'отправлен' : row.aiReply.status === 'review' ? 'нужен менеджер' : row.aiReply.status === 'sending' ? 'отправка не подтверждена' : row.aiReply.status === 'skipped' ? 'отменён' : row.aiReply.status === 'pending' ? 'ожидает отправки' : 'письмо не требуется'}
+                      {row.aiReply.reason ? ` · ${row.aiReply.reason}` : ''}</p>
+                  ) : row.aiReplyStatus === 'review' ? <p className="text-xs text-amber-700">Ответ ИИ: сбой, нужен менеджер</p> : null}
                   {crm ? (
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <span className={`text-xs ${crm.className}`}>{crm.text}</span>
