@@ -3247,9 +3247,9 @@ function CampaignAccountsTab({
   /**
    * Проверить выбранные аккаунты.
    *
-   * Идём пачками по четыре — как и чтение профилей: каждая проверка это
-   * подключение через мобильный прокси на десятки секунд, а полсотни
-   * одновременных соединений в один пул он не переживёт.
+   * Держим до десяти одновременных проверок: каждая подключается через
+   * мобильный прокси на десятки секунд, поэтому меньший лимит растягивает
+   * проверку партии. Не открываем все выбранные сессии одновременно.
    *
    * Ответ проверки — это и есть результат: статус, объяснение и чужие сеансы
    * приходят от самого Telegram, и ровно их же ручка кладёт в аккаунт. Поэтому
@@ -3263,7 +3263,7 @@ function CampaignAccountsTab({
     if (!targets.length) return;
     setCheckResults(null);
 
-    // По месту в targets, а не в порядке ответов: четыре воркера заканчивают
+    // По месту в targets, а не в порядке ответов: воркеры заканчивают
     // вразнобой, а оператор ищет строку там, где выделял.
     const rows: CheckRow[] = new Array<CheckRow>(targets.length);
     let next = 0;
@@ -3333,7 +3333,7 @@ function CampaignAccountsTab({
         }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(4, targets.length) }, () => worker()));
+    await Promise.all(Array.from({ length: Math.min(10, targets.length) }, () => worker()));
 
     setCheckResults(rows);
   }, [accounts, selectedIds]);
