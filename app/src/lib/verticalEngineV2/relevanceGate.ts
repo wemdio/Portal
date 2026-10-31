@@ -23,6 +23,7 @@ import { VE_RELEVANCE_TRIAGE_VERSION } from './relevanceTriageConfig';
 import { needsVeStaffingCorrection, veHasStaffingOnlyRefusal, veStaffingCorrectionApplies, VE_STAFFING_CORRECTION_VERSION } from './staffingCorrection';
 import { veRelevanceActivityInput, veRelevanceSourceFields } from './relevanceReserve';
 import { VE_COLLECTION_GEOGRAPHY_RULE, veRelevanceGeographyFacts } from './relevanceGeography';
+import { vePaidWebsiteSearchAllowed } from './freeWebsiteSearch';
 export type { VeRelevanceDecision } from './relevanceDecision';
 
 const BATCH_SIZE = 20;
@@ -1415,7 +1416,7 @@ export async function findIrrelevantRows(input: {
       // search whose unusable result would overwrite that decision.
       const settled = current.get(entry);
       if (settled?.triage && (settled.status === 'relevant' || settled.status === 'irrelevant')) return false;
-      if (cached?.search_deferred) return input.allowPaidSearch !== false;
+      if (cached?.search_deferred) return vePaidWebsiteSearchAllowed(entry.group.rows, input.allowPaidSearch) !== false;
       if (cached?.provider_error) return !searchAttemptsExhausted(cached);
       if (websiteTimeoutPending(cached)) return true;
       if (checkpoint.citation_repairs[entry.key] && current.get(entry)?.status === 'error') return false;
@@ -1475,7 +1476,8 @@ export async function findIrrelevantRows(input: {
               companyInn: entry.identity, companyName: entry.twoGisRow ? rowText(entry.twoGisRow, ['company', 'компания']) : entry.fields.company,
               companyAddress: (entry.twoGisRow && rowText(entry.twoGisRow, ['address', 'адрес'])) || entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean),
               companyEmail: entry.group.rows.map((row) => rowText(row, ['email', 'e-mail', 'почта'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' '),
-              allowPaidSearch: entry.twoGisOnly ? false : input.allowPaidSearch, ...(entry.twoGisOnly ? { sourceSiteOnly: true } : {}) })));
+              allowPaidSearch: entry.twoGisOnly ? false : vePaidWebsiteSearchAllowed(entry.group.rows, input.allowPaidSearch),
+              ...(entry.twoGisOnly ? { sourceSiteOnly: true } : {}) })));
         } catch (error) {
           signal?.throwIfAborted();
           if (!(error instanceof VeOperationTimeoutError) || error.label !== WEBSITE_COMPANY_DEADLINE_LABEL) throw error;

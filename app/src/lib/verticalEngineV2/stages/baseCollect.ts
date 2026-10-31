@@ -139,6 +139,11 @@ import {
 import { veSavedRelevanceScope } from '../collectionRecovery';
 import { addVeKnownWebsiteSource, VE_KNOWN_ADULT_WEBSITES, VE_KNOWN_WEBSITE_CATALOG, veKnownWebsiteAudienceEligible, type VeKnownWebsiteSourceReceipt } from '../knownWebsiteDirectory';
 import { cleanVeCompanyNames, type VeCompanyNameCheckpoint } from '../companyNameCleanup';
+import { retainVeFreeWebsiteSearch, VE_FREE_WEBSITE_SEARCH_FIELD } from '../freeWebsiteSearch';
+import { buildVeRuRescueQueries, readVeRuWebsiteRescue, selectVeRuWebsiteRescueRows, veRuWebsiteRescueReason, type VeRuWebsiteRescue } from '../ruWebsiteRescue';
+import { readVeRuDiscoveredCompany, veRuDiscoveryHome } from '../ruWebsiteDiscovery';
+import { claimVeRuWebsiteRescue } from '../ruWebsiteRescueClaim';
+import { searchRuTinyfish } from '@/lib/enrich/ruTinyfishSearch';
 import { recoverVeSavedEmails, needsVeSavedEmailReview, hasPendingVeSavedEmailRecovery, type VeSavedEmailRecoveryState } from '../savedEmailRecovery';
 import { finalizeVeTwoGisTwins, isVeTwoGisRow, isVeTwoGisTask, pairVeTwoGisStates, retireVeOrphanTwoGisTwins, retireVeTwoGisTwin,
   veCountedPlanTasks, veTwoGisImportMarker, veTwoGisInputMarkers, veTwoGisTwinKeys, VE_TWO_GIS_ROW_FIELD, withoutVeTwoGisRows,
@@ -817,6 +822,9 @@ export interface VeCollectInfo {
   source_contact_recovery?: VeSourceContactCheckpoint;
   source_contact_budget?: VeSourceDiscoveryBudget;
   source_contact_discovery?: { checked: number; remaining: number; contacts?: number };
+  /** At most one saved-site rescue, admitted only after ordinary collection
+   * proves a deficit. This receipt survives retries and manual continuation. */
+  ru_website_rescue?: VeRuWebsiteRescue;
   /** Existing identifiers only: unmatched/anonymous rows are allowed, not verified identities. */
   project_exclusions?: { revision: number; checked_at: string; mode: 'existing_identity';
     blocked_rows: number; unidentified_rows: number };
@@ -3476,6 +3484,8 @@ async function dispatchConstructJob(input: {
   rows: VeUnifiedRow[];
   market: VeMarket;
   reservedId?: string;
+  ruTinyfish?: boolean;
+  ruRescueParent?: { base_id: string; project_id: string };
 }): Promise<{ bcJobId: string; locale: 'ru' | 'en'; construct: VeConstructInfo }> {
   const { ctx, ownerId, projectName, baseLabel, market, reservedId } = input;
   // R1 (2ГИС): строки справочника конструктору не отдаём. Резерв из одних таких строк
@@ -3499,6 +3509,8 @@ async function dispatchConstructJob(input: {
     selected_steps: steps,
     step_config: {
       ...(reservedId ? { queue_class: 'interactive_preview' } : {}),
+      ...(market === 'ru' && input.ruTinyfish && input.ruRescueParent
+        ? { ve_ru_website_rescue: input.ruRescueParent } : {}),
       find_emails_target: 'separate',
       // Краул сайта — главный расход времени на компанию (см. комментарий у
       // stopAtFirstUsableEmail в processingSteps.ts). Раньше здесь стояло
@@ -3509,6 +3521,7 @@ async function dispatchConstructJob(input: {
       // предпочёл подтверждённый адрес catch-all, и не больше.
       find_emails: {
         stop_at_first: false, max_per_site: 6, max_pages: 4, site_timeout_ms: 30_000, merge_mode: 'prefer_found_validated',
+        ...(market === 'ru' ? { ru_page_fallback: { tinyfish: input.ruTinyfish === true } } : {}),
         // Описание берём из главной страницы, которую find_emails и так уже
         // скачал. Без этого enrich_descriptions идёт на тот же сайт второй
         // раз — и втрое меньшей параллельностью, чем поиск почт. Замер: у 75%
@@ -4653,6 +4666,18 @@ async function checkCollectedRelevance(args: {
     // so bounded follow-up work rotates through the whole saved reserve.
     return clean;
   });
+  if (market === 'ru') {
+    // The constructor's public grid intentionally omits private metadata.
+    // Restore the free-only cost boundary for these exact companies on every
+    // saved review too, without disabling configured search for other rows.
+    storedRows = retainVeFreeWebsiteSearch(storedRows, [
+      ...(Array.isArray(base.data) ? base.data : []),
+      ...readVeRelevanceReserve(info.relevance_reserve),
+      ...readVeRelevanceSourceRows(info.relevance_reserve),
+      ...(args.evidenceRows ?? []),
+      ...(info.ru_website_rescue?.rows ?? []).map((row) => ({ ...row, [VE_FREE_WEBSITE_SEARCH_FIELD]: true })),
+    ]);
+  }
   if (finalEmailStatuses) {
     storedRows = storedRows.map((r, i) => {
       const st = finalEmailStatuses[i];
@@ -5239,6 +5264,122 @@ async function resumeSavedCompanyNames(
   });
 }
 
+/** One bounded rescue of existing sites. A reserved child identity is durable
+ * before insertion, and its normal constructor/fit/name gates are reused. */
+async function resumeRuWebsiteRescue(
+  ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
+  project: VeProject, market: VeMarket, usage: VeUsage,
+): Promise<VeStageResult> {
+  const rescue = readVeRuWebsiteRescue(info.ru_website_rescue)!;
+  if (market !== 'ru' || !['discovering', 'reserved', 'running'].includes(rescue.phase)) {
+    throw new VeRelevanceCheckpointError('Invalid RU website rescue phase');
+  }
+  if (rescue.phase === 'discovering') {
+    const discovery = rescue.discovery!;
+    if (discovery.next_query < discovery.queries.length) {
+      const query = discovery.queries[discovery.next_query++];
+      // The receipt is advanced before HTTP: neither a crash nor an uncertain
+      // provider outcome grants the same query another attempt.
+      await persistCollectInfo(ctx, base.id, info);
+      const results = await searchRuTinyfish({ query, deficit: true, signal: ctx.signal });
+      if (results === null) discovery.next_query = discovery.queries.length;
+      else {
+        const homes = new Set(discovery.urls);
+        for (const result of results) {
+          const home = veRuDiscoveryHome(result.link);
+          if (home && homes.size < 100) homes.add(home);
+        }
+        discovery.urls = [...homes];
+      }
+      await persistCollectInfo(ctx, base.id, info);
+      await requeueSelf(ctx, job, 1_000);
+      return { result: { waiting: true, base_id: base.id, ru_website_rescue: 'searching' }, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
+    }
+    if (discovery.next_site < discovery.urls.length && rescue.rows.length < 100) {
+      const wave = discovery.urls.slice(discovery.next_site, discovery.next_site + 3);
+      discovery.next_site += wave.length;
+      // At most three guarded 30-second reads per wake, including a renderer.
+      // Mark all attempted before the wave; interrupted sites are not retried.
+      await persistCollectInfo(ctx, base.id, info);
+      const seenSites = new Set([...readVeRelevanceSourceRows(info.relevance_reserve), ...rescue.rows,
+        ...(Array.isArray(base.data) ? base.data : [])].map((row) => normalizeVeWebsiteHost(row.website)).filter(Boolean));
+      const results = await Promise.allSettled(wave.map((url) => seenSites.has(normalizeVeWebsiteHost(url))
+        ? Promise.resolve(null) : readVeRuDiscoveredCompany(url, ctx.signal)));
+      ctx.signal?.throwIfAborted();
+      const otherBaseKeys = await loadOtherBaseExclusionKeys(ctx, job.project_id, base.id, base.hypothesis_id);
+      const seenCompanies = new Set(rescue.rows.map(veRelevanceCompanyKey));
+      for (const result of results) {
+        if (result.status !== 'fulfilled' || !result.value || rescue.rows.length >= 100) continue;
+        const row = { ...unifiedRow(result.value), description: result.value.description };
+        if (!allowedByProject(ctx, row) || baseRowMatchesExclusion(otherBaseKeys, row)
+          || seenCompanies.has(veRelevanceCompanyKey(row))) continue;
+        seenCompanies.add(veRelevanceCompanyKey(row));
+        rescue.rows.push(row);
+      }
+      await persistCollectInfo(ctx, base.id, info);
+      await requeueSelf(ctx, job, 1_000);
+      return { result: { waiting: true, base_id: base.id, ru_website_rescue: 'checking_sites' }, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
+    }
+    rescue.phase = 'reserved';
+    await persistCollectInfo(ctx, base.id, info);
+  }
+  if (rescue.phase === 'reserved' && rescue.rows.length > 0) {
+    // A crash may have happened on either side of the enqueue. A successful
+    // absent read permits a fresh timer; a read error must never mean absent,
+    // and an existing child retains its original deadline and identity.
+    const existingChild = await readConstructJobStatus(ctx, rescue.id);
+    if (!existingChild) {
+      rescue.child_dispatched_at = new Date().toISOString();
+      await persistCollectInfo(ctx, base.id, info);
+      await dispatchConstructJob({ ctx, ownerId: project.created_by, projectName: project.name,
+        baseLabel: `${base.filename ?? base.id} · резерв сайтов`, rows: rescue.rows as VeUnifiedRow[],
+        market, reservedId: rescue.id, ruTinyfish: true,
+        ruRescueParent: { base_id: base.id, project_id: job.project_id } });
+    }
+    rescue.phase = 'running';
+    await persistCollectInfo(ctx, base.id, info);
+  }
+  const child = rescue.rows.length ? await readConstructJobStatus(ctx, rescue.id) : null;
+  const waiting = child && !['completed', 'failed', 'cancelled'].includes(child.status)
+    && Date.now() - Date.parse(rescue.child_dispatched_at ?? rescue.started_at) < CONSTRUCT_TIMEOUT_MS;
+  if (waiting) {
+    await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+    return { result: { waiting: true, base_id: base.id, ru_website_rescue: 'running' },
+      tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
+  }
+  let imported: VeConstructImport | null = null;
+  if (child?.status === 'completed' && child.selected_steps?.includes('split_emails')
+    && child.selected_steps.includes('validate_emails')) imported = await importConstructRows(ctx, rescue.id);
+  // Never upgrade partial/unvalidated output because an optional reader failed.
+  const complete = rescue.rows.length === 0 || (!!imported && imported.emailStatuses.every((status) => status !== null));
+  const keys = await loadOtherBaseExclusionKeys(ctx, job.project_id, base.id, base.hypothesis_id);
+  const rows: Array<VeUnifiedRow & Record<typeof VE_FREE_WEBSITE_SEARCH_FIELD, true>> = [];
+  const statuses: Array<string | null> = [];
+  if (complete && imported) imported.rows.forEach((row, index) => {
+    if (!allowedByProject(ctx, row)) return;
+    const pruned = pruneBaseRowAgainstExclusion(keys, row);
+    if (pruned) { rows.push({ ...pruned, [VE_FREE_WEBSITE_SEARCH_FIELD]: true }); statuses.push(imported.emailStatuses[index]); }
+  });
+  const gate = rows.length ? await checkCollectedRelevance({ ctx, job, base, info,
+    finalRows: rows, finalEmailStatuses: statuses, market, usage,
+    evidenceRows: rescue.rows, twoGisOtherBaseKeys: keys }) : null;
+  rescue.phase = 'gates';
+  rescue.outcome = !complete ? 'constructor_unavailable' : gate && !gate.relevanceCoverageComplete ? 'gates_incomplete' : 'complete';
+  info.relevance_reserve = { ...info.relevance_reserve, version: 1, rows: readVeRelevanceReserve(info.relevance_reserve),
+    source_rows: mergeVeRelevanceRows(readVeRelevanceSourceRows(info.relevance_reserve),
+      rescue.rows.map((row) => ({ ...row, _ve_source_candidate: true, [VE_FREE_WEBSITE_SEARCH_FIELD]: true }))) };
+  // This phase is saved atomically by completeTargetRound before name calls.
+  // A crash resumes those gates, never a second constructor/Fetch wave.
+  stageLog(ctx, `[base_collect] резерв сайтов завершён: ${rows.length} проверенных email-строк; исходный бюджет сбора сохранён`);
+  return completeTargetRound({ ctx, job, base, info, progress: rescue.resume_target,
+    candidates: [], rows: [...(Array.isArray(base.data) ? base.data : []), ...(gate?.storedRows ?? [])],
+    columns: [...new Set([...(base.columns ?? []), ...VE_AUTO_COLLECT_COLUMNS, ...(imported?.hasDescription ? ['description'] : [])])],
+    stats: { tasks_total: info.tasks?.length ?? 0, tasks_done: info.tasks?.filter((t) => t.status === 'done').length ?? 0,
+      tasks_failed: 0, rows_total: rescue.resume_target.candidates_processed,
+      excluded_existing_bases: 0, excluded_during_fetch: 0, ...info.stats },
+    hasBufferedCandidates: false, validationError: null, usage });
+}
+
 /**
  * The specialist's "addresses per company" limit for this base. Read fresh: it
  * may change while a long job runs, and the worker-owned collect_info must not
@@ -5380,9 +5521,10 @@ async function completeTargetRound(args: {
   const tasks = (info.tasks ?? []).filter((task) => continuationSourceAllowed(info, task));
   // Ключи близнецов 2ГИС — по всем задачам: continuationSourceAllowed может скрыть близнеца, а его строки остаются.
   const twoGisTwinKeys = veTwoGisTwinKeys(info.tasks);
-  const reviewOnly = job.payload?.review_relevance === true;
+  const rescueOnly = info.ru_website_rescue?.phase === 'gates';
+  const reviewOnly = job.payload?.review_relevance === true || rescueOnly;
   const prior = info.target_checkpoint;
-  const validationRetry = info.validation_retry === true || !!info.company_name_recovery || info.relevance_review_requested === true;
+  const validationRetry = rescueOnly || info.validation_retry === true || !!info.company_name_recovery || info.relevance_review_requested === true;
   const columns = [...new Set([...(base.columns ?? []), ...args.columns])];
   const previousRows = Array.isArray(base.data) ? base.data : [];
   // Keep the complete post-constructor observations across every round. data is
@@ -5500,6 +5642,16 @@ async function completeTargetRound(args: {
   const pendingRequestedReview = args.continueRequestedReview === true
     && withoutVeTwoGisRows(reserveRows, twoGisTwinKeys).some((row) => needsVeRelevanceReview(row) || needsVeSavedEmailReview(row));
   const finish = (readyCount: number, nameError?: string) => {
+    if (rescueOnly) {
+      const saved = info.ru_website_rescue!.resume_target;
+      const restored = { ...saved, ready_rows: readyCount };
+      if (readyCount >= saved.ready_target) {
+        restored.status = 'target_reached';
+        delete restored.reason;
+        delete restored.stop_cause;
+      }
+      return restored;
+    }
     const phaseError = args.validationError ?? nameError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null);
     const result = finishCollectionRound(progress, {
       candidates: args.candidates.length, readyRows: readyCount,
@@ -5535,7 +5687,7 @@ async function completeTargetRound(args: {
     return result;
   };
   const checkpoint: NonNullable<VeCollectInfo['target_checkpoint']> = {
-    completed_round: progress.round,
+    completed_round: rescueOnly ? info.ru_website_rescue!.completed_round : progress.round,
     seen_rows: [...seen.values()],
     processed_rows: validationRetry ? prior?.processed_rows ?? args.rows.length : (prior?.processed_rows ?? 0) + args.rows.length,
     prior_low_relevance: validationRetry ? prior?.prior_low_relevance ?? 0 : prior?.low_relevance ?? 0,
@@ -5689,7 +5841,9 @@ async function completeTargetRound(args: {
     info.relevance_review_requested = true;
   } else {
     delete info.relevance_review_requested;
-    if (reviewOnly && !args.validationError && cleaned.summary.status === 'complete'
+    // An optional RU rescue may leave uncertain contacts in reserve, but it
+    // must not turn the saved ordinary continuation into a review-only stop.
+    if (reviewOnly && !rescueOnly && !args.validationError && cleaned.summary.status === 'complete'
       && targetRows < progress.ready_target && reviewablePending) {
       next = { ...progress, ready_rows: targetRows, candidates_processed: stats.rows_total, status: 'limited',
         reason: 'Уточнение сохранённых контактов завершено. Неопределённые контакты остались в резерве; новый сбор в этой операции не запускается.' };
@@ -5839,7 +5993,7 @@ async function completeTargetRound(args: {
     info.adaptive_collection!.note = 'Новые партии из источников с подтверждённо низким выходом отложены.';
     info.target_progress = next;
   }
-  if (next.status !== 'limited' || !economicHold) delete next.stop_cause;
+  if (!rescueOnly && (next.status !== 'limited' || !economicHold)) delete next.stop_cause;
   // Правило узкого рынка уже расширило срез или завершило базу в этом раунде.
   let marketDecided = economicHold;
   if (info.estimate) {
@@ -5979,7 +6133,7 @@ async function completeTargetRound(args: {
     // info уже держит прежний объект раунда (см. остановку по размеру рынка выше).
     info.target_progress = next;
   }
-  if (boundedSourceContinuation(info) && tasks.length === 1 && tasks[0].status === 'done' && tasks[0].exhausted
+  if (!rescueOnly && boundedSourceContinuation(info) && tasks.length === 1 && tasks[0].status === 'done' && tasks[0].exhausted
     && !args.hasBufferedCandidates && !pendingSources && !pendingDiscovery && !pendingBatches.length
     && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
     && cleaned.summary.status === 'complete' && targetRows < progress.ready_target) {
@@ -5988,6 +6142,54 @@ async function completeTargetRound(args: {
         : info.restaurant_source_refresh ? 'Доступный каталог профильных заведений обработан. Проверенные контакты сохранены; это не оценка всего рынка.'
         : 'Доступные официальные сайты платформ проверены. Проверенные контакты сохранены; это не оценка всего рынка.' };
     info.target_progress = next;
+  }
+  // A source/geography repair deliberately froze its allowed acquisition
+  // scope. The optional reserve must not introduce a global source beside it.
+  const rescueReason = !info.ru_website_rescue && base.hypothesis_id && !boundedSourceContinuation(info) ? veRuWebsiteRescueReason({
+    market: ctx.market ?? '',
+    enabled: process.env.RU_BROWSER_ENABLED === '1' && process.env.RU_TINYFISH_ENABLED === '1'
+      && !!process.env.RU_TINYFISH_API_KEY?.trim() && /^[a-zA-Z0-9._-]{1,80}$/.test(process.env.RU_TINYFISH_ACCOUNT_ID?.trim() ?? ''),
+    ready: targetRows, target: progress.ready_target, completedRound: progress.round,
+    ordinaryComplete: !reviewOnly && !args.validationError && !taskError && !pipeline?.error
+      && cleaned.summary.status === 'complete' && info.relevance_summary.error === 0,
+    pending: continueSavedReview || pendingAutomaticEmails || pendingBatches.length > 0 || pendingDiscovery
+      || args.hasBufferedCandidates || tasks.some((task) => !veTwoGisOut(info, task)
+        && (task.status === 'dispatched' || (task.status === 'pending' && !veTaskAcquisitionDeferred(info, task)))),
+    sourcesExhausted: exhausted,
+    lowYield: !!info.adaptive_collection && tasks.some((task) => !isVeTwoGisTask(task)
+      && veAdaptiveLowYield(info.adaptive_collection!.completed, veSourceStrategyKey(task.task))),
+  }) : null;
+  if (rescueReason) {
+    // Preview and later supply bases share a hypothesis. Reuse its receipt,
+    // rather than reopening the same optional reserve in every daily base.
+    const { data: previousRescue, error: rescueReadError } = await ctx.supabase.from('ve_bases')
+      .select('id').eq('project_id', job.project_id).eq('hypothesis_id', base.hypothesis_id)
+      .neq('id', base.id).not('collect_info->ru_website_rescue', 'is', null).limit(1);
+    const stock = withoutVeTwoGisRows(projectAllowedRows(ctx, readVeRelevanceSourceRows(info.relevance_reserve)), twoGisTwinKeys);
+    const addressed = new Set([...stock, ...reserveRows, ...cleaned.rows].filter((row) => extractEmails(cell(row.email)).length > 0).map(veRelevanceCompanyKey));
+    const selected = selectVeRuWebsiteRescueRows(stock.filter((row) =>
+      !baseRowMatchesExclusion(freshKeys, row as VeUnifiedRow)), addressed);
+    const hypothesis = info.audience_snapshot?.hypotheses.find((row) => row.id === base.hypothesis_id)
+      ?? info.hypotheses?.find((row) => row.id === base.hypothesis_id);
+    const queries = process.env.RU_TINYFISH_SEARCH_ENABLED === '1' && hypothesis ? buildVeRuRescueQueries({
+      title: hypothesis.title, description: hypothesis.description ?? '', geography: readVeCollectionGeography(info.collection_geography)?.required ?? '',
+    }) : [];
+    if (!rescueReadError && Array.isArray(previousRescue) && previousRescue.length === 0 && (selected.length || queries.length)) {
+      const rescueId = await claimVeRuWebsiteRescue(ctx.supabase, { projectId: job.project_id,
+        hypothesisId: base.hypothesis_id!, baseId: base.id, proposedId: randomUUID() });
+      if (rescueId) {
+        // Reserve half the batch for new verified websites when Search is on.
+        const rows = selected.slice(0, queries.length ? 50 : 100).map((row) => ({ ...unifiedRow(Object.fromEntries(VE_AUTO_COLLECT_COLUMNS.map((key) => [key, cell(row[key])]))),
+          ...(cell(row.description) ? { description: cell(row.description) } : {}) }));
+        info.ru_website_rescue = { version: 1, phase: queries.length ? 'discovering' : 'reserved', id: rescueId, started_at: new Date().toISOString(),
+          reason: rescueReason, ready_before: targetRows, target: progress.ready_target, completed_round: progress.round,
+          rows, ...(queries.length ? { discovery: { queries, next_query: 0, urls: [], next_site: 0 } } : {}), resume_target: { ...next } };
+        next = { ...next, status: 'collecting' };
+        delete next.reason;
+        info.target_progress = next;
+        stageLog(ctx, `[base_collect] подтверждён недобор ${targetRows}/${progress.ready_target}: один бесплатный резерв, ${rows.length} сохранённых сайтов и до ${queries.length} поисковых запросов`);
+      }
+    }
   }
   if (next.status === 'collecting' && !continueSavedReview) {
     // One atomic checkpoint: prior validated output is durable BEFORE the next
@@ -6009,6 +6211,21 @@ async function completeTargetRound(args: {
     stats.finished_at = new Date().toISOString();
   }
   info.stats = stats;
+  if (rescueOnly) {
+    info.ru_website_rescue!.phase = 'done';
+    // Exhausting optional name retries must not fail an otherwise valid
+    // ordinary collection, or leave a gate marker against its old round.
+    // Unprepared names remain held in reserve and never enter ready output.
+    if (cleaned.summary.status !== 'complete') {
+      info.ru_website_rescue!.outcome = 'gates_incomplete';
+      const unprepared = cleaned.rows.filter((row) => !isCompanyNameReady(row));
+      info.relevance_reserve = { ...info.relevance_reserve, version: 1,
+        rows: mergeVeRelevanceRows(readVeRelevanceReserve(info.relevance_reserve), unprepared) };
+      info.relevance_summary = summarizeVeRelevanceReserve(readVeRelevanceReserve(info.relevance_reserve));
+      cleaned.rows = cleaned.rows.filter(isCompanyNameReady);
+      delete info.company_name_recovery;
+    }
+  }
   // Разбор сохранённого резерва тоже может продвигаться без новых готовых
   // контактов: меняются решения или состав следующей порции. Только сравнение
   // с сохранённым отпечатком подтверждает такую работу; первый отпечаток и
@@ -6112,6 +6329,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
   const info: VeCollectInfo =
     base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
+  const ruRescue = readVeRuWebsiteRescue(info.ru_website_rescue);
+  if (ruRescue?.phase === 'gates' && !info.company_name_recovery) {
+    throw new VeRelevanceCheckpointError('RU website rescue is missing its gate checkpoint');
+  }
   readVeGeographyRepair(info); // Reject cap/source tampering before acquisition or paid work.
   if (base.project_id !== job.project_id) throw new Error('Collection base does not belong to the job project');
   const frozenAudience = readVeCollectionAudienceSnapshot(info.audience_snapshot);
@@ -6211,12 +6432,20 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     }
     if (previous) {
       const firstRoundCandidates = previous.first_round_candidates ?? 2_000;
+      const savedRescue = ruRescue && ruRescue.phase !== 'done' ? ruRescue : null;
+      const expectedCompletedRound = savedRescue ? savedRescue.completed_round
+        : previous.round - (info.validation_retry || info.company_name_recovery || info.relevance_review_requested ? 0 : 1);
       if (!Number.isSafeInteger(previous.round) || previous.round < 1 || previous.round > target.max_rounds
         || !Number.isSafeInteger(previous.ready_target) || previous.ready_target < 1 || previous.ready_target > target.max_candidates
         || !Number.isSafeInteger(firstRoundCandidates) || firstRoundCandidates < 1 || firstRoundCandidates > 2_000
         || !Number.isSafeInteger(previous.candidates_processed) || previous.candidates_processed < 0 || previous.candidates_processed > target.max_candidates
         || !Number.isSafeInteger(previous.ready_rows) || previous.ready_rows < 0
-        || (info.target_checkpoint?.completed_round ?? 0) !== previous.round - (info.validation_retry || info.company_name_recovery || info.relevance_review_requested ? 0 : 1)) {
+        || (info.target_checkpoint?.completed_round ?? 0) !== expectedCompletedRound
+        || (savedRescue && (savedRescue.resume_target.round !== previous.round
+          || savedRescue.resume_target.ready_target !== previous.ready_target
+          || savedRescue.resume_target.candidates_processed !== previous.candidates_processed
+          || savedRescue.resume_target.max_rounds !== previous.max_rounds
+          || savedRescue.resume_target.max_candidates !== previous.max_candidates))) {
         throw new Error('Invalid collection target checkpoint');
       }
       target.round = previous.round;
@@ -6326,6 +6555,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   if (info.company_name_recovery) {
     if (!target) throw new Error('Company name recovery requires a collection target');
     return resumeSavedCompanyNames(ctx, job, base, info, target, usage);
+  }
+  if (ruRescue && ['discovering', 'reserved', 'running'].includes(ruRescue.phase)) {
+    if (!target || isRefill || market !== 'ru') throw new VeRelevanceCheckpointError('RU website rescue requires an internal collection target');
+    return resumeRuWebsiteRescue(ctx, job, base, info, project, market, usage);
   }
   if (job.payload?.review_relevance === true) {
     if (!target || mode !== 'preview') throw new Error('Saved relevance review requires a preview target');

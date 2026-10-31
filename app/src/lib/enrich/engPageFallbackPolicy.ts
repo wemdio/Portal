@@ -21,8 +21,9 @@ export function isEngHtmlBlocked(html: string): boolean {
   $('script, style, noscript').remove();
   const text = $('body').text().replace(/\s+/g, ' ').trim().slice(0, 8000);
   return /(?:just a moment|attention required|access denied|request (?:was )?blocked|security check|captcha|verify (?:that )?you are human|checking your browser|unusual traffic|enable javascript and cookies to continue)/i.test(`${title} ${text}`)
+    || /(?:доступ (?:запрещ[её]н|ограничен)|запрос (?:заблокирован|отклон[её]н)|проверка (?:безопасности|браузера)|проверяем (?:ваш )?браузер|подтвердите[,\s]*(?:что )?вы (?:не робот|человек)|я не робот|(?:пройдите|введите|решите) (?:проверку безопасности|капчу)|требуется (?:авторизация|аутентификация))/i.test(`${title} ${text}`)
     || /(?:\/cdn-cgi\/challenge-platform\/|cf-chl-|id=["']challenge-form|id=["']px-captcha|class=["'][^"']*g-recaptcha)/i.test(html)
-    || /(?:sign in|log in|authentication required)/i.test(title) && $('input[type="password"]').length > 0;
+    || /(?:sign in|log in|authentication required|вход|авторизаци[яи]|аутентификаци[яи])/i.test(title) && $('input[type="password"]').length > 0;
 }
 
 /** Only a small empty document or JavaScript shell merits a second reader. */

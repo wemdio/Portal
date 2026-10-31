@@ -938,7 +938,7 @@ type PageFetchResult = {
    * защитой чтения — на него запрос не уходил. Повтор не нужен: адрес тот же.
    */
   refused?: true;
-  /** Only requested by the opt-in ENG contact crawl. */
+  /** Requested only by explicit website fallback callers. */
   finalUrl?: string;
   readMethod?: 'browser' | 'tinyfish';
   blocked?: true;
@@ -1216,7 +1216,7 @@ async function fetchPageWithProxyRetry(
 
 // ── Link discovery from HTML ───────────────────────────────────
 
-async function discoverEmailPageLinks(html: string, baseUrl: string): Promise<string[]> {
+async function discoverEmailPageLinks(html: string, baseUrl: string, ruFallback = false): Promise<string[]> {
   const cheerio = await import('cheerio');
   const $ = cheerio.load(html);
   const origin = new URL(baseUrl).origin;
@@ -1228,7 +1228,8 @@ async function discoverEmailPageLinks(html: string, baseUrl: string): Promise<st
     if (!href || /^(#|mailto:|tel:|javascript:)/i.test(href)) return;
 
     const linkText = ($(el).text() ?? '').trim();
-    if (!LINK_HREF_PATTERN.test(href) && !LINK_TEXT_PATTERN.test(linkText)) return;
+    const contactLink = LINK_HREF_PATTERN.test(href) || LINK_TEXT_PATTERN.test(linkText);
+    if (!contactLink && !ruFallback) return;
 
     let absoluteUrl: string;
     try {
@@ -1237,7 +1238,13 @@ async function discoverEmailPageLinks(html: string, baseUrl: string): Promise<st
       return;
     }
 
-    if (!absoluteUrl.startsWith(origin)) return;
+    if (ruFallback) {
+      // JavaScript \b does not recognize Cyrillic words. Resolve relative
+      // contact paths against the actual page URL before classifying them.
+      if (!contactLink && !LINK_HREF_PATTERN.test(new URL(absoluteUrl).pathname)
+        && !/(?:контакты|о\s*компании|о\s*нас|команда|сотрудники|связаться|написать|обратн(?:ая|ой)\s+связ(?:ь|и)|почта)/iu.test(linkText)) return;
+      if (new URL(absoluteUrl).origin !== origin) return;
+    } else if (!absoluteUrl.startsWith(origin)) return;
     const normalized = stripUrlTail(absoluteUrl);
     if (seen.has(normalized)) return;
     seen.add(normalized);
@@ -1736,6 +1743,8 @@ export async function scrapeEmails(
     locale?: 'ru' | 'en';
     /** ENG caller opt-in only; undefined preserves the legacy traversal and result shape. */
     contactPageStrategy?: 'eng_contact_first';
+    /** VE2 RU callers only. TinyFish is reserved for an admitted deficit pass. */
+    ruPageFallback?: { tinyfish: boolean };
     includeDescription?: boolean;
     /**
      * Защита чтения (WebsiteFetchGuard, например createUsWebsiteFetchGuard из
@@ -1760,12 +1769,28 @@ export async function scrapeEmails(
   if (options?.locale === 'en' && options.contactPageStrategy === 'eng_contact_first') {
     return scrapeEngContactEmails(rawUrl, options);
   }
+  if (options?.locale === 'ru' && options.ruPageFallback && process.env.RU_BROWSER_ENABLED === '1') {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    options.signal?.addEventListener('abort', abort, { once: true });
+    if (options.signal?.aborted) abort();
+    const deadline = setTimeout(abort, 30_000);
+    try { return await scrapeLegacyEmails(rawUrl, { ...options, signal: controller.signal }); }
+    finally { clearTimeout(deadline); options.signal?.removeEventListener('abort', abort); }
+  }
+  return scrapeLegacyEmails(rawUrl, options);
+}
+
+async function scrapeLegacyEmails(
+  rawUrl: string, options?: NonNullable<Parameters<typeof scrapeEmails>[1]>,
+): Promise<ScrapeEmailsResult> {
   const url = normalizeUrl(rawUrl);
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
   const signal = options?.signal;
   const maxPages = Math.max(1, Math.min(20, options?.maxPages ?? DEFAULT_MAX_PAGES));
   const stopAtFirstUsableEmail = options?.stopAtFirstUsableEmail === true;
   const locale = options?.locale === 'en' ? 'en' : 'ru';
+  const ruFallback = locale === 'ru' && !!options?.ruPageFallback && process.env.RU_BROWSER_ENABLED === '1';
   const acceptLanguage = locale === 'en' ? EN_ACCEPT_LANGUAGE : DEFAULT_ACCEPT_LANGUAGE;
   const origin = new URL(url).origin;
   const tryWithWww = !/^https?:\/\/www\./i.test(url);
@@ -1800,26 +1825,57 @@ export async function scrapeEmails(
   // отвал отдельной /contacts ни о чём не говорит, а отвал главной — это
   // ровно тот случай, когда «почт нет» на самом деле значит «мы не смотрели».
   let mainFailure: PageFetchFailure | null = null;
+  let accessBlocked = false;
+  let mainPageUrl = url;
 
   const tryFetch = async (pageUrl: string, isMain = false): Promise<string | null> => {
     const normalized = normalizeForDedupe(pageUrl);
     if (checkedNormalized.has(normalized)) return null;
     if (checkedUrls.length >= maxPages) return null;
-    if (signal?.aborted) return null;
+    if (signal?.aborted || accessBlocked) return null;
 
     checkedNormalized.add(normalized);
     checkedUrls.push(pageUrl);
     const cached = options?.pageCache?.get(sitePageKey(pageUrl));
-    if (cached !== undefined) return cached;
-    let result = await fetchPageWithRetry(pageUrl, { timeout, signal, acceptLanguage, ...limitsOption });
+    if (cached !== undefined && !ruFallback) return cached;
+    // RU fallback needs a real observed HTTP status/final URL. A string-only
+    // cache, proxy retry or ambiguous response must not admit a renderer.
+    let result = ruFallback
+      ? await fetchPage(pageUrl, { timeout: Math.min(timeout, 8_000), signal, acceptLanguage, ...limitsOption, trackFinalUrl: true })
+      : await fetchPageWithRetry(pageUrl, { timeout, signal, acceptLanguage, ...limitsOption });
+    if (ruFallback) {
+      try {
+        const { isEngHtmlBlocked } = await import('./engPageFallbackPolicy');
+        if ([401, 403, 407, 429, 451].includes(result.status ?? 0) || result.html && isEngHtmlBlocked(result.html)) {
+          // A public page can embed a CAPTCHA in its contact form. Preserve
+          // addresses already present in a successful direct response, as the
+          // legacy RU reader did, without rendering or publishing wall HTML as
+          // company evidence. Status refusals never contribute addresses.
+          if (result.html && result.status !== undefined && result.status >= 200 && result.status < 300) processPage(result.html);
+          result = { ...result, html: null, blocked: true, failure: 'Страница закрыта проверкой доступа' };
+          accessBlocked = true;
+        } else if (!result.html || filterJunkEmails(extractEmailsFromHtmlAdvanced(result.html)).length === 0) {
+          const { fetchEngPageFallback } = await import('./engPageFallback');
+          const fallback = await fetchEngPageFallback({ url: result.finalUrl || pageUrl, companyUrl: url,
+            html: result.html, status: result.status, signal, locale: 'ru', ruDeficit: options?.ruPageFallback?.tinyfish === true });
+          if (fallback) {
+            // A renderer may omit a useful footer. Preserve literal original
+            // addresses and leave company/site/INN ownership to the constructor.
+            if (result.html) processPage(result.html);
+            result = { html: fallback.html, finalUrl: fallback.url, failure: null, status: 200, readMethod: fallback.source };
+          }
+        }
+      } catch { /* Keep observed HTTP content and already collected addresses. */ }
+    }
     // Прокси тратим только на главную: если она за бот-защитой, остальные
     // страницы того же сайта за ней же, а ретраить каждую — это и есть
     // тот июльский сценарий, когда джоба на 1000 строк шла час.
-    if (isMain && !result.html) {
+    if (!ruFallback && isMain && !result.html) {
       result = await fetchPageWithProxyRetry(pageUrl, result, { timeout, signal, acceptLanguage, ...limitsOption });
     }
+    if (ruFallback && isMain && result.html && result.finalUrl) mainPageUrl = result.finalUrl;
     if (isMain && !result.html && result.failure) mainFailure = result.failure;
-    if (result.html) options?.pageCache?.set(sitePageKey(pageUrl), result.html);
+    if (result.html && !result.readMethod) options?.pageCache?.set(sitePageKey(pageUrl), result.html);
     return result.html;
   };
 
@@ -1860,7 +1916,7 @@ export async function scrapeEmails(
         ...readLimitsField(),
       };
     }
-    discoveredLinks = await discoverEmailPageLinks(mainHtml, url);
+    discoveredLinks = await discoverEmailPageLinks(mainHtml, ruFallback ? mainPageUrl : url, ruFallback);
   }
 
   // 2. Build candidate pages: discovered links first, then static paths

@@ -2038,8 +2038,18 @@ function hasActionableDirectCommercialRequest(authoredReply: string): boolean {
  * or let an unrelated, conditional future call negate the current request. */
 function hasIndependentProductEvaluationRequest(authoredReply: string, confirmedProposal = false): boolean {
   const statement = normalizeAuthoredStatement(authoredReply);
-  if (EXPLICIT_REFUSAL_PATTERN.test(statement) || THIRD_PARTY_INTEREST_PATTERN.test(statement) ||
-      /(?:коллег[а-яё]*|руководств[а-яё]*|руководител[а-яё]*|директор[а-яё]*|(?:ему|ей|он|она)\s+(?:будет\s+)?интересн)/i.test(statement)) {
+  if (EXPLICIT_REFUSAL_PATTERN.test(statement) || THIRD_PARTY_INTEREST_PATTERN.test(statement)) {
+    return false;
+  }
+  // Asking about named work's budget for our own evaluation is not merely
+  // forwarding a presentation to colleagues. Preserve only the semantic
+  // verdict; this exception must not promote an AI negative into a lead.
+  // Keep the question and own evaluation together, before any condition, and
+  // require a complete question rather than a quote/report of someone else's.
+  const beforeCondition = statement.split(/(?<![\p{L}\p{N}_])(?:если|в\s+случае)(?![\p{L}\p{N}_])/iu, 1)[0];
+  const ownBudgetQuestion = /(?:^|[.!?;])\s*(?:подскажите[,\s]+)?сколько\s+(?:выходит|составляет|составит)\s+(?:(?:примерный|ориентировочный|предварительный)\s+)?бюджет\s+(?:по|на|для)\s+[^.!?;]{2,120}\?\s*(?:нам|мне)\s+(?:хотя\s+бы\s+)?(?:(?:нужно|важно)\s+)?(?:понимать|понять|оценить)\s+(?:(?:примерный|ориентировочный)\s+)?(?:разброс|диапазон)\s+(?:цен(?:ы)?|стоимости)(?=[\s,.!;]|$)/iu;
+  if (!hasExplicitNegativeContext(statement) && ownBudgetQuestion.test(beforeCondition)) return true;
+  if (/(?:коллег[а-яё]*|руководств[а-яё]*|руководител[а-яё]*|директор[а-яё]*|(?:ему|ей|он|она)\s+(?:будет\s+)?интересн)/i.test(statement)) {
     return false;
   }
   const budgetRequest = new RegExp(

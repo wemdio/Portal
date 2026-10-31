@@ -47,12 +47,15 @@ import {
   type EngContactCollectionDiagnostics,
 } from './engContactDiagnostics';
 import { ENG_BASE_BUDGET_FREE_STEPS } from './engConstructorSteps';
+import { matchesRuWebsiteRescueInput } from './ruWebsiteFallbackConfig';
 
 const admin = supabaseAdmin!;
 
 interface StepConfig {
   /** Server-created ENG child job: do not run paid steps outside its parent ledger. */
   he_eng_base_budget?: { base_id: string; project_id: string };
+  /** Server-created rescue child; a caller-supplied boolean is insufficient. */
+  ve_ru_website_rescue?: { base_id: string; project_id: string };
   brief?: string;
   prompt?: string;
   personalization?: { concurrency?: number };
@@ -80,6 +83,9 @@ interface StepConfig {
     reuse_website_description?: boolean;
     /** Explicit ENG client opt-in; locale alone must not change legacy callers. */
     contact_page_strategy?: 'eng_contact_first';
+    /** Internal RU verticals only. TinyFish is admitted by the parent after a
+     * completed, low-yield collection round; locale alone never enables it. */
+    ru_page_fallback?: { tinyfish: boolean };
     /** Opt-in website refresh; other callers keep the existing additive merge. */
     merge_mode?: 'all' | 'prefer_found' | 'prefer_found_validated';
   };
@@ -524,6 +530,7 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
       siteTimeoutMs: cfg.find_emails?.site_timeout_ms,
       reuseWebsiteDescription: cfg.find_emails?.reuse_website_description === true,
       contactPageStrategy: cfg.locale === 'en' ? cfg.find_emails?.contact_page_strategy : undefined,
+      ruPageFallback: cfg.locale === 'ru' ? cfg.find_emails?.ru_page_fallback : undefined,
       initialContactDiagnostics: cfg.initialContactDiagnostics,
       onContactDiagnostics: cfg.onContactDiagnostics,
       // Локаль джобы (job.locale): 'en' → «Found Email», EN-блок-лист
@@ -811,6 +818,24 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
     // fallback'ом). 'en' включает ENG-локаль конструктора: EN-алиасы
     // заголовков, английские служебные колонки, EN-блок-листы в шагах.
     const locale = normalizeConstructorLocale(job.locale);
+    if (stepConfig.find_emails?.ru_page_fallback?.tinyfish === true) {
+      const parent = stepConfig.ve_ru_website_rescue;
+      let admitted = false;
+      try {
+        if (locale === 'ru' && job.workload_origin === 'automation' && !stepConfig.column_mapping
+          && parent && typeof parent.base_id === 'string' && typeof parent.project_id === 'string') {
+          const { data: base, error: parentError } = await admin.from('ve_bases')
+            .select('project_id, status, collect_info').eq('id', parent.base_id).maybeSingle();
+          if (!parentError && base?.project_id === parent.project_id && base.status === 'collecting'
+            && matchesRuWebsiteRescueInput(job.data, base.collect_info?.ru_website_rescue, jobId)) {
+            const { data: project, error: projectError } = await admin.from('ve_projects')
+              .select('market, created_by').eq('id', parent.project_id).maybeSingle();
+            admitted = !projectError && project?.market === 'ru' && project.created_by === job.user_id;
+          }
+        }
+      } catch { /* An unavailable permission proof disables only the optional provider. */ }
+      if (!admitted) stepConfig.find_emails.ru_page_fallback = { tinyfish: false };
+    }
     const engContactDiagnosticsEnabled =
       locale === 'en' && stepConfig.find_emails?.contact_page_strategy === 'eng_contact_first';
     // These writes all replace result_stats. Serialize the opted-in ENG path

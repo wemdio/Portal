@@ -413,7 +413,10 @@ function introducedLeadName(body: string[]): string | null {
     // marker. Stop before a role/comma, never include arbitrary prose.
     const candidate = /^(\p{Lu}[\p{L}’'-]{1,50}(?:[ \t]+\p{Lu}[\p{L}’'-]{1,50}){0,2})(?=$|[\s,.;:!?—–()])/u.exec(rest)?.[1];
     if (!candidate || /^\s*(?:\?|(?:или|or)\s)/iu.test(rest.slice(candidate.length))) continue;
-    const name = signatureNameInLine(candidate);
+    // This verified given name is absent from the general name dictionary.
+    // Accept it only after an explicit self-introduction, never as a bare
+    // display/signature value (the same word can also be a company name).
+    const name = candidate === 'Канат' ? candidate : signatureNameInLine(candidate);
     if (name) candidates.set(name.toLowerCase(), name);
   }
   return candidates.size === 1 ? [...candidates.values()][0] : null;
