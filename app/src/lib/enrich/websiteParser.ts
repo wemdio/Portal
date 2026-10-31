@@ -1013,7 +1013,7 @@ function looksLikeBrokenUtf8(text: string): boolean {
   return bad >= 8 || questionMarks >= 40 || sample.includes('����');
 }
 
-function decodeHtml(body: ArrayBuffer, contentType: string | null): string {
+export function decodeHtml(body: ArrayBuffer, contentType: string | null): string {
   const buffer = Buffer.from(body);
   const headerMatch = contentType?.match(/charset=([^;]+)/i);
   const headerCharset = headerMatch ? headerMatch[1].trim().toLowerCase() : null;

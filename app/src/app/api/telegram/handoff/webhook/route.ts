@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { verifyHandoffCallback, verifyHandoffRejection, verifyLeadAlertRejection } from '@/lib/instantly/handoffCallback';
-import { handoffBotToken, answerCallback, editHandoffMessage } from '@/lib/instantly/handoffTelegram';
+import { handoffBotToken, answerCallback, editHandoffMessage, postHandoffEditor } from '@/lib/instantly/handoffTelegram';
 import { sendHandoffNow, type PendingHandoffRow } from '@/lib/instantly/handoffSender';
 import { handleHandoffEditor, type HandoffEditUpdate } from '@/lib/instantly/handoffEditor';
 import { canActOnManualHandoff } from '@/lib/instantly/handoffAuthorization';
@@ -127,7 +127,24 @@ export async function POST(req: NextRequest) {
     sentByTelegramId: fromId ?? null,
   });
   if (!result.ok) {
-    await answerCallback(token, cq.id, 'Ошибка отправки письма');
+    const uncertain = result.outcome === 'unknown';
+    const message = uncertain
+      ? 'Отправку не удалось подтвердить. Повтор отключён, нужна проверка результата передачи.'
+      : result.outcome === 'in_progress'
+        ? 'Передача уже начата. Дождитесь результата; повторно отправлять письмо не нужно.'
+        : result.retryable === false
+          ? 'Передача не выполнена. Нужна проверка перед повторной отправкой.'
+          : 'Передача не выполнена: не удалось завершить подготовку. Можно попробовать позже.';
+    // Keep the actionable card for a safely retryable preflight failure. Only
+    // an uncertain terminal send consumes it and leaves a persistent warning.
+    if (uncertain && result.retryable === false && chatId != null && messageId != null) {
+      await editHandoffMessage(token, chatId, messageId, `⚠️ <b>${message}</b>\nНе отправляйте письмо повторно до проверки.`);
+    } else if (result.outcome === 'not_sent' && result.retryable === false && chatId != null) {
+      // A terminal refusal needs a persistent explanation too. Do not replace
+      // the card: a mode/session race could already have produced a newer state.
+      await postHandoffEditor(token, chatId, message, { ...(messageId != null ? { replyTo: messageId } : {}) });
+    }
+    await answerCallback(token, cq.id, message, true);
     return OK();
   }
 

@@ -7,7 +7,7 @@ import { fetchFollowingGuarded } from '@/lib/enrich/websiteParser';
 import { BrowserError, DEFAULT_TIMEOUT, MAX_RESOURCES, MAX_TIMEOUT, RESOURCE_BYTES, SESSION_BYTES, readJson, reply, socketJson } from './protocol';
 
 type Page = { url: string; contentType: string; body: string; headers: Record<string, string> };
-type Session = { token: string; controller: AbortController; resources: number; bytes: number; pending: number; initial: Page | null; initialServed: boolean; refusal: string | null };
+type Session = { token: string; locale: 'en' | 'ru'; controller: AbortController; resources: number; bytes: number; pending: number; initial: Page | null; initialServed: boolean; refusal: string | null };
 const guard = createUsWebsiteFetchGuard();
 
 function urlAllowed(raw: string): string {
@@ -46,7 +46,7 @@ async function fetchPage(session: Session, raw: string, initial = false): Promis
   const { res, url: finalUrl } = await fetchFollowingGuarded(url, {
     method: 'GET', redirect: 'manual', signal,
     dispatcher: guard.directDispatcher,
-    headers: { 'user-agent': 'Mozilla/5.0 (compatible; PortalWebsiteReader/1.0)', accept: 'text/html,application/xhtml+xml,text/css,application/javascript,text/javascript;q=0.9,*/*;q=0.1', 'accept-language': 'en-US,en;q=0.9' },
+    headers: { 'user-agent': 'Mozilla/5.0 (compatible; PortalWebsiteReader/1.0)', accept: 'text/html,application/xhtml+xml,text/css,application/javascript,text/javascript;q=0.9,*/*;q=0.1', 'accept-language': session.locale === 'ru' ? 'ru-RU,ru;q=0.9,en;q=0.5' : 'en-US,en;q=0.9' },
   } as RequestInit, guard, signal);
   if ([401, 403, 407, 429, 451].includes(res.status)) { await res.body?.cancel().catch(() => {}); throw new BrowserError('blocked'); }
   if (!res.ok) { await res.body?.cancel().catch(() => {}); throw new BrowserError(res.status >= 500 ? (initial ? 'upstream_unavailable' : 'unavailable') : 'http_error'); }
@@ -89,28 +89,34 @@ export function createBroker(options: { token: string; runnerSocket: string }) {
     const auth = req.headers.authorization ?? '';
     if (!auth.startsWith('Bearer ') || !secureEqual(auth.slice(7), options.token)) { reply(res, 401, { error: 'unauthorized' }); return; }
     let session: Session | undefined; let timer: NodeJS.Timeout | undefined;
+    let requestedLocale: 'en' | 'ru' | undefined;
     try {
       const body = await readJson(req); if (typeof body.url !== 'string') throw new BrowserError('bad_url');
       const url = urlAllowed(body.url);
+      const locale = body.locale === undefined ? 'en' : body.locale;
+      if (locale !== 'en' && locale !== 'ru') throw new BrowserError('bad_request');
+      requestedLocale = locale;
       if (sessions.size >= capacity) throw new BrowserError('busy');
       const timeout = typeof body.timeoutMs === 'number' && Number.isFinite(body.timeoutMs) ? Math.max(1, Math.min(MAX_TIMEOUT, Math.floor(body.timeoutMs))) : DEFAULT_TIMEOUT;
       const controller = new AbortController();
-      session = { token: randomBytes(32).toString('hex'), controller, resources: 0, bytes: 0, pending: 0, initial: null, initialServed: false, refusal: null };
+      session = { token: randomBytes(32).toString('hex'), locale, controller, resources: 0, bytes: 0, pending: 0, initial: null, initialServed: false, refusal: null };
       sessions.set(session.token, session);
       timer = setTimeout(() => controller.abort(), timeout);
       res.once('close', () => { if (!res.writableEnded) controller.abort(); });
       if (!(await ready())) throw new BrowserError('not_ready');
       session.initial = await fetchPage(session, url, true);
       if (!/^(?:text\/html|application\/xhtml\+xml)\b/.test(session.initial.contentType)) throw new BrowserError('content_type');
-      const output = await socketJson(options.runnerSocket, '/render', { session: session.token, url: session.initial.url }, controller.signal);
+      const output = await socketJson(options.runnerSocket, '/render', { session: session.token, url: session.initial.url, locale: session.locale }, controller.signal);
       if (controller.signal.aborted) throw new BrowserError('cancelled');
       if (session.pending !== 0) throw new BrowserError('incomplete');
       if (output.url !== session.initial.url || typeof output.html !== 'string' || Buffer.byteLength(output.html) > RESOURCE_BYTES) throw new BrowserError('invalid_result');
+      // Older ENG runners did not echo locale. RU must never silently use one.
+      if (output.locale !== session.locale && !(session.locale === 'en' && output.locale === undefined)) throw new BrowserError('invalid_result');
       if (isEngHtmlBlocked(output.html)) throw new BrowserError('blocked');
-      reply(res, 200, { url: output.url, html: output.html, source: 'browser' });
+      reply(res, 200, { url: output.url, html: output.html, source: 'browser', locale: session.locale });
     } catch (error) {
       const code = session?.refusal ?? (session?.controller.signal.aborted ? 'timeout' : errorCode(error));
-      reply(res, errorStatus(code), { error: code });
+      reply(res, errorStatus(code), { error: code, ...(requestedLocale ? { locale: requestedLocale } : {}) });
     } finally {
       if (timer) clearTimeout(timer);
       if (session) { session.controller.abort(); sessions.delete(session.token); }
@@ -122,7 +128,7 @@ export function createBroker(options: { token: string; runnerSocket: string }) {
     try {
       const body = await readJson(req); session = typeof body.session === 'string' ? sessions.get(body.session) : undefined;
       if (!session || session.controller.signal.aborted || !session.initial) throw new BrowserError('unauthorized');
-      if (req.url === '/verify') { reply(res, 200, { url: session.initial.url }); return; }
+      if (req.url === '/verify') { reply(res, 200, { url: session.initial.url, locale: session.locale }); return; }
       if (typeof body.url !== 'string') throw new BrowserError('bad_url');
       const url = urlAllowed(body.url);
       // Initial response is retrieved exactly once by the runner, without another request.

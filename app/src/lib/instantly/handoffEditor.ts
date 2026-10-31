@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { signHandoffEdit, verifyHandoffEdit } from './handoffCallback';
-import { answerCallback, postHandoffEditor } from './handoffTelegram';
+import { answerCallback, editHandoffMessage, postHandoffEditor } from './handoffTelegram';
 import { HANDOFF_AUTO_SEND_MARKER, sendHandoffNow, type PendingHandoffRow } from './handoffSender';
 import { canActOnManualHandoff } from './handoffAuthorization';
 
@@ -88,10 +88,23 @@ export async function handleHandoffEditor(update: HandoffEditUpdate, token: stri
   if (action?.action === 's') {
     await answerCallback(token, cq!.id, 'Отправляю подтверждённый ответ…');
     const result = await sendHandoffNow(db, row, { sentByTelegramId: from, editToken: row.edit_token! });
+    if (!result.ok && result.outcome === 'unknown' && result.retryable === false) {
+      const warning = '⚠️ <b>Отправку не удалось подтвердить.</b> Повтор отключён, нужна проверка результата передачи. Не отправляйте письмо повторно до проверки.';
+      await editHandoffMessage(token, chat, row.tg_message_id, warning);
+      if (context?.message_id != null && context.message_id !== row.tg_message_id) {
+        await editHandoffMessage(token, chat, context.message_id, warning);
+      }
+    }
     await postHandoffEditor(token, chat, result.ok ? (result.publicationPending
       ? 'Письмо отправлено, клиент в копии. Не удалось подтвердить сохранение передачи в БД: запись может отсутствовать в таблице. Сообщите администратору; повторно отправлять письмо не нужно.'
       : '✅ Исправленный ответ отправлен лиду, клиент добавлен в копию.')
-      : 'Отправку не удалось подтвердить. Повторно не отправляем: сначала нужно проверить результат передачи.',
+      : result.outcome === 'unknown'
+        ? 'Отправку не удалось подтвердить. Повтор отключён, нужна проверка результата передачи.'
+        : result.outcome === 'in_progress'
+          ? 'Передача уже начата. Дождитесь результата; повторно отправлять письмо не нужно.'
+          : result.retryable === false
+            ? 'Передача не выполнена. Нужна проверка перед повторной отправкой.'
+            : 'Передача не выполнена: не удалось завершить подготовку. Черновик сохранён; попробуйте позже.',
     { threadId: context?.message_thread_id });
     return true;
   }

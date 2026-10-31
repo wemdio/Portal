@@ -41,9 +41,11 @@ export async function createRunner(brokerSocket: string) {
       const input = await readJson(req);
       if (typeof input.session !== 'string' || !/^[a-f0-9]{64}$/.test(input.session) || typeof input.url !== 'string') throw new BrowserError('bad_request');
       const session = input.session; const url = input.url;
+      const locale = input.locale === undefined ? 'en' : input.locale;
+      if (locale !== 'en' && locale !== 'ru') throw new BrowserError('bad_request');
       const verify = await socketJson(brokerSocket, '/verify', { session }, controller.signal);
-      if (verify.url !== url) throw new BrowserError('unauthorized');
-      context = await browser.newContext({ locale: 'en-US', serviceWorkers: 'block', acceptDownloads: false });
+      if (verify.url !== url || (verify.locale === undefined ? 'en' : verify.locale) !== locale) throw new BrowserError('unauthorized');
+      context = await browser.newContext({ locale: locale === 'ru' ? 'ru-RU' : 'en-US', serviceWorkers: 'block', acceptDownloads: false });
       const closeOnAbort = () => { void context?.close().catch(() => {}); };
       controller.signal.addEventListener('abort', closeOnAbort, { once: true });
       await context.routeWebSocket(/.*/, ws => ws.close());
@@ -94,7 +96,7 @@ export async function createRunner(brokerSocket: string) {
       }
       if (Buffer.byteLength(html) > RESOURCE_BYTES) throw new BrowserError('resource_limit');
       if (isEngHtmlBlocked(html)) throw new BrowserError('blocked');
-      reply(res, 200, { url, html });
+      reply(res, 200, { url, html, locale });
     } catch (error) {
       reply(res, 503, { error: fatal ?? (error instanceof BrowserError ? error.code : 'unavailable') });
     } finally {

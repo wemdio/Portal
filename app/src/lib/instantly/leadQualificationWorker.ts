@@ -34,6 +34,7 @@ import {
   handoffChatId,
   handoffThreadId,
   postHandoffMessage,
+  postHandoffEditor,
   editHandoffMessage,
   escapeHtml,
 } from './handoffTelegram';
@@ -41,6 +42,7 @@ import {
   HANDOFF_AUTO_SEND_MARKER,
   sendHandoffNow,
   type PendingHandoffRow,
+  type HandoffSendResult,
 } from './handoffSender';
 import type { Email, Lead } from './types';
 import { resolveLeadContactMetadata } from './leadContactMetadata';
@@ -4852,6 +4854,23 @@ export async function reconcileLeadHandoffJobs(options: {
   return processed;
 }
 
+function autoHandoffResultText(result: HandoffSendResult): string | null {
+  if (result.ok) {
+    return '✅ <b>Передано клиенту</b> — отправка подтверждена провайдером.' +
+      (result.publicationPending
+        ? '\n⚠️ Сохранение передачи в Portal не подтверждено. Запись может отсутствовать в таблице. Нужна проверка; повторно отправлять письмо не нужно.'
+        : '');
+  }
+  // A second caller must not overwrite the card while the first is sending.
+  if (result.outcome === 'in_progress') return null;
+  if (result.outcome === 'unknown') {
+    return '⚠️ <b>Отправку не удалось подтвердить.</b> Повтор отключён, нужна проверка результата передачи. Не отправляйте письмо повторно до проверки.';
+  }
+  return result.retryable === false
+    ? '⚠️ <b>Передача не выполнена.</b> Автоматический повтор отключён, нужна проверка.'
+    : '⚠️ <b>Передача пока не выполнена.</b> Подготовка будет повторена автоматически.';
+}
+
 /**
  * If the lead's project has handoff configured (handoff_email + handoff_legend)
  * and a responsible specialist, post the handoff card to Telegram with a
@@ -4884,13 +4903,14 @@ export async function maybePostLeadHandoff(opts: {
       return { disposition: 'skipped', detail: 'qualification archived or automatic processing window closed' };
     }
 
-    // The delivery mode is snapshotted on materialization. In particular, an
-    // auto handoff may crash after INSERT but before sendHandoffNow, leaving a
-    // perfectly valid `pending` row that still needs delivery. Manual pending
-    // rows, and every sent row, are terminal for the worker outbox.
+    // The delivery mode is snapshotted on materialization. New auto rows carry
+    // an explicit ready state: only the shared sender may
+    // decide whether a request can start. A legacy pending/failed row is not
+    // proof that its previous request was never accepted by the provider.
+    // Manual rows, and every sent row, are terminal for the worker outbox.
     const existingLookup = await instantlyDb
       .from('instantly_pending_handoffs')
-      .select('id, qualification_id, campaign_id, draft_text, reply_to_uuid, eaccount, client_email, responsible_user_id, status, auto_send, error_message')
+      .select('id, qualification_id, campaign_id, draft_text, reply_to_uuid, eaccount, client_email, responsible_user_id, status, auto_send, error_message, tg_chat_id, tg_message_id, send_attempt')
       .eq('qualification_id', qualificationId)
       .maybeSingle();
     let existing = existingLookup.data as Record<string, unknown> | null;
@@ -4898,7 +4918,7 @@ export async function maybePostLeadHandoff(opts: {
     if (isMissingHandoffAutoSendColumn(existingError)) {
       const legacyLookup = await instantlyDb
         .from('instantly_pending_handoffs')
-        .select('id, qualification_id, campaign_id, draft_text, reply_to_uuid, eaccount, client_email, responsible_user_id, status, error_message')
+        .select('id, qualification_id, campaign_id, draft_text, reply_to_uuid, eaccount, client_email, responsible_user_id, status, error_message, tg_chat_id, tg_message_id, send_attempt')
         .eq('qualification_id', qualificationId)
         .maybeSingle();
       existing = legacyLookup.data as Record<string, unknown> | null;
@@ -4910,6 +4930,8 @@ export async function maybePostLeadHandoff(opts: {
         status: 'pending' | 'sent' | 'failed' | 'rejected';
         auto_send?: boolean;
         error_message?: string | null;
+        tg_chat_id?: number | null;
+        tg_message_id?: number | null;
       };
       const automatic = materialized.auto_send === true ||
         materialized.error_message?.startsWith(HANDOFF_AUTO_SEND_MARKER) === true;
@@ -4917,9 +4939,30 @@ export async function maybePostLeadHandoff(opts: {
         return { disposition: 'completed', detail: 'handoff already materialized' };
       }
       const resent = await sendHandoffNow(instantlyDb, materialized);
+      const resultText = autoHandoffResultText(resent);
+      const token = handoffBotToken();
+      if (token && materialized.tg_chat_id != null && materialized.tg_message_id != null && resultText) {
+        if (!resent.ok && resent.outcome === 'not_sent' && resent.retryable === false) {
+          // A fresh mode/session check may have observed a newer state than
+          // this outbox snapshot. Explain the refusal without replacing it.
+          await postHandoffEditor(token, materialized.tg_chat_id,
+            'Передача не выполнена. Автоматический повтор отключён, нужна проверка.',
+            { replyTo: materialized.tg_message_id });
+        } else {
+          const summary = [
+            '<b>🤝 Передача лида клиенту</b>',
+            `<b>Лид:</b> ${escapeHtml(opts.leadEmail)}`,
+            opts.campaignName ? `<b>Кампания:</b> ${escapeHtml(opts.campaignName)}` : '',
+            resultText,
+          ].filter(Boolean).join('\n');
+          await editHandoffMessage(token, materialized.tg_chat_id, materialized.tg_message_id, summary);
+        }
+      }
       return resent.ok
-        ? { disposition: 'completed', detail: `auto handoff sent via ${resent.via}` }
-        : { disposition: 'retry', detail: `auto-send failed: ${resent.error}` };
+        ? { disposition: 'completed', detail: resent.publicationPending ? 'auto handoff sent; publication needs verification' : `auto handoff sent via ${resent.via}` }
+        : resent.retryable === false
+          ? { disposition: 'completed', detail: 'manual verification required; automatic resend disabled' }
+          : { disposition: 'retry', detail: `auto-send preparation failed: ${resent.error}` };
     }
 
     // 1. Project → handoff config + responsible specialist. New
@@ -5089,6 +5132,7 @@ export async function maybePostLeadHandoff(opts: {
       auto_send: autoSend,
       error_message: autoSend ? HANDOFF_AUTO_SEND_MARKER : null,
       status: 'pending',
+      send_attempt: { version: 1, phase: 'ready' },
     };
     let { data: pendingRow, error: insErr } = await instantlyDb
       .from('instantly_pending_handoffs')
@@ -5138,15 +5182,14 @@ export async function maybePostLeadHandoff(opts: {
       error_message: autoSend ? HANDOFF_AUTO_SEND_MARKER : null,
     });
     if (!sent.ok) {
-      await editHandoffMessage(
-        token,
-        chatId,
-        messageId,
-        `${text}\n\n❌ Автопередача не отправлена: ${escapeHtml(sent.error.slice(0, 200))}`,
-      );
+      const resultText = autoHandoffResultText(sent);
+      if (resultText) await editHandoffMessage(token, chatId, messageId, `${text}\n\n${resultText}`);
       workerLog('warn', `Handoff auto-send failed for ${opts.leadEmail} (qual ${qualificationId}): ${sent.error}`);
-      return { disposition: 'retry', detail: `auto-send failed: ${sent.error}` };
+      return sent.retryable === false
+        ? { disposition: 'completed', detail: 'manual verification required; automatic resend disabled' }
+        : { disposition: 'retry', detail: `auto-send preparation failed: ${sent.error}` };
     }
+    await editHandoffMessage(token, chatId, messageId, `${text}\n\n${autoHandoffResultText(sent)}`);
     workerLog('info', `Handoff auto-sent for ${opts.leadEmail} (qual ${qualificationId}, via ${sent.via})`);
     return { disposition: 'completed' };
   } catch (err) {

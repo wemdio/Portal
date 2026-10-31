@@ -52,8 +52,14 @@ jest.mock('@/lib/instantly/client', () => ({
   listAllCustomTags: (...args: unknown[]) => listAllCustomTags(...args),
   getAccountCampaignMappings: (...args: unknown[]) => getAccountCampaignMappings(...args),
   getEmail: (...args: unknown[]) => getEmail(...args),
-  replyToEmail: (...args: unknown[]) => replyToEmail(...args),
-  sendTestEmail: (...args: unknown[]) => sendTestEmail(...args),
+  replyToEmail: async (...args: unknown[]) => {
+    await (args[1] as { onRequestAttempt?: () => Promise<void> } | undefined)?.onRequestAttempt?.();
+    return replyToEmail(...args);
+  },
+  sendTestEmail: async (...args: unknown[]) => {
+    await (args[1] as { onRequestAttempt?: () => Promise<void> } | undefined)?.onRequestAttempt?.();
+    return sendTestEmail(...args);
+  },
 }));
 
 jest.mock('@/lib/instantly/handoffTelegram', () => ({
@@ -1310,9 +1316,9 @@ describe('pollAndQualifyReplies', () => {
     const pending = mockInstantlyDb!.getRows('instantly_pending_handoffs');
     expect(pending).toHaveLength(1);
     expect(pending[0].status).toBe('failed');
-    expect(String(pending[0].error_message)).toContain('500');
+    expect(pending[0].send_attempt).toEqual(expect.objectContaining({ phase: 'unknown' }));
     expect(editHandoffMessage).toHaveBeenCalledTimes(1);
-    expect(editHandoffMessage.mock.calls[0][3] as string).toContain('Автопередача не отправлена');
+    expect(editHandoffMessage.mock.calls[0][3] as string).toContain('Отправку не удалось подтвердить');
     expect(mockInstantlyDb!.getRows('client_forwarded_leads')).toHaveLength(0);
   });
 
@@ -7408,7 +7414,7 @@ describe('thread-level specialist alert dedup — RED contract', () => {
     );
   });
 
-  it.each(['pending', 'failed'])('retries an existing %s auto handoff through the same pending row', async (status) => {
+  it.each(['pending', 'failed'])('sends only a ready %s auto handoff, not a legacy failure', async (status) => {
     process.env.LEAD_HANDOFF_ENABLED = 'true';
     const qualification = {
       id: 'failed-auto-handoff', campaign_id: 'campaign-a', qualified_project_id: 'project-a',
@@ -7421,6 +7427,7 @@ describe('thread-level specialist alert dedup — RED contract', () => {
         campaign_id: 'campaign-a', draft_text: 'Передаю.', reply_to_uuid: 'email-failed-auto',
         eaccount: 'sender@example.com', client_email: 'client@example.com',
         responsible_user_id: 'specialist-a',
+        send_attempt: status === 'pending' ? { version: 1, phase: 'ready' } : null,
       }],
       instantly_lead_handoff_outbox: [{ qualification_id: qualification.id, status: 'pending' }],
     }));
@@ -7429,10 +7436,10 @@ describe('thread-level specialist alert dedup — RED contract', () => {
     } });
     const { reconcileLeadHandoffJobs } = await import('@/lib/instantly/leadQualificationWorker');
     expect(await reconcileLeadHandoffJobs({ qualificationId: qualification.id })).toBe(1);
-    expect(replyToEmail).toHaveBeenCalledTimes(1);
+    expect(replyToEmail).toHaveBeenCalledTimes(status === 'pending' ? 1 : 0);
     expect(postHandoffMessage).not.toHaveBeenCalled();
     expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')[0]).toEqual(
-      expect.objectContaining({ id: 'pending-failed-auto', status: 'sent', error_message: null }),
+      expect.objectContaining({ id: 'pending-failed-auto', status: status === 'pending' ? 'sent' : 'failed' }),
     );
     expect(mockInstantlyDb!.getRows('instantly_lead_handoff_outbox')[0]).toEqual(
       expect.objectContaining({ status: 'completed' }),
@@ -7517,7 +7524,7 @@ describe('thread-level specialist alert dedup — RED contract', () => {
     ]);
   });
 
-  it('recovers a failed rollout-window auto handoff after the auto_send column appears', async () => {
+  it('does not resend an uncertain rollout-window auto handoff after the auto_send column appears', async () => {
     process.env.LEAD_HANDOFF_ENABLED = 'true';
     replyToEmail
       .mockRejectedValueOnce(new Error('temporary provider failure'))
@@ -7560,7 +7567,7 @@ describe('thread-level specialist alert dedup — RED contract', () => {
     };
 
     await expect(maybePostLeadHandoff(args)).resolves.toEqual(
-      expect.objectContaining({ disposition: 'retry' }),
+      expect.objectContaining({ disposition: 'completed' }),
     );
     const failedRow = mockInstantlyDb!.getRows('instantly_pending_handoffs')[0];
     expect(failedRow).toEqual(expect.objectContaining({
@@ -7578,10 +7585,10 @@ describe('thread-level specialist alert dedup — RED contract', () => {
     await expect(maybePostLeadHandoff(args)).resolves.toEqual(
       expect.objectContaining({ disposition: 'completed' }),
     );
-    expect(replyToEmail).toHaveBeenCalledTimes(2);
+    expect(replyToEmail).toHaveBeenCalledTimes(1);
     expect(postHandoffMessage).toHaveBeenCalledTimes(1);
     expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')[0]).toEqual(
-      expect.objectContaining({ status: 'sent', error_message: null }),
+      expect.objectContaining({ status: 'failed', send_attempt: expect.objectContaining({ phase: 'unknown' }) }),
     );
   });
 
