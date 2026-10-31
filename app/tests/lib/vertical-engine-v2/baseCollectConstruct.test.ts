@@ -1755,7 +1755,8 @@ describe('base_collect CONSTRUCT step order', () => {
       // Описание забираем из уже скачанной главной: иначе enrich_descriptions
       // качает тот же сайт второй раз, втрое меньшей параллельностью.
       find_emails: { stop_at_first: false, max_per_site: 6, max_pages: 4, site_timeout_ms: 30_000, merge_mode: 'prefer_found_validated',
-        reuse_website_description: true },
+        // Обычная RU-партия разрешает браузер, но не резерв TinyFish.
+        ru_page_fallback: { tinyfish: false }, reuse_website_description: true },
     });
     const dispatchedInfo = lastBasePatch(db)?.collect_info as VeCollectInfo;
     expect(dispatchedInfo.construct?.progress).toMatchObject({ status: 'pending', total_steps: expected.length });
